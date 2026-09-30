@@ -67,6 +67,7 @@ class HelpSystemModule:
                 "description": "Multi-tier recovery system for autonomous problem resolution",
                 "quick_fixes": [
                     "Run these on the HOST, from the ai-stack repo root.",
+                    "docker compose -f frontend\\docker-compose.yml restart tailscale - Lightest network-namespace fix, try it FIRST: restarts tailscale ALONE (safe - it is openwebui that must never be restarted alone), which re-joins openwebui's namespace. Wait ~30 s, then check: docker exec tailscale ping -c 1 8.8.8.8",
                     "python scripts\\recovery\\status_check.py - System overview, read-only (containers, CUDA in openwebui, gateway, upstreams, tailscale)",
                     "python scripts\\stack\\stack.py health - Health probes for the enabled planes it covers (not the portal: use scripts\\portal\\portal-status.ps1), read-only (exit code = failed probes)",
                     "docker exec openwebui nvidia-smi - Is the GPU visible inside Open WebUI? (read-only)",
@@ -84,8 +85,8 @@ class HelpSystemModule:
                     "network_unreachable": {
                         "symptoms": ["Network unreachable", "Tailscale can't connect", "Connection timeout"],
                         "cause": "OpenWebUI container recreation breaks shared network namespace",
-                        "solution": ".\\scripts\\recovery\\emergency-recovery.ps1 -Action recover (host, repo root)",
-                        "explanation": "Ordered restart: openwebui first, then tailscale, which re-joins openwebui's network namespace"
+                        "solution": "First, lightest: docker compose -f frontend\\docker-compose.yml restart tailscale (host, repo root; tailscale ALONE is safe), wait ~30 s, then docker exec tailscale ping -c 1 8.8.8.8. If the restart errors or the ping fails: .\\scripts\\recovery\\emergency-recovery.ps1 -Action recover (host, repo root)",
+                        "explanation": "tailscale runs in openwebui's network namespace; restarting tailscale alone re-joins it, and the ping shows traffic flows again. When that is not enough (for example openwebui was recreated), recover does the ordered restart: openwebui first, then tailscale"
                     },
                     "gpu_not_available": {
                         "symptoms": ["CUDA not available", "GPU models slow", "Reranker using CPU"],

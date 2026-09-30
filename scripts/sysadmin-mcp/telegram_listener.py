@@ -221,7 +221,9 @@ def _recovery_report(action: str, rc: int, out: str) -> str:
     ai-stack_* network differs from its declaration, creates nothing, and recovery
     CONTINUES; a 15-line tail of a long run does not reach that line, so a drifted
     anchor read as a clean recover (ac-recovery-gates review, R6). ERROR/WARN lines
-    already inside the tail are not repeated; past _MAX_ISSUE_LINES the rest are
+    already inside the tail are not repeated; ERROR lines are listed before WARN
+    lines (each group in run order), so a run with many early WARNs cannot push an
+    ERROR past the cap (cf-small-fixes G12); past _MAX_ISSUE_LINES the rest are
     counted, not shown; the reply is cut to stay under Telegram's size limit,
     keeping the head, which is the part this exists for.
     """
@@ -229,6 +231,7 @@ def _recovery_report(action: str, rc: int, out: str) -> str:
     tail = lines[-_TAIL_LINES:]
     before_tail = lines[:-_TAIL_LINES] if len(lines) > _TAIL_LINES else []
     issues = [ln for ln in before_tail if _ISSUE_RE.search(ln)]
+    issues = [ln for ln in issues if "[ERROR]" in ln] + [ln for ln in issues if "[ERROR]" not in ln]
     n_err = sum(1 for ln in lines if "[ERROR]" in ln)
     n_warn = sum(1 for ln in lines if "[WARN]" in ln)
     parts = [f"{action} finished (exit {rc}); the run logged {n_err} ERROR and {n_warn} WARN line(s)."]
@@ -236,7 +239,7 @@ def _recovery_report(action: str, rc: int, out: str) -> str:
         parts.append("Exit 0 does NOT mean clean - read the ERROR lines.")
     if issues:
         shown = issues[:_MAX_ISSUE_LINES]
-        parts.append("ERROR/WARN earlier in the run:")
+        parts.append("ERROR/WARN earlier in the run (ERROR lines first):")
         parts.extend(shown)
         if len(issues) > len(shown):
             parts.append(f"(+{len(issues) - len(shown)} more ERROR/WARN line(s) not shown)")

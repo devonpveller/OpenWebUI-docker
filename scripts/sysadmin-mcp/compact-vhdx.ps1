@@ -40,7 +40,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path $ResultFile) | Out-Null
 $result = [ordered]@{
   ok = $false; started = (Get-Date).ToString('o'); finished = $null
   vhdx_before_gb = $null; vhdx_after_gb = $null; reclaimed_gb = $null
-  trapped_before_gb = $null; shortfall_gb = $null
+  trapped_before_gb = $null; fs_overhead_gb = $null; shortfall_gb = $null
   fstrim_ok = $null; fstrim_note = $null
   pre_running = $null; post_running = $null; stack_returned = $false
   c_free_before_gb = $null; c_free_after_gb = $null; error = $null; notes = @()
@@ -70,6 +70,18 @@ try {
   $trapped = [math]::Round($result.vhdx_before_gb - $usedGb, 1)
   $result.trapped_before_gb = $trapped
   Note "trapped ~= $trapped GB (vhdx $($result.vhdx_before_gb) - used $usedGb)"
+  # The ext4 metadata df never counts (Get-FsOverheadGb): device size minus df Size. The shortfall
+  # check subtracts it from the target, since no compaction returns it. Best-effort: a failed probe
+  # leaves it null and the check judges against trapped as before.
+  try {
+    $dfCols = ($df | Select-Object -Last 1).Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
+    $devName = Split-Path -Leaf $dfCols[0]
+    if ($devName -match '^[a-z0-9]+$') {
+      $sectors = ((wsl -d docker-desktop -e cat "/sys/class/block/$devName/size") 2>$null | Select-Object -First 1)
+      $result.fs_overhead_gb = Get-FsOverheadGb -DeviceBytes ([double]$sectors * 512) -DfSizeKb ([double]$dfCols[1])
+    }
+    Note "filesystem metadata df does not count ~= $($result.fs_overhead_gb) GB (device $devName)"
+  } catch { Note "fs overhead probe skipped: $($_.Exception.Message)" }
   if ($trapped -lt $MinTrappedGb) { $result.error = "trapped $trapped GB < MinTrappedGb $MinTrappedGb; refusing no-op compaction"; Note 'REFUSED tiny trapped'; exit 2 }
 } catch { Note "trapped check skipped: $($_.Exception.Message)" }
 
@@ -179,7 +191,7 @@ try {
   # compact-lib.ps1 so it can be tested without elevation or downtime (test-compact-lib.ps1).
   $verdict = Get-ReclaimVerdict -TrappedGb $result.trapped_before_gb -ReclaimedGb $result.reclaimed_gb `
                                 -MinReclaimFraction $MinReclaimFraction -ShortfallGraceGb $ShortfallGraceGb `
-                                -FstrimOk $result.fstrim_ok
+                                -FstrimOk $result.fstrim_ok -FsOverheadGb $result.fs_overhead_gb
   $result.shortfall_gb = $verdict.shortfall_gb
   if (-not $verdict.ok) {
     $result.error = $verdict.reason

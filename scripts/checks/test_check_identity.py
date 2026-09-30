@@ -266,6 +266,28 @@ class FileNames(ScratchRepo):
         self.assertNotIn(OPERATOR_LITERAL, out.lower())
         self.assertIn('notes-<entry 1>.md:0:', out)
 
+    def test_every_occurrence_in_a_file_name_is_masked(self):
+        # cf-small-fixes G20: only the FIRST occurrence was masked; `docs/<x>/<x>.md` printed the second
+        self.denylist_in_git_dir(OPERATOR_LITERAL + '\n')
+        self.stage('docs/' + OPERATOR_LITERAL + '/' + OPERATOR_LITERAL + '.md', 'clean\n')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 1, out)
+        self.assertNotIn(OPERATOR_LITERAL, out.lower())
+        self.assertIn('docs/<entry 1>/<entry 1>.md:0:', out)
+
+    def test_overlapping_entries_in_a_file_name_are_masked_whole(self):
+        # cf-small-fixes G20: an entry whose span overlapped an earlier one was skipped, so its
+        # tail printed. Entry 2 starts inside entry 1 and runs past it.
+        tail = 'zzq' + 'wib'
+        second = OPERATOR_LITERAL[-4:] + tail
+        self.denylist_in_git_dir(OPERATOR_LITERAL + '\n' + second + '\n')
+        self.stage('n-' + OPERATOR_LITERAL + tail + '.md', 'clean\n')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 1, out)
+        self.assertNotIn(OPERATOR_LITERAL, out.lower())
+        self.assertNotIn(tail, out.lower())
+        self.assertIn('n-<entry 1+2>.md:0:', out)
+
     def test_a_rename_to_a_bad_name_is_refused(self):
         self.stage('clean.md', 'clean\n')
         git(self.dir, 'commit', '-q', '--no-verify', '-m', 'clean')
@@ -588,6 +610,20 @@ class Allowlist(ScratchRepo):
         rc, out = self.run_gate()
         self.assertEqual(rc, 1, out)
         self.assertEqual(out.count('n.md:1:'), 2, out)      # the long one, and the short one alone
+
+    def test_a_context_regex_may_contain_a_spaced_alternation(self):
+        # cf-small-fixes G20: entries were split on every ` | `, so `(a | b)` in a regex was a
+        # format error. The glob ends at the first separator and the reason after the last.
+        self.denylist_in_git_dir(OPERATOR_LITERAL + '\n')
+        a = self.allow(r'README.md | operator~(?x) https://github\.com/[^/\s]+/(thing | other)\.git'
+                       ' | test: spaced alternation in the regex' + '\n')
+        self.stage('README.md', 'git clone ' + OPERATOR_IN_URL + '\n')
+        rc, out = self.run_gate(allowlist=a)
+        self.assertEqual(rc, 0, out)
+        entries = ci.load_allowlist(r'x.md | operator~(a | b) | a reason that is long enough', 't')
+        self.assertEqual(entries[0].text_rx.pattern, '(a | b)')
+        self.assertEqual(entries[0].reason, 'a reason that is long enough')
+        self.assertEqual(entries[0].glob, 'x.md')
 
     def test_malformed_entries_are_config_errors(self):
         for bad in ('x.md | lan-ip\n', 'x.md | nosuchclass | a long enough reason\n', 'x.md | lan-ip | short\n',

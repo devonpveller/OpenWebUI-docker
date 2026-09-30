@@ -28,11 +28,13 @@ holds the real mnemory key. The gateway injects the mnemory key +
 X-User-Id upstream.
 """
 import json
+import math
 import os
+import re
 
 import httpx
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse, PlainTextResponse, Response
+from starlette.responses import PlainTextResponse, Response
 from starlette.routing import Route
 
 MNEMORY_URL = os.environ["MNEMORY_URL"].rstrip("/")          # http://mnemory:8050
@@ -40,6 +42,18 @@ MNEMORY_KEY = os.environ["MNEMORY_KEY"]                       # real mnemory API
 GATEWAY_KEY = os.environ["GATEWAY_KEY"]                       # key cloud clients use
 BOUND_USER = os.environ["BOUND_USER_ID"]                      # mnemory user_id to bind
 SHARE_VALUE = os.environ.get("SHARE_LABEL_VALUE", "cloud")
+
+# REQUEST-SIZE CAP. A request body larger than GATEWAY_MAX_BODY_BYTES (default
+# 4 MiB = 4194304 bytes) is refused with HTTP 413 and a JSON-RPC error, and
+# nothing is forwarded. It is checked against a declared Content-Length before
+# the body is read, and again while it is read (a chunked body declares none),
+# so the gateway never buffers more than the cap. 4 MiB is far above any real
+# MCP call (mnemory's own MAX_INPUT_LENGTH is 400000 characters, which JSON
+# escaping can at most sextuple to ~2.4 MB). A value that is not a positive
+# integer stops the gateway at start rather than running uncapped.
+MAX_BODY_BYTES = int(os.environ.get("GATEWAY_MAX_BODY_BYTES", "4194304"))
+if MAX_BODY_BYTES <= 0:
+    raise ValueError("GATEWAY_MAX_BODY_BYTES must be a positive integer")
 
 # Tools a cloud client may call. Reads get a forced share filter; writes
 # get forced origin/share stamping.
@@ -238,15 +252,156 @@ def _apply_policy(msg: dict):
     return msg, None
 
 
-def _filter_tools_list(payload: dict) -> dict:
-    try:
-        tools = payload["result"]["tools"]
-    except (KeyError, TypeError):
-        return payload
-    payload["result"]["tools"] = [
-        t for t in tools if t.get("name") in ALLOWED_TOOLS
-        or t.get("name") == "initialize_memory"]
+class _Unfilterable(ValueError):
+    """An upstream tools/list reply the gateway cannot filter."""
+
+
+def _filter_tools_list(payload):
+    """Filter a tools/list reply to the allow-list. FAIL CLOSED: raises
+    _Unfilterable for any reply whose tool list cannot be read, and the caller
+    then advertises NOTHING (see _closed_tools_list) instead of passing the
+    upstream's reply through unfiltered. A tool entry that is not an object,
+    or whose name is not a string, is dropped. A JSON-RPC error, or a message that
+    is not a response at all (a notification or request the server interleaves
+    on an SSE stream), carries no tool list and is returned as it is."""
+    if not isinstance(payload, dict):
+        raise _Unfilterable("not a JSON object")
+    if "result" not in payload:
+        if "error" in payload or "method" in payload:
+            return payload
+        raise _Unfilterable("neither a result nor an error")
+    result = payload["result"]
+    if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
+        raise _Unfilterable("result.tools is not a list")
+    result["tools"] = [
+        t for t in result["tools"] if isinstance(t, dict) and isinstance(t.get("name"), str) and (
+            t.get("name") in ALLOWED_TOOLS
+            or t.get("name") == "initialize_memory")]
     return payload
+
+
+def _closed_tools_list(rpc_id):
+    """What the client gets when the upstream's tools/list reply cannot be
+    filtered: an EMPTY tool list, never the unfiltered reply."""
+    return _rpc_result(rpc_id, {"tools": []})
+
+
+# SSE line terminators per the HTML Living Standard (server-sent events):
+# CRLF, CR or LF - and NOTHING else. str.splitlines() also splits at U+2028,
+# U+2029, U+0085 (and more), which JSON allows raw inside a string: it cut a
+# valid data line in two and let the tail out unparsed (attempt-4 X6).
+_SSE_EOL = re.compile(r"\r\n|\r|\n")
+
+# The only `id:` / `retry:` values the gateway re-emits. An id is re-emitted
+# (it is the client's Last-Event-ID for resumability) only if it is 1-128
+# printable ASCII characters with no space: nothing any line splitter - the
+# spec's CR/LF, or str.splitlines() / httpx's LineDecoder, which also split at
+# VT, FF, FS/GS/RS, U+0085, U+2028, U+2029 (attempt-5 X7) - could split, and
+# no control character. retry: 1-10 ASCII digits. Anything else is dropped.
+_SSE_SAFE_ID = re.compile(r"[\x21-\x7e]{1,128}")
+_SSE_SAFE_RETRY = re.compile(r"[0-9]{1,10}")
+
+
+def _sse_filter_tools_list(raw: bytes, list_id) -> str:
+    """Re-serialise an SSE tools/list reply, FAIL CLOSED. Parsed the way an
+    EventSource client parses it: UTF-8 decode with replacement (never the
+    charset the upstream declares - utf-7 etc. can decode to a lone surrogate,
+    attempt-3 X4; replacement never yields one), ONE leading BOM stripped
+    (attempt-4 X5), lines split on CR/LF only, events ended by a blank line (or
+    the end of the body), a field's value after one optional space, the last
+    `event`/`id`/`retry` winning, data lines joined with LF (collected in a
+    list and joined once - attempt-5 X8 was a quadratic join).
+
+    NOTHING upstream-chosen is copied (attempt-5 X7). Per event the gateway
+    writes only:
+      * `event: message` - when the event's type is `message` (explicitly or by
+        default). An event of any other type is dropped whole: MCP puts its
+        messages in `message` events, and a type is never echoed.
+      * `id: <v>` / `retry: <n>` - only values matching _SSE_SAFE_ID /
+        _SSE_SAFE_RETRY.
+      * data, re-serialised by json.dumps (ASCII) or empty:
+          - no data field: the event is kept without data (id / retry only);
+          - data that is empty or whitespace (an MCP resumability "priming"
+            event, `id: n` + `data:`): an empty `data:` - it carries no tool,
+            and a client does not take it for the tools/list response;
+          - a JSON-RPC response (result/error) whose id is NOT this tools/list
+            request's: dropped - it is not this request's answer and must not
+            be turned into one;
+          - a notification / request (`method`, no result/error): passed,
+            re-serialised;
+          - this request's response: filtered to the allow-list;
+          - anything unparseable or unfilterable: the EMPTY tool list.
+    Comments, unknown fields and anything unparsed are dropped, never copied."""
+    text = raw.decode("utf-8", "replace")
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    events, cur = [], []
+    for line in _SSE_EOL.split(text):
+        if line == "":
+            if cur:
+                events.append(cur)
+            cur = []
+        else:
+            cur.append(line)
+    if cur:  # a last event with no blank line after it: closed off here
+        events.append(cur)
+
+    out = []
+    for ev in events:
+        etype, typed, eid, retry, data = "message", False, None, None, None
+        for line in ev:
+            if line.startswith(":"):
+                continue  # comment
+            name, sep, value = line.partition(":")
+            if sep and value.startswith(" "):
+                value = value[1:]
+            if name == "data":
+                if data is None:
+                    data = []
+                data.append(value)
+            elif name == "event":
+                etype, typed = value, True
+            elif name == "id":
+                eid = value
+            elif name == "retry":
+                retry = value
+            # any other field name is ignored, as a client ignores it
+        if etype != "message":
+            continue
+        fields = []
+        if typed:  # keep a valid upstream's framing byte for byte
+            fields.append("event: message")
+        if eid is not None and _SSE_SAFE_ID.fullmatch(eid):
+            fields.append(f"id: {eid}")
+        if retry is not None and _SSE_SAFE_RETRY.fullmatch(retry):
+            fields.append(f"retry: {retry}")
+        if data is not None:
+            joined = "\n".join(data)
+            if not joined.strip():
+                fields.append("data: ")
+            else:
+                p = _sse_event_payload(joined, list_id)
+                if p is None:
+                    continue  # a response to another request: not this answer
+                fields.append("data: " + json.dumps(p))
+        if fields:
+            out.append("\n".join(fields) + "\n\n")
+    return "".join(out)
+
+
+def _sse_event_payload(data: str, list_id):
+    """The re-serialisable payload for one event's data, or None to drop it."""
+    try:
+        msg = _strict_json(data)
+    except Exception:
+        return _closed_tools_list(list_id)
+    if isinstance(msg, dict) and ("result" in msg or "error" in msg) \
+            and msg.get("id") != list_id:
+        return None
+    try:
+        return _filter_tools_list(msg)
+    except Exception:  # anything unfilterable -> advertise nothing
+        return _closed_tools_list(list_id)
 
 
 class _BodyRefused(ValueError):
@@ -257,14 +412,26 @@ def _no_constant(name):
     raise _BodyRefused(f"non-standard JSON constant {name}")
 
 
+def _finite_float(s: str) -> float:
+    """A JSON number too large for a double (1e400, -1e999) parses to +/-inf,
+    which json.dumps would re-emit as the non-JSON token Infinity. Refuse it:
+    the gateway only forwards what it can re-serialise as valid JSON."""
+    v = float(s)
+    if not math.isfinite(v):
+        raise _BodyRefused(f"number out of range ({s[:32]})")
+    return v
+
+
 def _strict_json(txt: str):
     """json.loads under the gateway's strict rules (no BOM, no NaN/Infinity,
-    bounded nesting); raises _BodyRefused. Used for the request body and for
-    string-encoded policed arguments alike."""
+    no number that overflows to infinity, bounded nesting); raises
+    _BodyRefused. Used for the request body and for string-encoded
+    policed arguments alike."""
     if txt.startswith("\ufeff"):
         raise _BodyRefused("byte-order mark")
     try:
-        return json.loads(txt, parse_constant=_no_constant)
+        return json.loads(txt, parse_constant=_no_constant,
+                          parse_float=_finite_float)
     except _BodyRefused:
         raise
     except (ValueError, RecursionError) as e:
@@ -294,8 +461,25 @@ def _parse_body(raw: bytes):
     raise _BodyRefused("not a JSON-RPC object or a non-empty batch of objects")
 
 
+def _json_response(payload, status_code=200):
+    """Every JSON reply the gateway BUILDS goes through here (never starlette's
+    JSONResponse). JSONResponse renders with ensure_ascii=False and then encodes
+    UTF-8, so a lone surrogate ("\\ud800") in any string it carries - a kept tool
+    description from the upstream, a request id, a tool name echoed in an error -
+    raised UnicodeEncodeError and the client got a 500. Same bytes as
+    JSONResponse for everything it could render; a payload it could not is
+    re-serialised with ensure_ascii=True (valid JSON, the surrogate \\u-escaped)."""
+    try:
+        body = json.dumps(payload, ensure_ascii=False, allow_nan=False,
+                          separators=(",", ":")).encode("utf-8")
+    except UnicodeEncodeError:
+        body = json.dumps(payload, ensure_ascii=True, allow_nan=False,
+                          separators=(",", ":")).encode("ascii")
+    return Response(body, status_code=status_code, media_type="application/json")
+
+
 def _refuse(reason: str):
-    return JSONResponse(
+    return _json_response(
         _rpc_error(None, -32700, f"Request refused by the gateway: {reason}."),
         status_code=400)
 
@@ -353,6 +537,26 @@ def _upstream_headers(req):
     return h
 
 
+class _TooLarge(Exception):
+    """The request body exceeds MAX_BODY_BYTES."""
+
+
+async def _read_capped(request) -> bytes:
+    """Read the request body, never buffering more than MAX_BODY_BYTES.
+    Raises _TooLarge on a declared Content-Length over the cap (before
+    reading anything) or once the bytes actually read pass it."""
+    declared = request.headers.get("content-length")
+    if (declared is not None and declared.strip().isdigit()
+            and int(declared) > MAX_BODY_BYTES):
+        raise _TooLarge()
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > MAX_BODY_BYTES:
+            raise _TooLarge()
+    return bytes(buf)
+
+
 async def health(_request):
     return PlainTextResponse("ok")
 
@@ -361,15 +565,23 @@ async def mcp(request):
     # Authenticate the cloud client against the gateway key.
     auth = request.headers.get("authorization", "")
     if auth != f"Bearer {GATEWAY_KEY}":
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return _json_response({"error": "unauthorized"}, status_code=401)
 
     method = request.method
-    body = await request.body()
+    try:
+        body = await _read_capped(request)
+    except _TooLarge:
+        return _json_response(
+            _rpc_error(None, -32600,
+                       f"Request refused by the gateway: body larger than "
+                       f"{MAX_BODY_BYTES} bytes."),
+            status_code=413)
     up_headers = _upstream_headers(request)
 
     short_circuit = None
     out_body = None  # only bytes re-serialised below ever go upstream
     is_tools_list = False
+    list_id = None
 
     if body and method != "POST":
         return _refuse(f"{method} with a body")
@@ -396,6 +608,7 @@ async def mcp(request):
         elif isinstance(msg, dict):
             if msg.get("method") == "tools/list":
                 is_tools_list = True
+                list_id = msg.get("id")
             mm, sc = _apply_policy(msg)
             if sc is not None:
                 short_circuit = sc
@@ -403,7 +616,7 @@ async def mcp(request):
                 out_body = json.dumps(mm).encode()
 
     if short_circuit is not None:
-        return JSONResponse(short_circuit)
+        return _json_response(short_circuit)
 
     up_headers.pop("content-length", None)
     timeout = httpx.Timeout(300.0, connect=10.0)
@@ -415,28 +628,26 @@ async def mcp(request):
             params=dict(request.query_params))
 
         ct = upstream.headers.get("content-type", "")
-        # tools/list: filter advertised tools to the cloud allow-list.
-        if is_tools_list and "application/json" in ct:
-            try:
-                payload = _filter_tools_list(json.loads(upstream.content))
-                return JSONResponse(payload, status_code=upstream.status_code)
-            except Exception:
-                pass
-        if is_tools_list and "text/event-stream" in ct:
-            txt = upstream.text
-            out_lines = []
-            for line in txt.splitlines():
-                if line.startswith("data:"):
-                    try:
-                        p = _filter_tools_list(json.loads(line[5:].strip()))
-                        out_lines.append("data: " + json.dumps(p))
-                        continue
-                    except Exception:
-                        pass
-                out_lines.append(line)
-            return Response("\n".join(out_lines) + "\n",
+        # tools/list: filter advertised tools to the cloud allow-list, FAIL
+        # CLOSED - a reply that cannot be filtered is replaced, never passed
+        # through (it would advertise every upstream tool).
+        if is_tools_list and "text/event-stream" in ct.lower():
+            return Response(_sse_filter_tools_list(upstream.content, list_id),
                             status_code=upstream.status_code,
                             media_type="text/event-stream")
+        if is_tools_list:
+            try:
+                payload = _filter_tools_list(_strict_json(
+                    upstream.content.decode("utf-8", "replace")))
+            except Exception:  # anything unfilterable -> advertise nothing
+                if 200 <= upstream.status_code < 300:
+                    return _json_response(_closed_tools_list(list_id))
+                return _json_response(
+                    _rpc_error(list_id, -32603,
+                               "upstream tools/list reply could not be filtered; "
+                               "nothing is advertised"),
+                    status_code=502)
+            return _json_response(payload, status_code=upstream.status_code)
 
         passthru = {k: v for k, v in upstream.headers.items()
                     if k.lower() not in ("content-length", "content-encoding",

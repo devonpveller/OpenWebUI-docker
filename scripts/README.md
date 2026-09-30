@@ -71,16 +71,20 @@ were retired by the follow-up item (ac-legacy-recovery) rather than fixed.
 
 ## `backup/` (host side — NAS mirror + DR; container-side sidecar scripts live in ../backup/)
 
-`backup-to-nas.ps1` (weekly NAS mirror; Task via
-`install-nas-backup-task.ps1`), `set-nas-credential.ps1`,
+`backup-to-nas.ps1` (weekly NAS mirror of `../backups/` plus the verified,
+never-replacing archive copy of `../backup/<subdir>/`; Task via `install-nas-backup-task.ps1`; helpers
+in `nas-sync-lib.ps1`, tests in `test-nas-sync.ps1`), `copy-archives-to-nas.ps1`
+(one-time, sha256-verified archive copy; never deletes), `set-nas-credential.ps1`,
 `restore-from-snapshot.ps1` (DR driver). Container-side sidecar scripts live
 in `../backup/`; conventions in
 `../documentation/runbooks/backup-conventions.md`.
 
 ## Notifications
 
-`notify-mattermost.sh` — Claude Code Stop/Notification hook target (posts to
-#claude-code; per-session allowlist `scripts/.mm-notify-sessions`).
+`notify-mattermost.sh` — Claude Code Stop/Notification hook target (one thread per
+interactive session in #claude-sessions, recorded in `scripts/.mm-session-threads`, which the
+claude-sessions bridge reads; its Stop-hook runs stand down inside bridge sessions; per-session allowlist
+`scripts/.mm-notify-sessions`).
 
 ## Rules
 

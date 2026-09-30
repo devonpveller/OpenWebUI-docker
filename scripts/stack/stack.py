@@ -588,27 +588,51 @@ def host_path_problem(root: Path, spec: dict) -> str | None:
     Existing is not enough: an empty directory or a plain file at the path
     would pass an .exists() test and still fail the build. The entry's
     `contains` names what a real checkout holds there (memory: `.git` and the
-    Dockerfile its compose file builds with); each must be present.
+    Dockerfile its compose file builds with); each must be present, and each
+    as the right KIND: `.git` may be a directory (a clone) or a file (a
+    worktree or submodule gitfile), a name ending in `/` must be a directory,
+    and any other name must be a regular file - a DIRECTORY called
+    `Dockerfile` would pass an .exists() test and still fail the build.
     """
     path = root / Path(spec["path"])
     if not path.exists():
         return "is missing"
     if not path.is_dir():
         return "is not a directory"
-    absent = [name for name in spec.get("contains", []) if not (path / name).exists()]
+    absent = [name for name in spec.get("contains", []) if not _host_path_member_ok(path, name)]
     if absent:
         return "is not a checkout the plane can build from (no " + ", ".join(absent) + ")"
     return None
 
 
-def missing_host_paths(manifest: Manifest, root: Path, plane: str) -> list[tuple[dict, str]]:
+def _host_path_member_ok(path: Path, name: str) -> bool:
+    """One `contains` name is present inside `path` as the kind it names."""
+    if name == ".git":
+        return (path / name).exists()
+    if name.endswith("/"):
+        return (path / name.rstrip("/")).is_dir()
+    return (path / name).is_file()
+
+
+def host_path_applies(spec: dict, active) -> bool:
+    """Whether one `host_paths` entry is checked: always, unless it names a `profile`, and then
+    only while that profile is active (`active`: the profiles compose will run the plane with;
+    None = not known, so a profile-gated entry is not checked)."""
+    profile = spec.get("profile")
+    return not profile or (active is not None and profile in active)
+
+
+def missing_host_paths(manifest: Manifest, root: Path, plane: str, active=None) -> list[tuple[dict, str]]:
     """(entry, reason) for each of the plane's `host_paths` that is not usable.
 
-    A path OUTSIDE the checkout that the plane builds from - memory's sibling
-    ../mnemory. Each entry carries the `remedy` command that creates it.
+    A path the plane cannot run without that no clone carries - memory's sibling
+    ../mnemory, or agent-org's GENERATED worker configs (gitignored; only under
+    the `workers` profile). Each entry carries the `remedy` command that creates it.
     """
     found = []
     for spec in manifest.plane(plane).get("host_paths", []):
+        if not host_path_applies(spec, active):
+            continue
         reason = host_path_problem(root, spec)
         if reason:
             found.append((spec, reason))
@@ -1308,7 +1332,7 @@ def _preflight(manifest, state, root, planes, verb: str, capture) -> None:
     used to be left to each compose file's `:?` guard, which on a GPU-less host
     surfaced inside the GPU check's render (ac-driver-products attempt 3, T12e).
     """
-    submodule_lines = []
+    submodule_lines, host_lines = [], []
     for plane in planes:
         submodule = missing_submodule(manifest, root, plane)
         if submodule:
@@ -1316,11 +1340,19 @@ def _preflight(manifest, state, root, planes, verb: str, capture) -> None:
                 f"  {plane}: {manifest.plane(plane)['compose']} is missing because the {submodule} "
                 f"submodule is not initialised - run {submodule_remedy(submodule)}"
             )
+            continue
+        # A path the plane cannot run without (host_paths), under the profiles `up` will run -
+        # agent-org's generated worker configs only matter with `workers` (cf-small-fixes G18).
+        for spec, reason in missing_host_paths(manifest, root, plane,
+                                               active_profiles(manifest, state, root, plane)):
+            host_lines.append("  " + host_path_line(spec, plane, reason))
     placeholder_lines = _placeholder_lines(manifest, state, root, planes, capture, blank=True)
-    if submodule_lines or placeholder_lines:
+    if submodule_lines or placeholder_lines or host_lines:
         steps = []
         if submodule_lines:
             steps.append("initialise the submodule with the command named above")
+        if host_lines:
+            steps.append("run the command named for each path above")
         if placeholder_lines:
             unset = any(line.endswith((" is blank", " is missing")) for line in placeholder_lines)
             steps.append(("give each key named above a value of your own" if unset
@@ -1328,7 +1360,7 @@ def _preflight(manifest, state, root, planes, verb: str, capture) -> None:
                          + " (for a secret: `openssl rand -hex 32`)")
         raise Refusal(
             f"refused: fix these before `{verb}` starts anything:\n"
-            + "\n".join(submodule_lines + placeholder_lines)
+            + "\n".join(submodule_lines + host_lines + placeholder_lines)
             + "\nNothing was started. " + _sentence("; then ".join(steps)) + ", and re-run."
         )
 
@@ -1632,7 +1664,8 @@ def _key_problems(manifest, state, root, planes, subject, capture, profile_map=N
     """
     lines, files, submodules = [], [], []
     for plane in planes:
-        for spec, reason in missing_host_paths(manifest, root, plane):
+        active = active_profiles(manifest, state, root, plane, (profile_map or {}).get(plane, ()))
+        for spec, reason in missing_host_paths(manifest, root, plane, active):
             lines.append("  " + host_path_line(spec, plane, reason))
             command = f"`{spec['remedy']}`"
             if command not in submodules:
@@ -2003,7 +2036,11 @@ def cmd_doctor(manifest, state, root, console, runner, capture=None) -> int:
         else:
             console.line(f"    [FAIL] compose file missing: {manifest.plane(plane)['compose']}")
             problems += 1
+        doctor_active = active_profiles(manifest, state, root, plane)
         for spec in manifest.plane(plane).get("host_paths", []):
+            if not host_path_applies(spec, doctor_active):
+                console.line(f"    [--]   host path {spec['path']} (checked only with profile {spec['profile']})")
+                continue
             reason = host_path_problem(root, spec)
             if reason:
                 console.line("    [FAIL] " + host_path_line(spec, plane, reason))
@@ -3100,6 +3137,186 @@ def _last_health_output(state: dict) -> str:
     return text[:200]
 
 
+class _Gate:
+    """One container's gate: the verdict rule of wait_gate, fed one `docker inspect` at a time.
+
+    Split out of the loop so a whole depends_on level can be watched at once
+    (wait_gates). The rule itself is unchanged: `observe` is the body the loop
+    used to run on every poll, and it returns (passed, seen) once there is a
+    verdict, None while there is not.
+    """
+
+    def __init__(self, name: str, timeout: int, kind: str, settle: float, started: float):
+        self.name, self.timeout, self.kind, self.settle = name, timeout, kind, settle
+        self.started = started
+        self.window = None       # (monotonic at first running, RestartCount, StartedAt)
+        self.by_window = False   # passed by sitting out its settle window (not on an event docker reported)
+        self.last = "no container"
+
+    def observe(self, state: dict | None, now: float, credit: float = 0.0, grace: float = 0.0):
+        """`credit`: seconds of the level's time NOT charged to this gate's budget; `grace`: how far past its
+        budget a timeout waits to be DECLARED (see wait_gates). Both 0 for a gate watched alone."""
+        kind, timeout, settle = self.kind, self.timeout, self.settle
+        elapsed = int(now - self.started)
+        spent = int(now - self.started - credit)    # what the budget is judged on
+        window = self.window
+        if state is not None:
+            status = state.get("Status") or "?"
+            health = (state.get("Health") or {}).get("Status")
+            restarts = state.get("RestartCount")
+            self.last = last = f"{status}/{health}" if health else status
+            if kind == GATE_COMPLETES:
+                if status in ("exited", "dead"):
+                    code = state.get("ExitCode")
+                    if code == 0:
+                        return True, f"completed (exit 0) after {elapsed}s"
+                    return False, (f"exited with exit code {code} - a service others wait on with "
+                                   "service_completed_successfully must exit 0")
+                if spent >= timeout + grace:
+                    return False, f"did not complete within {timeout}s (last seen: {last})"
+                return None
+            if health == "healthy":
+                return True, f"healthy after {elapsed}s"
+            if health == "unhealthy":
+                output = _last_health_output(state)
+                return False, "unhealthy" + (f" - last healthcheck output: {output}" if output else "")
+            if status in ("exited", "dead"):
+                code = state.get("ExitCode")
+                if kind == GATE_ONE_SHOT and code == 0:
+                    return True, f"exited 0 after {elapsed}s (restart: \"no\" - a one-shot, exit 0 is its success)"
+                if window is not None:
+                    return False, (f"exited with exit code {code} {int(now - window[0])}s after it was first "
+                                   "seen running (a crash inside the settle window)")
+                return False, f"{status} with exit code {code}"
+            if status == "restarting":
+                return False, f"restart loop: docker reports it restarting (RestartCount {restarts})"
+            if status == "running" and not health:
+                if window is None:
+                    self.window = (now, restarts, state.get("StartedAt"))
+                elif restarts != window[1] or state.get("StartedAt") != window[2]:
+                    return False, (f"restart loop: it restarted {int(now - window[0])}s into the "
+                                   f"{int(settle)}s settle window (RestartCount {window[1]} -> {restarts})")
+                elif now - window[0] >= settle:
+                    self.by_window = True
+                    return True, (f"running and steady for {int(now - window[0])}s (no healthcheck; "
+                                  f"RestartCount {restarts}, not restarted)")
+        if spent >= timeout + grace:
+            return False, f"no verdict within {timeout}s (last seen: {self.last})"
+        return None
+
+
+def wait_gates(capture, root, docker, gates):
+    """Watch every gate of one depends_on level AT ONCE: [(passed, seen) | None, ...] in `gates` order.
+
+    `gates` is [(name, timeout, kind, settle), ...]. Each poll round inspects every
+    container still without a verdict, then sleeps once - so a level of N containers
+    with no healthcheck settles in one 15 s window, not N of them back to back (the
+    first cut waited for each in turn: OB1's 22 settle-gated services cost 5.5 min
+    of pure waiting). Every container gets the same rule and window it had alone
+    (_Gate); its settle window opens at the first poll that sees it running.
+
+    NO GATE TIMES OUT SOONER THAN IT DID ONE AFTER ANOTHER - provided no
+    `docker inspect` then was slower than the slowest one this level measured
+    (the only cost it can know). There, gate i was watched only from S_i, when
+    gate i-1 had its verdict, and its timeout was declared at its first poll at or
+    past S_i + its budget - a poll that could still see it pass. Here:
+      * S_i is taken no EARLIER than it was (one_after_another_start): rebuilt
+        from what was observed, allowing for those polls seeing each change up to
+        3 s plus two inspects late (the inspect before the sleep and the one that
+        sees it) and closing a settle window up to one round late;
+      * the timeout is declared late enough (`grace`) that whatever one after
+        another would still have seen PASS is seen here too. One after another's
+        last poll came at most one lone round (3 s + an inspect) past the budget.
+        This level polls each gate once per LEVEL round (3 s + an inspect per open
+        gate), so it sees a change up to one level round later - and a settle
+        window twice: once to see the container running, once to see the window
+        close. grace = one lone round + two level rounds, a level round being the
+        longest measured so far and never less than 3 s + the slowest inspect x
+        the gates polled per round. A gate alone in its level polls exactly as
+        before and gets no grace.
+    While an earlier gate is still open, S_i is not known yet and gate i cannot
+    time out (one after another it was not watched yet). The price of those
+    allowances: every TIMEOUT is declared `grace` later than it was, and a later
+    gate's start can move by a few rounds more; a level never waits past the sum
+    of its budgets plus seven level rounds per gate (a gate's verdict comes at
+    most its budget + grace + a level round after its credited start, and the
+    next start at most lag + a round after that). A pass, or a failure docker
+    reports, is seen at the next poll either way.
+
+    The first round in which any gate FAILS ends the wait: the level has failed and
+    recover stops, as it did at the first failed gate before. Gates still pending
+    then answer None ("not awaited"). Two failures in one round are both returned;
+    the caller names the first in `gates` order.
+    """
+    started = monotonic()
+    pending = {i: _Gate(name, timeout, kind, settle, started)
+               for i, (name, timeout, kind, settle) in enumerate(gates)}
+    results = [None] * len(gates)
+    took = [None] * len(gates)      # seconds from the level's start to each gate's verdict
+    gate_of = dict(pending)
+    cost = 0.0                      # the slowest `docker inspect` seen in this level, seconds
+    longest_round = 0.0             # the longest measured round (from one round's start to the next's)
+    round_started = None
+    while pending:
+        failed = False
+        now = monotonic()
+        if round_started is not None:
+            longest_round = max(longest_round, now - round_started)
+        round_started = now
+        polled = len(pending)
+        for i, gate in list(pending.items()):
+            asked = monotonic()
+            state = container_state(capture, root, docker, gate.name)
+            now = monotonic()
+            cost = max(cost, now - asked)
+            start = one_after_another_start(took, [gate_of[j] for j in range(i)], cost)
+            level_round = max(longest_round, GATE_POLL_SECONDS + cost * polled)
+            grace = (GATE_POLL_SECONDS + cost + 2 * level_round) if len(gates) > 1 else 0.0
+            verdict = gate.observe(state, now, (now - started) if start is None else start, grace)
+            if verdict is not None:
+                results[i] = verdict
+                took[i] = now - started
+                del pending[i]
+                failed = failed or not verdict[0]
+        if failed or not pending:
+            break
+        sleep(GATE_POLL_SECONDS)
+    return results
+
+
+def one_after_another_start(took, earlier, cost: float = 0.0):
+    """S_i for the gate after `earlier`: seconds from the level's start, never earlier than one after
+    another started it; None while one of `earlier` is still open. See wait_gates.
+
+    `took[j]`: when gate j had its verdict, watched from the level's start. `cost` (c): the slowest
+    `docker inspect` seen, taken as the slowest one after another met too. One after another started
+    gate j at some S_j we cannot see; we carry an upper bound (`start`) and a lower bound (`low`) on it.
+    It asked docker at S_j and then every round r = 3 s + c; a change that happened between two of its
+    reads was seen at the second one, up to 3 s + two inspects after it happened (`lag`); a change
+    that happened before S_j was seen at its very first look, S_j + c:
+      an event (healthy, an exit) that WE saw by `low` had happened before S_j: seen at S_j + c;
+        otherwise by the later of that and took_j + lag (we saw it at took_j, so it happened by then);
+      a settle window: opened at S_j + c if WE saw it running by `low` (running before S_j, and
+        unrestarted from then until its window closed); otherwise by the later of that and our
+        first-seen + lag; closed by settle + r after it opened (its polls are at most r apart).
+    The lower bound only grows by what one after another cannot have skipped: a settle window.
+    """
+    r = GATE_POLL_SECONDS + cost
+    lag = r + cost
+    start = low = 0.0
+    for j, gate in enumerate(earlier):
+        if took[j] is None:
+            return None
+        if gate.by_window:
+            seen = gate.window[0] - gate.started
+            opened = start + cost if seen <= low else max(start + cost, seen + lag)
+            start = opened + gate.settle + r
+            low += gate.settle
+        else:
+            start = start + cost if took[j] <= low else max(start + cost, took[j] + lag)
+    return start
+
+
 def wait_gate(capture, root, docker, name: str, timeout: int, kind: str = GATE_SETTLE,
               settle: float = SETTLE_SECONDS):
     """(passed, what was seen). Polls `docker inspect` until a verdict or the timeout.
@@ -3122,57 +3339,11 @@ def wait_gate(capture, root, docker, name: str, timeout: int, kind: str = GATE_S
     kind=completes: only the EXIT counts - exit 0 passes, any other exit fails, and
     running (or restarting under an on-failure policy) keeps waiting until the timeout.
     kind=one-shot: as above for running containers, but an exit 0 at any point passes.
+
+    One container; recover watches a whole level with wait_gates, which applies this
+    same rule (_Gate) to every container of the level at once.
     """
-    started = monotonic()
-    window = None            # (monotonic at first running, RestartCount, StartedAt)
-    last = "no container"
-    while True:
-        state = container_state(capture, root, docker, name)
-        now = monotonic()
-        elapsed = int(now - started)
-        if state is not None:
-            status = state.get("Status") or "?"
-            health = (state.get("Health") or {}).get("Status")
-            restarts = state.get("RestartCount")
-            last = f"{status}/{health}" if health else status
-            if kind == GATE_COMPLETES:
-                if status in ("exited", "dead"):
-                    code = state.get("ExitCode")
-                    if code == 0:
-                        return True, f"completed (exit 0) after {elapsed}s"
-                    return False, (f"exited with exit code {code} - a service others wait on with "
-                                   "service_completed_successfully must exit 0")
-                if elapsed >= timeout:
-                    return False, f"did not complete within {timeout}s (last seen: {last})"
-                sleep(GATE_POLL_SECONDS)
-                continue
-            if health == "healthy":
-                return True, f"healthy after {elapsed}s"
-            if health == "unhealthy":
-                output = _last_health_output(state)
-                return False, "unhealthy" + (f" - last healthcheck output: {output}" if output else "")
-            if status in ("exited", "dead"):
-                code = state.get("ExitCode")
-                if kind == GATE_ONE_SHOT and code == 0:
-                    return True, f"exited 0 after {elapsed}s (restart: \"no\" - a one-shot, exit 0 is its success)"
-                if window is not None:
-                    return False, (f"exited with exit code {code} {int(now - window[0])}s after it was first "
-                                   "seen running (a crash inside the settle window)")
-                return False, f"{status} with exit code {code}"
-            if status == "restarting":
-                return False, f"restart loop: docker reports it restarting (RestartCount {restarts})"
-            if status == "running" and not health:
-                if window is None:
-                    window = (now, restarts, state.get("StartedAt"))
-                elif restarts != window[1] or state.get("StartedAt") != window[2]:
-                    return False, (f"restart loop: it restarted {int(now - window[0])}s into the "
-                                   f"{int(settle)}s settle window (RestartCount {window[1]} -> {restarts})")
-                elif now - window[0] >= settle:
-                    return True, (f"running and steady for {int(now - window[0])}s (no healthcheck; "
-                                  f"RestartCount {restarts}, not restarted)")
-        if elapsed >= timeout:
-            return False, f"no verdict within {timeout}s (last seen: {last})"
-        sleep(GATE_POLL_SECONDS)
+    return wait_gates(capture, root, docker, [(name, timeout, kind, settle)])[0]
 
 
 # --------------------------------------------------------------------------
@@ -3326,22 +3497,29 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
                         return EXIT_REFUSED
             code = runner(cmd, root)
             failure = f"`up` exited {code}" if code != 0 else None
+            failed_name = container_of(renders[p], level[0])   # the `docker logs` hint: the failed gate's, when one failed
             if failure is None:
-                for key, limit in gates:
-                    name = container_of(renders[p], key)
-                    svc = renders[p].services[key]
-                    passed, seen = wait_gate(capture, root, docker[p], name, limit,
-                                             gate_kind(renders[p], key, one_shots[p]), settle_seconds(svc))
+                # The whole level at once (wait_gates): its containers were started together,
+                # so their settle windows run together - one window per level, not one per container.
+                names = [container_of(renders[p], key) for key, _limit in gates]
+                verdicts = wait_gates(capture, root, docker[p], [
+                    (name, limit, gate_kind(renders[p], key, one_shots[p]), settle_seconds(renders[p].services[key]))
+                    for name, (key, limit) in zip(names, gates)])
+                for name, (key, _limit), verdict in zip(names, gates, verdicts):
+                    if verdict is None:
+                        console.line(f"  [--] {p}/{key} ({name}): not awaited - another gate of this level failed")
+                        continue
+                    passed, seen = verdict
                     console.line(f"  [{'ok' if passed else 'FAIL'}] {p}/{key} ({name}): {seen}")
-                    if not passed:
+                    if not passed and failure is None:
                         failure = f"{key} ({name}) {seen}"
-                        break
+                        failed_name = name
             if failure:
                 console.line(f"refused: recover stopped at {p}: {failure}.")
                 later = work[index + 1:]
                 if later:
                     console.line(f"# stopped and not started: {', '.join(later)}")
-                console.line(f"# fix it (`docker logs {container_of(renders[p], level[0])}`), then re-run "
+                console.line(f"# fix it (`docker logs {failed_name}`), then re-run "
                              "`stack.py recover` - it stops and restarts everything again in order")
                 return EXIT_REFUSED
     if dry_run:
@@ -4862,9 +5040,11 @@ class DocRenders:
                     f"{rel(self.root, env_path)} is absent (gitignored), and {compose_rel} does not render "
                     "without it - copy it from its .env.example"
                 )
-            # A SERVICE-level env_file elsewhere (OB1's recipe .env files) is absent: the
-            # render cannot run, which is "could not compare", not drift - `--write` would
-            # refuse the same way (ac-linux-rehearsal F2). Named, so the reader can create it.
+            # A SERVICE-level env_file elsewhere is absent: the render cannot run, which is
+            # "could not compare", not drift - `--write` would refuse the same way
+            # (ac-linux-rehearsal F2). Named, so the reader can create it. No committed
+            # compose file triggers this any more: OB1's recipe .env files, the case it was
+            # written for, are `required: false` since cf-ob1-fresh. Kept for the next one.
             missing = re.search(r"env file (.+?) not found", result.stderr or "")
             if missing:
                 raw = missing.group(1).strip()
@@ -4873,8 +5053,8 @@ class DocRenders:
                 except (ValueError, OSError):
                     shown = raw
                 raise Unverifiable(
-                    f"could not compare: {shown} is absent (gitignored), and {compose_rel} does not "
-                    "render without it - create it (README's Contributing loop copies or touches every one)"
+                    f"could not compare: {shown} is absent, and {compose_rel} does not render without it "
+                    "- create it, or mark that env_file `required: false` if its services start without it"
                 )
         return result
 

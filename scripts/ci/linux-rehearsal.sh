@@ -23,8 +23,11 @@
 #   5  agent routing - CLAUDE.md's plan-store section is quoted and names plans, notes,
 #      findings and evidence; staging documentation/notes/<x>.md is refused
 # Criterion 6 (the live deployment renders unchanged) is HOST-side and read-only; it is
-# not done here. Open Brain from a fresh clone is a known blocker (G19): the run records
-# what `enable open-brain` says before and after the Contributing loop, as INFO lines.
+# not done here. Open Brain from a fresh clone (G19) is not a criterion: the run records
+# what `enable open-brain` says before and after the Contributing loop, and whether OB1
+# then renders, as INFO lines. Its first wall - the recipe .env files compose required -
+# is gone since cf-ob1-fresh (they are `required: false`); criterion 3's F2 check below
+# holds that.
 #
 # HOW THE README IS READ. Three fenced blocks are found by the HTML comment on the line
 # before them - `<!-- rehearsal:linux-quickstart`, `<!-- rehearsal:contributing-hooks`,
@@ -514,7 +517,7 @@ HR=1; health_ran "$LOGS/health.log" "$HEALTH_RC" && HR=0
 ck 2 "health ran to its verdict and passed, the coder daemon's probe OK (exit $HEALTH_RC)" \
   "$(t sh -c "[ $HR -eq 0 ] && [ $HEALTH_RC -eq 0 ] && grep -q 'OK.*coder: little-coder daemon' '$LOGS/health.log'")"
 
-hr "G19 probe, before the Contributing loop (INFO; Open Brain from a fresh clone is out of scope)"
+hr "G19 probe, before the Contributing loop (INFO; Open Brain from a fresh clone is not a criterion)"
 G19A=$(python3 scripts/stack/stack.py enable open-brain 2>&1); G19A_RC=$?
 printf '%s\n' "$G19A" | sed 's/^/   | /'
 info "G19 before the Contributing loop: enable open-brain exit $G19A_RC: $(printf '%s\n' "$G19A" | sed -n 2p | sed 's/^ *//' | cut -c1-160)"
@@ -594,8 +597,10 @@ ck 3 "the attestation ledger has a line for that tree, with a skipped= column" "
 case "$SUMMARY" in *"SKIPPED:"*docs-blocks*) info "docs-blocks SKIPPED on the doc-only commit made before the Contributing .env loop (known carry: its OB1/docker/.env is absent)";; esac
 
 # F2: OB1/docker/.env present (as `enable open-brain`'s loop makes it) but OB1's recipe .env
-# files absent. The render cannot run; the commit must NOT be refused as "stale", and the
-# output must name the missing file.
+# files absent - which no step of the README creates. Until cf-ob1-fresh the render could
+# not run here and the output named the missing file; the recipe env_files are now
+# `required: false`, so OB1 renders and its blocks are COMPARED: nothing may say it could
+# not compare an OB1 block, and the commit must not be refused as "stale".
 F2_MADE=0
 if [ ! -e OB1/docker/.env ]; then cp OB1/docker/.env.example OB1/docker/.env && F2_MADE=1; fi
 printf '\nA third line added by the Linux rehearsal.\n' >> frontend/README.md
@@ -604,8 +609,8 @@ try_commit doc-half-ob1-env "docs: a doc-only commit with OB1/docker/.env but no
 grep -E 'could not compare|NOT VERIFIED' "$LOGS/commit-doc-half-ob1-env.log" | head -3 | sed 's/^/   | /'
 ck 3 "with OB1/docker/.env but no recipe .env files, a doc-only commit still succeeds (exit $COMMIT_RC)" \
   "$(t sh -c "[ $COMMIT_RC = 0 ] && [ $COMMIT_MOVED = 0 ]")"
-ck 3 "... docs-blocks says it could not compare and names the missing recipe .env, with no 'docs --write' advice" \
-  "$(t sh -c "grep -qE 'could not compare: OB1/recipes/[a-z-]+/\\.env is absent' '$LOGS/commit-doc-half-ob1-env.log' && ! grep -q 'Regenerate with' '$LOGS/commit-doc-half-ob1-env.log'")"
+ck 3 "... OB1 renders without the recipe .env files: no OB1 block or row is left uncompared, no 'docs --write' advice" \
+  "$(t sh -c "[ ! -e OB1/recipes/daily-digest/.env ] && [ ! -e OB1/recipes/email-history-import/.env ] && grep -q 'docs-blocks' '$LOGS/commit-doc-half-ob1-env.log' && ! grep -qE 'could not compare: OB1/|(NOT|PARTLY) VERIFIED.*(ob1|OB1/)' '$LOGS/commit-doc-half-ob1-env.log' && ! grep -q 'Regenerate with' '$LOGS/commit-doc-half-ob1-env.log'")"
 [ "$F2_MADE" = 1 ] && rm -f OB1/docker/.env   # back to the README's path: the loop below makes it
 
 extract_block rehearsal:contributing-checks README.md "$WORK/checks.sh"; X=$?

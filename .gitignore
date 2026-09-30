@@ -58,6 +58,8 @@ secrets/
 # Sidecar build contexts (compose builds ./backup with these) — must be tracked
 # or a fresh clone cannot build the postgres/surreal/generic backup sidecars.
 !backup/Dockerfile
+# ...and its .dockerignore, without which a build sends the gitignored backups here too.
+!backup/.dockerignore
 # The shared module's README (ac-planes-contained): which planes consume backup/.
 !backup/README.md
 

@@ -39,6 +39,13 @@ Gated/mutating: `reclaim_execute(confirm_token)`, `compact_execute(confirm_token
    admits only `image rm <tag|id>`, `volume rm <64-hex id>` and `builder prune -af --filter
    until=<N>h` (named volumes never; source-guarded by tests), compaction requires warranted +
    registered task.
+3. **The lowest guard (allowlists, in `sysadmin.py`):** every program `sysadmin._run` starts passes
+   `run_refusal` (only `docker`, `wsl`, `schtasks` by their plain names), then its ARGUMENTS pass
+   `docker_refusal`, `wsl_args_refusal` or `schtasks_refusal` - each an allowlist of the exact
+   shapes sysadmin code uses. Anything else returns rc 126, `refused by sysadmin allowlist: ...`,
+   and never starts. **Adding a tool that runs a new command shape means adding that exact shape
+   there**, with a test beside the existing ones in `test_docker_reclaim.py` (t05) - the upper
+   gates above do not replace it, and a new call that is not listed fails closed.
 
 ## Run the tests - in a disposable container ONLY
 
@@ -125,6 +132,12 @@ Registers `AI-Stack Sysadmin Compact VHDX` (on-demand, RunLevel Highest) and
   when the return misses proportionally (`-MinReclaimFraction`, default 0.5) *and* by more than
   `-ShortfallGraceGb` (default 5). Both conditions are required so a small target missed by a
   small amount is not an incident.
+- **The target excludes filesystem metadata.** "Trapped" is vhdx length minus `df` Used, so it
+  includes the ext4 inode tables, journal and bitmaps `df` never counts (18.4 GB on this host,
+  2026-09-27), which no trim or compaction returns. The script measures that overhead per run
+  (block-device size minus `df` Size, `fs_overhead_gb` in the result) and the verdict judges
+  against trapped minus it, so a run whose shortfall is only that metadata is not reported as a
+  failure. If the probe fails, the field is null and the target is trapped, as before.
 - **WARN and ACT are different numbers.** `vhdx_trapped_warn_gb` (60) decides when `disk_report`
   mentions compaction; `vhdx_compact_min_gb` (20) decides when `compact_execute` will run. They
   were the same key until 47.8 GB trapped left the stack simultaneously "HEALTHY" and refused.
@@ -172,7 +185,13 @@ Space freed this way is freed inside the Docker vhdx: C: gets it back only at th
 The same docker reclaim runs **automatically** from the hourly `AI-Stack Disk Guard` task
 (`scripts/maintenance/disk-guard.ps1` -> `auto_reclaim.py`) when C: free is under its warn line;
 its #sysadmin alert carries the per-category freed bytes. `python auto_reclaim.py --plan` prints
-the listed set without removing anything.
+the listed set without removing anything. The same task also ALERTS (alert only, no reclaim) when
+C: free drops under 10% of the drive while still above the GB lines; its alert names the largest
+non-Docker space users on C: (for CRITICAL in a second message, so the walk cannot hold the
+urgent line back), is re-sent at most every 6 h per severity (a worse severity, or a
+run that stopped workers, always goes out), and falls back to Telegram (`telegram_notify.py`) when
+the #sysadmin post fails. Its test fakes the disk figures, docker and both transports:
+`powershell -NoProfile -File scripts\maintenance\test-disk-guard.ps1`.
 
 ## Safety notes
 - Never `docker volume prune`, `docker image prune -a` or `docker system prune`; never a named

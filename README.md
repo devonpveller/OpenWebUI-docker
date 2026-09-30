@@ -301,7 +301,6 @@ the examples, the files only have to exist):
 python3 -m venv ~/.venvs/ai-stack && . ~/.venvs/ai-stack/bin/activate
 pip install ruff pytest
 for p in . frontend inference memory search coder portal agent-org/docker OB1/docker; do [ -e "$p/.env" ] || cp "$p/.env.example" "$p/.env"; done
-touch OB1/recipes/daily-digest/.env OB1/recipes/email-history-import/.env
 ruff check .
 python3 -m pytest scripts/stack -q
 python3 scripts/stack/stack.py inventory --check

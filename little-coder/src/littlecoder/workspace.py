@@ -21,6 +21,71 @@ from .openterminal import ExecResult, OpenTerminalClient
 from .urlnorm import NormalizedRepo
 
 
+# --- HTTPS git credentials: never in a remote URL (cf-lc-token, 2026-09-28) ----------------------
+# Until 2026-09-28 every token-bearing path below spliced the token INTO the remote URL
+# (`https://x-access-token:<token>@host/...`), so it was written into `.git/config` (and, for a
+# private submodule, into the TRACKED `.gitmodules`) inside the shared workspace VOLUME - where any
+# volume copy or backup carried it. The audit of 2026-09-27 found live `github_pat_` tokens there.
+#
+# Now every remote URL is token-free. The token reaches the executor only in the ENVIRONMENT of the
+# one exec that needs it (`LC_GIT_TOKEN`, open-terminal's per-exec `env`, so it is not in the
+# command string either), and that exec hands it to git's stock `credential-store` helper, whose
+# file lives in the executor's container-local HOME (`/home/user` in open-terminal, not a volume in
+# either compose file) - never under /workspace. `credential.useHttpPath` keys each entry on the
+# full repo URL, so origin, a fork's read-only upstream and each submodule keep their own token.
+# The helper is configured in the exec user's GLOBAL git config (also in HOME), so the worker's own
+# `git push` through the git-proxy finds it without the agent ever touching a credential command.
+# The file does not survive a recreate of the executor; the daemon re-asserts it on every focus and
+# before every task (daemon.py `_ensure_git_credentials`).
+GIT_TOKEN_ENV = "LC_GIT_TOKEN"
+GIT_CRED_FILE = "$HOME/.lc-git-credentials"   # expanded by the executor's shell, never /workspace
+GIT_CRED_USER = "x-access-token"
+# Strip `user[:secret]@` from an http(s) URL (sed -E); used on submodule origins and by the scrub.
+_SED_STRIP_USERINFO = r"s#^(https?://)[^/@]*@#\1#"
+
+
+def _cred_config(g: str) -> str:
+    """Shell: point the exec user's global git config at the credential-store file (idempotent)."""
+    return (
+        f"{g} config --global --replace-all credential.helper "
+        f"\"store --file={GIT_CRED_FILE}\" && "
+        f"{g} config --global credential.useHttpPath true"
+    )
+
+
+def _cred_store(g: str, url_expr: str) -> str:
+    """Shell: store `$LC_GIT_TOKEN` for the repo at `url_expr` (a shell word that expands to a
+    token-free URL). The token is read from the environment by the shell builtin `printf`, so it is
+    never in an argv; credential-store replaces any older entry for the same URL (token refresh)."""
+    return (
+        f"(umask 077; printf 'url=%s\\nusername={GIT_CRED_USER}\\npassword=%s\\n\\n' "
+        f"{url_expr} \"${GIT_TOKEN_ENV}\" | {g} credential-store --file=\"{GIT_CRED_FILE}\" store)"
+    )
+
+
+def _cred_has(g: str, url_expr: str) -> str:
+    """Shell condition: the credential store already holds a password for `url_expr`. Asks
+    credential-store itself (`get`), so matching is git's own (path included); the answer is
+    consumed by `grep -q` and never printed."""
+    return (
+        f"printf 'url=%s\\n\\n' {url_expr} | {{ {g} credential-store --file=\"{GIT_CRED_FILE}\" get "
+        f"2>/dev/null; }} | grep -q '^password='"
+    )
+
+
+def _submodule_cred_script(g: str) -> str:
+    """The per-submodule script for `git submodule foreach`: make the submodule's origin token-free
+    (it may still carry a token from before 2026-09-28) and, for a same-host GitHub origin, store the
+    caller's token for it. Runs in a child shell, so `$LC_GIT_TOKEN` arrives through the env."""
+    c_word = '"$c"'
+    return (
+        f"u=$({g} config --get remote.origin.url 2>/dev/null); "
+        f"c=$(printf '%s' \"$u\" | sed -E '{_SED_STRIP_USERINFO}'); "
+        f"case \"$c\" in https://github.com/*) "
+        f"{g} remote set-url origin \"$c\" && {_cred_store(g, c_word)} ;; esac"
+    )
+
+
 _EXT_LANG = {
     ".py": "python", ".rs": "rust", ".go": "go", ".js": "javascript",
     ".ts": "typescript", ".tsx": "typescript", ".jsx": "javascript",
@@ -128,11 +193,16 @@ class WorkspaceManager:
             return False
         return name in {ln.strip() for ln in res.stdout.splitlines() if ln.strip()}
 
+    def _token_env(self, token: str | None) -> dict[str, str] | None:
+        """The per-exec environment that carries a token to the executor, or None without one."""
+        return {GIT_TOKEN_ENV: token} if token else None
+
     def clone(self, repo: NormalizedRepo, deploy_token: str | None = None,
               recurse: bool = False) -> ExecResult:
-        """Clone `repo` into the (empty) workspace. With `deploy_token` the
-        clone uses an HTTPS token URL — least-privilege, injected per switch,
-        never the self-improvement PAT (design §10.3).
+        """Clone `repo` into the (empty) workspace. With `deploy_token` the clone
+        authenticates over HTTPS through the credential store (see GIT_TOKEN_ENV above) —
+        least-privilege, injected per switch, never the self-improvement PAT (design §10.3).
+        The remote URL written to `.git/config` is the token-free canonical URL.
 
         Full-history clone (no `--depth 1`): the agent needs all branches +
         history to switch branches, `git log` past initial commit, and
@@ -149,13 +219,9 @@ class WorkspaceManager:
         deps is slow / can hit private repos); the bridge opts in for a
         composition check.
 
-        The returned ExecResult.command still contains the token; the caller
-        MUST journal a redacted form, never the raw command."""
+        The token travels in the exec's `env`, never in the command string, so
+        ExecResult.command carries no token."""
         url = repo.canonical_url
-        if deploy_token:
-            url = url.replace(
-                "https://", f"https://x-access-token:{deploy_token}@", 1
-            )
         branch_flag = ""
         if repo.branch:
             branch_flag = f" -b {shlex.quote(repo.branch)}"
@@ -180,6 +246,11 @@ class WorkspaceManager:
         wipe_ws = (f"chmod -R u+w {ws} 2>/dev/null; "
                    f"find {ws} -mindepth 1 -maxdepth 1 -exec rm -rf {{}} + 2>/dev/null; "
                    f"find {ws} -mindepth 1 -delete 2>/dev/null || true")
+        # With a token, store it for this URL BEFORE the clone (the store is what the clone
+        # authenticates with); the clone URL itself stays token-free.
+        creds = ""
+        if deploy_token:
+            creds = f"{_cred_config(g)} && {_cred_store(g, shlex.quote(url))}; "
         cmd = (
             # THE CLONE'S EXIT CODE IS THE RESULT — captured in `rc` and re-raised by the trailing
             # `exit $rc`, so no best-effort suffix can mask a failed clone (live 2026-07-14: the
@@ -187,7 +258,7 @@ class WorkspaceManager:
             # daemon claimed focus on a VOID workspace, and the bridge quarantine-looped both
             # workers for hours with an idle GPU — a silent false "ok" at the very bottom of the
             # stack defeated every honesty gate above it).
-            f"{wipe_ws}; umask 000; {g} clone{branch_flag} {shlex.quote(url)} {ws}; rc=$?; "
+            f"{wipe_ws}; {creds}umask 000; {g} clone{branch_flag} {shlex.quote(url)} {ws}; rc=$?; "
             # Default: DIRECT submodules only. `recurse`: the full nested tree, which a composition
             # build requires — the operator-privileged clone is the ONLY place `submodule` can run
             # (the proxy denies it to the worker), so recursive init MUST happen here or never.
@@ -197,69 +268,73 @@ class WorkspaceManager:
         if deploy_token:
             # WORK-IN-HOST delivery: a composition fix is edited in-place inside a vendored
             # submodule and must be PUSHED to THAT submodule's own remote. The proxy denies the
-            # worker `submodule`, and the submodule's `origin` (from .gitmodules) carries no token,
-            # so re-bake the deploy token into every populated same-host submodule origin here
-            # (privileged). Runs on EVERY focus with a token — NOT just recursive ones (2026-07-12):
-            # a composition fix happens on a NORMAL task focus (non-recursive) too, and without the
-            # re-bake murder's origin has no push credential, so the worker's submodule push fails and
-            # the engine's gitlink points at an unreachable commit (live: the atlas fix landed on the
-            # engine but its murder branch couldn't push). `foreach --recursive` only visits the
-            # submodules actually populated by this focus (direct-only on a task focus). Best-effort +
-            # non-fatal; the token is redacted at journal time by the caller.
-            tok = shlex.quote(deploy_token)
+            # worker `submodule`, so store the deploy token for every populated same-host submodule
+            # origin here (privileged). Runs on EVERY focus with a token — NOT just recursive ones
+            # (2026-07-12): a composition fix happens on a NORMAL task focus (non-recursive) too, and
+            # without it the worker's submodule push has no credential and the engine's gitlink
+            # points at an unreachable commit (live: the atlas fix landed on the engine but its murder
+            # branch couldn't push). `foreach --recursive` only visits the submodules actually
+            # populated by this focus (direct-only on a task focus). Best-effort + non-fatal.
             reauth = (
                 f"cd {ws} && {g} submodule foreach --recursive "
-                f"'u=$({g} config --get remote.origin.url 2>/dev/null); "
-                f"case \"$u\" in "
-                f"https://github.com/*) {g} remote set-url origin "
-                f"\"https://x-access-token:{tok}@github.com/${{u#https://github.com/}}\" ;; "
-                f"esac' 2>/dev/null || true"
+                f"{shlex.quote(_submodule_cred_script(g))} 2>/dev/null || true"
             )
             # Gated on the clone's rc and never the last word on the exit code — the reauth's
             # `|| true` must not bless a failed clone (the 2026-07-14 false-focus incident).
             cmd += f" ; if [ $rc -eq 0 ]; then ({reauth}); fi"
         cmd += " ; exit $rc"
-        return self.ot.execute(cmd, cwd="/", timeout=self.clone_timeout)
+        return self.ot.execute(cmd, cwd="/", env=self._token_env(deploy_token),
+                               timeout=self.clone_timeout)
 
     def refresh_origin_auth(
-        self, repo: NormalizedRepo, deploy_token: str | None
+        self, repo: NormalizedRepo, deploy_token: str | None, *, if_missing: bool = False
     ) -> ExecResult:
-        """Re-bake `origin`'s URL with a FRESH deploy token (real git — operator setup path, like
-        `clone`/`add_upstream_remote`). The token embedded at clone time is SHORT-LIVED (a GitHub App
+        """Re-store `origin`'s credential with a FRESH deploy token (real git — operator setup path,
+        like `clone`/`add_upstream_remote`). The token given at clone time is SHORT-LIVED (a GitHub App
         installation token lives 1h): a NOOP re-focus hours later, or a task that outlives the token,
         would `git push` with a dead credential — the live "expired token in origin" failure. Cheap +
-        idempotent (`remote set-url`); with no token it resets origin to the clean URL. Never journal
-        the raw command (it contains the token)."""
+        idempotent. The credential store lives in the executor's HOME, which a recreate of the
+        executor empties — so the daemon also calls this before every task (`_ensure_git_credentials`).
+
+        What it cleans of a clone made before 2026-09-28 (token in the URL): it ALWAYS resets
+        `origin` to the token-free URL. Submodule origins are reset only when the submodule step
+        runs: WITH a token, and - under `if_missing` - only when origin had no stored entry (an
+        existing entry skips the whole step, token or not). The `upstream` remote is never touched
+        here. So a re-focus can leave legacy submodule/upstream tokens in place; the landing scrub
+        (credscrub.py) is what removes those.
+
+        `if_missing`: store the token only when the store holds NO credential for origin's URL yet
+        (and then the submodules' too). The daemon uses it for a focus it SEEDED from disk after its
+        own restart, where it does not know the caller's token: an existing entry (e.g. a GitHub App
+        token from agent-bridge's last /project) is kept rather than overwritten with the env PAT."""
         url = repo.canonical_url
-        if deploy_token:
-            url = url.replace(
-                "https://", f"https://x-access-token:{deploy_token}@", 1
-            )
         g = shlex.quote(self.real_git)
         q = shlex.quote
         ws = q(self.workspace_path)
         cmd = f"cd {ws} && {g} remote set-url origin {q(url)}"
-        if deploy_token:
+        if deploy_token and if_missing:
+            reauth = (
+                f"cd {ws} && {g} submodule foreach --recursive "
+                f"{shlex.quote(_submodule_cred_script(g))} 2>/dev/null || true"
+            )
+            cmd += (f" && if ! {_cred_has(g, q(url))}; then "
+                    f"{_cred_config(g)} && {_cred_store(g, q(url))} ; ({reauth}); fi")
+        elif deploy_token:
+            cmd += f" && {_cred_config(g)} && {_cred_store(g, q(url))}"
             # SYMMETRIC WITH clone() (live 2026-07-12: the cursor fix's murder commit couldn't push).
             # A composition fix edited inside a vendored submodule must be PUSHED to THAT submodule's
             # own remote — but a NOOP re-focus (persistent workspace, no re-clone) never re-runs
-            # clone()'s submodule reauth, so the submodule origin keeps its token-less `.gitmodules`
-            # URL and the worker's `git -C <sub> push` has no credential → the engine's gitlink points
-            # at an unreachable commit (broken gitlink → not buildable from a fresh clone). Re-bake the
-            # deploy token into every populated same-host submodule origin here too. `foreach
-            # --recursive` visits only the submodules this focus populated. Best-effort + non-fatal;
-            # the token is redacted at journal time by the caller.
-            tok = shlex.quote(deploy_token)
+            # clone()'s submodule step, so the worker's `git -C <sub> push` would have no credential
+            # → the engine's gitlink points at an unreachable commit (broken gitlink → not buildable
+            # from a fresh clone). `foreach --recursive` visits only the submodules this focus
+            # populated. Best-effort + non-fatal.
             reauth = (
                 f"cd {ws} && {g} submodule foreach --recursive "
-                f"'u=$({g} config --get remote.origin.url 2>/dev/null); "
-                f"case \"$u\" in "
-                f"https://github.com/*) {g} remote set-url origin "
-                f"\"https://x-access-token:{tok}@github.com/${{u#https://github.com/}}\" ;; "
-                f"esac' 2>/dev/null || true"
+                f"{shlex.quote(_submodule_cred_script(g))} 2>/dev/null || true"
             )
             cmd += f" ; ({reauth})"
-        return self.ot.execute(cmd, cwd=self.workspace_path, timeout=60)
+        return self.ot.execute(cmd, cwd=self.workspace_path,
+                               env=self._token_env(deploy_token), timeout=60)
 
     def add_upstream_remote(
         self, upstream_url: str, token: str | None = None
@@ -279,24 +354,22 @@ class WorkspaceManager:
 
         Push is fenced to a no-op URL so `git push upstream` fails fast — the worker
         publishes only to `origin` (its fork). NOT `main`-related and additive, so it's
-        routine per the corrected floor. A PRIVATE upstream needs a read-scoped `token`
-        (injected into the fetch URL like clone); never journal the raw command."""
-        fetch_url = upstream_url
-        if token:
-            fetch_url = fetch_url.replace(
-                "https://", f"https://x-access-token:{token}@", 1
-            )
+        routine per the corrected floor. A PRIVATE upstream needs a read-scoped `token`,
+        stored for the upstream URL in the credential store (keyed by path, so it never
+        replaces origin's); the remote URL itself stays token-free."""
         g = shlex.quote(self.real_git)
         q = shlex.quote
+        creds = f"{_cred_config(g)} && {_cred_store(g, q(upstream_url))} && " if token else ""
         # `remote add` fails (exit 3) if `upstream` already exists — fall back to set-url so
         # a re-focus onto an unwiped workspace is still correct. Then fence the push side.
         cmd = (
-            f"cd {q(self.workspace_path)} && "
-            f"({g} remote add upstream {q(fetch_url)} || "
-            f"{g} remote set-url upstream {q(fetch_url)}) && "
+            f"cd {q(self.workspace_path)} && {creds}"
+            f"({g} remote add upstream {q(upstream_url)} || "
+            f"{g} remote set-url upstream {q(upstream_url)}) && "
             f"{g} remote set-url --push upstream DISABLED-fork-parent-is-fetch-only"
         )
-        return self.ot.execute(cmd, cwd=self.workspace_path, timeout=120)
+        return self.ot.execute(cmd, cwd=self.workspace_path, env=self._token_env(token),
+                               timeout=120)
 
     def add_submodule(
         self, url: str, path: str, *, commit_message: str | None = None,
@@ -308,16 +381,16 @@ class WorkspaceManager:
         HARD-DENIES `submodule` to the worker, design §3.3). The worker can never restructure the
         repo topology; only this governed setup path does.
 
-        The submodule is typically a PUBLIC fork → anonymous fetch, so the URL stays clean (no token
-        at rest in `.gitmodules`); a private submodule passes a read-scoped `token`. The composition
-        repo's own origin carries its (short-lived GitHub App) token for the push. First submodule on
-        a freshly-cloned empty repo creates the initial commit + default branch, so we `push -u`."""
-        sub_url = url
-        if token:
-            sub_url = sub_url.replace("https://", f"https://x-access-token:{token}@", 1)
+        The URL recorded in `.gitmodules` (a TRACKED file, pushed to the remote) and `.git/config`
+        is ALWAYS the token-free one. Before 2026-09-28 a private submodule's read token was spliced
+        into it, so it was committed and pushed; now a `token` is stored for that URL in the
+        credential store instead. The composition repo's own origin authenticates the push through
+        the credential its focus stored. First submodule on a freshly-cloned empty repo creates the
+        initial commit + default branch, so we `push -u`."""
         msg = commit_message or f"Add {path} submodule"
         g = shlex.quote(self.real_git)
         q = shlex.quote
+        creds = f"{_cred_config(g)} && {_cred_store(g, q(url))} && " if token else ""
         # IDEMPOTENT: if `path` is already a submodule (a partial/repeated compose), skip cleanly
         # instead of failing 'already exists' — so re-running a plan adds only what's missing.
         cmd = (
@@ -325,12 +398,14 @@ class WorkspaceManager:
             f"if {g} submodule status {q(path)} >/dev/null 2>&1; then "
             f"echo 'submodule {path} already present — skipping'; "
             f"else "
-            f"{g} submodule add {q(sub_url)} {q(path)} && "
+            f"{creds}"
+            f"{g} submodule add {q(url)} {q(path)} && "
             f"{g} commit -m {q(msg)} && "
             f"{g} push -u origin HEAD; "
             f"fi"
         )
-        return self.ot.execute(cmd, cwd=self.workspace_path, timeout=600)
+        return self.ot.execute(cmd, cwd=self.workspace_path, env=self._token_env(token),
+                               timeout=600)
 
     def wipe(self) -> ExecResult:
         """Empty the workspace, keeping the mount point itself. open-terminal owns the files it

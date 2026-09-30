@@ -24,7 +24,10 @@ procedure is `documentation/runbooks/backup-restore-runbook.md`. The artifacts
 the sidecars write go to `backups/` (plural), not here.
 
 Only the files named above are tracked: `.gitignore` ignores `backup/*` and
-re-includes each script, the `Dockerfile` and this README by name. A new script
+re-includes each script, the `Dockerfile`, its `.dockerignore` and this README
+by name. The `.dockerignore` is `*`: the image copies nothing from here, and on a
+live host this directory also holds old exports and archives (gitignored), which the
+legacy builder or a broad `COPY` would otherwise send to the daemon. A new script
 needs its own `!backup/<name>` line, or a fresh clone will not have it, and
 a bind mount of a file that does not exist makes Docker create an empty
 DIRECTORY in its place, so the sidecar fails without saying so.

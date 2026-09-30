@@ -36,11 +36,13 @@ class _FakeOT:
 
     def __init__(self):
         self.calls: list[tuple[str, str]] = []
+        self.envs: list[dict | None] = []
 
     def execute(self, command, cwd=None, env=None, timeout=None):
         from littlecoder.openterminal import ExecResult
 
         self.calls.append((command, cwd))
+        self.envs.append(env)
         return ExecResult(command, 0, "", "", "done", "p1")
 
 
@@ -79,12 +81,35 @@ def test_clone_wipes_the_workspace_before_cloning():
     assert cmd.index("-delete") < cmd.index("clone")        # wipe happens BEFORE the clone
 
 
-def test_clone_with_deploy_token_injects_https_credential():
+def _assert_token_only_in_env(ot, i, token):
+    """cf-lc-token (2026-09-28): a token must never be spliced into a URL or the command string -
+    it would land in .git/config inside the workspace VOLUME. It travels in the exec's env only."""
+    cmd, _ = ot.calls[i]
+    assert token not in cmd
+    assert "x-access-token:" not in cmd                  # no userinfo in any URL
+    assert ot.envs[i] == {"LC_GIT_TOKEN": token}
+
+
+def test_clone_with_deploy_token_uses_credential_store_not_url():
     ot = _FakeOT()
     ws = WorkspaceManager(ot, workspace_path="/workspace")
     ws.clone(WIDGET, deploy_token="tok-secret")
     cmd, _cwd = ot.calls[0]
-    assert "x-access-token:tok-secret@" in cmd
+    _assert_token_only_in_env(ot, 0, "tok-secret")
+    assert "credential-store" in cmd and '"$LC_GIT_TOKEN"' in cmd
+    assert " clone https://github.com/acme/widget /workspace;" in cmd   # the clone URL is token-free
+    # the credential is stored BEFORE the clone that authenticates with it
+    assert cmd.index("credential-store") < cmd.index(" clone ")
+    # ...into the executor's HOME, never the workspace volume
+    assert "$HOME/.lc-git-credentials" in cmd and "/workspace/.lc-git" not in cmd
+
+
+def test_clone_without_token_sends_no_env_and_stores_nothing():
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace")
+    ws.clone(WIDGET)
+    cmd, _ = ot.calls[0]
+    assert ot.envs[0] is None and "credential-store" not in cmd
 
 
 def test_clone_exit_code_survives_the_token_reauth_suffix():
@@ -102,7 +127,7 @@ def test_clone_exit_code_survives_the_token_reauth_suffix():
     assert cmd.rstrip().endswith("exit $rc")                # ...and is the command's final word
     assert cmd.index("clone") < cmd.index("rc=$?")
     # the best-effort extras only run on a SUCCESSFUL clone
-    assert cmd.count("if [ $rc -eq 0 ]") == 2               # submodule init + token re-bake
+    assert cmd.count("if [ $rc -eq 0 ]") == 2               # submodule init + submodule credential
 
 
 def test_clone_exit_code_is_honest_without_a_token_too():
@@ -123,9 +148,9 @@ def test_deploy_token_rebakes_submodule_push_credential_on_task_focus():
     ws = WorkspaceManager(ot, workspace_path="/workspace", real_git="/usr/bin/git")
     ws.clone(WIDGET, deploy_token="tok-sub", recurse=False)     # a normal task focus
     cmd, _cwd = ot.calls[0]
-    assert "submodule foreach --recursive" in cmd               # the origin re-bake runs
-    assert "remote set-url origin" in cmd
-    assert "x-access-token:tok-sub@" in cmd
+    assert "submodule foreach --recursive" in cmd               # the submodule credential step runs
+    assert "remote set-url origin" in cmd                       # (origin reset to the token-free URL)
+    _assert_token_only_in_env(ot, 0, "tok-sub")
 
 
 def test_no_submodule_rebake_without_a_token():
@@ -191,7 +216,7 @@ def test_clone_with_token_and_branch_both_apply():
     repo = normalize_repo_url("https://github.com/acme/widget#dev")
     ws.clone(repo, deploy_token="tok-x")
     cmd, _ = ot.calls[0]
-    assert "x-access-token:tok-x@" in cmd
+    _assert_token_only_in_env(ot, 0, "tok-x")
     assert " -b 'dev' " in cmd or " -b dev " in cmd
 
 
@@ -215,13 +240,16 @@ def test_add_upstream_remote_uses_real_git_and_fences_push():
     assert cwd == "/workspace"
 
 
-def test_add_upstream_remote_injects_token_for_private_parent():
-    """A private parent needs a read-scoped token, injected into the FETCH url like clone."""
+def test_add_upstream_remote_stores_token_for_private_parent():
+    """A private parent needs a read-scoped token - stored for the UPSTREAM url (useHttpPath keys
+    it apart from origin's), never spliced into the remote url."""
     ot = _FakeOT()
     ws = WorkspaceManager(ot, workspace_path="/workspace")
     ws.add_upstream_remote("https://github.com/acme/private-parent", token="ro-tok")
     cmd, _ = ot.calls[0]
-    assert "x-access-token:ro-tok@" in cmd
+    _assert_token_only_in_env(ot, 0, "ro-tok")
+    assert "credential.useHttpPath true" in cmd
+    assert "credential-store" in cmd and "acme/private-parent" in cmd
 
 
 def test_add_upstream_remote_no_token_leaves_url_clean():
@@ -230,21 +258,25 @@ def test_add_upstream_remote_no_token_leaves_url_clean():
     ws.add_upstream_remote("https://github.com/MonoGame/MonoGame")
     cmd, _ = ot.calls[0]
     assert "x-access-token" not in cmd                 # public parent → no credential baked
+    assert ot.envs[0] is None and "credential-store" not in cmd
 
 
 def test_refresh_origin_auth_rebakes_fresh_token():
-    """LIVE regression ("expired token in origin"): the token embedded at clone time is short-lived;
-    a NOOP re-focus / publish must re-bake origin's URL with a CURRENT token via real git set-url."""
+    """LIVE regression ("expired token in origin"): the token given at clone time is short-lived;
+    a NOOP re-focus / publish must re-store origin's credential with a CURRENT token, and reset
+    origin to the token-free URL (which also cleans a pre-2026-09-28 clone on its next re-focus)."""
     ot = _FakeOT()
     ws = WorkspaceManager(ot, workspace_path="/workspace", real_git="/usr/bin/git")
     ws.refresh_origin_auth(WIDGET, "fresh-tok")
     cmd, _ = ot.calls[0]
-    assert "/usr/bin/git" in cmd and "remote set-url origin" in cmd
-    assert "x-access-token:fresh-tok@" in cmd
+    assert "/usr/bin/git" in cmd and "remote set-url origin https://github.com/acme/widget" in cmd
+    assert "credential-store" in cmd
+    _assert_token_only_in_env(ot, 0, "fresh-tok")
     # no token → resets origin to the clean URL (no stale credential left behind)
     ws.refresh_origin_auth(WIDGET, None)
     cmd2, _ = ot.calls[1]
     assert "remote set-url origin" in cmd2 and "x-access-token" not in cmd2
+    assert ot.envs[1] is None
 
 
 def test_refresh_origin_auth_also_rebakes_submodule_push_credential():
@@ -257,8 +289,8 @@ def test_refresh_origin_auth_also_rebakes_submodule_push_credential():
     ws = WorkspaceManager(ot, workspace_path="/workspace", real_git="/usr/bin/git")
     ws.refresh_origin_auth(WIDGET, "fresh-tok")
     cmd, _ = ot.calls[0]
-    assert "submodule foreach --recursive" in cmd               # submodule origins re-baked too
-    assert "x-access-token:fresh-tok@" in cmd
+    assert "submodule foreach --recursive" in cmd               # submodule credentials too
+    _assert_token_only_in_env(ot, 0, "fresh-tok")
     # no token → no submodule re-bake (nothing to inject)
     ws.refresh_origin_auth(WIDGET, None)
     cmd2, _ = ot.calls[1]
@@ -289,12 +321,16 @@ def test_add_submodule_public_fork_leaves_url_clean():
     assert "x-access-token" not in cmd                  # public submodule → no token at rest in .gitmodules
 
 
-def test_add_submodule_private_injects_token():
+def test_add_submodule_private_stores_token_not_in_gitmodules():
+    """Before 2026-09-28 the read token was spliced into the submodule url - which lands in the
+    TRACKED .gitmodules and was committed + pushed. Now the url is clean and the token is stored."""
     ot = _FakeOT()
     ws = WorkspaceManager(ot, workspace_path="/workspace")
     ws.add_submodule("https://github.com/acme/private-lib", "libs/priv", token="ro-tok")
     cmd, _ = ot.calls[0]
-    assert "x-access-token:ro-tok@" in cmd              # private submodule needs a read token
+    _assert_token_only_in_env(ot, 0, "ro-tok")
+    assert "submodule add https://github.com/acme/private-lib libs/priv" in cmd
+    assert cmd.index("credential-store") < cmd.index("submodule add")
 
 
 def test_add_submodule_is_idempotent():
@@ -313,3 +349,16 @@ def test_submodule_added_is_a_known_audit_event():
     it MUST be a registered event or the write throws and fakes a failure AFTER a real push."""
     from littlecoder.audit import KNOWN_EVENTS
     assert "submodule_added" in KNOWN_EVENTS
+
+
+def test_refresh_if_missing_only_fills_an_empty_store():
+    """cf-lc-token N5: for a focus seeded after a daemon restart, the re-store is conditional on
+    the store holding nothing for origin's URL; origin is still reset to the clean URL."""
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace", real_git="/usr/bin/git")
+    ws.refresh_origin_auth(WIDGET, "env-tok", if_missing=True)
+    cmd, _ = ot.calls[0]
+    _assert_token_only_in_env(ot, 0, "env-tok")
+    assert "remote set-url origin https://github.com/acme/widget" in cmd
+    assert "if ! printf" in cmd and "credential-store" in cmd and " get " in cmd
+    assert cmd.index(" get ") < cmd.index(" store)")

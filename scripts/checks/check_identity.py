@@ -45,6 +45,8 @@ main checkout is not copied into a new worktree). Format: `.identity-denylist.ex
 
 ALLOWLIST - scripts/checks/identity-allowlist.txt, tracked. One entry per line:
     <path glob> | <class>[~<context regex>] | <reason>
+The glob ends at the first ` | ` and the reason starts after the last one, so a context
+regex may contain ` | ` and a reason may not.
 `**` in the glob crosses directories, `*` does not. A reason is required. With a context
 regex, a finding is allowed only if it lies INSIDE a match of that regex on its line, so
 an entry can allow "the owner segment of a github.com URL to this project's own repos"
@@ -329,8 +331,14 @@ def load_allowlist(text: str, source: str) -> list[AllowEntry]:
         line = raw.strip()
         if not line or line.startswith('#'):
             continue
-        parts = [p.strip() for p in line.split(' | ')]
-        if len(parts) != 3 or not all(parts):
+        # The glob ends at the FIRST ` | ` and the reason starts after the LAST one; everything
+        # between is the class and its context regex, so a regex may itself contain ` | ` (a
+        # spaced alternation) and a reason may not.
+        first, last = line.find(' | '), line.rfind(' | ')
+        if first == -1 or last == first:
+            raise ConfigError(f'{source}:{n}: expected `<path glob> | <class>[~<regex>] | <reason>`')
+        parts = [line[:first].strip(), line[first + 3:last].strip(), line[last + 3:].strip()]
+        if not all(parts):
             raise ConfigError(f'{source}:{n}: expected `<path glob> | <class>[~<regex>] | <reason>`')
         glob, clsrx, reason = parts
         cls, _, rx = clsrx.partition('~')
@@ -426,15 +434,29 @@ def scan_line(path: str, lineno: int, line: str, deny) -> list[Finding]:
 
 
 def show_path(path: str, deny) -> str:
-    """A path as printed: any denylisted literal in it becomes `<entry N>`, so a file NAME
-    carrying the operator's value is reported without echoing it."""
-    low, out, i = path.lower(), [], 0
-    spans = sorted((low.find(lit, 0), len(lit), num) for num, lit, _l in deny if lit in low)
-    for start, ln, num in spans:
-        if start < i:
-            continue
-        out.append(path[i:start] + f'<entry {num}>')
-        i = start + ln
+    """A path as printed: every occurrence of a denylisted literal in it becomes `<entry N>`,
+    so a file NAME carrying the operator's value is reported without echoing it. Occurrences
+    that OVERLAP (two entries sharing characters, or one entry overlapping itself) are merged
+    into one masked span naming each entry - `<entry 1+2>` - so no part of either prints."""
+    low = path.lower()
+    spans = []
+    for num, lit, _l in deny:
+        start = low.find(lit)
+        while start != -1:
+            spans.append((start, start + len(lit), num))
+            start = low.find(lit, start + 1)
+    merged: list[list] = []
+    for start, end, num in sorted(spans):
+        if merged and start < merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+            if num not in merged[-1][2]:
+                merged[-1][2].append(num)
+        else:
+            merged.append([start, end, [num]])
+    out, i = [], 0
+    for start, end, nums in merged:
+        out.append(path[i:start] + '<entry ' + '+'.join(str(n) for n in sorted(nums)) + '>')
+        i = end
     return ''.join(out) + path[i:]
 
 

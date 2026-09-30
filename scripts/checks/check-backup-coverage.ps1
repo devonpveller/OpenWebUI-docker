@@ -1,4 +1,4 @@
-﻿# scripts/checks/check-backup-coverage.ps1
+# scripts/checks/check-backup-coverage.ps1
 #
 # Audits every Docker volume + bind-mount data path across the ai-stack
 # and OB1 compose projects, and confirms that each one is either:
@@ -49,7 +49,7 @@ try {
   }
   Write-Host ("  OB1     named volumes  : {0}" -f $ob1Volumes.Count) -ForegroundColor DarkGray
 
-  # agent-org is a THIRD separate compose project (project=agent-org) — mattermost +
+  # agent-org is a THIRD separate compose project (project=agent-org) - mattermost +
   # agent-bridge governance state. Same by-project volume inventory as ai-stack/OB1.
   $agentOrgVolumes = @()
   $rawAo = docker volume ls --filter 'label=com.docker.compose.project=agent-org' --format '{{.Name}}' 2>$null
@@ -112,7 +112,6 @@ try {
   $backupCoverage = @{
     'openwebui-data'         = 'openwebui-backup'
     'mnemory-data'           = 'mnemory-backup'
-    'smolcrawl-data'         = 'RETIRED 2026-08-21 (smolcrawl-pipelines + smolcrawl-backup removed; volume kept for old crawl indexes - delete when confident)'
     'little-coder-journals'  = 'little-coder-backup'
     'little-coder-skill'     = 'little-coder-backup'
     'little-coder-cohorts'   = 'little-coder-backup'
@@ -125,10 +124,10 @@ try {
     'openbrain-db-data'      = 'openbrain-db-backup (open-brain project since 2026-08-21; artifacts still in ./backups)'
     'openbrain-wiki-data'    = 'openbrain-wiki-backup (open-brain project since 2026-08-21; artifacts still in ./backups)'
     # Pre-existing map omissions (the backup containers already cover these; the map just
-    # never listed them — see the Backups table in stack-map/workspace-stacks.md):
+    # never listed them - see the Backups table in stack-map/workspace-stacks.md):
     'llm-gateway-db-data'    = 'llm-gateway-backup (logical pg_dump of the LiteLLM DB)'
     'wiki-assets'            = 'openbrain-wiki-backup (mounts wiki-assets alongside openbrain-wiki-data)'
-    # agent-org — the two authoritative Postgres stores.
+    # agent-org - the two authoritative Postgres stores.
     'agent-bridge-db-data'   = 'agent-bridge-db-backup'
     'mattermost-db-data'     = 'mattermost-db-backup'
     # agent-org worker journals (memory-plane Phase 0.3) - the append-only evidence

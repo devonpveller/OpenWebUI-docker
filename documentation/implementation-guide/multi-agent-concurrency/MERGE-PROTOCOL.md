@@ -446,8 +446,6 @@ $m = '<main-checkout>/.claude/worktrees/merge-line'
 git -C $m submodule update --init OB1                      # OB1 at the line's pin
 foreach ($d in '.', 'frontend', 'inference', 'memory', 'search', 'coder', 'portal', 'agent-org/docker', 'OB1/docker') {
     if (-not (Test-Path "$m/$d/.env")) { Copy-Item "$m/$d/.env.example" "$m/$d/.env" } }
-foreach ($r in 'daily-digest', 'email-history-import') {
-    if (-not (Test-Path "$m/OB1/recipes/$r/.env")) { New-Item -ItemType File "$m/OB1/recipes/$r/.env" | Out-Null } }
 # after `merge --no-ff ... --no-commit` (or before, on the line): OB1 at the MERGED pin
 git -C $m submodule update OB1
 python "$m/scripts/stack/stack.py" docs --check            # must exit 0 - 3 or 4 is NOT mergeable
