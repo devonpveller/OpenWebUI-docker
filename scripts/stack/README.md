@@ -59,6 +59,8 @@ python scripts/stack/stack.py backup frontend     # backups/frontend/manual-<UTC
 python scripts/stack/stack.py restore frontend --from backups/frontend/manual-<UTC>
 python scripts/stack/stack.py inventory --check   # is stack-services.json still true?
 python scripts/stack/stack.py docs --check        # are the generated blocks in the docs still true?
+python scripts/stack/stack.py labels --dry-run    # which Open WebUI role names would change
+python scripts/stack/stack.py labels              # set them from the model files (idempotent)
 ```
 
 `status`, `health`, `doctor`, `stats`, `inventory --check` and `docs --check` are **read-only**:
@@ -535,7 +537,12 @@ What it checks, in the cheapest order that cannot be fooled:
 3. **One completion**, only when nothing is resident: `max_tokens` 3, THROUGH the
    gateway (never around it), 600 s timeout because a cold load is minutes -
    257 s measured on this host. 200 with a choice PASSES; anything else FAILS
-   with the gateway's own sentence.
+   with the gateway's own sentence. It asks for the **role** `local-small`
+   (`PROBE_ROLE`; model-roles, 2026-09-28), never "the first id that is not an
+   embedding": the assembler loads `cloud.openrouter.yaml` before `local.yaml`,
+   so with a cloud key set that rule picked `cloud-large` - which has no egress -
+   and said nothing about the local backend. A gateway that does not list
+   `local-small` FAILS naming it.
 
 **What fails it:** an empty or missing `/models`; a completion that does not
 return 200; `llama-cpp-upstream` not running; or `LITELLM_MASTER_KEY` missing
@@ -874,6 +881,197 @@ MERGE-PROTOCOL.md step 5 requires `--no-ff` and a `docs --check` exit 0. Git cal
 aimed at the submodule drop git's repository-local variables
 (`git rev-parse --local-env-vars`), which a hook sets for the PARENT repository.
 
+### `labels` [`--dry-run`] [`--render JSON`]
+
+Sets the name Open WebUI shows for each local model **role** (`local-large`,
+`local-large:nothink`, `local-small`, `local-small:nothink`, `local-embed` - the
+`model_name`s in `inference/config/litellm/model_list/local.yaml`) to a label
+**derived from the model file** the inference plane loads, so a model swap
+relabels itself and no name is typed by hand (model-roles, operator decision
+R4). The derivation is `scripts/stack/model_labels.py`, and its ONLY source for
+what the plane loads is **compose's own render**: `docker [--context X] compose -f
+inference/docker-compose.yml --profile local config --format json`, the read-only
+render `recover` already reads (it creates, starts and pulls nothing, needs no
+daemon, and takes about a second). Nothing re-reads `.env`: compose resolves the
+shell, `inference/.env` and the compose defaults itself, exactly as `up` will.
+
+- the role's `litellm_params.model` (from `local.yaml` behind `llm-gateway`'s
+  rendered `/app/conf.d` bind) is the concrete id; a llama-swap id resolves through
+  that entry's `--model` in the llama-swap config (the file the rendered command's
+  `-config` names - `/app/config.yaml` - through its bind; usually
+  `${env.LLAMA_SWAP_..._MODEL_PATH}`, taken from the service's RENDERED
+  environment), a `bge*` id through the embed upstream's rendered command
+  `-m`/`--model` if it has one (llama.cpp takes the flag over the env) or else its
+  rendered `LLAMA_ARG_MODEL`;
+- **refuse, don't emulate**: anything this module would have to interpret the way
+  a server or the kernel does is refused instead. That means an `entrypoint`
+  override on either upstream; a `-config` that is missing, relative or in
+  `=`-form; for llama-swap's entry, any key besides `cmd`/`filters`/
+  `concurrencyLimit` (a per-model `env:`), and an unknown `${...}`. llama-swap
+  (v236, the pinned image) builds its command with a POSIX-shell LEXER (quotes
+  group and vanish, a backslash escapes, `${...}` inside a substituted value is
+  expanded AGAIN) and parses its config as YAML; neither is emulated. Instead:
+  - ONLY THE COMMITTED CONFIG (operator decision, 2026-09-29): the llama-swap
+    config the render mounts must be, byte for byte, the blob committed at HEAD
+    of the STACK ROOT's checkout (the driver's `--root`). git runs as
+    `git --no-replace-objects -c core.useReplaceRefs=false -c core.fsmonitor=false
+    -C <root>` (no fsmonitor program runs) with every `GIT_*` variable removed
+    (`GIT_ALTERNATE_OBJECT_DIRECTORIES` included) (then `GIT_NO_REPLACE_OBJECTS=1` and an empty
+    `GIT_GRAFT_FILE`), and its toplevel must be the root itself - so
+    `HEAD:<path>` is the blob in HEAD's own tree, never a `git replace`
+    substitute. The path is taken as the render names it, never resolved:
+    it must lie under the root with no `..` segment (a `.` segment or doubled
+    separator is dropped by path normalisation first - it names the same
+    directory), and neither the file nor
+    any directory between the root and it may be a symlink, a junction or other
+    reparse point, or hold a `.git` entry (a nested repository or gitfile). The
+    file must be tracked, and its bytes are compared in Python with
+    `git cat-file blob HEAD:<path>`, CRLF -> LF the only normalisation (a
+    Windows checkout of an LF blob; a lone CR is not normalised away), and the
+    verified bytes are what is parsed; the blob git returns is re-hashed here
+    and must hash to the id `git rev-parse HEAD:<path>` names (git does not
+    verify an object on read) - no clean filter, attribute or index flag
+    (assume-unchanged, skip-worktree) takes part. Anything else is refused,
+    naming the file: "llama-swap config differs from the committed version;
+    labels are only derived from the committed config". The committed file is
+    PINNED by a test (`test_the_committed_llama_swap_config_is_pinned`: every
+    line llama-swap reads - top-level settings, macros, each entry's cmd words,
+    model flag, `concurrencyLimit` and `filters`, e.g. `:nothink` ->
+    `enable_thinking: false` - comments excepted), so a change to it goes
+    through review. `up` and `recover` run `labels` too, so on a host the
+    merged config must be in the checkout (committed, no local edit) before
+    either runs.
+    THREAT MODEL (operator decision, 2026-09-29): this check protects against
+    ORDINARY AND ACCIDENTAL edits - uncommitted or staged edits, index flags,
+    symlinks and junctions, nested repositories, `GIT_*` overrides, filters and
+    attributes, replace refs, an fsmonitor program, a loose object overwritten in
+    place. It does NOT protect against someone who can write to `.git`'s
+    internals - a forged tree or commit object with a valid id, an alternates
+    object store or pack naming HEAD's ids, a rewritten ref - or to the stack's
+    own code: such a person can edit `scripts/stack` directly. Those cases are
+    out of scope by decision. What follows is defence in depth,
+    ALLOWLISTS:
+  - every `${env.*}` in the WHOLE llama-swap config (every entry and macro, YAML
+    comments excepted), as compose renders it, and every model path, must match
+    `[A-Za-z0-9_./:,+=@-]` - printable ASCII with no `$` (compose's JSON writes a
+    literal `$` as `$$`, and llama-swap would re-expand `${...}`), no quote, no
+    backslash, no whitespace of any kind, no control character, nothing outside
+    ASCII - and be at most 4096 characters; a value starting with `@` or ending
+    with `:` (YAML indicators) is refused too, and every `${env.*}` must sit
+    inside a `|`/`>` block scalar (in a plain scalar the substituted value would
+    be re-read as YAML);
+  - every literal word of the role's expanded cmd must match the same allowlist
+    once its `${env.*}` and built-in `${PORT}`/`${MODEL_ID}` references are set
+    aside (so no `--` word and no `#...` word either), and a macro may reference
+    only macros defined BEFORE it;
+  - the llama-swap config itself must be in a small recognised YAML SUBSET: a few
+    top-level plain scalars (`listen`, `logToStdout`, ...), a `macros:` map and a
+    `models:` map; per entry only `cmd` (a single-line plain scalar, or a
+    `|`/`|-`/`>`/`>-` block), `filters` (nested plain maps) and
+    `concurrencyLimit`; plain or double-quoted keys; no tab, anchor, tag, alias,
+    flow collection, quoted or escaped value, multi-line plain scalar, sequence
+    or block indicator (`>+`, `|2`, ...); non-ASCII only in full-line comments.
+    Any other line is a refusal naming its line number. This is a reader for
+    the recognised shapes, not a YAML validator: it does not promise to catch
+    every construct YAML would read differently - the committed-config rule
+    and the pin are what bound the config.
+
+  The allowed words are then split on ASCII spaces and newlines. The llama.cpp
+  flag rules then apply to BOTH llama-server command lines - the embed upstream's
+  rendered command and llama-swap's expanded cmd: long flags match with `_` as `-`
+  (`--hf_repo` is `--hf-repo`); a model flag in `--flag=value` form is refused
+  (llama-server rejects `--model=x`); `-m`/`--model` - the last one wins, as in
+  llama.cpp - is required for llama-swap's entry; and every flag or `LLAMA_ARG_*`
+  variable (in either service's environment) the pinned llama-server offers for
+  loading a model from a URL, a repo, a directory, a preset or a built-in default
+  is refused - the list is checked against
+  `scripts/stack/fixtures/llama-server-help.txt`;
+- the model path - from the env, the command or a link's target - must be plain
+  names under `/models`: it is **refused** if it has an empty, `.` or `..` segment
+  (so no `//`, no trailing `/`, no `nosuch/../x`), a segment ending in `.` or a
+  space, a `:` (an NTFS stream) or another character Windows treats specially, a
+  Windows device name or an 8.3 short-name form - every shape where the host and
+  the container could read the same path differently. Then symlinks are followed
+  one component at a time: every component before the last must be an existing
+  DIRECTORY and the last a regular FILE; a link's target must be relative and
+  pass the same rule (so links only lead down, never out of the store); a link to
+  a host-absolute path and a Windows JUNCTION (the host follows it, the container
+  sees a host-absolute link) are refused. The label is the name of the file finally
+  REACHED, so a link `Claims-70B-Q2_K.gguf` -> `real/Inside-7B-Q8_0.gguf` labels
+  Inside-7B;
+- the label is the file stem with its quant split off, plus the mode:
+  `Qwen3.8-27B-Q4_K_M.gguf` -> `Qwen3.8-27B Q4_K_M (thinking)` for `local-large`,
+  `Qwen3.8-27B Q4_K_M (no thinking)` for the `:nothink` and `local-small` roles,
+  `bge-m3 f16 (embeddings)` for `local-embed`.
+
+`python scripts/stack/model_labels.py [--env-file F] [--skip-file-check]` prints
+the labels and writes nothing (`--env-file` goes to compose's `--env-file`).
+`--render JSON` (both commands) derives from a saved render instead - for a
+disposable environment with no docker CLI; it is compose output all the same.
+
+The sync uses Open WebUI's own admin API (`GET /api/v1/models/model?id=`, then
+`POST /api/v1/models/create` for a role with no row, or
+`POST /api/v1/models/model/update` for one whose name differs) - the path its
+admin UI takes to rename a base model. It reads and validates EVERY role row
+before it writes any - so a refusal writes nothing - then writes only a name that
+differs, sends a renamed row's meta, params, access grants and active
+flag back exactly as it read them (Open WebUI 0.11.0 replaces a row's grants with
+the list an update carries, and fails an update that carries none), and never
+touches a row that is not a role id. A role id whose row is a PRESET (it has a `base_model_id`) is refused,
+not rewritten. Each change is printed (`created as`, `renamed 'old' -> 'new'`,
+`unchanged`).
+
+It needs **`OWUI_ADMIN_API_KEY`** - an Open WebUI ADMIN user's API key (Settings >
+Account > API keys; API keys must be enabled in Admin Settings > General) - from
+the shell or the root `.env`. `OWUI_BASE_URL` defaults to `http://127.0.0.1:3000`.
+
+**`up` and `recover` run it** after a successful run that started inference or the
+frontend, when both are on (started by this run or enabled) and inference runs
+`local` (from any source, as `health` decides it). There it never changes the
+exit code: a failure prints `# labels: FAILED - ...` and a `WARNING` line naming
+`labels`. Under `--dry-run` they print that they would run it and call nothing.
+`stack.ps1` does not forward `labels`; run it with `stack.py`.
+
+Compose's JSON is read back as strict UTF-8, not in the locale codepage, with a
+120 s timeout that kills the whole process TREE on expiry and then waits at most
+5 s more: on Windows the child runs in a job object (KILL_ON_JOB_CLOSE), so
+terminating the job ends `docker.exe`, the compose plugin it starts (which holds
+the pipe) and any grandchild whose parent already exited; elsewhere the child's
+process group is killed, so a non-ASCII model path reaches the label exactly and output
+that is not UTF-8 is a refusal. Whatever shape `inference/.env` has, the label
+names what compose makes of it: an
+`.env` compose cannot read (UTF-16, a BOM past byte 0, `EXPORT X=...`) fails the
+render, so there is no label; one compose reads its own way (`export<TAB>X=`,
+`X: value`, ` # comment`) gives compose's value; one where compose falls back to
+the default (a form feed or lone CR swallowing the line) gives the default -
+which is also what the upstream will load.
+
+**Refuses** (exit 1): inference without `local` (no role is registered); no docker
+compose CLI, or a render that fails; a label that cannot be derived (a variable
+the render leaves empty, a path outside `/models` or of any shape the rule above
+refuses, a missing directory or file, a symlink to a host-absolute path or with a
+refused target, a Windows junction, a symlink loop, an `entrypoint` override, a
+`--flag=value` model/config flag, a missing or relative `-config`, an embed model
+from a URL / repo / directory / preset / built-in default, a render that is not
+the shape compose writes (a hand-made `--render`),
+a role forwarding an id no upstream serves, `local.yaml` or the llama-swap config
+unreadable or not UTF-8) - then nothing is written; no
+`OWUI_ADMIN_API_KEY`; Open WebUI not answering `/health` within 180 s; a key Open
+WebUI refuses (401/403); a preset on a role id or a row returned without its
+grants - found while READING, so nothing is written.
+
+**Can fail after writing** (exit 1, the error names the rows already written, each
+of which carries its correct new label; the next run converges): a role row that
+changed in Open WebUI between the read and its write - every row is re-read just
+before its write and compared on existence, `base_model_id`, `updated_at`, name,
+grants, meta, params and the active flag; Open WebUI rejecting a write. **Not
+closed:** a change landing between that re-read and the POST (one round trip;
+Open WebUI has no conditional update) is overwritten. One case repeats on every run: a
+role row whose stored `meta` Open WebUI cannot parse answers **404** to the read,
+so the sync plans a create and Open WebUI rejects it (HTTP 401 `Something went
+wrong`, measured on a disposable 0.11.0) - repair or delete that row in Open WebUI (Admin Settings >
+Models), then run `labels` again.
+
 ### `init` [`--planes a,b`] [`--product X`] [`--context plane=name`] [`--headless`] [`--force`]
 
 Writes `.stack/state.json`. Non-interactive by design - it has to behave
@@ -945,6 +1143,11 @@ own (`MINI_MANIFEST`) with a scripted `docker compose config`, so an unrelated
 plane change cannot fail it; the shipping tree is covered by three `shipped`
 tests plus `inventory --check` itself, which the pre-commit hook and the
 `stack-driver` CI job both run for real.
+
+`labels` and the model-role label generator (`test_model_labels.py`) run
+against a scratch copy of the real inference config and a `FakeOwui` that
+answers the four Open WebUI admin-API calls as 0.11.0 does; their real proof is
+the disposable Open WebUI in item `mr-gateway`'s test plan.
 
 `recover`, `backup`, `restore` and `stats` run against `OpsDaemon`, a scripted
 daemon with containers, volumes and the helper container, so gate timeouts,
