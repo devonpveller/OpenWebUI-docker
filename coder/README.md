@@ -63,6 +63,10 @@ Keys, in `coder/.env`:
 | `LC_ROUTE_EXEC` | Leave it `1`. `0` moves execution into `little-coder`, which bypasses both the egress allowlist and the git chokepoint - and shows up as "the clone hangs", not as a policy change. |
 | `LC_DEPLOY_TOKEN` | Optional: a deploy token for cloning private repositories. |
 
+`coder/.env`'s `OPEN_TERMINAL_API_KEY` reaches `open-terminal` under that same
+name (the image reads `OPEN_TERMINAL_API_KEY` only - not `API_KEY`; cf-ot-env,
+2026-09-30).
+
 ## Enable and start
 
 **On a fresh clone the frontend is already enabled.** With no
