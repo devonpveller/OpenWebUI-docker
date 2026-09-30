@@ -363,6 +363,16 @@ does not belong is a rejection, and the tool will not let you merge without sayi
 
 `-Misfits` on a merge is refused outright: if it does not belong, it does not land.
 
+**Learning record (2026-09-29; research-workbench `06-EXPANSION.md` §3.3).** Before merging an
+item that took more than one iteration (any return from tester or reviewer) or that parked,
+check that its `iterative` learning record exists beside its findings file in the plan store
+(`learning-record.schema.json`), that its factual fields (steer, red state, iterations, merge
+range or park) are derived from this queue and git rather than written, and that
+`outcome.summary` matches the diff you are about to merge. A missing record on such an item, or
+an outcome that does not match the diff, is a refusal like any other. A first-try green needs
+no record. The `mental_model` field is the worker's labelled claim; you check it exists and is
+labelled, not that it is right. This is a reviewer step until `queue.ps1 -Merged` enforces it.
+
 **Review is not where intent is decided (2026-08-29, U2).** This verdict used to be
 `-FitsAnchor`, which asked the reviewer to re-judge whether the work was the right *thing*.
 That is the operator's call and they have already made it twice — at the anchor gate before

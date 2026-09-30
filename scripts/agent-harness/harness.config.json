@@ -240,6 +240,36 @@
         "runner": "claude-code",
         "model": "opus"
       }
+    },
+    "research-workbench": {
+      "_desc": "research-workbench plan (05-SWARM, operator 2026-09-25): worker and tester on the tasking tier (sonnet), reviewer on the delegation tier (opus) - the reviewer is the last gate before a merge and must hold the whole contract; tester executes the acceptance as written and never interprets it",
+      "worker": {
+        "runner": "claude-code",
+        "model": "sonnet"
+      },
+      "tester": {
+        "runner": "claude-code",
+        "model": "sonnet"
+      },
+      "reviewer": {
+        "runner": "claude-code",
+        "model": "opus"
+      }
+    },
+    "research-workbench-elevated": {
+      "_desc": "the elevated variant: all three roles on the delegation tier; used for a contract-setting item (P0) from the start, or after two consecutive returns of one item to the same role (05-SWARM elevation rule), recorded in the phase findings file",
+      "worker": {
+        "runner": "claude-code",
+        "model": "opus"
+      },
+      "tester": {
+        "runner": "claude-code",
+        "model": "opus"
+      },
+      "reviewer": {
+        "runner": "claude-code",
+        "model": "opus"
+      }
     }
   },
 
