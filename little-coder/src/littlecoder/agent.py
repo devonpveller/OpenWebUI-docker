@@ -30,6 +30,19 @@ from .sanitize import redact_secrets
 from .tasks import TaskContext, digest
 
 
+# Where upstream little-coder (1.12.0+) looks for USER extensions, pinned to a root-owned,
+# empty, read-only directory the image creates (docker/Dockerfile.agent). Unpinned, the launcher
+# falls back to ~/.config/little-coder/extensions - inside the agent user's home, which the
+# model's own `write` tool can reach - and loads every .ts/.js/.mjs there on EVERY launch, in
+# THIS (control-plane) container: outside open-terminal and the git-proxy (cf-lc-upgrade X1).
+LOCKED_USER_EXTENSIONS_DIR = "/opt/little-coder/user-extensions"
+
+# argv the daemon never lets through from config: each re-opens a code/config load path.
+#   --with-pi-extensions  drops --no-extensions (pi discovers ~/.pi and ./.pi extensions)
+#   --approve / -a        trusts the project: ./.pi settings, packages, skills, SYSTEM.md
+_LOAD_SURFACE_FLAGS = ("--with-pi-extensions", "--approve", "-a", "--no-approve", "-na")
+
+
 class TaskTimeout(RuntimeError):
     """The agent exceeded the per-channel abandoned-timeout (design §4.2)."""
 
@@ -276,6 +289,12 @@ class AgentRunner:
                 # `cd`, and — worst — only gates `bash`, which pushed the agent
                 # to escape via ShellSession.
                 "LITTLE_CODER_PERMISSION_MODE": "accept-all",
+                # Load-surface lock (cf-lc-upgrade): the agent (and every `dispatch` child,
+                # which inherits this env) loads code only from the root-owned package dir.
+                "LITTLE_CODER_EXTENSIONS_DIR": LOCKED_USER_EXTENSIONS_DIR,
+                "LITTLE_CODER_PI_EXTENSIONS": "0",
+                # No startup network operations: pi never installs a `packages` entry.
+                "PI_OFFLINE": "1",
             }
         )
         return env
@@ -331,13 +350,18 @@ class AgentRunner:
             if arg in ("--session", "--session-dir", "--fork", "-r", "--resume"):
                 skip_next = True
                 continue
+            if arg in _LOAD_SURFACE_FLAGS:
+                continue
             if plan_only and arg in ("--exclude-tools", "-xt"):
                 skip_next = True
                 capture_exclude = True
                 continue
             filtered_extra.append(arg)
 
-        cmd = [*a.command, "--model", a.model, *filtered_extra]
+        # --no-approve: pi treats the workspace as an UNTRUSTED project - its ./.pi settings
+        # (packages, npmCommand), skills, prompts and SYSTEM.md are ignored. Always passed;
+        # any trust flag in extra_args was dropped above (the daemon owns this policy).
+        cmd = [*a.command, "--model", a.model, *filtered_extra, "--no-approve"]
         if plan_only:
             merged = ",".join(x for x in (exclude_tools, "edit,write") if x)
             cmd.extend(["--exclude-tools", merged])

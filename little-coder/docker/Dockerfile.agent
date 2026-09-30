@@ -43,10 +43,21 @@ RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "little-coder@${LITTLE_COD
 # best-effort, swallowing errors. Here the agent runs as the unprivileged `lc` user against a
 # root-owned global node_modules, so that launch-time write fails SILENTLY and the patches
 # (1.20.0: the multi-line `edit` JSON repair, issue #127) would never land. Applying them at
-# build time restores what the 1.10.x postinstall did; the script fails the build if a patch
-# that has a target file is left unapplied (fail closed, not a silent downgrade).
+# build time restores what the 1.10.x postinstall did; the script fails the build if any patch
+# is left unapplied or its target file is missing (fail closed, not a silent downgrade).
 COPY docker/apply-pi-patches.mjs /tmp/apply-pi-patches.mjs
 RUN node /tmp/apply-pi-patches.mjs && rm -f /tmp/apply-pi-patches.mjs
+
+# Load-surface lock (cf-lc-upgrade X1). Since 1.12.0 the launcher loads every file in a USER
+# extension dir on every launch; unpinned that is ~/.config/little-coder/extensions, which the
+# agent user (and so the model's `write` tool) can write - code the model planted would run in
+# THIS control-plane container. Pin it to a root-owned, empty, read-only dir. PI_OFFLINE=1: pi
+# performs no startup network operations, so a `packages` settings entry is never installed.
+# agent.py pins the same values per task; the entrypoint makes $HOME root-owned read-only.
+RUN mkdir -p /opt/little-coder/user-extensions && chmod 0555 /opt/little-coder/user-extensions
+ENV LITTLE_CODER_EXTENSIONS_DIR=/opt/little-coder/user-extensions \
+    LITTLE_CODER_PI_EXTENSIONS=0 \
+    PI_OFFLINE=1
 
 WORKDIR /app
 COPY pyproject.toml ./

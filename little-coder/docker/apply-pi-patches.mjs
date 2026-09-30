@@ -7,11 +7,12 @@
 // patches (1.20.0: the multi-line `edit` JSON repair, upstream issue #127) would
 // never land. This runs once, as root, during the image build.
 //
-// Fail closed: every patch whose target file exists must end up applied. A
-// patch with no target file (e.g. a nested copy npm hoisted elsewhere) is
-// reported and skipped; a patch whose target exists but was not applied (pi
-// changed underneath, so its `find` no longer matches) fails the build, so a
-// version bump cannot silently ship without the repair.
+// Fail closed: every patch upstream ships must end up applied. A patch whose
+// target file is MISSING fails the build (pi moved the file, or npm laid the
+// nested pi-agent-core copy out elsewhere - either way the repair would be
+// absent), and so does a patch whose target exists but was not applied (pi
+// changed underneath, so its `find` no longer matches). A version bump cannot
+// silently ship without a repair; adapt this script deliberately instead.
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -43,7 +44,8 @@ let failed = 0;
 for (const p of PATCHES) {
   const file = join(piRoot, p.rel);
   if (!existsSync(file)) {
-    console.log(`[apply-pi-patches] SKIP (no target) ${p.rel}`);
+    failed += 1;
+    console.error(`[apply-pi-patches] MISSING TARGET ${p.rel}`);
     continue;
   }
   if (readFileSync(file, "utf8").includes(p.applied)) {

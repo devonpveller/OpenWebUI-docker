@@ -104,3 +104,99 @@ def test_pi_patches_applied_at_build_after_install():
 def test_build_patcher_fails_closed():
     src = PATCHER.read_text(encoding="utf-8")
     assert "process.exit(1)" in src and "NOT APPLIED" in src
+
+
+# --- load-surface lock (cf-lc-upgrade attempt 2, tester finding X1) -----------------------------
+# 1.12.0+ loads every file in a USER extension dir on every launch; unpinned that is
+# ~/.config/little-coder/extensions, writable by the agent user and so by the model's `write`
+# tool. pi also reads settings (`packages`, `npmCommand`), `!command` config values, models/auth
+# and skills from $HOME and from ./.pi. The wrapper pins the extension dir, runs pi offline and
+# untrusted, and the entrypoint makes $HOME root-owned read-only except named data dirs.
+
+from littlecoder.agent import LOCKED_USER_EXTENSIONS_DIR, AgentRunner  # noqa: E402
+from littlecoder.config import AgentConfig, Config  # noqa: E402
+
+
+def _env_value(name: str) -> str | None:
+    pattern = r"^\s*(?:ENV\s+)?" + re.escape(name) + r"=([^\s\\]+)\s*(?:\\)?$"
+    m = re.search(pattern, DOCKERFILE.read_text(encoding="utf-8"), re.M)
+    return m.group(1) if m else None
+
+
+def test_dockerfile_pins_user_extension_dir_to_the_locked_dir():
+    assert _env_value("LITTLE_CODER_EXTENSIONS_DIR") == LOCKED_USER_EXTENSIONS_DIR
+    src = DOCKERFILE.read_text(encoding="utf-8")
+    assert f"mkdir -p {LOCKED_USER_EXTENSIONS_DIR} && chmod 0555 {LOCKED_USER_EXTENSIONS_DIR}" in src
+    assert not LOCKED_USER_EXTENSIONS_DIR.startswith("/home/")
+
+
+def test_dockerfile_runs_pi_offline_without_pi_discovery():
+    assert _env_value("PI_OFFLINE") == "1"
+    assert _env_value("LITTLE_CODER_PI_EXTENSIONS") == "0"
+
+
+class _State:
+    task_id = "t1"
+    session_id = "s1"
+    channel = "cli"
+    user_id = "u"
+    repo = "r"
+    prompt = "p"
+    plan_only = False
+
+
+class _Ctx:
+    state = _State()
+
+
+def _runner(extra_args):
+    cfg = Config()
+    cfg.agent = AgentConfig(command=["little-coder"], model="llamacpp/m", prompt_mode="arg",
+                            extra_args=extra_args, use_session=False, session_dir="/s")
+    return AgentRunner(cfg, journals=None, ot_client=None)  # type: ignore[arg-type]
+
+
+def test_daemon_pins_the_load_surface_env_per_task(monkeypatch):
+    # an operator/compose value must not re-open the door: the daemon's values win
+    monkeypatch.setenv("LITTLE_CODER_EXTENSIONS_DIR", "/home/lc/.config/little-coder/extensions")
+    monkeypatch.setenv("LITTLE_CODER_PI_EXTENSIONS", "1")
+    monkeypatch.setenv("PI_OFFLINE", "0")
+    env = _runner(["--print"])._build_env(_Ctx(), "/tmp/ev")
+    assert env["LITTLE_CODER_EXTENSIONS_DIR"] == LOCKED_USER_EXTENSIONS_DIR
+    assert env["LITTLE_CODER_PI_EXTENSIONS"] == "0"
+    assert env["PI_OFFLINE"] == "1"
+
+
+@pytest.mark.parametrize("extra", [
+    ["--print"],
+    ["--print", "--approve"],
+    ["--print", "-a", "--with-pi-extensions"],
+    ["--print", "--no-approve", "--no-approve"],
+])
+def test_every_invocation_is_untrusted_exactly_once(extra):
+    cmd, _ = _runner(extra)._build_invocation("hi", _Ctx())
+    assert cmd.count("--no-approve") == 1
+    assert not {"--approve", "-a", "--with-pi-extensions"} & set(cmd)
+
+
+def test_config_does_not_reopen_the_load_surface():
+    args = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))["agent"]["extra_args"]
+    assert not {"--approve", "-a", "--with-pi-extensions"} & set(args)
+
+
+def test_entrypoint_locks_home_after_the_last_chown_and_before_exec():
+    src = ENTRYPOINT.read_text(encoding="utf-8")
+    last_chown = src.rindex("chown -R lc:lc /home/lc\n")
+    lock = src.index('chown root:root "$LC_HOME" && chmod 0755 "$LC_HOME"')
+    exec_ = src.rindex('exec gosu lc "$@"')
+    assert last_chown < lock < exec_
+    m = re.search(r'^HOME_DATA_DIRS="([^"]*)"', src, re.M)
+    assert m and set(m.group(1).split()) == {".little-coder", ".cache", ".npm", ".lc-quarantine"}
+    for locked in (".pi", ".config", ".agents", ".node_modules"):
+        assert locked not in m.group(1).split()
+
+
+def test_build_patcher_fails_on_a_missing_target():
+    src = PATCHER.read_text(encoding="utf-8")
+    block = src[src.index("if (!existsSync(file))"):src.index("if (readFileSync(file")]
+    assert "failed += 1" in block and "MISSING TARGET" in block and "SKIP" not in block

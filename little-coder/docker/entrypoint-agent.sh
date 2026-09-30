@@ -80,4 +80,61 @@ fi
 # EACCES-blocks the lc user's next direct pi CLI run.
 chown -R lc:lc /home/lc
 
+# Load-surface lock (cf-lc-upgrade) - AFTER the chown above, which would undo it. The agent runs
+# as `lc`, so anything `lc` can write the model can write with its ordinary `write` tool. pi and
+# the little-coder launcher read CODE or CONFIG from $HOME at startup (~/.pi/agent settings:
+# `packages` + `npmCommand`; config values starting with `!`, which pi runs as a shell command;
+# models.json / auth.json / trust.json; ~/.agents/skills; the user extension dir, also pinned
+# away by LITTLE_CODER_EXTENSIONS_DIR; Node's ~/.node_modules fallback). So $HOME itself is
+# root-owned and read-only (a root-owned dir inside an lc-owned home can still be RENAMED away
+# by lc - measured), and so is everything in it except the data dirs below.
+# Stays writable (data, never loaded as code or config): ~/.little-coder (upstream's pre-edit
+# checkpoints), ~/.cache, ~/.npm, ~/.lc-quarantine, /tmp, /workspace and the named volumes
+# (journals, sessions, skill library, cohorts, polyglot).
+# Anything else in $HOME from an earlier run of THIS container (a restart, not a recreate,
+# keeps the writable layer) is moved to ~/.lc-quarantine/<ts>/ - never loaded, never deleted.
+LC_HOME=/home/lc
+HOME_DATA_DIRS=".little-coder .cache .npm .lc-quarantine"
+HOME_SKELETON=".bashrc .profile .bash_logout"
+PI_PKG="$(npm root -g)/little-coder/node_modules/@earendil-works/pi-coding-agent/package.json"
+PI_VERSION="$(node -p "require('$PI_PKG').version" 2>/dev/null || echo unknown)"
+QUAR="$LC_HOME/.lc-quarantine/$(date +%Y%m%dT%H%M%S)"
+in_list() { case " $2 " in *" $1 "*) return 0;; esac; return 1; }
+# Our own generated files are regenerated below; drop them first so a restart does not
+# quarantine (and so copy around) models.json, which carries the substituted API key.
+MODELS_TMP="$(mktemp)"
+cp "$LC_HOME/.config/little-coder/models.json" "$MODELS_TMP" 2>/dev/null || true
+rm -f "$LC_HOME/.config/little-coder/models.json" "$LC_HOME/.pi/agent/settings.json" \
+      "$LC_HOME/.pi/agent/auth.json"
+for entry in "$LC_HOME"/.[!.]* "$LC_HOME"/*; do
+  [ -e "$entry" ] || continue
+  name="$(basename "$entry")"
+  in_list "$name" "$HOME_DATA_DIRS $HOME_SKELETON" && continue
+  # a leftover dir holding only (empty) dirs is our own earlier lock - nothing to keep
+  if [ -d "$entry" ] && [ -z "$(find "$entry" ! -type d 2>/dev/null | head -n 1)" ]; then
+    rm -rf "$entry"; continue
+  fi
+  mkdir -p "$QUAR" && mv "$entry" "$QUAR/$name" \
+    && echo "[entrypoint] quarantined earlier content: ~/$name -> $QUAR/$name"
+done
+mkdir -p "$LC_HOME/.pi/agent" "$LC_HOME/.config/little-coder" "$LC_HOME/.agents" \
+         "$LC_HOME/.node_modules" "$LC_HOME/.node_libraries"
+# settings.json pre-stamped with exactly what the launcher's step 8 merges in, so it never
+# needs to write; auth.json present so pi never tries to create it.
+printf '{\n  "quietStartup": true,\n  "lastChangelogVersion": "%s"\n}\n' "$PI_VERSION" \
+  > "$LC_HOME/.pi/agent/settings.json"
+printf '{}\n' > "$LC_HOME/.pi/agent/auth.json"
+cp "$MODELS_TMP" "$LC_HOME/.config/little-coder/models.json" 2>/dev/null || true
+rm -f "$MODELS_TMP"
+for d in $HOME_DATA_DIRS; do mkdir -p "$LC_HOME/$d"; chown -R lc:lc "$LC_HOME/$d"; done
+for entry in "$LC_HOME"/.[!.]* "$LC_HOME"/*; do
+  [ -e "$entry" ] || continue
+  in_list "$(basename "$entry")" "$HOME_DATA_DIRS" && continue
+  chown -R root:root "$entry"
+  find "$entry" -type d -exec chmod 0555 {} +
+  find "$entry" -type f -exec chmod 0444 {} +
+done
+chown root:root "$LC_HOME" && chmod 0755 "$LC_HOME"
+echo "[entrypoint] load surface locked: ~ root-owned read-only except ~/.little-coder ~/.cache ~/.npm ~/.lc-quarantine; user extensions dir: ${LITTLE_CODER_EXTENSIONS_DIR:-UNSET}"
+
 exec gosu lc "$@"
