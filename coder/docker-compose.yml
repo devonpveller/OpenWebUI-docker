@@ -85,7 +85,7 @@ services:
       context: ../little-coder
       dockerfile: docker/Dockerfile.agent
       args:
-        LITTLE_CODER_VERSION: ${LITTLE_CODER_VERSION:-latest}
+        LITTLE_CODER_VERSION: ${LITTLE_CODER_VERSION:-1.20.0}
     image: little-coder:local
     container_name: little-coder
     networks:
@@ -125,6 +125,10 @@ services:
       # not forward llama.cpp's /props — the probe just fails (silently) on every
       # task and falls back to models.json's declared window (131072), which is
       # what we want anyway. Skip the futile probe + its log noise.
+      # 1.19.0+: the probe also falls back to /v1/models (with the bearer) and, when
+      # the listing holds more than one id (LiteLLM lists every role), REGISTERS every
+      # served id as a selectable model. This flag also switches that discovery off,
+      # so the agent's model registry stays exactly config/models.json.
       - LITTLE_CODER_NO_CTX_PROBE=1
     volumes:
       - ../little-coder/config:/app/config:ro

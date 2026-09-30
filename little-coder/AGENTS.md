@@ -76,10 +76,12 @@ See [integration-tasks.md](../../documentation-plans-ai-stack/journal/archive/im
 | `agent.py` | Agent integration — runs the upstream little-coder CLI and instruments it. | §3.1, §1.5, §3.3 | — |
 | `audit.py` | Operator audit log — `audit.jsonl` (design §4.4). | §4.4 | — |
 | `augmenter.py` | Per-task skill selection (design §7.4, Chapter 4). | §7.4, §5.5, §8.5, §8.4 | Chapter 4 |
+| `bootstrap_agents.py` | Operator-triggered AGENTS.md bootstrap prompts (design §3.7 layer 3). | §3.7 | — |
 | `cli.py` | `lc` — the CLI operator surface (design §12.6). | §12.6 | — |
 | `clusters.py` | Cluster identity + assignment (design §5.1–§5.3). | §5.1, §5.3, §5.4, §5.6, §5.2, §3e | — |
 | `cohorts.py` | Cohort store — event-sourced projection over journals (design §5.4). | §5.4, §5.2, §5.5, §4.2, §0, §3e | — |
 | `config.py` | Centralized typed config (design §12.8). | §12.8, §12.9 | — |
+| `credscrub.py` | Scrub credentials out of the git config files in a little-coder workspace (cf-lc-token). | — | — |
 | `daemon.py` | Control daemon — the little-coder container's main process (design §3.1). | §3.1, §12.4, §12.3, §12.7, §12.6 | Chapter 2 |
 | `docs_sync.py` | Agent-orientation doc sync — keep `little-coder/AGENTS.md` fact-checked. | — | — |
 | `efficacy.py` | Efficacy reversion (design §8.5, Chapter 4 §4d). | §8.5, §4d | Chapter 4 |

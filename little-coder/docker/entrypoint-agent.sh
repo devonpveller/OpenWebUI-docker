@@ -54,10 +54,14 @@ if [ "${LC_ROUTE_EXEC:-0}" = "1" ]; then
   #   browser / browser-extract-retention — playwright launches chromium
   #                              IN-PROCESS here (1.9.x), not in open-terminal;
   #                              also egress. Excluded until/unless routed.
+  #   bg-shell                 — (1.16.0+) ShellStart/ShellLog/ShellList/
+  #                              ShellSend/ShellStop: background jobs spawned
+  #                              IN THIS container, a second git-proxy bypass
+  #                              exactly like shell-session.
   # The `--exclude-tools` denylist in config/little-coder.config.yaml is the
   # declarative backstop (survives an upstream dir rename); this rm is the
   # belt-and-braces. Removal is logged per-dir so a silent miss is visible.
-  for ext in shell-session browser browser-extract-retention; do
+  for ext in shell-session bg-shell browser browser-extract-retention; do
     if [ -d "$EXT_DIR/$ext" ]; then
       rm -rf "$EXT_DIR/$ext" && echo "[entrypoint] removed extension: $ext"
     else
