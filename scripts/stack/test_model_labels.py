@@ -522,12 +522,16 @@ class FakeOwui:
     row WITH its access grants, create refuses a taken id, update REPLACES the grants
     with the list it is sent and answers 500 when `access_grants` is absent or null
     (0.11.0's router re-validates None against `list` - measured by the drill against
-    a real disposable 0.11.0), and a key other than ADMIN_KEY gets 401. Every call is
+    a real disposable 0.11.0), and a key other than ADMIN_KEY gets 401. GET /api/models
+    lists every base model the connections serve (`listed`, {id: name}) plus the rows,
+    hidden ones INCLUDED - Open WebUI 0.11.0 filters `meta.hidden` in the browser, not in
+    that endpoint (measured by mr-picker against a disposable 0.11.0). Every call is
     recorded; `writes` lists the POSTs.
     """
 
-    def __init__(self, rows=None, healthy=True):
+    def __init__(self, rows=None, healthy=True, listed=None):
         self.rows = copy.deepcopy(rows or {})
+        self.listed = dict(listed or {})
         self.grants = {rid: [{"principal_type": "group", "principal_id": "g1", "permission": "read"}]
                        for rid in self.rows}
         self.calls: list[tuple[str, str]] = []
@@ -541,6 +545,10 @@ class FakeOwui:
             return (200, '{"status":true}') if self.healthy else (0, "ConnectionRefusedError")
         if headers.get("Authorization") != f"Bearer {ADMIN_KEY}":
             return 401, '{"detail":"Not authenticated"}'
+        if method == "GET" and parsed.path == "/api/models":
+            data = [{"id": rid, "name": name} for rid, name in self.listed.items() if rid not in self.rows]
+            data += [{"id": rid, "name": row["name"], "info": row} for rid, row in self.rows.items()]
+            return 200, json.dumps({"data": data})
         if method == "GET" and parsed.path == "/api/v1/models/model":
             rid = urllib.parse.parse_qs(parsed.query)["id"][0]
             if rid not in self.rows:
@@ -2064,3 +2072,242 @@ def test_the_comparison_is_of_bytes_not_lines(world, how):
     path.write_bytes(data)
     with pytest.raises(ml.LabelError, match="not the blob committed at HEAD"):
         ml.derive_labels(make_render(world))
+
+
+# --------------------------------------------------------------------------
+# mr-picker (2026-09-30): the sync owns the PICKER visibility (`meta.hidden`) of every
+# row whose id the local gateway serves - one row per derived label, nothing else.
+# Each test below fails at 58bdeb5 (no picker_hidden / served ids / visibility writes).
+# --------------------------------------------------------------------------
+
+THINK, NOTHINK, EMBED = ("Qwen3.8-27B Q4_K_M (thinking)", "Qwen3.8-27B Q4_K_M (no thinking)",
+                         "bge-m3 f16 (embeddings)")
+SERVED = list(ROLE_TABLE) + OLD_NAMES
+PUBLIC = {"principal_type": "user", "principal_id": "*", "permission": "read"}
+
+
+def _live_like():
+    """The live table as the coordinator measured it on 2026-09-30: the five role rows with
+    today's labels (none hidden), qwen36-27b as 'Qwen 3.6 27B', bge-m3 and bge-m3-f16.gguf
+    already hidden, a preset on local-large and on local-small, a pipe row and a cloud row.
+    qwen36-27b:nothink and qllama/bge-m3:latest have NO row; Open WebUI lists the first only."""
+    rows = {rid: _row(rid, THINK if mode == "thinking" else NOTHINK if mode == "no thinking" else EMBED)
+            for rid, (_c, mode) in ROLE_TABLE.items()}
+    rows["qwen36-27b"] = _row("qwen36-27b", "Qwen 3.6 27B")
+    for rid in ("bge-m3", "bge-m3-f16.gguf"):
+        rows[rid] = _row(rid, rid, meta={"profile_image_url": "/static/favicon.png", "hidden": True})
+    rows["writer"] = _row("writer", "Writer", base_model_id="local-large")
+    rows["terse"] = _row("terse", "Terse", base_model_id="local-small")
+    rows["server_status"] = _row("server_status", "Server Status")   # a pipe's row
+    rows["cloud-large"] = _row("cloud-large", "Cloud Large")
+    return FakeOwui(rows, listed={"qwen36-27b:nothink": "qwen36-27b:nothink"})
+
+
+def _shown(owui):
+    """What the picker lists: Open WebUI's model list minus `meta.hidden` (its browser filter)."""
+    _s, text = owui("GET", "http://owui:8080/api/models", {"Authorization": f"Bearer {ADMIN_KEY}"}, None, 5)
+    return {m["id"] for m in json.loads(text)["data"] if not ((m.get("info") or {}).get("meta") or {}).get("hidden")}
+
+
+def _swap_labels(small_file="Qwen3.8-27B Q4_K_M"):
+    """The five roles with local-small / local-small:nothink on `small_file` (a model swap)."""
+    out = []
+    for item in _labels():
+        if item.role.startswith("local-small"):
+            item = item._replace(label=f"{small_file} (no thinking)")
+        out.append(item)
+    return out
+
+
+def test_the_picker_rule_is_one_row_per_label_in_role_order():
+    hidden = ml.picker_hidden(_labels(), SERVED)
+    assert list(hidden) == SERVED, "every role, then every other served id, each once"
+    assert [rid for rid, h in hidden.items() if not h] == ["local-large", "local-large:nothink"]
+    # the ORDER decides, not the list's order: local-small first in the list is still hidden
+    rev = list(reversed(_labels()))
+    assert [r for r, h in ml.picker_hidden(rev).items() if not h] == ["local-large:nothink", "local-large"]
+    # a chat role the order does not name ranks after the named ones
+    extra = _labels() + [ml.RoleLabel("local-medium", "x", "thinking", THINK, "", "", "t"),
+                         ml.RoleLabel("local-tiny", "y", "thinking", "Tiny Q4_0 (thinking)", "", "", "t")]
+    got = ml.picker_hidden(extra)
+    assert got["local-medium"] is True and got["local-tiny"] is False and got["local-large"] is False
+
+
+def test_the_swap_case_a_small_model_on_its_own_file_is_shown_and_hidden_again_on_the_way_back():
+    """The anchor's swap case: local-small on a DIFFERENT GGUF gets its own label and becomes
+    visible (local-small:nothink, same file and mode, stays hidden); switching back hides it."""
+    swapped = ml.picker_hidden(_swap_labels("Other-8B Q8_0"), SERVED)
+    assert [rid for rid, h in swapped.items() if not h] == ["local-large", "local-large:nothink", "local-small"]
+    owui = _live_like()
+    ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, owui, served=SERVED)
+    assert "local-small" not in _shown(owui)
+    changes = ml.sync_owui(_swap_labels("Other-8B Q8_0"), "http://owui:8080", ADMIN_KEY, owui, served=SERVED)
+    assert ("local-small", "renamed") in [(c.role, c.action) for c in changes]
+    assert owui.rows["local-small"]["name"] == "Other-8B Q8_0 (no thinking)"
+    assert owui.rows["local-small"]["meta"]["hidden"] is False
+    assert _shown(owui) >= {"local-large", "local-large:nothink", "local-small"}
+    assert "local-small:nothink" not in _shown(owui)
+    ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, owui, served=SERVED)
+    assert owui.rows["local-small"]["meta"]["hidden"] is True and "local-small" not in _shown(owui)
+
+
+def test_the_sync_leaves_one_gateway_row_per_label_touches_nothing_else_and_is_idempotent():
+    owui = _live_like()
+    unmanaged = ("writer", "terse", "server_status", "cloud-large")
+    before = copy.deepcopy(owui.rows)
+    grants_before = copy.deepcopy(owui.grants)
+    changes = ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, owui, served=SERVED)
+    got = {c.role: c.action for c in changes}
+    assert got == {"local-large": "unchanged", "local-large:nothink": "unchanged", "local-small": "hidden",
+                   "local-small:nothink": "hidden", "local-embed": "hidden", "qwen36-27b": "hidden",
+                   "qwen36-27b:nothink": "created", "bge-m3": "unchanged", "bge-m3-f16.gguf": "unchanged",
+                   "qllama/bge-m3:latest": "absent"}
+    # the picker: exactly one gateway row per label, plus the rows the gateway does not serve
+    assert _shown(owui) == {"local-large", "local-large:nothink", *unmanaged}
+    assert owui.rows["local-large"]["name"] == THINK and owui.rows["local-large:nothink"]["name"] == NOTHINK
+    # rows the local gateway does not serve are never read, let alone written
+    assert {rid: owui.rows[rid] for rid in unmanaged} == {rid: before[rid] for rid in unmanaged}
+    read = {urllib.parse.parse_qs(urllib.parse.urlparse(path).query)["id"][0]
+            for m, path in owui.calls if path.startswith("/api/v1/models/model?")}
+    assert read == set(SERVED)
+    # a hidden row keeps everything else it had: name, meta keys, params, grants, active flag
+    for rid in ("local-small", "qwen36-27b"):
+        row = owui.rows[rid]
+        assert row["meta"] == {**before[rid]["meta"], "hidden": True}
+        assert {k: v for k, v in row.items() if k not in ("meta", "updated_at")} == \
+               {k: v for k, v in before[rid].items() if k not in ("meta", "updated_at")}
+        assert owui.grants[rid] == grants_before[rid]
+    # the only row created is the served id Open WebUI lists with no row; it is created hidden
+    assert owui.rows["qwen36-27b:nothink"]["meta"]["hidden"] is True
+    assert "qllama/bge-m3:latest" not in owui.rows
+    assert [p for p, _ in owui.writes].count("/api/v1/models/create") == 1
+    # a second run changes nothing and writes nothing
+    writes = len(owui.writes)
+    again = ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, owui, served=SERVED)
+    assert {c.action for c in again} <= {"unchanged", "absent"} and len(owui.writes) == writes
+
+
+def test_an_admin_un_hiding_a_served_duplicate_is_reverted_and_a_hidden_visible_one_is_shown():
+    owui = _live_like()
+    ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, owui, served=SERVED)
+    owui.rows["qwen36-27b"]["meta"]["hidden"] = False       # an admin un-hides it in the UI
+    owui.rows["local-large"]["meta"]["hidden"] = True       # and hides the one the rule shows
+    changes = ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, owui, served=SERVED)
+    assert [(c.role, c.action) for c in changes if c.action in ml.WRITTEN] == [
+        ("local-large", "shown"), ("qwen36-27b", "hidden")]
+    assert owui.rows["qwen36-27b"]["meta"]["hidden"] is True
+    assert owui.rows["local-large"]["meta"]["hidden"] is False
+    shown = next(c for c in changes if c.role == "local-large")
+    assert ml.describe(shown) == f"local-large: now shown in the picker ({THINK!r})"
+
+
+def test_a_dry_run_prints_the_visibility_plan_and_writes_nothing():
+    owui = _live_like()
+    changes = ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, owui, dry_run=True, served=SERVED)
+    assert owui.writes == []
+    lines = [ml.describe(c) for c in changes]
+    assert f"local-large: unchanged ({THINK!r}, shown in the picker)" in lines
+    assert f"local-small: would be hidden from the picker ({NOTHINK!r})" in lines
+    assert "qwen36-27b: would be hidden from the picker ('Qwen 3.6 27B')" in lines
+    assert "qwen36-27b:nothink: would-create as 'qwen36-27b:nothink', hidden from the picker" in lines
+    assert ("qllama/bge-m3:latest: no row, and Open WebUI does not list it - nothing to hide, no row created"
+            in lines)
+
+
+def test_a_rename_that_also_changes_visibility_says_both():
+    owui = FakeOwui({"local-small": _row("local-small", "Qwen 3.6 27B")})
+    changes = ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, owui)
+    small = next(c for c in changes if c.role == "local-small")
+    assert small.action == "renamed"
+    assert ml.describe(small) == f"local-small: renamed 'Qwen 3.6 27B' -> {NOTHINK!r}, now hidden from the picker"
+    assert owui.rows["local-small"]["meta"]["hidden"] is True
+    assert owui.rows["local-small"]["meta"]["capabilities"] == {"vision": True}
+
+
+@pytest.mark.parametrize("bad", ["preset on a served old id", "preset on a role", "unreadable row",
+                                 "refused key on the model list", "unreadable model list",
+                                 "old id without grants"])
+def test_every_refusal_aborts_before_any_visibility_write(bad):
+    """Pass 1 plans the visibility writes too: with several rows needing a hide or a create,
+    one refusal anywhere - the LAST managed id included - writes nothing at all."""
+    owui = _live_like()
+    real = owui.__call__
+    if bad == "preset on a served old id":
+        owui.rows["qllama/bge-m3:latest"] = _row("qllama/bge-m3:latest", "Mine", base_model_id="bge-m3")
+    elif bad == "preset on a role":
+        owui.rows["local-embed"]["base_model_id"] = "bge-m3"
+    before = copy.deepcopy(owui.rows)
+
+    def request(method, url, headers, body, timeout):
+        path = urllib.parse.urlparse(url).path
+        if bad == "unreadable row" and "bge-m3-f16.gguf" in url:
+            return 500, "Internal Server Error"
+        if bad == "refused key on the model list" and path == "/api/models":
+            return 403, '{"detail":"forbidden"}'
+        if bad == "unreadable model list" and path == "/api/models":
+            return 200, "<html>not json</html>"
+        status, text = real(method, url, headers, body, timeout)
+        if bad == "old id without grants" and method == "GET" and "id=qwen36-27b" in url and status == 200:
+            data = json.loads(text)
+            data.pop("access_grants", None)
+            text = json.dumps(data)
+        return status, text
+    with pytest.raises(ml.OwuiError, match="Nothing was written"):
+        ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, request, served=SERVED)
+    assert owui.writes == [] and owui.rows == before
+
+
+def test_a_served_id_with_no_row_that_open_webui_does_not_list_gets_no_row():
+    owui = FakeOwui()
+    changes = ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, owui, served=SERVED)
+    assert {c.role for c in changes if c.action == "absent"} == set(OLD_NAMES)
+    assert set(owui.rows) == set(ROLE_TABLE)
+    # the model list is read ONCE, however many served ids have no row
+    assert [p for m, p in owui.calls].count("/api/models") == 1
+    # and not at all when every managed id has a row
+    owui.calls.clear()
+    ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, owui)
+    assert "/api/models" not in [p for m, p in owui.calls]
+
+
+def test_the_served_ids_are_every_name_the_rendered_local_yaml_registers(world):
+    assert ml.served_ids(make_render(world)) == ["qwen36-27b", "qwen36-27b:nothink", "bge-m3", "bge-m3-f16.gguf",
+                                                 "qllama/bge-m3:latest", *ROLE_TABLE]
+    with pytest.raises(ml.LabelError, match="llm-gateway"):
+        ml.served_ids(make_render(world, drop=("llm-gateway",)))
+
+
+def test_the_rollback_deletes_created_rows_and_restores_changed_ones():
+    """Tester attempt 1 (T8): `meta.hidden: false` does not undo a CREATED row - deleting it does.
+    Tester attempt 2 (T10): a row whose meta had NO `hidden` key gets the key REMOVED, not set to
+    false, so executing the printed steps restores every managed row as it was."""
+    owui = _live_like()
+    owui.rows["local-small"]["meta"]["hidden"] = False    # an explicit false stays an explicit false
+    before = copy.deepcopy(owui.rows)
+    changes = ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, owui, served=SERVED)
+    steps = ml.rollback_steps(changes)
+    tail = " (POST /api/v1/models/model/update, everything else as read)"
+    assert steps == [
+        "row 'local-small': meta.hidden back to false" + tail,
+        "row 'local-small:nothink': meta.hidden REMOVED (the row had no such key)" + tail,
+        "row 'local-embed': meta.hidden REMOVED (the row had no such key)" + tail,
+        "row 'qwen36-27b': meta.hidden REMOVED (the row had no such key)" + tail,
+        "delete the row 'qwen36-27b:nothink' (this run created it): "
+        'POST /api/v1/models/model/delete {"id": "qwen36-27b:nothink"}']
+    # carry the steps out literally: the managed rows come back as they were, created rows go
+    for step in steps:
+        rid = re.search(r"'([^']+)'", step).group(1)
+        if step.startswith("delete the row"):
+            del owui.rows[rid]
+        elif "REMOVED" in step:
+            owui.rows[rid]["meta"].pop("hidden")
+        else:
+            owui.rows[rid]["meta"]["hidden"] = step.split("meta.hidden back to ")[1].startswith("true")
+    strip = lambda rows: {r: {k: v for k, v in row.items() if k != "updated_at"}  # noqa: E731
+                          for r, row in rows.items()}
+    assert strip(owui.rows) == strip(before)
+    renamed = ml.Change("local-small", "renamed", "old", "new", True, False, True)
+    assert ml.rollback_steps([renamed]) == ["row 'local-small': name back to 'old' and meta.hidden back to false" + tail]
+    assert ml.rollback_steps([renamed._replace(had_hidden_key=False)]) == [
+        "row 'local-small': name back to 'old' and meta.hidden REMOVED (the row had no such key)" + tail]
+    assert ml.rollback_steps([c._replace(action="would-hide") for c in changes]) == []

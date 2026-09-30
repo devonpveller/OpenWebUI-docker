@@ -59,7 +59,7 @@ python scripts/stack/stack.py backup frontend     # backups/frontend/manual-<UTC
 python scripts/stack/stack.py restore frontend --from backups/frontend/manual-<UTC>
 python scripts/stack/stack.py inventory --check   # is stack-services.json still true?
 python scripts/stack/stack.py docs --check        # are the generated blocks in the docs still true?
-python scripts/stack/stack.py labels --dry-run    # which Open WebUI role names would change
+python scripts/stack/stack.py labels --dry-run    # which Open WebUI role names / picker rows would change
 python scripts/stack/stack.py labels              # set them from the model files (idempotent)
 ```
 
@@ -918,7 +918,8 @@ Sets the name Open WebUI shows for each local model **role** (`local-large`,
 `model_name`s in `inference/config/litellm/model_list/local.yaml`) to a label
 **derived from the model file** the inference plane loads, so a model swap
 relabels itself and no name is typed by hand (model-roles, operator decision
-R4). The derivation is `scripts/stack/model_labels.py`, and its ONLY source for
+R4), and sets the picker visibility of every id `local.yaml` registers (see "It
+also owns the picker" below). The derivation is `scripts/stack/model_labels.py`, and its ONLY source for
 what the plane loads is **compose's own render**: `docker [--context X] compose -f
 inference/docker-compose.yml --profile local config --format json`, the read-only
 render `recover` already reads (it creates, starts and pulls nothing, needs no
@@ -1039,17 +1040,39 @@ the labels and writes nothing (`--env-file` goes to compose's `--env-file`).
 `--render JSON` (both commands) derives from a saved render instead - for a
 disposable environment with no docker CLI; it is compose output all the same.
 
-The sync uses Open WebUI's own admin API (`GET /api/v1/models/model?id=`, then
-`POST /api/v1/models/create` for a role with no row, or
-`POST /api/v1/models/model/update` for one whose name differs) - the path its
-admin UI takes to rename a base model. It reads and validates EVERY role row
-before it writes any - so a refusal writes nothing - then writes only a name that
-differs, sends a renamed row's meta, params, access grants and active
-flag back exactly as it read them (Open WebUI 0.11.0 replaces a row's grants with
-the list an update carries, and fails an update that carries none), and never
-touches a row that is not a role id. A role id whose row is a PRESET (it has a `base_model_id`) is refused,
-not rewritten. Each change is printed (`created as`, `renamed 'old' -> 'new'`,
-`unchanged`).
+The sync uses Open WebUI's own admin API (`GET /api/v1/models/model?id=`, `GET
+/api/models`, then `POST /api/v1/models/create` for a row to create, or
+`POST /api/v1/models/model/update` for one whose name or visibility differs) - the
+paths its admin UI takes to rename or hide a base model. It MANAGES every id
+`local.yaml` registers - the roles and the old names - and nothing else: a row
+`local.yaml` does not register (a preset, a pipe, arena, a cloud row) is never read
+or written. It reads and validates EVERY managed row before it writes any, so a
+refusal writes nothing (what it refuses while reading is listed once, under
+**Refuses** below). Then it writes only a row whose name (roles
+only - an old name keeps its own) or visibility differs, and sends that row's meta,
+params, access grants and active flag back exactly as it read them, `meta.hidden`
+aside (Open WebUI 0.11.0 replaces a row's grants with the list an update carries,
+and fails an update that carries none). Each change is printed (`created as`,
+`renamed 'old' -> 'new'`, `now hidden from the picker`, `unchanged`).
+
+**It also owns the picker** (mr-picker, 2026-09-30): the visibility (`meta.hidden`,
+the flag Open WebUI's own "hide" sets) of every row whose id `local.yaml` registers -
+the roles and the old names - is set in the same two passes (planned, and refused,
+in pass 1 with the names). Among the chat roles the first of each label, in the order
+`local-large`, `local-large:nothink`, `local-small`, `local-small:nothink`, is shown and
+the rest hidden; `local-embed` and every non-role id are hidden. A served id with no
+row is given a hidden row only when Open WebUI lists it (`GET /api/models`): without a
+row Open WebUI lists it to admins, and `meta.hidden` lives on a row. A created row has
+no access grants: with `BYPASS_ADMIN_ACCESS_CONTROL` on (Open WebUI's default, this
+host's setting) that changes nothing for anyone, but with it off a second admin loses
+that id, and presets built on it, once the row exists (measured, model-roles findings
+F4). The run prints the plan (`picker: shown ...; hidden ...`) and each change (`now
+hidden from the picker`, `would be shown in the picker`, ...); an admin un-hiding a
+managed row is reverted on the next run. **Rollback** is printed by the run itself, one
+`rollback:` line per write: DELETE each row it CREATED (`POST
+/api/v1/models/model/delete`; setting `meta.hidden` false would leave a row where there
+was none), and set the old name / old `meta.hidden` back on each row it changed - or
+REMOVE `meta.hidden` where the row had no such key, so the row comes back as it was.
 
 It needs **`OWUI_ADMIN_API_KEY`** - an Open WebUI ADMIN user's API key (Settings >
 Account > API keys; API keys must be enabled in Admin Settings > General) - from
@@ -1086,19 +1109,25 @@ from a URL / repo / directory / preset / built-in default, a render that is not
 the shape compose writes (a hand-made `--render`),
 a role forwarding an id no upstream serves, `local.yaml` or the llama-swap config
 unreadable or not UTF-8) - then nothing is written; no
-`OWUI_ADMIN_API_KEY`; Open WebUI not answering `/health` within 180 s; a key Open
-WebUI refuses (401/403); a preset on a role id or a row returned without its
-grants - found while READING, so nothing is written.
+`OWUI_ADMIN_API_KEY`; Open WebUI not answering `/health` within 180 s; and, found
+while READING the managed rows (every id `local.yaml` registers), so nothing is
+written: a key Open WebUI refuses (401/403, on a row or on `GET /api/models`); a row
+it cannot read (any answer but 200 or 404, or a body that is not a row with a `meta` object); a PRESET
+(a `base_model_id` is set) on ANY managed id, role or old name; a row that needs a
+write but came back without its access grants; and a failing `GET /api/models`
+(read once, only when a served id that is not a role has no row).
 
 **Can fail after writing** (exit 1, the error names the rows already written, each
-of which carries its correct new label; the next run converges): a role row that
-changed in Open WebUI between the read and its write - every row is re-read just
+of which carries its correct new name and visibility; the next run converges): a
+managed row (a role or an old name) that changed in Open WebUI between the read and
+its write - every row is re-read just
 before its write and compared on existence, `base_model_id`, `updated_at`, name,
 grants, meta, params and the active flag; Open WebUI rejecting a write. **Not
 closed:** a change landing between that re-read and the POST (one round trip;
 Open WebUI has no conditional update) is overwritten. One case repeats on every run: a
-role row whose stored `meta` Open WebUI cannot parse answers **404** to the read,
-so the sync plans a create and Open WebUI rejects it (HTTP 401 `Something went
+managed row whose stored `meta` Open WebUI cannot parse answers **404** to the read,
+so the sync plans a create (for an old name, only when Open WebUI lists it; one it
+does not list is left alone) and Open WebUI rejects it (HTTP 401 `Something went
 wrong`, measured on a disposable 0.11.0) - repair or delete that row in Open WebUI (Admin Settings >
 Models), then run `labels` again.
 

@@ -6869,11 +6869,13 @@ def test_up_sets_the_role_names_then_a_second_up_changes_nothing(root, no_owui_e
     assert "# labels: local-large: created as 'Qwen3.8-27B Q4_K_M (thinking)'" in out
     assert "# labels: local-small: created as 'Qwen3.8-27B Q4_K_M (no thinking)'" in out
     assert "# labels: local-embed: created as 'bge-m3 f16 (embeddings)'" in out
-    assert "# labels: 5 row(s) changed, 0 already right, at http://127.0.0.1:1" in out
-    assert owui.rows["qwen36-27b"]["name"] == "Qwen 3.6 27B", "an old-name row was touched"
+    # the five role rows created, and the old-name row hidden from the picker (mr-picker)
+    assert "# labels: qwen36-27b: now hidden from the picker ('Qwen 3.6 27B')" in out
+    assert "# labels: 6 row(s) changed, 0 already right, at http://127.0.0.1:1" in out
+    assert owui.rows["qwen36-27b"]["name"] == "Qwen 3.6 27B", "an old-name row was renamed"
     writes = len(owui.writes)
     code, out = _main(root, "up", daemon=_rdaemon(root), owui=owui)
-    assert code == 0 and "# labels: 0 row(s) changed, 5 already right" in out, out
+    assert code == 0 and "# labels: 0 row(s) changed, 6 already right" in out, out
     assert len(owui.writes) == writes
 
 
@@ -6913,7 +6915,7 @@ def test_a_label_failure_after_up_is_loud_and_leaves_the_exit_code_alone(root, n
     code, out = _main(root, "up", daemon=_rdaemon(root), owui=owui)
     assert code == 0, out
     assert "# labels: FAILED - role local-large:" in out and "Nothing was written to Open WebUI." in out
-    assert "# labels: WARNING - Open WebUI's role names were NOT synced" in out
+    assert "# labels: WARNING - Open WebUI's role names and picker were NOT synced" in out
     assert owui.calls == []
 
 
@@ -6948,6 +6950,49 @@ def test_the_labels_verb_syncs_on_demand_and_dry_runs(root, no_owui_env):
     assert code == 0 and "labels: 5 row(s) changed" in out, out
     code, out = _main(root, "labels", daemon=_rdaemon(root), owui=owui)
     assert code == 0 and "labels: 0 row(s) changed, 5 already right" in out, out
+
+
+def test_the_labels_verb_leaves_one_gateway_row_per_model_and_mode_in_the_picker(root, no_owui_env):
+    """mr-picker. BASE RED at 58bdeb5: `labels` set names only, so the duplicate roles, the
+    embedding role and the old concrete ids all stayed in the picker. Now the picker shows
+    exactly local-large and local-large:nothink from the gateway; the preset, the pipe and the
+    cloud row are left exactly as they were; a second run changes nothing."""
+    _roles_root(root)
+    label = {"local-large": "Qwen3.8-27B Q4_K_M (thinking)", "local-embed": "bge-m3 f16 (embeddings)"}
+    rows = {rid: {"id": rid, "user_id": "a", "base_model_id": None,
+                  "name": label.get(rid, "Qwen3.8-27B Q4_K_M (no thinking)"), "meta": {}, "params": {},
+                  "is_active": True, "created_at": 1, "updated_at": 1}
+            for rid in ("local-large", "local-large:nothink", "local-small", "local-small:nothink", "local-embed")}
+    rows.update(_old_row())
+    rows["bge-m3"] = {**rows["qwen36-27b"], "id": "bge-m3", "name": "bge-m3", "meta": {"hidden": True}}
+    unmanaged = {"writer": {**rows["qwen36-27b"], "id": "writer", "name": "Writer", "base_model_id": "local-large"},
+                 "server_status": {**rows["qwen36-27b"], "id": "server_status", "name": "Server Status"},
+                 "cloud-large": {**rows["qwen36-27b"], "id": "cloud-large", "name": "Cloud Large"}}
+    owui = FakeOwui({**rows, **unmanaged}, listed={"qwen36-27b:nothink": "qwen36-27b:nothink"})
+
+    def picker():
+        _s, text = owui("GET", "http://x/api/models", {"Authorization": f"Bearer {ADMIN_KEY}"}, None, 5)
+        return {m["id"] for m in json.loads(text)["data"]
+                if not ((m.get("info") or {}).get("meta") or {}).get("hidden")} - set(unmanaged)
+
+    code, out = _main(root, "labels", "--dry-run", daemon=_rdaemon(root), owui=owui)
+    assert code == 0 and owui.writes == [], out
+    assert ("labels: picker: shown local-large, local-large:nothink; hidden local-small, local-small:nothink, "
+            "local-embed, qwen36-27b, qwen36-27b:nothink, bge-m3, bge-m3-f16.gguf, qllama/bge-m3:latest") in out
+    assert "un-hiding one of them in Open WebUI is undone by the next run" in out
+    assert "labels: local-small: would be hidden from the picker" in out
+    code, out = _main(root, "labels", daemon=_rdaemon(root), owui=owui)
+    assert code == 0, out
+    assert picker() == {"local-large", "local-large:nothink"}
+    assert {rid: owui.rows[rid] for rid in unmanaged} == unmanaged
+    assert "labels: 5 row(s) changed, 3 already right" in out, out
+    # the rollback is printed, and a CREATED row is deleted, not un-hidden (tester attempt 1)
+    assert ("labels: rollback: delete the row 'qwen36-27b:nothink' (this run created it): "
+            'POST /api/v1/models/model/delete {"id": "qwen36-27b:nothink"}') in out, out
+    assert "labels: rollback: row 'qwen36-27b': meta.hidden REMOVED (the row had no such key)" in out, out
+    writes = len(owui.writes)
+    code, out = _main(root, "labels", daemon=_rdaemon(root), owui=owui)
+    assert code == 0 and "labels: 0 row(s) changed, 8 already right" in out and len(owui.writes) == writes, out
 
 
 def test_the_labels_verb_refuses_without_local_and_without_a_key(root, no_owui_env):
@@ -6995,7 +7040,7 @@ def test_an_unreadable_config_fails_the_sync_loudly_and_leaves_the_exit_code_alo
     owui = FakeOwui()
     code, out = _main(root, verb, daemon=_rdaemon(root), owui=owui)
     assert code == 0, out
-    assert "# labels: FAILED - " in out and "# labels: WARNING - Open WebUI's role names were NOT synced" in out
+    assert "# labels: FAILED - " in out and "# labels: WARNING - Open WebUI's role names and picker were NOT synced" in out
     assert ("UnicodeDecodeError" if how == "undecodable" else "Permission denied") in out
     assert owui.writes == []
     if verb == "recover":
