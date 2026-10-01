@@ -516,8 +516,9 @@ class State:
         caller says so, and the next verb that writes state leaves it out.
 
         Nothing that still exists is stopped as a side effect: a plane that was
-        enabled only by a retired product, or kept only because a retired plane
-        required it, would be collected as an orphan by the next `disable`. It is
+        enabled only by a retired product (whether or not a remaining plane also
+        requires it - that requirer can be disabled later), or kept only because a
+        retired plane required it, would be collected as an orphan by a `disable`. It is
         re-owned as enabled directly instead, with the profiles it already runs,
         so the operator takes it out on purpose (`disable --plane <name>`).
         """
@@ -532,16 +533,23 @@ class State:
             for entry in self.planes.values() for owner in (entry.get("owners") or {})
         ):
             return [], [], []
-        for entry in self.planes.values():
+        # Planes whose ONLY owners were retired products. Re-owned whatever else needs them:
+        # an unowned plane would go with its last requirer (e.g. `disable coding-agent`
+        # taking a `local` inference that product:memory had enabled) - mm-retire X2.
+        orphaned = set()
+        for name, entry in self.planes.items():
             owners = entry.get("owners") or {}
-            for owner in [o for o in owners if o.startswith("product:")
-                          and o.split(":", 1)[1] not in manifest.products]:
+            gone = [o for o in owners if o.startswith("product:")
+                    and o.split(":", 1)[1] not in manifest.products]
+            for owner in gone:
                 del owners[owner]
             entry["owners"] = owners
+            if gone and not owners:
+                orphaned.add(name)
         owned = [name for name in self.planes if self.owners_of(name)]
         needed = dependency_closure(manifest, owned) if owned else set()
-        kept = [name for name in manifest.order if name in self.planes
-                and not self.owners_of(name) and name not in needed]
+        kept = [name for name in manifest.order if name in self.planes and not self.owners_of(name)
+                and (name in orphaned or name not in needed)]
         for name in kept:
             self.planes[name]["owners"] = {DIRECT: list(self.planes[name]["profiles"])}
         self.retired = set(planes) | set(products)

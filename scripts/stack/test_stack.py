@@ -5923,6 +5923,35 @@ def test_an_unknown_plane_in_the_state_file_does_not_block_disabling_another_pro
     assert state_of(root)["products"] == {}
 
 
+def test_a_plane_owned_only_by_a_retired_product_survives_its_requirer_going(root):
+    """mm-retire X2: inference owned only by product:memory, coder (coding-agent) requires it.
+
+    Retiring the owner left inference unowned but still NEEDED, so the first cut did not
+    re-own it - and `disable coding-agent` then printed `removed planes: inference, coder`,
+    dropping a running `local` inference. RED at bc8990e."""
+    _write_state(root, {
+        "version": 1,
+        "planes": {
+            "frontend": {"context": None, "profiles": [], "owners": {"plane": []}},
+            "inference": {"context": None, "profiles": ["local"], "owners": {"product:memory": ["local"]}},
+            "memory": {"context": None, "profiles": [], "owners": {"product:memory": []}},
+            "coder": {"context": None, "profiles": [], "owners": {"product:coding-agent": []}},
+        },
+        "products": {"memory": {"headless": False}, "coding-agent": {"headless": False}},
+    })
+    state = stack.State.load(root / stack.STATE_REL)
+    planes, products, kept = state.forget_retired(_MANIFEST)
+    assert (planes, products, kept) == (["memory"], ["memory"], ["inference"])
+    assert state.owners_of("inference") == {stack.DIRECT: ["local"]}
+    code, out, _ = run(root, "disable", "coding-agent")
+    assert code == 0, out
+    assert "removed planes: coder" in out and "inference" not in out.split("removed planes:")[1].splitlines()[0]
+    data = state_of(root)
+    assert set(data["planes"]) == {"frontend", "inference"}
+    assert data["planes"]["inference"]["profiles"] == ["local"]
+    assert data["planes"]["inference"]["owners"] == {"plane": ["local"]}
+
+
 def test_disable_help_says_exactly_what_it_removes():
     parser = stack.build_parser()
     sub = next(a for a in parser._actions if isinstance(a, stack.argparse._SubParsersAction))

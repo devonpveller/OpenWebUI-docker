@@ -2845,8 +2845,7 @@ function Invoke-HealthCheck {
     Confirm-AuxiliaryContainer -Container "llm-gateway-ui" -RestartWaitSeconds 15 | Out-Null
 
     # --- remaining main-stack backup sidecars (cron loops; openwebui-backup
-    # is confirmed above;
- portal backups (caddy/authelia) are
+    # is confirmed above; portal backups (caddy/authelia) are
     # deliberately NOT here - the portal has its own lifecycle (portal-on/off)
     # and must not be auto-started; OB/agent-org backups live in their own
     # Invoke-*Health blocks. Test-BackupRecency below watches everyone's OUTPUT.
