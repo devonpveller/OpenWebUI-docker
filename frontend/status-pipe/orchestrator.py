@@ -51,8 +51,8 @@ compose projects: main `ai-stack` + separate `open-brain`).
   Output:   System Health Report — Docker services, network connectivity,
             AI Stack Services (live HTTP probes grouped by plane), system
             resources, container environment.
-  Coverage: 10 probe-backed services across every plane (core, memory,
-            search, little-coder, aux, OB1).
+  Coverage: 8 probe-backed services across every plane (core, search,
+            little-coder, aux, OB1).
 
 ─ Tailnet inventory  ──────────────────────────── → tailscale_serve_pipe
   Triggers: inventory · show services · list services · show tailnet ·
