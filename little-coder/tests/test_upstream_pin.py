@@ -226,3 +226,19 @@ def test_build_patcher_fails_on_a_missing_target():
     src = PATCHER.read_text(encoding="utf-8")
     block = src[src.index("if (!existsSync(file))"):src.index("if (readFileSync(file")]
     assert "failed += 1" in block and "MISSING TARGET" in block and "SKIP" not in block
+
+
+# --- default model for launches without --model (cf-lc-upgrade attempt 4, tester finding X4) ----
+# 1.11.0+: when a launch passes no --model and is not headless (1.20 counts only `-p` / `--mode`,
+# NOT `--print`), the launcher injects models.json's top-level `default` - the user file's wins
+# over upstream's shipped `llamacpp/qwen3.6-35b-a3b`, which the gateway does not serve.
+
+
+def test_models_json_default_is_the_daemons_model():
+    import json
+
+    models = json.loads((LC / "config" / "models.json").read_text(encoding="utf-8"))
+    cfg = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+    assert models.get("default") == cfg["agent"]["model"]
+    provider, _, model_id = models["default"].partition("/")
+    assert model_id in [m["id"] for m in models["providers"][provider]["models"]]
