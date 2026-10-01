@@ -700,9 +700,10 @@ def check_committed(path: Path, root: Path, run=None) -> str:
     or raises a LabelError naming the file. The llama-swap config the render mounts must be, byte for
     byte, the blob committed at HEAD of the STACK ROOT's own checkout:
 
-      - git runs as `git --no-replace-objects -c core.useReplaceRefs=false -C <root>` with every
-        `GIT_*` variable removed from its environment (then GIT_NO_REPLACE_OBJECTS=1 and an empty
-        GIT_GRAFT_FILE set), and `git rev-parse --show-toplevel` must be the root itself - so
+      - git runs as `git --no-replace-objects -c core.useReplaceRefs=false -c core.fsmonitor=false
+        -C <root>` (no fsmonitor program runs) with every `GIT_*` variable removed from its
+        environment (then GIT_NO_REPLACE_OBJECTS=1 and an empty GIT_GRAFT_FILE set), and
+        `git rev-parse --show-toplevel` must be the root itself - so
         `HEAD:<path>` is the blob in HEAD's own tree, never a `refs/replace/*` substitute;
       - the path is taken AS THE RENDER NAMES IT, never resolved: it must lie under the root with no
         `..` segment (pathlib has already dropped `.` segments and doubled separators, which name
@@ -725,10 +726,10 @@ def check_committed(path: Path, root: Path, run=None) -> str:
     THREAT MODEL (operator decision, 2026-09-29): this protects against ORDINARY AND ACCIDENTAL
     edits - uncommitted/staged edits, index flags, symlinks, junctions, nested repos, GIT_* overrides
     (GIT_ALTERNATE_OBJECT_DIRECTORIES included), filters, attributes, replace refs, an fsmonitor
-    program, a loose object overwritten in place. It does NOT protect against someone who can write
-    to .git's internals (a forged tree or commit with a valid id, an alternates store or pack naming
-    HEAD's ids, rewritten refs) or to the stack's own code - such a person can edit scripts/stack
-    directly. Those are out of scope by decision.
+    program, a loose BLOB overwritten in place. It does NOT protect against someone who can write
+    to .git's internals (a forged loose tree or commit with a valid id, an alternates store or pack
+    naming HEAD's ids, rewritten refs) or to the stack's own code - such a person can edit
+    scripts/stack directly. Those are out of scope by decision.
 
     `run(args, cwd) -> (code, stdout bytes, stderr)` runs git (injectable for tests)."""
     run = run or _run_git
@@ -771,7 +772,7 @@ def check_committed(path: Path, root: Path, run=None) -> str:
         raise LabelError(f"{refuse} (it is not committed at HEAD)")
     oid = oid.decode("ascii", "replace").strip()
     if _object_id(b"blob", blob, oid) != oid:
-        # git does not verify an object on read: a loose object file overwritten in place
+        # git does not verify an object on read: a loose blob file overwritten in place
         raise LabelError(f"{refuse} (the object git returned for HEAD:{rel} does not hash to its id {oid})")
     data = path.read_bytes()
     if data.replace(b"\r\n", b"\n") != blob.replace(b"\r\n", b"\n"):
