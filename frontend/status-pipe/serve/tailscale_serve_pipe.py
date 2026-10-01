@@ -157,8 +157,6 @@ _STACK_ROSTER: List[str] = [
     # read-only /observe/* pass-through)
     "openwebui", "tailscale", "llm-gateway", "llm-queue",
     "llama-cpp", "llama-cpp-embed",
-    # main project — memory layer
-    "mnemory", "mnemory-cloud-gateway", "mnemory-backup",
     # main project — Private Search Gateway
     "vpn", "redis", "searxng", "gateway",
     # main project — little-coder control plane
@@ -301,7 +299,6 @@ def _build_scope_aliases() -> Dict[str, List[str]]:
         variants = {svc, svc.replace("-", " "), svc.replace("_", " ")}
         aliases[svc] = sorted(variants, key=len, reverse=True)
     extras: Dict[str, List[str]] = {
-        "mnemory":             ["memory service"],
         "open_notebook":       ["notebook"],
         "surrealdb":           ["surreal", "surreal db"],
         "open-terminal":       ["terminal"],
@@ -384,7 +381,6 @@ _HELP_COMMANDS: List[Dict[str, Any]] = [
         "description": "Filter the stack status to one service.",
         "phrases": [
             "status of llama-cpp", "status of llm-gateway",
-            "status of mnemory",
             "status of open-notebook", "status of surrealdb",
         ],
     },
@@ -456,7 +452,7 @@ def _format_help_message(commands: List[Dict[str, Any]]) -> str:
     lines.append(
         "_Service registry covers: openwebui, lmstudio, llama-cpp, "
         "llama-cpp-embed, open-notebook, open-notebook-api. "
-        "Stack scope adds mnemory, surrealdb, tailscale, "
+        "Stack scope adds surrealdb, tailscale, "
         "open-terminal._"
     )
     return "\n".join(lines)
@@ -666,16 +662,6 @@ _PROBES: Dict[str, Dict[str, Any]] = {
     "llm-queue": {
         "host": "llm-gateway", "port": 8080,
         "kind": "http_health", "health_path": "/observe/queue",
-    },
-    "mnemory": {
-        "host": "mnemory", "port": 8051,
-        "host_fallback": "127.0.0.1", "host_fallback_port": 8051,
-        "kind": "http_health",
-    },
-    "mnemory-cloud-gateway": {
-        "host": "mnemory-cloud-gateway", "port": 8060,
-        "host_fallback": "127.0.0.1", "host_fallback_port": 8060,
-        "kind": "http_health",
     },
     "open_notebook": {
         "host": "open_notebook", "port": 5055,
@@ -1089,7 +1075,6 @@ _LLM_KEY_NAMES: Dict[str, str] = {
     "ollama": "openwebui",
     "not-needed": "openbrain",
     "llama": "little-coder",
-    "mnemory": "mnemory",
     "": "anonymous",
     "no-key": "anonymous",
     "sk-admin": "admin",

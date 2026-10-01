@@ -53,7 +53,7 @@ PATTERNS = (
     ('AWS access key id', r'AKIA[0-9A-Z]{16}'),
     ('Telegram bot token', r'[0-9]{8,10}:AA[A-Za-z0-9_\-]{33}'),
     ('Private key block', r'-----BEGIN [A-Z ]*PRIVATE KEY-----'),
-    # This repo's own gateway-key format (mnemory/openbrain privacy gateways).
+    # This repo's own gateway-key format (the openbrain privacy gateways).
     ('ai-stack gateway key', r'gw-[A-Za-z0-9_\-]{30,}'),
 )
 COMPILED = tuple((name, re.compile(rx)) for name, rx in PATTERNS)

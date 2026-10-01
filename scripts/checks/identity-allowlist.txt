@@ -26,9 +26,6 @@
 .gitmodules | operator~https://github\.com/(?P<allow>[A-Za-z0-9][A-Za-z0-9-]{0,38})/OB1\.git | the OB1 submodule's remote; a --recurse-submodules clone resolves the pinned commit from it
 README.md | operator~https://github\.com/(?P<allow>[A-Za-z0-9][A-Za-z0-9-]{0,38})/OpenWebUI-docker\.git | the repository's own clone URL in the quickstart
 CLAUDE.md | operator~https://github\.com/(?P<allow>[A-Za-z0-9][A-Za-z0-9-]{0,38})/documentation-plans-ai-stack\.git | the plan store's clone URL, which agents working in this repo must be able to clone beside it
-memory/README.md | operator~https://github\.com/(?P<allow>[A-Za-z0-9][A-Za-z0-9-]{0,38})/mnemory\.git | the mnemory fork the memory plane builds mnemory:local from; the clone command must name it
-stack.manifest.toml | operator~https://github\.com/(?P<allow>[A-Za-z0-9][A-Za-z0-9-]{0,38})/mnemory\.git | the same mnemory clone command, as the manifest's remedy for a missing sibling checkout
-scripts/stack/test_stack.py | operator~https://github\.com/(?P<allow>[A-Za-z0-9][A-Za-z0-9-]{0,38})/mnemory\.git | the test pins that manifest remedy text byte for byte
 .claude/skills/stack-map/metadata.json | operator~"github": "(?P<allow>[A-Za-z0-9][A-Za-z0-9-]{0,38})" | skill authorship metadata: the same public account every commit in this repository is authored by
 little-coder/tests/test_sanitize.py | operator~github\.com/(?P<allow>[A-Za-z0-9][A-Za-z0-9-]{0,38})/monogame-engine\.git | a repo-URL fixture in a file that also holds synthetic credential fixtures, so the secret guard refuses any commit touching it; replacing the owner needs that file handled first (see the item's findings)
 

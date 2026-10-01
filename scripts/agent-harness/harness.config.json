@@ -463,7 +463,6 @@
       ".env.test",
       "frontend/.env",
       "inference/.env",
-      "memory/.env",
       "search/.env",
       "coder/.env",
       "portal/.env",

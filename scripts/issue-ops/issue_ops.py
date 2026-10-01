@@ -881,7 +881,6 @@ def cmd_archive(effort_id: str) -> int:
 PLANES = {  # plane → (compose file, compose project name for native-network name resolution)
     "frontend": ("frontend/docker-compose.yml", "frontend"),
     "inference": ("inference/docker-compose.yml", "inference"),
-    "memory": ("memory/docker-compose.yml", "memory"),
     "search": ("search/docker-compose.yml", "search"),
     "coder": ("coder/docker-compose.yml", "coder"),
     "ob1": ("OB1/docker/docker-compose.yml", "docker"),

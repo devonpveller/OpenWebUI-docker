@@ -111,7 +111,6 @@ try {
   # isn't listed here AND isn't in $intentionallyExcluded.
   $backupCoverage = @{
     'openwebui-data'         = 'openwebui-backup'
-    'mnemory-data'           = 'mnemory-backup'
     'little-coder-journals'  = 'little-coder-backup'
     'little-coder-skill'     = 'little-coder-backup'
     'little-coder-cohorts'   = 'little-coder-backup'
@@ -139,7 +138,7 @@ try {
 
   # ----- Pre-flight: ensure ./backups/<service>/ dirs exist ----------
   $expectedBackupDirs = @(
-    'caddy', 'authelia', 'mnemory', 'openwebui', 'little-coder',
+    'caddy', 'authelia', 'openwebui', 'little-coder',
     'openbrain-db', 'openbrain-wiki', 'open-notebook',
     'tailscale', 'lm-models',
     'agent-bridge-db', 'mattermost-db',

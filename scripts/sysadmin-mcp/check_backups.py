@@ -50,7 +50,6 @@ _ARTIFACT_EXTS = (".tar.gz", ".dump", ".sql.gz")
 # threshold (one missed nightly run + slack); lm-models is weekly, so ~8.5 days.
 _EXPECTED = [
     ("openwebui",        "openwebui-backup",        36),
-    ("mnemory",          "mnemory-backup",          36),
     ("little-coder",     "little-coder-backup",     36),
     ("openbrain-db",     "openbrain-db-backup",     36),
     ("openbrain-wiki",   "openbrain-wiki-backup",   36),

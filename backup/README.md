@@ -11,7 +11,6 @@ referencing `../backup` without that list changing too.
 |---|---|
 | frontend | bind mount: `openwebui-backup.sh`, `generic-tar-backup.sh` (tailscale-backup) |
 | inference | bind mount: `llm-gateway-backup.sh`, `generic-tar-backup.sh` (`inference/compose/backups.yml`) |
-| memory | bind mount: `mnemory-backup.sh` |
 | coder | bind mount: `little-coder-backup.sh` |
 | portal | build context `../backup` (`Dockerfile`, for the caddy-backup and authelia-backup images); bind mount: `caddy-backup.sh`, `authelia-backup.sh` |
 | agent-org | bind mount: `pg-backup.sh`, `generic-tar-backup.sh` |
@@ -19,7 +18,7 @@ referencing `../backup` without that list changing too.
 Each sidecar mounts its script read-only at `/scripts/backup.sh`. OB1 is not a
 consumer: its backup sidecars and their scripts live in `OB1/docker/backup/`.
 
-`openwebui-restore.sh` and `mnemory-restore.sh` are run by hand; the restore
+`openwebui-restore.sh` is run by hand; the restore
 procedure is `documentation/runbooks/backup-restore-runbook.md`. The artifacts
 the sidecars write go to `backups/` (plural), not here.
 

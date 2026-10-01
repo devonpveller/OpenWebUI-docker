@@ -10,8 +10,8 @@
 # .env or a cache dropped in this directory is out by default rather than by
 # someone remembering to add it.
 # NOTE: every other service builds from a context inside its own plane - coder
-# spells it ../little-coder, portal ./config/watcher, search ./gateway, memory
-# ../../mnemory, each RELATIVE TO ITS OWN compose file and not to this one -
+# spells it ../little-coder, portal ./config/watcher, search ./gateway, each
+# RELATIVE TO ITS OWN compose file and not to this one -
 # and this .dockerignore does NOT affect any of them. Nothing builds from the
 # repo root any more, so there is nothing left there for a root .dockerignore
 # to guard.

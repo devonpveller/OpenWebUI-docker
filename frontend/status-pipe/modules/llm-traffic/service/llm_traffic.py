@@ -57,7 +57,6 @@ KEY_FRIENDLY_NAMES = {
     "ollama": "openwebui (chat + embed)",
     "not-needed": "openbrain (research / mcp / wiki / entity)",
     "llama": "little-coder",
-    "mnemory": "mnemory",
     "": "unkeyed / anonymous",
     "no-key": "unkeyed / anonymous",
     "sk-admin": "admin / ad-hoc",

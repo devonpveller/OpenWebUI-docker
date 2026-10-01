@@ -18,7 +18,7 @@
 # A single GPU is shared by all models defined here. Only one model is
 # resident at a time; llama-swap unloads the previous server when a request
 # arrives for a different model id. Keep clients pinned to the same id
-# (see docker-compose.yml `LLM_MODEL` for mnemory) to avoid swap thrash.
+# to avoid swap thrash.
 
 listen: 0.0.0.0:8080
 healthCheckTimeout: 300

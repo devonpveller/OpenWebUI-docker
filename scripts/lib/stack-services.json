@@ -72,11 +72,6 @@
       "file": "inference/docker-compose.yml",
       "env_file": null
     },
-    "memory": {
-      "compose": "docker compose -f memory/docker-compose.yml",
-      "file": "memory/docker-compose.yml",
-      "env_file": null
-    },
     "search": {
       "compose": "docker compose -f search/docker-compose.yml",
       "file": "search/docker-compose.yml",
@@ -164,18 +159,6 @@
         "project": "inference",
         "critical": false,
         "note": "Admin-UI sidecar (tailnet :8445/ui + litellm.<PUBLIC_DOMAIN>); serves no inference"
-      }
-    ],
-    "memory": [
-      {
-        "container": "mnemory",
-        "project": "memory",
-        "critical": false
-      },
-      {
-        "container": "mnemory-cloud-gateway",
-        "project": "memory",
-        "critical": false
       }
     ],
     "search": [
@@ -406,11 +389,6 @@
         "container": "tailscale-backup",
         "profile": "tailscale",
         "project": "frontend",
-        "critical": false
-      },
-      {
-        "container": "mnemory-backup",
-        "project": "memory",
         "critical": false
       },
       {

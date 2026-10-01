@@ -169,7 +169,7 @@ def test_volume_age() -> None:
     import time as _t
     now = int(_t.time())
     root = "/mnt/docker-desktop-disk/data/docker/volumes"
-    vols = ["ai-stack_openwebui-data", "ai-stack_mnemory-data", "deadbeef" * 8, "some_other_vol"]
+    vols = ["ai-stack_openwebui-data", "ai-stack_tailscale-data", "deadbeef" * 8, "some_other_vol"]
 
     def fake_wsl(args, timeout=30):
         cold = now - 24 * 86400          # the real Aug-20 orphan: 24 days at time of writing
@@ -178,7 +178,7 @@ def test_volume_age() -> None:
             f"{cold} {root}/ai-stack_openwebui-data",
             f"{cold} {root}/ai-stack_openwebui-data/_data",
             f"{cold} {root}/ai-stack_openwebui-data/_data/webui.db",
-            f"{warm} {root}/ai-stack_mnemory-data/_data/state.db",
+            f"{warm} {root}/ai-stack_tailscale-data/_data/state.db",
             f"{now} {root}",                      # the root itself must not become a volume
             "garbage-with-no-space",              # malformed lines must be skipped, not crash
             f"notanumber {root}/some_other_vol/_data",
@@ -210,7 +210,7 @@ def test_volume_age() -> None:
               "ai-stack_openwebui-data" not in vr["dangling_protected_DO_NOT_PRUNE"],
               str(vr["dangling_protected_DO_NOT_PRUNE"]))
         check("recently-written protected volume stays DO_NOT_PRUNE",
-              "ai-stack_mnemory-data" in vr["dangling_protected_DO_NOT_PRUNE"],
+              "ai-stack_tailscale-data" in vr["dangling_protected_DO_NOT_PRUNE"],
               str(vr["dangling_protected_DO_NOT_PRUNE"]))
         check("unknown age stays DO_NOT_PRUNE (conservative)",
               "some_other_vol" not in cold_names, str(cold_names))

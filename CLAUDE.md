@@ -1,7 +1,7 @@
 # CLAUDE.md — ai-stack workspace
 
 Self-hosted AI stack: Open WebUI + local llama.cpp inference behind a LiteLLM gateway
-with an admission queue, a memory layer (mnemory + Open Brain), a private search
+with an admission queue, a memory layer (Open Brain), a private search
 gateway, a coding agent with a governed multi-agent org, and a gated internet portal.
 Each plane is its own compose project around a root `docker-compose.yml` that declares
 only the shared `ai-stack_*` networks. [`README.md`](README.md) is the map; this file is
@@ -16,7 +16,7 @@ the rules.
   manifest. To turn something on: `stack.py enable <plane|product>`, then `up`
   (`enable` merges into the state file; `init --force` replaces it).
 - **Each plane's README is the detailed one:** [frontend](frontend/README.md) ·
-  [inference](inference/README.md) · [memory](memory/README.md) · [search](search/README.md)
+  [inference](inference/README.md) · [search](search/README.md)
   · [coder](coder/README.md) · [portal](portal/README.md). Topology: the `/stack-map` skill
   or [its reference](.claude/skills/stack-map/references/workspace-stacks.md).
 - **Every plane owns its `.env`** (from `<plane>/.env.example`) and its own

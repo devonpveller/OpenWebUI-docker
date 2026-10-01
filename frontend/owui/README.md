@@ -13,8 +13,8 @@ the id is cryptic the filename uses the friendly name instead — e.g. the
 
 | Folder | OWUI kind | Files |
 |--------|-----------|-------|
-| `tools/`   | Tools (model-callable)        | `superpowers_tool`, `fileshed`, `mnemory`, `deep_research`, `github_chat_mcp_tools` (GitHub Repo Analyzer) |
-| `filters/` | Filter functions              | `context_window_manager`, `mnemory_persistent_memory` |
+| `tools/`   | Tools (model-callable)        | `superpowers_tool`, `fileshed`, `deep_research`, `github_chat_mcp_tools` (GitHub Repo Analyzer) |
+| `filters/` | Filter functions              | `context_window_manager` |
 | `pipes/`   | Pipe functions (custom models)| `server_status` (the AI-Stack unified status pipe), `little_coder`, `githelper`, `github_chat_mcp` |
 | `actions/` | Action functions (buttons)    | `copy_research_note`, `copy_sources` (`add_web_sources_to_knowledge` retired 2026-08-20 — wrote into the retired OWUI Knowledge layer; deactivated in webui.db, snapshot in `scripts/archive/owui-retired/`) |
 | `skills/`  | Skills (attached to models via `skillIds`) | `skill-creator`, `docx`, `canvas-design`, `doc-coauthoring`, `github-repo-analyzer`, `feature-validation-workflow`, `github-repo-expert`, `openwebui-tools` |
@@ -26,11 +26,10 @@ file named `github-chat-mcp.md`). All 8 exported live from `webui.db`
 2026-08-20; the old partial root `skills/` folder (3 of 8, stale names) was
 retired the same day in favour of this complete set.
 
-`manifest.csv` lists `file, type, name, owui_id, sha256` for all 13 tool/function
-files + the 8 skills — 21 rows (the "16" this line carried until 2026-09-06 was
-the pre-retirement count; `add_web_sources_to_knowledge`, `code_agent` and
-`code_agent_tools` left the manifest in August and the total was never
-recomputed). The `sha256` column is the CR-normalized digest of the repo file,
+`manifest.csv` lists `file, type, name, owui_id, sha256` for all 11 tool/function
+files + the 8 skills — 19 rows (`add_web_sources_to_knowledge`, `code_agent` and
+`code_agent_tools` left the manifest in August 2026; the memory-layer tool and
+filter left with mm-retire, 2026-09-30). The `sha256` column is the CR-normalized digest of the repo file,
 which is what `scripts/checks/check-owui-drift.ps1` compares against the live
 row. Functions are
 async-compatible with OWUI **0.11.0** (re-verified 2026-08-20 against v0.11.0

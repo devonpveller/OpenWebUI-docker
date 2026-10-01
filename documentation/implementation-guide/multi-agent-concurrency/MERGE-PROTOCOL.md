@@ -103,7 +103,7 @@ Rules while you work:
   .\scripts\agent-harness\lease.ps1 -Release -Name open-brain -Owner <your-wt-id>
   ```
 
-  Lease names = the compose planes (`lease-names.conf`): `inference`, `memory`,
+  Lease names = the compose planes (`lease-names.conf`): `inference`,
   `search`, `coder`, `frontend`, `open-brain`, `agent-org`, `portal`. Rules:
   1. A multi-plane test requests all names in **one call**
      (`-Name "frontend,open-brain"`) — sorted, all-or-nothing, so two agents
@@ -444,7 +444,7 @@ files, so provision the merge worktree before merging, then check it by hand:
 ```powershell
 $m = '<main-checkout>/.claude/worktrees/merge-line'
 git -C $m submodule update --init OB1                      # OB1 at the line's pin
-foreach ($d in '.', 'frontend', 'inference', 'memory', 'search', 'coder', 'portal', 'agent-org/docker', 'OB1/docker') {
+foreach ($d in '.', 'frontend', 'inference', 'search', 'coder', 'portal', 'agent-org/docker', 'OB1/docker') {
     if (-not (Test-Path "$m/$d/.env")) { Copy-Item "$m/$d/.env.example" "$m/$d/.env" } }
 # after `merge --no-ff ... --no-commit` (or before, on the line): OB1 at the MERGED pin
 git -C $m submodule update OB1

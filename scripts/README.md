@@ -45,8 +45,8 @@ were retired by the follow-up item (ac-legacy-recovery) rather than fixed.
 
 - `stack-watchdog.ps1` — the 60 s watchdog (Scheduled Task `StackWatchdog`;
   renamed from check-tailscale-health 2026-08-21). Covers: tailnet serves,
-  all eight compose projects in `scripts/lib/stack-services.json` (ai-stack,
-  frontend, inference, memory, search, coder, open-brain, agent-org — the
+  all seven compose projects in `scripts/lib/stack-services.json` (ai-stack,
+  frontend, inference, search, coder, open-brain, agent-org — the
   portal is driven separately), Docker-engine restart, backup recency,
   claude-bridge health, Telegram alerting. Log stays at
   `logs/tailscale-health.log` for continuity.
