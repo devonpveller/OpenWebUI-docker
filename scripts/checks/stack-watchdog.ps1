@@ -673,7 +673,7 @@ function Repair-OpenTerminal {
 # Generic helper: ensure a non-critical compose container is running.
 # Uses Test-ServiceHealth (which reads docker's compose-defined healthcheck
 # status, or just the running state for containers without a healthcheck).
-# Used for mnemory and the backup sidecars -
+# Used for the backup sidecars and other auxiliaries -
 # none are required for the core OpenWebUI/Tailscale/LLM path, so failures
 # are logged but do not fail the overall health check.
 #
@@ -877,8 +877,7 @@ function Repair-LlamaCppEmbed {
 # open_notebook depends on surrealdb; if surrealdb is down, the API will report
 # dbStatus != "online" but still return 200, so we only require a 200 response
 # here and treat surrealdb as a separate auxiliary check.
-# The image ships only Python (no wget/curl), so the probe uses urllib like
-# the mnemory healthcheck pattern.
+# The image ships only Python (no wget/curl), so the probe uses urllib.
 function Test-OpenNotebookHealth {
     [CmdletBinding()]
     param()
@@ -949,7 +948,7 @@ function Repair-OpenNotebook {
 
 # ---------------------------------------------------------------------------
 # Extended-plane checks (added 2026-06-05): the private web-search gateway,
-# little-coder, mnemory-cloud-gateway, and the SEPARATE "open-brain" compose project
+# little-coder, and the SEPARATE "open-brain" compose project
 # (including the openbrain-mcp stale-DB-pool guard that caused Open WebUI tool
 # 500s / "Broken pipe" on 2026-06-05).
 # ---------------------------------------------------------------------------
@@ -1287,7 +1286,6 @@ $ExpectedBackupRecency = @(
     @{ Dir = 'llm-gateway';     MaxAgeHours = 52 }
     @{ Dir = 'lm-models';       MaxAgeHours = 220 }  # weekly cron (Sun 01:00) + slack
     @{ Dir = 'mattermost-db';   MaxAgeHours = 52 }
-    @{ Dir = 'mnemory';         MaxAgeHours = 52 }
     @{ Dir = 'open-notebook';   MaxAgeHours = 52 }
     @{ Dir = 'openbrain-db';    MaxAgeHours = 52 }
     @{ Dir = 'openbrain-wiki';  MaxAgeHours = 52 }
@@ -2737,7 +2735,7 @@ function Invoke-HealthCheck {
         Write-LogEntry "llama-cpp connectivity failed, attempting recovery..." "WARN"
         if (-not (Repair-LlamaCppConnectivity)) {
             Write-LogEntry "Failed to restore llama-cpp connectivity" "ERROR"
-            Send-CatastropheAlert -Key 'inference' -Message "INFERENCE is down - llama-cpp is unreachable through the gateway and auto-repair failed. Every LLM path (OpenWebUI, mnemory, research, the agent org) is dead. Reply 'status' or 'recover'."
+            Send-CatastropheAlert -Key 'inference' -Message "INFERENCE is down - llama-cpp is unreachable through the gateway and auto-repair failed. Every LLM path (OpenWebUI, research, the agent org) is dead. Reply 'status' or 'recover'."
             $script:HealthIssues += 'llama-cpp'
         } else {
             Resolve-Catastrophe -Key 'inference' -Message "inference (llama-cpp) is reachable again."
@@ -2758,12 +2756,12 @@ function Invoke-HealthCheck {
 
     # Test llama-cpp-embed connectivity independently. The main llama-cpp test
     # above does not exercise the embed endpoint, so a broken embed server can
-    # silently degrade RAG and mnemory while the rest of the stack looks fine.
+    # silently degrade RAG and every embedding caller while the rest of the stack looks fine.
     # Non-fatal: main inference still works without embeddings.
     if (-not (Test-LlamaCppEmbedConnectivity)) {
         Write-LogEntry "llama-cpp-embed connectivity failed, attempting recovery..." "WARN"
         if (-not (Repair-LlamaCppEmbed)) {
-            Write-LogEntry "Failed to restore llama-cpp-embed - embedding/RAG/mnemory features may be degraded" "WARN"
+            Write-LogEntry "Failed to restore llama-cpp-embed - embedding/RAG features may be degraded" "WARN"
         }
     }
 
@@ -2777,10 +2775,7 @@ function Invoke-HealthCheck {
     }
 
     # Verify remaining compose containers (non-critical - log + attempt recovery
-    # but do not fail the overall health check). Order matters: mnemory depends
-    # on llama-cpp + llama-cpp-embed, which are confirmed healthy above.
-    Confirm-AuxiliaryContainer -Container "mnemory"            -RestartWaitSeconds 20 | Out-Null
-    Confirm-AuxiliaryContainer -Container "mnemory-backup"      -RestartWaitSeconds 10 | Out-Null
+    # but do not fail the overall health check).
     Confirm-AuxiliaryContainer -Container "openwebui-backup"    -RestartWaitSeconds 10 | Out-Null
     # surrealdb has no HTTP healthcheck (WS-only); just verify the container is up.
     # open_notebook gets a real API probe below - surrealdb must be up first since
@@ -2824,8 +2819,6 @@ function Invoke-HealthCheck {
     Confirm-AuxiliaryContainer -Container "little-coder" -RestartWaitSeconds 15 | Out-Null
     Confirm-AuxiliaryContainer -Container "lc-egress"    -RestartWaitSeconds 10 | Out-Null
 
-    # --- mnemory MCP gateway (the bridge clients reach; mnemory itself above) ---
-    Confirm-AuxiliaryContainer -Container "mnemory-cloud-gateway" -RestartWaitSeconds 10 | Out-Null
 
     # --- inference gateway plane (LiteLLM front door + admission queue) ---
     # ALL inference flows through llm-gateway (the llama-cpp:8080 alias) and
@@ -2851,8 +2844,9 @@ function Invoke-HealthCheck {
     Confirm-AuxiliaryContainer -Container "llm-gateway-db" -RestartWaitSeconds 15 | Out-Null
     Confirm-AuxiliaryContainer -Container "llm-gateway-ui" -RestartWaitSeconds 15 | Out-Null
 
-    # --- remaining main-stack backup sidecars (cron loops; mnemory-backup and
-    # openwebui-backup are confirmed above; portal backups (caddy/authelia) are
+    # --- remaining main-stack backup sidecars (cron loops; openwebui-backup
+    # is confirmed above;
+ portal backups (caddy/authelia) are
     # deliberately NOT here - the portal has its own lifecycle (portal-on/off)
     # and must not be auto-started; OB/agent-org backups live in their own
     # Invoke-*Health blocks. Test-BackupRecency below watches everyone's OUTPUT.

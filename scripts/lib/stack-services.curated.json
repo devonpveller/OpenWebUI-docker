@@ -91,9 +91,6 @@
     "inference": {
       "plane": "inference"
     },
-    "memory": {
-      "plane": "memory"
-    },
     "search": {
       "plane": "search"
     },
@@ -173,18 +170,6 @@
         "project": "inference",
         "critical": false,
         "note": "Admin-UI sidecar (tailnet :8445/ui + litellm.<PUBLIC_DOMAIN>); serves no inference"
-      }
-    ],
-    "memory": [
-      {
-        "container": "mnemory",
-        "project": "memory",
-        "critical": false
-      },
-      {
-        "container": "mnemory-cloud-gateway",
-        "project": "memory",
-        "critical": false
       }
     ],
     "search": [
@@ -416,11 +401,6 @@
         "project": "frontend",
         "critical": false,
         "profile": "tailscale"
-      },
-      {
-        "container": "mnemory-backup",
-        "project": "memory",
-        "critical": false
       },
       {
         "container": "little-coder-backup",

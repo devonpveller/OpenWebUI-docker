@@ -58,13 +58,12 @@ class PriorityPolicy:
 
 
 # Default ordering from design §8c, expressed over the key strings callers
-# actually present today (legacy direct callers: mnemory once sent "ollama",
-# little-coder sends "llama", others send junk/empty). Tune in P2 as real keys
+# actually present today (legacy direct callers sent "ollama", little-coder
+# sends "llama", others send junk/empty). Tune in P2 as real keys
 # are attributed. Budgets: interactive short, batch long.
 _DEFAULT_CLASSES: dict[str, PriorityClass] = {
     "owui-chat": PriorityClass("owui-chat", rank=0, acceptable_wait_s=30.0),
-    "ollama": PriorityClass("mnemory", rank=1, acceptable_wait_s=60.0),
-    "mnemory": PriorityClass("mnemory", rank=1, acceptable_wait_s=60.0),
+    "ollama": PriorityClass("ollama", rank=1, acceptable_wait_s=60.0),
     "ob-mcp": PriorityClass("ob-mcp", rank=1, acceptable_wait_s=60.0),
     "llama": PriorityClass("lc-coder", rank=2, acceptable_wait_s=120.0),
     "lc-coder": PriorityClass("lc-coder", rank=2, acceptable_wait_s=120.0),

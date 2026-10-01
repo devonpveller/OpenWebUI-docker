@@ -112,7 +112,6 @@ function Invoke-Under {
 $Script:ProjectOfFile = @{
     "frontend\docker-compose.yml"  = "frontend"
     "inference\docker-compose.yml" = "inference"
-    "memory\docker-compose.yml"    = "memory"
     "search\docker-compose.yml"    = "search"
     "coder\docker-compose.yml"     = "coder"
     "portal\docker-compose.yml"    = "portal"
@@ -136,7 +135,6 @@ function Reset-FakeHost {
         @{ Name = "tailscale";          Project = "frontend";  Service = "tailscale";          State = "running"; Health = @("healthy") },
         @{ Name = "llm-gateway";        Project = "inference"; Service = "llm-gateway";        State = "running"; Health = @("healthy") },
         @{ Name = "llama-cpp-upstream"; Project = "inference"; Service = "llama-cpp-upstream"; State = "running"; Health = @("healthy") },
-        @{ Name = "mnemory";            Project = "memory";    Service = "mnemory";            State = "running"; Health = @("healthy") },
         @{ Name = "search-gateway";     Project = "search";    Service = "gateway";            State = "running"; Health = @("healthy") },
         @{ Name = "little-coder";       Project = "coder";     Service = "little-coder";       State = "running"; Health = @("healthy") },
         @{ Name = "caddy";              Project = "portal";    Service = "caddy";              State = "running"; Health = @("healthy") },
@@ -270,7 +268,7 @@ function Test-HeadStub {
     Write-Host "[head, stub docker] $Path"
     Install-Stub
     try {
-        foreach ($n in @("openwebui", "tailscale", "llm-gateway", "llama-cpp-upstream", "mnemory", "search-gateway", "little-coder")) {
+        foreach ($n in @("openwebui", "tailscale", "llm-gateway", "llama-cpp-upstream", "search-gateway", "little-coder")) {
             Reset-FakeHost
             $r = Invoke-Under $Path ([scriptblock]::Create("Wait-ForHealthy '$n' 10"))
             $composeCalls = @($Script:Calls | Where-Object { $_ -like "compose*" })

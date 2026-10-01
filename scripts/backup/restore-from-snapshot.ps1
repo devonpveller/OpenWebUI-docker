@@ -108,7 +108,7 @@ $lmModelsDir = Get-PlaneBindDir -EnvFile 'inference\.env' -Key 'LM_MODELS_DIR' -
 # each entry names its Compose file (+ ComposeArgs where the project needs a
 # PROFILE - no entry needs an --env-file since sl-env-split, 2026-09-19: each
 # project directory holds its own .env). Volume targets carry the project prefixes
-# (frontend_/memory_/coder_/portal_) - the old ai-stack_* volumes are the
+# (frontend_/coder_/portal_) - the old ai-stack_* volumes are the
 # superseded pre-split copies, NOT the live data.
 $catalog = [ordered]@{
   'caddy' = @{
@@ -142,12 +142,6 @@ $catalog = [ordered]@{
     # describes THIS host's deployment; a `stock` host would carry
     # `--profile stock` and name `openwebui-stock` here.
     ComposeArgs = @('--profile','gpu','--profile','tailscale')
-  }
-  'mnemory' = @{
-    Archives = @(@{ Pattern = "mnemory-*.tar.gz"; Target = 'memory_mnemory-data'; Type = 'volume-tar' })
-    Stop    = @('mnemory','mnemory-cloud-gateway')
-    Start   = @('mnemory','mnemory-cloud-gateway')
-    Compose = 'memory\docker-compose.yml'
   }
   # little-coder writes ONE archive holding all five volumes as top-level directories
   # (backup/little-coder-backup.sh: `tar czf ... -C /data .` over /data/{journals,skill,
@@ -245,7 +239,7 @@ $catalog = [ordered]@{
 # Restore order — services that other services depend on first.
 $restoreOrder = @(
   'openbrain-db', 'openbrain-wiki', 'open-notebook',
-  'mnemory', 'lm-models', 'tailscale',
+  'lm-models', 'tailscale',
   'openwebui', 'little-coder',
   'ao-journals',
   'caddy', 'authelia'

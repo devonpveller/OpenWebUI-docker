@@ -23,7 +23,6 @@
 #
 #   frontend/   openwebui + tailscale (netns pair) + their backups   (K.5)
 #   inference/  llama.cpp upstreams + llm-queue + LiteLLM gateway    (K.1)
-#   memory/     mnemory + cloud gateway + backup                     (K.2)
 #   search/     Mullvad vpn + redis + searxng + gateway              (K.3)
 #   coder/      open-terminal + little-coder + lc-egress + backup    (K.4)
 #   portal/     internet front-end (portal-on.ps1 / portal-off.ps1)

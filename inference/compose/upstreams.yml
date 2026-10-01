@@ -101,8 +101,8 @@ services:
       - LLAMA_SWAP_QWEN36_27B_CTX_SIZE=${LLAMA_SWAP_QWEN36_27B_CTX_SIZE:-262144}
       - LLAMA_SWAP_QWEN36_27B_N_GPU_LAYERS=${LLAMA_SWAP_QWEN36_27B_N_GPU_LAYERS:-99}
       # parallel=2 -> two concurrent 131072-token lanes (256k / 2).
-      # Interactive chat no longer blocks behind a background mnemory
-      # extraction or a long research synthesis. Same model id.
+      # Interactive chat no longer blocks behind a background extraction
+      # or a long research synthesis. Same model id.
       - LLAMA_SWAP_QWEN36_27B_N_PARALLEL=${LLAMA_SWAP_QWEN36_27B_N_PARALLEL:-2}
       - LLAMA_SWAP_QWEN36_27B_BATCH=${LLAMA_SWAP_QWEN36_27B_BATCH:-1024}
       - LLAMA_SWAP_QWEN36_27B_UBATCH=${LLAMA_SWAP_QWEN36_27B_UBATCH:-512}

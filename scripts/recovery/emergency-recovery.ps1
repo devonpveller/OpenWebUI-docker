@@ -46,8 +46,6 @@ $ErrorActionPreference = "Stop"
 #    2026-08-21 Part K.1: inference\docker-compose.yml, driven below via
 #    Start-/Stop-InferenceStack. It owns llm-backend-net and attaches to the
 #    anchor's ai-stack_llm-net externally.)
-#   (the MEMORY plane -- mnemory, mnemory-cloud-gateway, mnemory-backup --
-#    is its own compose project since 2026-08-21 Part K.2: memory\docker-compose.yml)
 #   (the SEARCH plane -- vpn, redis, searxng, gateway -- is its own compose
 #    project since 2026-08-21 Part K.3: search\docker-compose.yml)
 #   (the CODER plane -- open-terminal, little-coder, lc-egress,
@@ -146,11 +144,6 @@ $Script:InferenceServices = @(
     "llm-gateway-db", "llm-gateway", "llm-gateway-ui",
     "llm-gateway-backup", "lm-models-backup"
 )
-
-# The MEMORY plane is a separate compose project since 2026-08-21 (Part K.2,
-# project name "memory"): mnemory + mnemory-cloud-gateway + mnemory-backup.
-$Script:MemoryCompose = "memory\docker-compose.yml"
-$Script:MemoryServices = @("mnemory", "mnemory-cloud-gateway", "mnemory-backup")
 
 # The SEARCH plane is a separate compose project since 2026-08-21 (Part K.3,
 # project name "search"): Mullvad vpn + redis + searxng + gateway. `vpn` and
@@ -741,21 +734,19 @@ function Test-BasicConnectivity {
         # across projects).
         $states = @{}
         $running = @(docker ps --format "{{.Names}}")
-        foreach ($svc in ($Script:InferenceServices + $Script:MemoryServices + $Script:SearchServices + $Script:CoderServices + $Script:FrontendServices)) {
+        foreach ($svc in ($Script:InferenceServices + $Script:SearchServices + $Script:CoderServices + $Script:FrontendServices)) {
             $states[$svc] = if ($running -contains $svc) { "running" } else { "absent" }
         }
 
         # Report container states grouped by plane so 20+ services stay readable.
         Write-Log "INFO" ("Core   - openwebui: {0}, llama-cpp-upstream: {1}, llama-cpp-embed-upstream: {2}, tailscale: {3}" -f `
             $states["openwebui"], $states["llama-cpp-upstream"], $states["llama-cpp-embed-upstream"], $states["tailscale"])
-        Write-Log "INFO" ("Memory - mnemory: {0}, mnemory-cloud-gateway: {1}" -f `
-            $states["mnemory"], $states["mnemory-cloud-gateway"])
         Write-Log "INFO" ("Search - vpn: {0}, redis: {1}, searxng: {2}, gateway: {3}" -f `
             $states["search-vpn"], $states["search-redis"], $states["searxng"], $states["search-gateway"])
         Write-Log "INFO" ("Coder  - open-terminal: {0}, little-coder: {1}, lc-egress: {2}" -f `
             $states["open-terminal"], $states["little-coder"], $states["lc-egress"])
         # (aux trio + backup sidecars report inside their own projects since
-        # Part K -- inference/memory/search/coder/frontend states above cover
+        # Part K -- inference/search/coder/frontend states above cover
         # the backups by name; the ON trio counts under OB1.)
 
         # Open Brain (OB1) -- separate compose project, reported as a count.
@@ -879,7 +870,7 @@ function Invoke-MinimalRecovery {
 
         # Ensure every auxiliary container is running (cheap no-op if already
         # up). Their depends_on only fires at the initial compose-up, so a
-        # llama-cpp-upstream restart can leave dependents (mnemory, the search gateway,
+        # llama-cpp-upstream restart can leave dependents (the search gateway,
         # the little-coder plane) degraded without this nudge. surrealdb must
         # precede open_notebook; the search/coder planes self-order via their
         # own depends_on.
@@ -888,8 +879,6 @@ function Invoke-MinimalRecovery {
         # llama-cpp-upstream restart drops nothing here (httpx reconnects), but
         # nudge them so a cold dependent comes back.
         docker compose -f $Script:InferenceCompose up -d llm-queue llm-gateway
-
-        docker compose -f $Script:MemoryCompose up -d
 
         docker compose -f $Script:SearchCompose up -d
         docker compose -f $Script:CoderCompose up -d
@@ -1082,7 +1071,7 @@ function Invoke-EmergencyRecovery {
 
     # -- Phase 1: Graceful shutdown in reverse dependency order -------------
     Write-Log "INFO" "Phase 1: Graceful shutdown"
-    Write-Log "WARN" "This restarts the full workspace: core, memory, search, coder planes + OB1"
+    Write-Log "WARN" "This restarts the full workspace: core, search, coder planes + OB1"
 
     # agent-org first (downstream of OB1 + the main stack's llm-net).
     Stop-AgentOrgStack
@@ -1095,10 +1084,6 @@ function Invoke-EmergencyRecovery {
 
     # Search project (its compose stop runs reverse dependency order).
     Stop-PlaneStack "search" $Script:SearchCompose
-
-
-    # Memory project (its compose stop orders gateway before mnemory).
-    Stop-PlaneStack "memory" $Script:MemoryCompose
 
     # Inference project -- stops after callers (compose handles its internal
     # reverse order: gateway -> llm-queue -> upstreams).
@@ -1155,9 +1140,6 @@ function Invoke-EmergencyRecovery {
         Write-Log "WARN" "Tailscale health check failed, testing connectivity..."
     }
 
-    # Memory project (mnemory -> cloud gateway -> backup; own project since K.2).
-    Start-PlaneStack "memory" $Script:MemoryCompose "mnemory" 90
-
     # (surrealdb / open_notebook / open-notebook-backup start with the OB1
     # project since K.5b; every backup sidecar starts with its plane.)
 
@@ -1201,8 +1183,6 @@ function Invoke-EmergencyRecovery {
         Write-Log "INFO" "Tailscale serve configuration:"
         docker exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status
 
-        Write-Log "INFO" "Mnemory status:"
-        docker exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>$null
         Write-Log "INFO" "open-notebook API status:"
         docker exec open_notebook python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5055/api/config').read().decode())" 2>$null
 
@@ -1218,8 +1198,7 @@ function Invoke-EmergencyRecovery {
         Write-Log "INFO" "surrealdb running state:"
         docker ps --filter "name=surrealdb" --format "table {{.Names}}\t{{.Status}}" 2>$null
 
-        Write-Log "INFO" "Memory + coder plane status:"
-        docker compose -f $Script:MemoryCompose ps --format "table {{.Service}}\t{{.Status}}" 2>$null
+        Write-Log "INFO" "Coder plane status:"
         docker compose -f $Script:CoderCompose ps --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Backup scheduler status:"
@@ -1295,7 +1274,6 @@ function Invoke-NuclearRecovery {
             @{ N = "frontend";  C = $Script:FrontendCompose },
             @{ N = "coder";     C = $Script:CoderCompose },
             @{ N = "search";    C = $Script:SearchCompose },
-            @{ N = "memory";    C = $Script:MemoryCompose },
             @{ N = "inference"; C = $Script:InferenceCompose })) {
         Write-Log "INFO" "Tearing down $($plane.N) project..."
         try { docker compose -f $plane.C down }
@@ -1319,7 +1297,6 @@ function Invoke-NuclearRecovery {
     # Inference first (every caller needs it), then the caller planes.
     Start-InferenceStack
     Start-PlaneStack "frontend" $Script:FrontendCompose "openwebui" 240
-    Start-PlaneStack "memory" $Script:MemoryCompose "mnemory" 90
     Start-PlaneStack "search" $Script:SearchCompose "search-gateway" 150
     Start-PlaneStack "coder" $Script:CoderCompose "little-coder" 120
 
@@ -1372,8 +1349,6 @@ function Invoke-GPUReset {
     Write-Log "INFO" "Stopping GPU-dependent services for reset..."
     try { docker compose -f $Script:InferenceCompose down }
     catch { Write-Log "WARN" "Inference teardown had issues: $_" }
-    try { docker compose -f $Script:MemoryCompose down }
-    catch { Write-Log "WARN" "Memory teardown had issues: $_" }
     try { docker compose -f $Script:FrontendCompose down }
     catch { Write-Log "WARN" "Frontend teardown had issues: $_" }
 
@@ -1397,10 +1372,7 @@ function Invoke-GPUReset {
                     Write-Log "SUCCESS" "llama-cpp-upstream GPU integration verified"
 
                     # Restart the planes that consume llama-cpp-upstream inference:
-                    # the memory layer, the little-coder plane, and OB1.
-                    docker compose -f $Script:MemoryCompose up -d
-                    Write-Log "INFO" "Mnemory layer started"
-
+                    # the little-coder plane, OB1 and the agent org.
                     docker compose -f $Script:CoderCompose up -d
                     Write-Log "INFO" "little-coder control plane started"
 

@@ -19,7 +19,7 @@ inference/frontend outage is acceptable. Step 0 is what makes this reversible.
 > | what breaks in the window | how it looks |
 > |---|---|
 > | `scripts/agent-harness/new-worktree.ps1` | provisions worktrees where **6 of 6** planes refuse to render; it warns in yellow, naming each missing file (it was 5 of 6 until the portal gained its guard) |
-> | `scripts/backup/restore-from-snapshot.ps1` | cannot stop or start any frontend/inference/memory/coder service - the `:?` guard refuses the render |
+> | `scripts/backup/restore-from-snapshot.ps1` | cannot stop or start any frontend/inference/coder service - the `:?` guard refuses the render |
 > | `scripts/recovery/emergency-recovery.ps1` | cannot start a plane, for the same reason; its FRONTEND PROFILES MISSING message now says so |
 > | `scripts/portal/portal-on.ps1` | REFUSES with `portal/.env not found` - deliberate, and new with this change |
 >
@@ -51,7 +51,7 @@ every plane was handed the same `--env-file`. It is now per plane:
 | `frontend/.env` | `COMPOSE_PROFILES=gpu,tailscale` | the CUDA build + the netns tailnet node |
 | `inference/.env` | `COMPOSE_PROFILES=local` | the GPU backends + `llm-queue` + `lm-models-backup` |
 | `portal/.env` | **absent, deliberately** | `internet` is passed on the command line by `portal-on.ps1`; exposing the stack must never be a standing setting |
-| `memory/.env`, `search/.env`, `coder/.env` | absent | those planes declare no profiles |
+| `search/.env`, `coder/.env` | absent | those planes declare no profiles |
 | the root `.env` | absent | the anchor declares no services and no profiles |
 
 **The single most dangerous mistake in this migration** is writing
@@ -85,7 +85,7 @@ a commit. Keep it until step 6 passes.
 ### 1. Create each plane file from its example
 
 ```powershell
-foreach ($p in 'frontend','inference','memory','search','coder','portal') {
+foreach ($p in 'frontend','inference','search','coder','portal') {
   Copy-Item "$p\.env.example" "$p\.env"
 }
 ```
@@ -95,12 +95,12 @@ foreach ($p in 'frontend','inference','memory','search','coder','portal') {
 For every variable in the table at the end of this runbook, take the value from
 the root `.env` and put it in the destination file.
 
-Each of the six plane files has exactly ONE variable carrying a `${...:?}`
+Each of the five plane files has exactly ONE variable carrying a `${...:?}`
 guard, and each of those ships a non-empty PLACEHOLDER so the committed example
 still renders: `WEBUI_SECRET_KEY` (frontend), `LITELLM_DB_PASSWORD` (inference),
-`MCP_API_KEY` (memory), `MULLVAD_WG_PRIVATE_KEY` (search),
+`MULLVAD_WG_PRIVATE_KEY` (search),
 `OPEN_TERMINAL_API_KEY` (coder), `AUTHELIA_JWT_SECRET` (portal). **Forget one
-of those six and the plane refuses to render at all** - loud, and the message
+of those five and the plane refuses to render at all** - loud, and the message
 names the file. **Forget any OTHER variable and nothing refuses**: compose
 substitutes a blank string with a warning on stderr, which a script that
 redirects stderr will not show you. That asymmetry is why step 3 insists on an
@@ -150,7 +150,6 @@ docker compose -f frontend\docker-compose.yml config -q
 docker compose -f frontend\docker-compose.yml --profile gpu --profile tailscale config -q
 docker compose -f inference\docker-compose.yml config -q
 docker compose -f inference\docker-compose.yml --profile local config -q
-docker compose -f memory\docker-compose.yml config -q
 docker compose -f search\docker-compose.yml config -q
 docker compose -f coder\docker-compose.yml config -q
 docker compose -f portal\docker-compose.yml --profile internet config -q
@@ -360,7 +359,7 @@ config's. It reads the config now, so this one command covers all twelve.)
   included. Three lines were DELETED rather than moved - `BACKUP_INTERVAL`,
   `RETAIN_COUNT`, `MIN_AGE_SECS` - because they are the CONTAINER-side names:
   every sidecar sets them itself in its own `environment:` block from a prefixed
-  host variable (e.g. `- BACKUP_INTERVAL=${MNEMORY_BACKUP_INTERVAL:-86400}`), so
+  host variable (e.g. `- BACKUP_INTERVAL=${OPENWEBUI_BACKUP_INTERVAL:-86400}`), so
   no compose file ever interpolated the bare names and setting them in an env
   file changed nothing. Identified by `sl-closeout`
   (`../documentation-plans-ai-stack/journal/notes/stack-layers-sl-closeout-findings.md` section 3).
@@ -430,11 +429,7 @@ assignments). Your real `.env` does not share those line numbers; match by NAME.
 | `LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_K` | 134 | `inference/.env` |
 | `LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_V` | 135 | `inference/.env` |
 | `LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET` | 136 | `inference/.env` |
-| `MNEMORY_LLM_CONTEXT_SIZE` | 139 | `memory/.env` |
 | `TAILSCALE_AUTH_KEY` | 144 | `frontend/.env` |
-| `MCP_API_KEY` | 149 | `memory/.env` |
-| `MCP_API_KEYS` | 151 | `memory/.env` |
-| `BACKUP_RETAIN_COUNT` | 155 | `memory/.env` |
 | `OPENWEBUI_BACKUP_RETAIN_COUNT` | 160 | `frontend/.env` |
 | `GPU_AISTACK_DEVICE_ID` | 165 | `frontend/.env` |
 | `GPU_LLAMA_CPP_DEVICE_ID` | 166 | `inference/.env` |
@@ -496,7 +491,6 @@ assignments). Your real `.env` does not share those line numbers; match by NAME.
 | `LITELLM_BACKUP_RETAIN_DAYS` | 347 | `inference/.env` |
 | `OPENROUTER_API_KEY` | 355 | `inference/.env` |
 | `LITELLM_MASTER_KEY` | 373 | `inference/.env` |
-| `MNEMORY_LLM_API_KEY` | 374 | `memory/.env` |
 | `LC_LLAMA_API_KEY` | 375 | `coder/.env` |
 | `OPEN_NOTEBOOK_LLM_API_KEY` | 376 | `OB1/docker/.env` - **already there**, never read from the root |
 | `WEBUI_SECRET_KEY` | 381 | `frontend/.env` |
@@ -506,8 +500,6 @@ assignments). Your real `.env` does not share those line numbers; match by NAME.
 | `LITELLM_UI_MASTER_KEY` | 390 | `inference/.env` |
 | `LITELLM_UI_USERNAME` | 391 | `inference/.env` |
 | `LITELLM_UI_PASSWORD` | 392 | `inference/.env` |
-| `MNEMORY_GATEWAY_KEY` | 394 | `memory/.env` |
-| `MNEMORY_CLOUD_USER` | 395 | `memory/.env` |
 | `WORKBENCH_KEY` | 397 | `portal/.env` |
 | `MULLVAD_COUNTRIES` | 400 | `search/.env` |
 | `VPN_IMAGE` | 401 | `search/.env` |
@@ -549,7 +541,6 @@ assignments). Your real `.env` does not share those line numbers; match by NAME.
 | `RETAIN_COUNT` | 449 | **DELETED** - container-side name, nothing interpolates it |
 | `MIN_AGE_SECS` | 450 | **DELETED** - container-side name, nothing interpolates it |
 | `TAILSCALE_BACKUP_INTERVAL` | 451 | `frontend/.env` |
-| `MNEMORY_BACKUP_INTERVAL` | 452 | `memory/.env` |
 | `OPENWEBUI_BACKUP_INTERVAL` | 453 | `frontend/.env` |
 | `LITTLE_CODER_BACKUP_INTERVAL` | 454 | `coder/.env` |
 | `LM_MODELS_BACKUP_INTERVAL` | 455 | `inference/.env` |

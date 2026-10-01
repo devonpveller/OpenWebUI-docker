@@ -4,7 +4,7 @@ from llm_queue.policy import build_policy
 def test_default_classes_ordering():
     p = build_policy("", default_wait_s=120.0)
     assert p.classify("owui-chat").rank == 0
-    assert p.classify("ollama").rank == 1  # mnemory
+    assert p.classify("ollama").rank == 1  # legacy direct callers
     assert p.classify("llama").rank == 2  # lc-coder
     assert p.classify("ob-entity").rank == 3  # batch
     assert p.classify("ob-entity").max_concurrency == 2

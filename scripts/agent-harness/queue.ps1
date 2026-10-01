@@ -537,8 +537,8 @@ function Get-DeployPending($item) { return @(Get-ArrayField $item "deploy_pendin
 function Convert-RepoRelative([string]$BaseDir, [string]$Rel) {
     # Combine a compose file's directory with a build context (or a context with a Dockerfile
     # name) and return the REPOSITORY-relative, forward-slash path - "" for the root, $null
-    # when it escapes the repository (memory/docker-compose.yml builds ../../mnemory, which is
-    # a sibling checkout, not this tree). Pure string arithmetic against a fake root: nothing
+    # when it escapes the repository (a build context such as ../../sibling is a sibling
+    # checkout, not this tree). Pure string arithmetic against a fake root: nothing
     # here touches the working directory, because the derivation reads the MERGED tree.
     $fake = "C:\__repo_root__\"
     $full = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($fake, $BaseDir, $Rel))
@@ -784,7 +784,7 @@ function Get-DockerignoreKeep([string]$Sha, [string]$Ctx, [string]$DfPath) {
 function Get-DeploySurfaces($item, [string]$Sha) {
     # See the section comment. Returns @{ surfaces; notes; skipped; line_before }. `notes` is
     # printed at -Merged; `skipped` names the services the rule cannot reach (a build context
-    # outside this repository - memory/ builds mnemory from a sibling checkout) and is only
+    # outside this repository, e.g. one built from a sibling checkout) and is only
     # recorded, because a NOTE printed on every merge is a note nobody reads. Every git
     # question is asked of the MERGED tree (`git show <sha>:<path>`), never of a working directory.
     $notes = @(); $skipped = @()

@@ -6,11 +6,11 @@ re-reading every compose file.
 
 ## What it does
 
-The workspace is **nine separate Docker Compose projects**, one per plane,
+The workspace is **eight separate Docker Compose projects**, one per plane,
 plus a driver and a recovery layer:
 
 - **`ai-stack`** — `docker-compose.yml`: the network ANCHOR, **zero services**.
-- **`frontend`, `inference`, `memory`, `search`, `coder`, `portal`** —
+- **`frontend`, `inference`, `search`, `coder`, `portal`** —
   `<plane>/docker-compose.yml`, each with its own `.env` and `README.md`.
 - **`open-brain`** — `OB1/docker/docker-compose.yml` (a pinned submodule; 30
   containers with every profile).
@@ -28,7 +28,7 @@ curated reference.
 ## When it triggers
 
 - "What stacks / containers are in this workspace?"
-- "Where does `mnemory` run? What network is it on?"
+- "Where does `little-coder` run? What network is it on?"
 - "Show me the topology."
 - Before editing any `<plane>/docker-compose.yml`, `stack.manifest.toml`, or
   `emergency-recovery.ps1`.

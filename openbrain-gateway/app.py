@@ -5,9 +5,7 @@ MCP endpoint (openbrain-mcp) for CLOUD services (Claude Code, ChatGPT, etc).
 Local/trusted clients on obnet/llm-net keep talking to openbrain-mcp
 directly and are unaffected.
 
-Modelled on ../memory/mnemory-gateway/app.py — see that file for the prior art.
-The mechanic is identical, swapping mnemory's `labels` for Open Brain's
-`metadata` JSONB:
+The policy is enforced on Open Brain's `metadata` JSONB:
 
   * Every cloud READ is force-filtered to metadata.share == "cloud".
     Open Brain's MCP server enforces this filter server-side via
@@ -50,8 +48,8 @@ SHARE_VALUE = os.environ.get("SHARE_LABEL_VALUE", "cloud")
 # nothing is forwarded. It is checked against a declared Content-Length before
 # the body is read, and again while it is read (a chunked body declares none),
 # so the gateway never buffers more than the cap. 4 MiB is far above any real
-# MCP call (mnemory's own MAX_INPUT_LENGTH is 400000 characters, which JSON
-# escaping can at most sextuple to ~2.4 MB). A value that is not a positive
+# MCP call (a 400000-character input, which JSON escaping can at most
+# sextuple to ~2.4 MB, still fits). A value that is not a positive
 # integer stops the gateway at start rather than running uncapped.
 MAX_BODY_BYTES = int(os.environ.get("GATEWAY_MAX_BODY_BYTES", "4194304"))
 if MAX_BODY_BYTES <= 0:

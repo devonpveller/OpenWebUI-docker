@@ -179,7 +179,7 @@ cheap and stateless; copying it here was paradigm mismatch.
 `-Acquire / -Refresh / -Release / -Status / -Takeover`, atomic via `CreateNew`,
 TTL'd (expiry at `age >= ttl`), owner-checked (foreign release refused), exit 3 =
 wait. Policy lives beside it in `lease-names.conf`: one lease per compose plane
-(`inference`, `memory`, `search`, `coder`, `frontend`, `open-brain`, `agent-org`,
+(`inference`, `search`, `coder`, `frontend`, `open-brain`, `agent-org`,
 `portal`) plus `merge`. Unknown names are refused unless `-AdHoc`, so a typo
 cannot fragment mutual exclusion into two locks that each protect nothing.
 

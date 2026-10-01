@@ -149,7 +149,7 @@ SUPERSEDED_LOG = """[2026-09-11T23:47:58Z] ao-worker-1-journals PRECHECK SKIP: /
 [2026-09-20T07:29:21Z] ao-worker-1-journals tar -> /backups/ao-worker-1-journals-20260920T072921Z.tar.gz (10609 bytes; retain=7)
 """
 
-PROBE_LOG = """[2026-09-20T07:29:00Z] mnemory PRECHECK SKIP: mnemory-cloud-gateway:8060 unreachable -- service unhealthy or down
+PROBE_LOG = """[2026-09-20T07:29:00Z] authelia PRECHECK SKIP: authelia:9091 unreachable -- service unhealthy or down
 """
 
 MIN_AGE_LOG = """[2026-09-20T07:29:00Z] lm-models SKIP: newest backup is 300s old (< MIN_AGE_SECS=86400)
@@ -163,7 +163,7 @@ def test_precheck() -> None:
     check("empty DATA_DIR is a skip", bool(s), str(s))
     check("  ... and names the MOUNT, not just the sidecar", s.get("mount") == "/data", str(s))
 
-    s = cb.precheck_skip("mnemory-backup", PROBE_LOG)
+    s = cb.precheck_skip("authelia-backup", PROBE_LOG)
     check("unreachable probe is a skip", bool(s), str(s))
     check("  ... but carries NO mount (it is not a path problem)", s.get("mount") is None, str(s))
 

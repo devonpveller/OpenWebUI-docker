@@ -44,7 +44,7 @@ feature developer.
 
 ### Hard rules (non-negotiable)
 - **NEVER** `docker volume prune`, `docker image prune -a` or `docker system prune`, and **never
-  remove a named volume** - named volumes hold live data (OWUI history, mnemory, tailscale state,
+  remove a named volume** - named volumes hold live data (OWUI history, tailscale state,
   …) even when dangling; `volume_report` is report-only. The ONE volume exception is the anonymous
   one above, removed only through `reclaim_execute` under its rules.
 - **Never** clear a BUSY ao-worker's `/tmp` (mid-effort). The tools enforce this — don't try to force it.

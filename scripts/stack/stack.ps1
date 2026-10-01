@@ -26,7 +26,7 @@
 #   .\scripts\stack\stack.ps1 up --dry-run     # print the docker lines, run nothing
 #   .\scripts\stack\stack.ps1 down             # every plane, reverse order
 #   .\scripts\stack\stack.ps1 status           # per-project container states
-#   .\scripts\stack\stack.ps1 restart memory   # one plane, in place
+#   .\scripts\stack\stack.ps1 restart search   # one plane, in place
 #   .\scripts\stack\stack.ps1 health           # functional probes across every plane
 #   .\scripts\stack\stack.ps1 stats            # inference demand + queue statistics
 #
