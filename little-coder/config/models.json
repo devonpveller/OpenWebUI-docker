@@ -1,5 +1,7 @@
 {
   "_comment": "little-coder models override (installed to ~/.config/little-coder/models.json by docker/entrypoint-agent.sh). Points the llamacpp provider at the ai-stack gateway alias (LiteLLM) and registers the model ROLE little-coder asks for, local-large (inference/README.md: the resident 27B with thinking), so a model swap needs no change here. contextWindow MUST track (and stay under) the resident 27B's per-request lane (ctx-size / n_parallel) -> 90000 for the 98304 lane since 2026-07-09b (ctx 196608, parallel 2). NOTE: the pre-2026-07-09 value 131072 was actually ABOVE the old 87552 lane (latent overflow bug). See the 27B LANE CONSUMERS note (historically in ai-stack/.env). Restart little-coder after changing.",
+  "_comment_default": "`default` (little-coder 1.11.0+): the model a launch WITHOUT --model selects. The daemon always passes --model, but an operator's direct `docker exec -u lc little-coder little-coder --print ...` (1.20 counts only -p/--mode as headless) and the TUI get this injected - without it the launcher falls back to upstream's shipped default llamacpp/qwen3.6-35b-a3b, which the gateway does not serve (cf-lc-upgrade X4). A dispatch sub-coder inherits its parent's model. Keep it equal to agent.model in little-coder.config.yaml.",
+  "default": "llamacpp/local-large",
   "providers": {
     "llamacpp": {
       "api": "openai-completions",

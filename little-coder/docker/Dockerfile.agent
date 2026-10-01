@@ -30,11 +30,40 @@ RUN apt-get update \
 # future chapter routes the browser into open-terminal, install playwright there
 # (Dockerfile.open-terminal), not here. See documentation/little-coder/UPDATE-NOTES.md.
 # Pinned to a KNOWN-GOOD version (was `latest`, which silently drifts and can cache-stale a
-# rebuild — 2026-07-09: verified 1.10.0 running live, all integration flags intact:
-# `--print --mode json --exclude-tools --append-system-prompt`. Bump this deliberately after
-# testing a newer release, not implicitly). Override via the compose build arg.
-ARG LITTLE_CODER_VERSION=1.10.0
+# rebuild). History: 2026-07-09 verified 1.10.0 live; 2026-09-30 bumped to 1.20.0 (bundled pi
+# 0.79.4 -> 0.83.0) with the integration flags re-verified: `--print --mode json
+# --exclude-tools --append-system-prompt --session --session-dir --no-session`. Bump this
+# deliberately after testing a newer release, not implicitly. Override via the compose build
+# arg; `coder/.env` LITTLE_CODER_VERSION WINS over this default when set.
+ARG LITTLE_CODER_VERSION=1.20.0
 RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "little-coder@${LITTLE_CODER_VERSION}"
+
+# Apply upstream's pi-runtime patches NOW, as root. Since 1.12.0 little-coder ships no
+# postinstall (issue #75): the launcher re-applies `scripts/patch-pi.mjs` on every launch,
+# best-effort, swallowing errors. Here the agent runs as the unprivileged `lc` user against a
+# root-owned global node_modules, so that launch-time write fails SILENTLY and the patches
+# (1.20.0: the multi-line `edit` JSON repair, issue #127) would never land. Applying them at
+# build time restores what the 1.10.x postinstall did; the script fails the build if any patch
+# is left unapplied or its target file is missing (fail closed, not a silent downgrade).
+COPY docker/apply-pi-patches.mjs /tmp/apply-pi-patches.mjs
+RUN node /tmp/apply-pi-patches.mjs && rm -f /tmp/apply-pi-patches.mjs
+
+# Load-surface lock (cf-lc-upgrade X1). Since 1.12.0 the launcher loads every file in a USER
+# extension dir on every launch; unpinned that is ~/.config/little-coder/extensions, which the
+# agent user (and so the model's `write` tool) can write - code the model planted would run in
+# THIS control-plane container. Pin it to a root-owned, empty, read-only dir. PI_OFFLINE=1: pi
+# performs no startup network operations, so a `packages` settings entry is never installed.
+# JITI_FS_CACHE=false: pi transpiles every extension with jiti 2.7.0, whose default fs cache is
+# <tmpdir>/jiti - writable by the agent user - and jiti serves a cached module whenever the
+# file ENDS with the source-hash trailer it wrote, so a prepended line runs at the next launch
+# (tester X2; pre-existing in 1.10.0 too). With the cache off jiti transpiles in memory on every
+# launch and reads nothing back.
+# agent.py pins the same values per task; the entrypoint makes $HOME root-owned read-only.
+RUN mkdir -p /opt/little-coder/user-extensions && chmod 0555 /opt/little-coder/user-extensions
+ENV LITTLE_CODER_EXTENSIONS_DIR=/opt/little-coder/user-extensions \
+    LITTLE_CODER_PI_EXTENSIONS=0 \
+    PI_OFFLINE=1 \
+    JITI_FS_CACHE=false
 
 WORKDIR /app
 COPY pyproject.toml ./

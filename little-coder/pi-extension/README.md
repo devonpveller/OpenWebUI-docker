@@ -22,8 +22,18 @@ running inside open-terminal (journaled as a `bash` tool_call sourced from the
   `extra-tools`). The file uses only `import type` + node builtins, so it has
   no runtime dependency to resolve.
 - `docker/entrypoint-agent.sh` installs it into little-coder's own
-  `.pi/extensions/` directory (alongside the 21 bundled extensions) so pi
-  discovers it and module resolution works.
+  `.pi/extensions/` directory (alongside the bundled extensions: 35 in 1.20.0,
+  of which the entrypoint removes `shell-session`, `bg-shell`, `browser` and
+  `browser-extract-retention`). The launcher passes every
+  `.pi/extensions/*/index.ts` to pi as `--extension`, so ours loads with the
+  bundled set. Re-verified on 1.20.0 (bundled pi 0.83.0) on 2026-09-30: the
+  model is offered our `bash` (open-terminal description), and a real task's
+  commands ran in a disposable open-terminal.
+- 1.12.0+ also has a user extension directory
+  (`~/.config/little-coder/extensions/`, loaded AFTER the bundled set). We do
+  not use it: the package-dir install is what has been verified, and pi's
+  built-in `bash` is what we override, which the bundled set does not
+  register.
 
 ## The switch
 
