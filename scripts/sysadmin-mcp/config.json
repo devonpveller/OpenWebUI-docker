@@ -28,7 +28,7 @@
     "reclaim_plan_ttl_hours": 24
   },
   "protected_volume_substrings": [
-    "openwebui", "open-webui", "mnemory", "tailscale", "openbrain",
+    "openwebui", "open-webui", "tailscale", "openbrain",
     "mattermost", "surreal", "iks", "llm-gateway", "open-terminal",
     "open_notebook", "task-management", "agent-bridge", "automatic1111",
     "realtimeaudiochat", "stable_diff"

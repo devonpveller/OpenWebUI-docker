@@ -66,3 +66,4 @@
 | `portal-authentik-traefik/` **@ plan store** | PLAN 2026-09-16, not built | Portal refactor Authelia+Caddy to Authentik+Traefik; as of 2026-09-17 it lands on cluster node 1, so only its Phase 3 and tailnet lane change. |
 | `validated-work-memory/` **@ plan store** | PLANNED 2026-09-11, nothing implemented | Receipt to lesson to skill, with re-validation. |
 | `source-admission-adversarial-gate/` **@ plan store** | DRAFT v3 2026-08-26, nothing built | Content-screen PDP + gateway acquisition chokepoint + admission gate across every intake lane. |
+| `mnemory-retire/` **@ plan store** | in progress 2026-09-30 (item `mm-retire`) | mnemory and the whole `memory` plane removed from the stack (operator: one memory system - Open Brain; delete, not archive). Integration branch `work/mnemory-retire`; the landing (containers, volume, images, LiteLLM key, OWUI rows) is a coordinator step in the item's test plan. |

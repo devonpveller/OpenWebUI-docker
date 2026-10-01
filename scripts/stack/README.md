@@ -130,7 +130,7 @@ seen*.
 | `networks_only` | the compose file declares networks and no service. Only the anchor. `up` never runs `docker compose up -d` on it (compose exits 1, "no service selected"); it renders the file with `config --no-interpolate --format json` and runs `docker network create` for each declared network that does not exist. An existing network is never altered: if it MATCHES the declaration (driver, internal, attachable, each declared driver_opt and label) it is left as is; if it DIFFERS - e.g. an `ai-stack_llm-net` that is not internal - `up` REFUSES before creating anything, and `doctor` reports it as a FAIL. `down` still runs `docker compose down`. |
 | `manual` | present when the driver must **not** start or stop this plane; the value names what does. Only the portal: exposing the stack to the internet stays a human action, exactly as `stack.ps1`'s header says. |
 | `host` | what the machine itself must provide, in prose (a GPU, a tunnel, model files). `doctor` prints these; nothing enforces them. |
-| `host_paths` | paths OUTSIDE the checkout that the plane builds from, each `{ path, contains, why, remedy }` with `path` repo-root-relative and `contains` the names that must exist inside it (memory: `.git` and `Dockerfile`), so an empty directory or a plain file does not pass. Unlike `host` this is checked: while one is missing or incomplete, `doctor` FAILs the plane and `enable`/`init` refuse, naming `remedy` (the command that creates it, run from the repo root). Only memory declares one: `../mnemory`, its build context. |
+| `host_paths` | paths OUTSIDE the checkout that the plane builds from, each `{ path, contains, why, remedy }` with `path` repo-root-relative and `contains` the names that must exist inside it (a plain name a file, a name ending in `/` a directory, `.git` either), so an empty directory or a plain file does not pass. Unlike `host` this is checked: while one is missing or incomplete, `doctor` FAILs the plane and `enable`/`init` refuse, naming `remedy` (the command that creates it, run from the repo root). With `profile`, it is checked only while that profile is active. Only agent-org declares one today: its generated worker configs, under `workers`. |
 | `keys` | variable names that must exist and be non-blank in the plane's env file. A blank one makes `enable` refuse and name the key. So does a value still EQUAL to the non-blank value the plane's `.env.example` ships for that key - for a required key that shipped value is a placeholder by construction - and that one `doctor` and `up` refuse too, before anything starts. **Keys NOT listed here are covered as well**: any value in a plane's `.env.example` that matches `stack.py`'s `PLACEHOLDER_PATTERN` (change-me, REPLACE_WITH, your-/putyour, `<...>`, an example.com domain or address, "placeholder") is refused while the plane's `.env` still holds it, provided a service the plane runs under its active profiles interpolates it (`${VAR}` in the `config --no-interpolate` render; a bulk `env_file:` does not count). So TAILSCALE_AUTH_KEY counts under `tailscale` and not under `stock`. |
 | `ports` | published **host** ports -> what answers on them. |
 | `profiles` | compose profiles, each a sub-table with a `description` and **exactly one** of the three flags below; optionally `requires` (other profiles of the plane it needs) and `stands_in_for` (profiles it replaces when the GPU refusal takes them out - frontend's `stock` for `gpu`). |
@@ -211,10 +211,10 @@ gateway; the check is repeated in the item's findings.
 | `profiles` | `{ plane = ["profile", ...] }` - profiles to enable inside a plane. |
 | `surfaces` | `{ plane = ["profile", ...] }` - how a person reaches the engine. Dropped by `--headless`; a plane that appears **only** under `surfaces` is itself dropped by `--headless`. |
 
-Five names (`inference`, `memory`, `search`, `agent-org`, `portal`) are both a
+Four names (`inference`, `search`, `agent-org`, `portal`) are both a
 plane and a product. A bare name means the **product**: a newcomer copies
 `enable <name>` from the product menu and must get what the menu promises -
-`enable memory` brings inference, `enable inference` turns on `local`.
+`enable inference` turns on `local`, `enable agent-org` turns on `workers`.
 `--plane <name>` acts on the plane alone (and `--product <name>` is still
 accepted). **Both `enable` and `disable`** print a `# note:` line whenever a
 shared name is used, saying which reading they took - `disable` is the
@@ -238,7 +238,7 @@ planes are declared in the manifest**. That tie-break is what makes the full set
 come out in exactly the order `stack.ps1` uses:
 
 ```text
-anchor, inference, frontend, memory, search, coder, ob1, agent-org
+anchor, inference, frontend, search, coder, ob1, agent-org
 ```
 
 `down` is the exact reverse. Re-ordering the `[planes.*]` tables re-orders
@@ -281,9 +281,19 @@ that HAS `products`, an empty `owners` is real: a plane kept only because
 another enabled plane requires it. It loads as unowned (not as a direct enable)
 and goes when its last requirer goes.
 
+**A plane or product the manifest no longer declares** (the `memory` plane and
+product were retired 2026-09-30, and a host that had enabled them still names
+them in its file) is forgotten when the file is read: every verb prints a
+`# note:` naming it, drives nothing for it, and the next verb that writes state
+leaves it out - `disable <name>` on the retired name does exactly that and
+nothing else. A plane that was enabled only for what was retired (by the retired
+product, or kept because the retired plane required it) stays enabled, re-owned
+as a direct enable with the profiles it already runs, so nothing that is running
+is dropped as a side effect; `disable --plane <name>` takes it out on purpose.
+
 `enable` prints each plane's profiles and labels any it did not turn on itself:
-`local (already on: product memory)`, `(default)`, `(required by another
-profile)` - so `enable --plane inference` after `enable memory` does not read
+`local (already on: product inference)`, `(default)`, `(required by another
+profile)` - so `enable --plane inference` after `enable inference` does not read
 as though `--plane` turned `local` on.
 
 `context` is the Docker context the plane runs on; when set, the command becomes
@@ -360,7 +370,7 @@ and which code - the rest is not attempted.
   the GPU profiles out and the refused command, re-run, gets past THIS refusal
   (any other check it then meets - a key, a render - speaks for itself):
   `disable <product>` for each product that asked for the profile (after `enable
-  memory`: `disable memory`); `disable --plane <plane>` only when nothing but a
+  inference`: `disable inference`); `disable --plane <plane>` only when nothing but a
   direct enable holds it; an edit of `.stack/state.json` when a direct enable
   carries it and something else still needs the plane (a pre-products state
   file); `enable --plane <plane>` when the plane went with its owners (for
@@ -397,7 +407,7 @@ A **plane**: enables just that plane (plus its `default` profiles).
 - **Refuses** when a required plane is not enabled, naming it *and* the command
   that would enable it - `--plane` when a product shares the name, since the
   refusal asked for the plane and not for the product's profiles:
-  `refused: memory requires inference, which is not enabled (python scripts/stack/stack.py enable --plane inference)`
+  `refused: coder requires inference, which is not enabled (python scripts/stack/stack.py enable --plane inference)`
 - **Refuses** when one of the plane's `keys` is blank or missing in the env file
   that plane reads, naming the key, whether it is blank or missing, the file, and
   the remedy:
@@ -412,8 +422,8 @@ A **plane**: enables just that plane (plus its `default` profiles).
 A **product**: enables its planes, their `requires` closure, its `profiles`,
 and its `surfaces` unless `--headless`, marking each plane `product:<name>` in
 the state file's `owners` and the product in `products` (what `disable` reads).
-`memory` declares `inference = ["local"]`: mnemory's `LLM_MODEL` and
-`EMBED_MODEL` are registered at the gateway only under `local`.
+`inference` declares `inference = ["local"]`: the local models are registered
+at the gateway only under `local`.
 
 - A product does **not** refuse on its own members being off - expanding them is
   the point. It still **refuses** on any member plane's blank key, naming the
@@ -434,7 +444,7 @@ every plane it enabled, and then a plane is removed only when **no owner is
 left** (no other enabled product, no direct enable) **and no remaining plane
 requires it**; a plane that stays loses only the profiles no remaining owner
 asked for. It prints the planes removed, the planes kept and why (`product
-coding-agent`, `enabled directly`, `required by memory`), and the profiles
+coding-agent`, `enabled directly`, `required by coder`), and the profiles
 dropped. A product that is **not enabled here** - including every product on a
 state file written before products were tracked - is a no-op note, and nothing
 is written. Measured on the attempt this replaced: `disable portal` with only
@@ -470,7 +480,6 @@ _Generated by `python scripts/stack/stack.py docs --write`; do not edit between 
 | frontend | `frontend: OWUI http://127.0.0.1:3000/health` | the plane is enabled |
 | frontend | `frontend: 8 tailnet serve routes` | the plane is enabled, and the frontend deploys the `tailscale` profile |
 | frontend | `frontend: owui/ manifest rows drifted from live webui.db: <count>` | the plane is enabled, and PowerShell is on PATH (`powershell` on Windows, `pwsh` elsewhere) and Open WebUI has at least one plugin deployed |
-| memory | `memory: cloud door http://127.0.0.1:8060/health` | the plane is enabled |
 | search | `search: gateway http://127.0.0.1:8085/healthz` | the plane is enabled |
 | search | `search: <verdict> - <n> engine(s) answering` | the plane is enabled |
 | coder | `coder: little-coder daemon :8090/health` | the plane is enabled |
@@ -480,11 +489,11 @@ _Generated by `python scripts/stack/stack.py docs --write`; do not edit between 
 | ob1 | `OB1: openbrain-db accepting connections` | the plane is enabled |
 | agent-org | `agent-org: mattermost ping` | the plane is enabled |
 
-**16 probes with every plane enabled, when the frontend deploys the `tailscale` profile, PowerShell is on PATH (`powershell` on Windows, `pwsh` elsewhere) and Open WebUI has at least one plugin deployed (14 when none of those holds).** Only the planes this machine enables are probed, plus the anchor; the exit code is the number of probes that failed.
+**15 probes with every plane enabled, when the frontend deploys the `tailscale` profile, PowerShell is on PATH (`powershell` on Windows, `pwsh` elsewhere) and Open WebUI has at least one plugin deployed (13 when none of those holds).** Only the planes this machine enables are probed, plus the anchor; the exit code is the number of probes that failed.
 
 <!-- /stack:health-probes -->
 
-These are the probes `stack.ps1 health` ran, one for one, with the same pass
+These are the probes `stack.ps1 health` ran for the planes that remain, one for one, with the same pass
 conditions, the same `[OK]` / `[FAIL]` line shape and the same exit code - **the
 number of failed probes** - plus the serving-depth probe, which has no `.ps1`
 ancestor. The table above is generated from `HealthSweep.run()`, so it cannot
@@ -495,9 +504,9 @@ implicit anchor - not the wider requires-closure `up` starts (on any state the
 driver wrote the two are equal; on a hand-edited one they are not, and a plane
 nobody enabled is not probed). The anchor probe checks that `ai-stack_llm-net`
 exists AND is internal. A fresh clone runs the frontend's and the
-anchor's probes and names the other six planes on one `[skip] not enabled on
+anchor's probes and names the other five planes on one `[skip] not enabled on
 this machine` line; the exit code counts failures among the probes that ran.
-The full set - <!-- stack:health-count -->16 probes with every plane enabled, when the frontend deploys the `tailscale` profile, PowerShell is on PATH (`powershell` on Windows, `pwsh` elsewhere) and Open WebUI has at least one plugin deployed (14 when none of those holds)<!-- /stack:health-count --> - runs only when every plane is enabled. The owui-drift probe needs
+The full set - <!-- stack:health-count -->15 probes with every plane enabled, when the frontend deploys the `tailscale` profile, PowerShell is on PATH (`powershell` on Windows, `pwsh` elsewhere) and Open WebUI has at least one plugin deployed (13 when none of those holds)<!-- /stack:health-count --> - runs only when every plane is enabled. The owui-drift probe needs
 PowerShell (`powershell` on Windows, `pwsh` elsewhere) and prints a `[skip]`
 line where there is none.
 
@@ -571,9 +580,9 @@ Read-only, and this is everything (counts measured 2026-09-21 on a healthy host)
   one `docker inspect llama-cpp-upstream` (to name the bind) or one further
   `docker exec llm-gateway` (the landing completion);
 * one `powershell -File check-owui-drift.ps1 -CountOnly`;
-* **seven** HTTP GETs - `:3000/health`, `:8060/health`, `:8085/healthz`,
-  `:8085/health`, `:5055/api/config`, `:8062/health`, `:8816/health`. Seven, not
-  six, because `search` gets two of them; that is the whole point of the third
+* **six** HTTP GETs - `:3000/health`, `:8085/healthz`,
+  `:8085/health`, `:5055/api/config`, `:8062/health`, `:8816/health`. Six, not
+  five, because `search` gets two of them; that is the whole point of the third
   rule below.
 
 **Why that render uses `.env` and not `.env.example`:** it is asking what THIS
@@ -1148,12 +1157,13 @@ read almost identically on screen - `init --product X` calls `cmd_enable`
 internally, so it prints the same `enabled product X:` block - but `cmd_init`
 builds a *fresh* `State({})` and saves that, while `cmd_enable` mutates the state
 it loaded. Measured against two scratch state files, both seeded by enabling
-`frontend, inference, memory, search, coder, agent-org` (six planes):
+`frontend, inference, search, coder, agent-org` (five planes; re-measured
+2026-09-30 when the memory plane left the manifest):
 
 | | Before | Command | After |
 |---|---|---|---|
-| replace | those six | `init --product research --force` | `frontend, inference, ob1, search` - **four**. `memory`, `coder` and `agent-org` are gone from the file, and a later `up` no longer starts them. |
-| merge | those six | `enable research` | `frontend, inference, memory, search, coder, agent-org, ob1` - **seven**, with `ob1` carrying `idea-refinery, research, wiki, notebook`. |
+| replace | those five | `init --product research --force` | `frontend, inference, ob1, search` - **four**. `coder` and `agent-org` are gone from the file, and a later `up` no longer starts them. |
+| merge | those five | `enable research` | `frontend, inference, search, coder, agent-org, ob1` - **six**, with `ob1` carrying `idea-refinery, research, wiki, notebook`. |
 
 Both printed the same four-line `enabled product research:` summary naming
 `inference, frontend, search, ob1`; only the resulting file differs, and only

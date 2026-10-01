@@ -9,7 +9,7 @@ A self-hosted AI stack on Docker, organized as **one Docker Compose project per
 plane** around a root `docker-compose.yml` that declares only the shared networks
 (`ai-stack_llm-net` / `app-net` / `default`):
 
-- **Planes** `frontend/`, `inference/`, `memory/`, `search/`, `coder/`, `portal/` —
+- **Planes** `frontend/`, `inference/`, `search/`, `coder/`, `portal/` —
   each `<plane>/docker-compose.yml` with its own `<plane>/.env` (compose loads it
   natively; nothing passes `--env-file`) and its own README. The portal is driven only
   by `scripts/portal/portal-on.ps1`.

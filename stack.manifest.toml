@@ -32,7 +32,7 @@
 # ORDER MATTERS. `up` is a topological sort of `requires`; ties are broken by
 # the order planes are declared BELOW, and that order is what reproduces
 # scripts/stack/stack.ps1's sequence:
-#   anchor, inference, frontend, memory, search, coder, ob1, agent-org
+#   anchor, inference, frontend, search, coder, ob1, agent-org
 # Re-ordering these tables re-orders `up`. Do it deliberately.
 #
 # EVERY edge below is evidenced in a compose file; the evidence is cited in the
@@ -42,7 +42,7 @@
 #   compose   - compose file, repo-root-relative (forward slashes).
 #   env_file  - extra --env-file for the compose CLI. RETIRED by sl-env-split
 #               (2026-09-19): NO plane declares one, so compose loads
-#               `<project dir>/.env` natively for all eight. The key is still
+#               `<project dir>/.env` natively for all seven. The key is still
 #               READ (Manifest.env_file) so a future plane could declare one.
 #   lease     - scripts/agent-harness/lease-names.conf name. Absent = none.
 #   requires  - hard edges (above).
@@ -284,37 +284,6 @@ description = "the CUDA local build + the NVIDIA device reservation (frontend/do
 requires    = ["gpu"]
 opt_in      = true
 description = "the tailscale netns companion and its state backup; usable ONLY with `gpu`, whose service its network_mode names (frontend/docker-compose.yml:323)"
-
-# --------------------------------------------------------------------------
-[planes.memory]
-# mnemory (the unified memory layer) + the ONLY cloud door.
-# requires anchor: memory/docker-compose.yml:153-155 (ai-stack_llm-net).
-# requires inference: memory/docker-compose.yml:54 (LLM_BASE_URL =
-#   http://llama-cpp:8080/v1) and :56 (EMBED_BASE_URL =
-#   http://llama-cpp-embed:8080/v1). Both are unconditional - mnemory cannot
-#   embed or summarise without them.
-compose  = "memory/docker-compose.yml"
-lease    = "memory"
-requires = ["anchor", "inference"]
-optional = []
-host = [
-  "the sibling mnemory checkout at ../mnemory (see host_paths): memory/docker-compose.yml builds mnemory:local from `context: ../../mnemory`, OUTSIDE this repository",
-]
-# The build context of `mnemory` (memory/docker-compose.yml, `context:
-# ../../mnemory`, relative to memory/) is ../mnemory relative to the repo root.
-# The remedy PINS the fork revision the plane is built from (e83cb5415481):
-# the first one that loads its BM25 model from the image with no network call
-# and holds mcp below 2. Moving the pin = a new fork commit, pushed, and this
-# remedy, memory/README.md and test_stack.py's MNEMORY_CLONE changed together.
-# doctor checks the path, not the revision. The upstream project is
-# fpytloun/mnemory. test_stack.py holds this path to the compose file.
-host_paths = [
-  { path = "../mnemory", contains = [".git", "Dockerfile"], why = "memory/docker-compose.yml builds mnemory:local from this sibling checkout", remedy = "git clone https://github.com/devonpveller/mnemory.git ../mnemory; git -C ../mnemory checkout e83cb54154812005fd363f9df82ee59e5e1c028b" },
-]
-keys     = ["MCP_API_KEY"]
-
-[planes.memory.ports]
-"8060" = "mnemory-cloud-gateway (loopback; the only cloud door)"
 
 # --------------------------------------------------------------------------
 [planes.search]
@@ -611,7 +580,6 @@ description = "the backup sidecar scripts (<service>-backup.sh, generic-tar-back
 [modules.backup.consumers]
 frontend  = "bind mount: openwebui-backup.sh, generic-tar-backup.sh (tailscale-backup)"
 inference = "bind mount: llm-gateway-backup.sh, generic-tar-backup.sh (inference/compose/backups.yml)"
-memory    = "bind mount: mnemory-backup.sh"
 coder     = "bind mount: little-coder-backup.sh"
 portal    = "build context: ../backup (Dockerfile; the caddy-backup and authelia-backup images); bind mount: caddy-backup.sh, authelia-backup.sh"
 agent-org = "bind mount: pg-backup.sh, generic-tar-backup.sh"
@@ -631,14 +599,6 @@ planes      = ["frontend"]
 [products.inference]
 description = "the LLM front door and the local llama.cpp backends"
 planes      = ["inference"]
-profiles    = { inference = ["local"] }
-
-[products.memory]
-description = "mnemory, the unified memory layer, and its cloud door"
-planes      = ["memory"]
-# mnemory calls LLM_MODEL=local-small and EMBED_MODEL=local-embed
-# (memory/docker-compose.yml); the gateway registers both only under `local`, so
-# without it the product is a memory layer whose every call fails.
 profiles    = { inference = ["local"] }
 
 [products.search]

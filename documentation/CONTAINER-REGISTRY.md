@@ -17,7 +17,7 @@ purpose. Containers that failed that test today were removed (see
 
 > Owns only the shared seam networks (`llm-net`, `app-net`, `default`).
 > The planes below were the "main stack" until Part K split each into
-> its own compose project (`frontend/`, `inference/`, `memory/`,
+> its own compose project (`frontend/`, `inference/`,
 > `search/`, `coder/`); their container purposes are unchanged.
 
 ### Frontend — own compose project `frontend` since 2026-08-21 (Part K.5)
@@ -47,13 +47,6 @@ executor; see the Coder section.)
 | `llama-cpp-upstream` | Real chat inference: llama-swap → llama.cpp (qwen36-27b, MTP) | The GPU worker; isolated on llm-backend-net so callers physically cannot bypass the gateway |
 | `llama-cpp-embed-upstream` | Real embedding inference (bge-m3, plain llama.cpp) | Separate from chat so embedding bursts (OB1 backfills) never contend for the swap slot |
 
-### Memory — own compose project `memory` since 2026-08-21 (Part K.2; D-9 keeps this plane, direction pending)
-
-| Container | Purpose | Why |
-|---|---|---|
-| `mnemory` | Layer-1 personal memory service (llm-net only, no host port) | Live consumers: OWUI mnemory tool + persistent-memory filter, system-health/llm-traffic modules |
-| `mnemory-cloud-gateway` | Privacy proxy (:8060, bearer-key'd, allow-listed verbs) | The ONLY published door to mnemory; label-forcing keeps cloud reads scoped. Twin of openbrain-gateway (unification = E.1, coupled to D-9/H.1) |
-
 ### Search — own compose project `search` since 2026-08-21 (Part K.3)
 
 | Container | Purpose | Why |
@@ -80,7 +73,7 @@ podcast chain). **Not retired**: it stays until the wiki workbench matures
 
 ### Backup sidecars (one per stateful store — backup-conventions runbook)
 
-`mnemory-backup`, `openwebui-backup` (vector_db excluded → 23 s nightly),
+`openwebui-backup` (vector_db excluded → 23 s nightly),
 `little-coder-backup`,
 `open-notebook-backup` (surql export + notebook tar; env-var creds),
 `tailscale-backup` (state/certs).
@@ -127,7 +120,7 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 | `openbrain-mcp` | Core MCP server (capture/search/fetch tools) | The write/read contract used by OWUI (via mcpo), the gateway (cloud), and curator |
 | `openbrain-ext` | Extensions MCP server (wiki/threads/extras) | Split from core so the cloud gateway can expose core-only |
 | `openbrain-mcpo` / `openbrain-mcpo-ext` | MCP→OpenAPI bridges for OWUI tool-servers | **Two instances on purpose** — one mcpo proxying two MCP servers crashes (documented upstream bug in `mcpo.config.json`) |
-| `openbrain-gateway` | Cloud privacy proxy (:8061, bearer-key'd; forces origin/share=cloud) | The ONLY door external/cloud clients get; twin of mnemory-cloud-gateway (E.1) |
+| `openbrain-gateway` | Cloud privacy proxy (:8061, bearer-key'd; forces origin/share=cloud) | The ONLY door external/cloud clients get - the only cloud door in the stack |
 | `openbrain-ops-gateway` | Ops privacy proxy (:8062, own `OPS_GATEWAY_KEY`; allowlists `agent_memory_*`, forces `exposure=ops`) | Host processes (claude-sessions bridge, Claude Code) cannot reach `openbrain-mcp` — it publishes no host port — and must never hold the raw `MCP_ACCESS_KEY`. Separate key and allow-list from the cloud door, which denies `agent_memory_*` by design (memory-plane PLAN §1.4) |
 | `openbrain-postgrest` + `openbrain-rest` | PostgREST + its Caddy front (:3001) | Recipes/local integrations read the store without MCP |
 
@@ -207,8 +200,6 @@ calling, never by which port happens to answer.
 | A local/trusted process (Claude Code, recipes) | Open Brain | `openbrain-mcp` (obnet MCP) or `openbrain-rest`:3001 (PostgREST) | the cloud gateway (it FILTERS: share=cloud only) |
 | A cloud/external client | Open Brain | `openbrain-gateway` 127.0.0.1:8061 (bearer key; forced share=cloud) | anything else — this is the only cloud door BY DESIGN |
 | A HOST process (claude-sessions bridge, Claude Code) | Open Brain agent-memory | `openbrain-ops-gateway` 127.0.0.1:8062 (own bearer key; forced exposure=ops) | `openbrain-mcp` directly — it has no host port, and a host process must never hold `MCP_ACCESS_KEY` |
-| A local/trusted process | mnemory | `mnemory:8050` REST directly (full access) | `mnemory-cloud-gateway` (it BLOCKS personal reads/writes) |
-| A cloud/external client | mnemory | `mnemory-cloud-gateway` 127.0.0.1:8060 | `mnemory:8050` (not published; and no cloud client is trusted with it) |
 | Anything fetching web pages | Anonymous egress | Mullvad HTTP proxy `http://vpn:8888` | direct egress (home IP) — tor retired 2026-08-21 |
 | Anything searching the web | Search | `gateway:8080` (search-gateway REST, key'd) | SearXNG directly (internal-only by design) |
 | OWUI / agent-org | Coding tasks | little-coder daemon `little-coder:8090` (lc-net) | open-terminal directly (exec plane, key'd, workers only) |
@@ -239,9 +230,6 @@ local job (or vice versa), not that something is broken.
 ## Redundancies examined and deliberately KEPT
 
 - `openbrain-mcpo` + `openbrain-mcpo-ext` — upstream mcpo crash bug, documented.
-- `mnemory-cloud-gateway` vs `openbrain-gateway` — same program twice (~75%); merge
-  (E.1) is deliberately sequenced behind the mnemory direction call (D-9) and
-  the OB1 submodule move (H.1), not forgotten.
 - `surrealdb` + `open_notebook` — transitional pair; retires together (D-10).
 - Two LiteLLM instances (`llm-gateway` vs agent-org's off-by-default
   `llm-gateway-cloud`) — opposite auth postures by design (local-permissive

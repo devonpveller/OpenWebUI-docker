@@ -257,13 +257,13 @@ class LeaseTests(unittest.TestCase):
 
     def tearDown(self):
         for owner in (self.A, self.B):
-            self._lease("-Release", "-Name", "memory,frontend,coder,open-brain",
+            self._lease("-Release", "-Name", "search,frontend,coder,open-brain",
                         "-Owner", owner)
 
     def test_second_agent_is_told_to_wait_not_allowed_through(self):
-        rc, _ = self._lease("-Acquire", "-Name", "memory", "-Owner", self.A, "-Thread", "t-a")
+        rc, _ = self._lease("-Acquire", "-Name", "search", "-Owner", self.A, "-Thread", "t-a")
         self.assertEqual(rc, 0)
-        rc, out = self._lease("-Acquire", "-Name", "memory", "-Owner", self.B)
+        rc, out = self._lease("-Acquire", "-Name", "search", "-Owner", self.B)
         self.assertEqual(rc, 3, "a second agent must be told to WAIT")
         self.assertIn("WAIT", out)
 
@@ -273,22 +273,22 @@ class LeaseTests(unittest.TestCase):
         self.assertEqual(self._lease("-Acquire", "-Name", "coder", "-Owner", self.B)[0], 0)
 
     def test_foreign_release_is_refused(self):
-        self.assertEqual(self._lease("-Acquire", "-Name", "memory", "-Owner", self.A)[0], 0)
-        rc, out = self._lease("-Release", "-Name", "memory", "-Owner", self.B)
+        self.assertEqual(self._lease("-Acquire", "-Name", "search", "-Owner", self.A)[0], 0)
+        rc, out = self._lease("-Release", "-Name", "search", "-Owner", self.B)
         self.assertEqual(rc, 3)
         self.assertIn("refusing", out.lower())
         # ...and the rightful owner still holds it (idempotent re-acquire succeeds).
-        self.assertEqual(self._lease("-Acquire", "-Name", "memory", "-Owner", self.A)[0], 0)
+        self.assertEqual(self._lease("-Acquire", "-Name", "search", "-Owner", self.A)[0], 0)
 
     def test_expired_lease_needs_explicit_takeover(self):
         # ttl 0 = instantly expired. Regression for the -ge/-gt boundary: with -gt a
         # dead agent's ttl-0 lease never expired and held the queue forever.
-        self.assertEqual(self._lease("-Acquire", "-Name", "memory", "-Owner", self.A,
+        self.assertEqual(self._lease("-Acquire", "-Name", "search", "-Owner", self.A,
                                      "-TtlMin", "0")[0], 0)
-        rc, out = self._lease("-Acquire", "-Name", "memory", "-Owner", self.B)
+        rc, out = self._lease("-Acquire", "-Name", "search", "-Owner", self.B)
         self.assertEqual(rc, 3, "an expired lease must not be silently stolen")
         self.assertIn("EXPIRED", out)
-        rc, _ = self._lease("-Takeover", "-Name", "memory", "-Owner", self.B)
+        rc, _ = self._lease("-Takeover", "-Name", "search", "-Owner", self.B)
         self.assertEqual(rc, 0, "-Takeover must claim an expired lease")
 
     def test_multi_name_is_all_or_nothing(self):

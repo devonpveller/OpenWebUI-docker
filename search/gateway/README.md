@@ -40,8 +40,8 @@ The gateway is part of the **main ai-stack compose** — no separate stack.
 \* The SearXNG-compat endpoint is unauthenticated **by necessity** — OWUI's
 `searxng` engine cannot send an `Authorization` header. It is safe because it
 is reachable only on the internal `search-net`/`default` Docker networks
-(never host-published) and called solely by OWUI — the same internal-trust
-model the stack already uses for `mnemory`.
+(never host-published) and called solely by OWUI — the network boundary, not
+a credential, is the control.
 
 ## Why these design choices (ai-stack specifics)
 

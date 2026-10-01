@@ -32,9 +32,9 @@ REAL_MANIFEST = REPO_ROOT / "stack.manifest.toml"
 
 # The order scripts/stack/stack.ps1 uses. Portal is deliberately absent: that
 # script says so in its header, and the manifest marks the plane `manual`.
-PS1_ORDER = ["anchor", "inference", "frontend", "memory", "search", "coder", "ob1", "agent-org"]
+PS1_ORDER = ["anchor", "inference", "frontend", "search", "coder", "ob1", "agent-org"]
 
-ALL_PLANES_BUT_ANCHOR = "inference,frontend,memory,search,coder,ob1,agent-org,portal"
+ALL_PLANES_BUT_ANCHOR = "inference,frontend,search,coder,ob1,agent-org,portal"
 
 
 class Recorder:
@@ -70,8 +70,8 @@ def _make_host_path(path: Path, spec: dict) -> None:
 def root(tmp_path: Path) -> Path:
     """A throwaway repo root: the real manifest, placeholder compose + env files.
 
-    The root is a CHILD of tmp_path so the manifest's `host_paths` (memory's
-    sibling ../mnemory) land inside this test's own directory; each one is
+    The root is a CHILD of tmp_path so a manifest `host_paths` entry outside
+    the checkout would land inside this test's own directory; each one is
     created, and a test that wants it absent removes it.
     """
     repo = tmp_path / "ai-stack"
@@ -187,7 +187,7 @@ def test_real_manifest_parses_and_every_edge_names_a_real_plane():
     manifest = stack.Manifest.load(REAL_MANIFEST)  # _validate raises on an unknown name
     assert manifest.order == PS1_ORDER + ["portal"]
     assert list(manifest.products) == [
-        "chat", "inference", "memory", "search", "open-brain",
+        "chat", "inference", "search", "open-brain",
         "research", "coding-agent", "agent-org", "digest", "portal",
     ]
 
@@ -199,7 +199,6 @@ def test_manifest_requires_edges_are_the_verified_set():
         "anchor": [],
         "inference": ["anchor"],
         "frontend": ["anchor"],
-        "memory": ["anchor", "inference"],
         "search": ["anchor"],
         "coder": ["anchor", "inference"],
         "ob1": ["anchor", "inference", "search"],
@@ -213,7 +212,6 @@ def test_manifest_requires_edges_are_the_verified_set():
         # behind an ..._ENABLED that defaults TRUE. The first cut of the manifest
         # listed only inference and search and was WRONG.
         "frontend": ["inference", "search", "ob1", "portal", "agent-org"],
-        "memory": [],
         "search": [],
         "coder": [],
         "ob1": ["frontend", "agent-org"],
@@ -336,14 +334,13 @@ def test_context_flag_rejects_a_malformed_pair(root):
 # --------------------------------------------------------------------------
 
 
-def test_enable_the_memory_plane_refuses_and_names_inference_and_the_remedy(root):
+def test_enable_the_coder_plane_refuses_and_names_inference_and_the_remedy(root):
     """The PLANE refuses on an unmet requires; the remedy enables the inference PLANE.
 
-    `--plane` since ac-driver-products: a bare `memory` is the product now. The
-    remedy says `--plane inference` because a bare `inference` would be the
+    The remedy says `--plane inference` because a bare `inference` would be the
     product, whose `local` profile is more than this refusal asked for.
     """
-    code, out, _ = run(root, "enable", "--plane", "memory")
+    code, out, _ = run(root, "enable", "--plane", "coder")
     assert code == stack.EXIT_REFUSED
     assert "inference" in out
     assert "stack.py enable --plane inference" in out
@@ -408,11 +405,11 @@ def test_restart_one_plane_restarts_only_that_plane(root):
 
 def test_disable_refuses_while_something_still_requires_the_plane(root):
     # `--plane`: a bare `inference` is the product now, and the product was never enabled here
-    run(root, "init", "--planes", "inference,frontend,memory")
+    run(root, "init", "--planes", "inference,frontend,coder")
     code, out, _ = run(root, "disable", "--plane", "inference")
     assert code == stack.EXIT_REFUSED
-    assert "memory" in out
-    run(root, "disable", "--plane", "memory")
+    assert "coder" in out
+    run(root, "disable", "--plane", "coder")
     code, _, _ = run(root, "disable", "--plane", "inference")
     assert code == 0
 
@@ -494,23 +491,24 @@ def test_the_anchor_is_implicit_never_written_to_state_but_always_started(root):
 def test_disable_says_so_when_a_name_is_ambiguous_too(root):
     """The note is worth most on the destructive half of the pair."""
     run(root, "init", "--planes", "frontend", "--force")
-    run(root, "enable", "memory")
-    code, out, _ = run(root, "disable", "memory")
+    run(root, "enable", "search")
+    code, out, _ = run(root, "disable", "search")
     assert code == 0
     assert "names both a plane and a product; acting on the PRODUCT" in out
-    assert "--plane memory" in out
+    assert "--plane search" in out
     assert set(state_of(root)["planes"]) == {"frontend"}
 
 
 def test_a_product_name_wins_over_a_plane_of_the_same_name(root):
-    """`enable memory` is the PRODUCT (orchestrator decision, ac-driver-products): it brings inference."""
-    code, out, _ = run(root, "enable", "memory")
+    """`enable inference` is the PRODUCT (orchestrator decision, ac-driver-products): it brings `local`."""
+    code, out, _ = run(root, "enable", "inference")
     assert code == 0, out
     assert "names both a plane and a product; acting on the PRODUCT" in out
     # frontend is there because the absent state file defaults to it, not because
     # the product asked for it.
-    assert set(state_of(root)["planes"]) == {"memory", "inference", "frontend"}
-    code, out, _ = run(root, "enable", "--plane", "memory")
+    assert set(state_of(root)["planes"]) == {"inference", "frontend"}
+    assert state_of(root)["planes"]["inference"]["profiles"] == ["local"]
+    code, out, _ = run(root, "enable", "--plane", "inference")
     assert code == 0
     assert "acting on the PLANE alone" in out
 
@@ -769,8 +767,8 @@ def test_a_corrupt_state_file_is_refused_not_ignored(root):
 
 
 # --------------------------------------------------------------------------
-# health - the fifteen probes stack.ps1 ran, one for one, plus the sixteenth
-# (inference serving depth) that has no .ps1 ancestor
+# health - the probes stack.ps1 ran, one for one (fourteen since mm-retire,
+# 2026-09-30), plus the inference serving depth probe that has no .ps1 ancestor
 # --------------------------------------------------------------------------
 #
 # The point of pinning the NAMES is parity. A probe dropped, merged into a
@@ -787,7 +785,6 @@ PS1_PROBES = [
     "frontend: OWUI http://127.0.0.1:3000/health",
     "frontend: 8 tailnet serve routes",
     "frontend: owui/ manifest rows drifted from live webui.db: 0",
-    "memory: cloud door http://127.0.0.1:8060/health",
     "search: gateway http://127.0.0.1:8085/healthz",
     "search: ok - 4 engine(s) answering",
     "coder: little-coder daemon :8090/health",
@@ -1063,8 +1060,8 @@ def test_one_dead_plane_costs_its_own_probes_and_not_the_rest_of_the_sweep(root)
 
     stack.ps1's first owui-drift probe assigned OUTSIDE a Probe block, so a
     stopped openwebui turned the check's stderr into a terminating
-    NativeCommandError: five probe lines, no summary, and the eight later probes
-    (memory, search, coder, OB1 x4, agent-org) never ran at all.
+    NativeCommandError: five probe lines, no summary, and every later probe
+    (search, coder, OB1 x4, agent-org) never ran at all.
     """
     host = FakeHost(
         drift_stdout="REFUSED",
@@ -1074,7 +1071,7 @@ def test_one_dead_plane_costs_its_own_probes_and_not_the_rest_of_the_sweep(root)
     )
     code, out = sweep(host, root)
     rows = probe_lines(out)
-    assert len(rows) == 16          # sixteen since the serving-depth probe
+    assert len(rows) == 15          # sixteen with the serving-depth probe; fifteen since mm-retire
     assert [name for state, name in rows if state == "FAIL"] == [
         "frontend: OWUI http://127.0.0.1:3000/health",
         "frontend: 8 tailnet serve routes",
@@ -1083,7 +1080,7 @@ def test_one_dead_plane_costs_its_own_probes_and_not_the_rest_of_the_sweep(root)
     ]
     assert code == 3
     # The eight probes AFTER the frontend block still ran and still passed.
-    assert [state for state, _name in rows][-9:] == ["OK"] * 9
+    assert [state for state, _name in rows][-8:] == ["OK"] * 8
 
 
 def test_a_drift_count_above_zero_fails_and_the_number_is_in_the_label(root):
@@ -1247,7 +1244,7 @@ def test_up_all_is_the_order_stack_ps1_used_whatever_the_state_says(root):
     assert code == 0
     assert [ln.split(" -f ")[1].split()[0] for ln in docker_lines(out)] == [
         "docker-compose.yml", "inference/docker-compose.yml", "frontend/docker-compose.yml",
-        "memory/docker-compose.yml", "search/docker-compose.yml", "coder/docker-compose.yml",
+        "search/docker-compose.yml", "coder/docker-compose.yml",
         "OB1/docker/docker-compose.yml", "agent-org/docker/docker-compose.yml",
     ]
 
@@ -1282,9 +1279,9 @@ def test_a_plane_and_all_together_is_refused(root):
 
 
 def test_status_reports_the_enabled_planes_and_does_not_pull_in_the_anchor(root):
-    run(root, "init", "--planes", "memory")
+    run(root, "init", "--planes", "coder")
     _code, _out, recorder = run(root, "status")
-    assert recorder.lines == ["docker compose -f memory/docker-compose.yml ps"]
+    assert recorder.lines == ["docker compose -f coder/docker-compose.yml ps"]
 
 
 # --------------------------------------------------------------------------
@@ -1327,11 +1324,11 @@ requires = ["anchor"]
 description = "the CUDA image and the device reservation"
 pending     = true
 
-[planes.memory]
-compose  = "memory/docker-compose.yml"
+[planes.notes]
+compose  = "notes/docker-compose.yml"
 requires = ["anchor"]
-[planes.memory.ports]
-"8060" = "mnemory-cloud-gateway"
+[planes.notes.ports]
+"8060" = "notes-gateway"
 
 [planes.search]
 compose  = "search/docker-compose.yml"
@@ -1409,9 +1406,9 @@ FIXTURE_RENDER = {
         "profiles": [],
         "services": {"openwebui": {"container_name": "openwebui", "ports": [{"published": "3000"}]}},
     },
-    "memory/docker-compose.yml": {
+    "notes/docker-compose.yml": {
         "profiles": [],
-        "services": {"mnemory-cloud-gateway": {"container_name": "mnemory-cloud-gateway",
+        "services": {"notes-gateway": {"container_name": "notes-gateway",
                                                "ports": [{"published": "8060"}]}},
     },
     "search/docker-compose.yml": {
@@ -1445,7 +1442,7 @@ CURATED_PROJECTS = {
     "ai-stack": {"plane": "anchor", "note": "pure network anchor"},
     "inference": {"plane": "inference"},
     "frontend": {"plane": "frontend"},
-    "memory": {"plane": "memory"},
+    "notes": {"plane": "notes"},
     "search": {"plane": "search"},
     "coder": {"plane": "coder"},
     "open-brain": {"plane": "ob1"},
@@ -1460,7 +1457,7 @@ CURATED_ROWS = {
         {"container": "llama-cpp-upstream", "profile": "local", "project": "inference", "critical": True},
     ],
     "search": [{"container": "search-gateway", "service": "gateway", "project": "search", "critical": False}],
-    "memory": [{"container": "mnemory-cloud-gateway", "project": "memory", "critical": False}],
+    "notes": [{"container": "notes-gateway", "project": "notes", "critical": False}],
     "coder": [{"container": "little-coder", "project": "coder", "critical": False}],
     "openbrain": [
         {"container": "openbrain-db", "project": "open-brain", "critical": True},
@@ -1561,13 +1558,13 @@ def test_inventory_check_is_red_when_one_row_is_edited_by_hand(mini_root):
     inventory(mini_root, "--write")
     path = mini_root / stack.INVENTORY_REL
     data = json.loads(path.read_text(encoding="utf-8"))
-    data["planes"]["core"][1]["project"] = "memory"
+    data["planes"]["core"][1]["project"] = "notes"
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     code, out, _c = inventory(mini_root, "--check")
     assert code != 0
     assert "planes.core[llm-gateway]" in out
-    assert "memory" in out and "inference" in out
+    assert "notes" in out and "inference" in out
 
 
 def test_inventory_check_is_red_when_a_row_is_deleted(mini_root):
@@ -1612,14 +1609,14 @@ def test_a_stale_service_key_in_the_sidecar_is_drift_not_a_silent_win(mini_root)
 
 def test_a_published_port_the_manifest_does_not_declare_is_drift(mini_root):
     render = json.loads(json.dumps(FIXTURE_RENDER))
-    render["memory/docker-compose.yml"]["services"]["mnemory-cloud-gateway"]["ports"].append(
+    render["notes/docker-compose.yml"]["services"]["notes-gateway"]["ports"].append(
         {"published": "9999"}
     )
     curated_file(mini_root)
     code, out, _c = inventory(mini_root, "--write", compose=FakeCompose(render))
     assert code != 0
-    assert "PORT 9999 is published by mnemory-cloud-gateway" in out
-    assert "[planes.memory.ports]" in out
+    assert "PORT 9999 is published by notes-gateway" in out
+    assert "[planes.notes.ports]" in out
 
 
 def test_a_declared_port_nothing_publishes_is_drift(mini_root):
@@ -1875,22 +1872,22 @@ def test_a_sidecar_row_may_omit_project_and_the_render_fills_it_in(mini_root):
     wrong; the render fills the field in now.
     """
     rows = json.loads(json.dumps(CURATED_ROWS))
-    rows["memory"].append({"container": "mnemory-cloud-gateway-2", "critical": False})
+    rows["notes"].append({"container": "notes-gateway-2", "critical": False})
     render = json.loads(json.dumps(FIXTURE_RENDER))
-    render["memory/docker-compose.yml"]["services"]["mnemory-cloud-gateway-2"] = {
-        "container_name": "mnemory-cloud-gateway-2"
+    render["notes/docker-compose.yml"]["services"]["notes-gateway-2"] = {
+        "container_name": "notes-gateway-2"
     }
     curated_file(mini_root, rows=rows)
     code, out, _c = inventory(mini_root, "--write", compose=FakeCompose(render))
     assert code == 0, out
     written = {r["container"]: r for g in generated(mini_root)["planes"].values() for r in g}
-    assert written["mnemory-cloud-gateway-2"]["project"] == "memory"
+    assert written["notes-gateway-2"]["project"] == "notes"
 
 
 def test_a_row_in_no_render_at_all_must_name_its_project(mini_root):
     """The honest refusal that remains: nothing to derive it from."""
     rows = json.loads(json.dumps(CURATED_ROWS))
-    rows["memory"].append({"container": "typo-svc", "critical": False})
+    rows["notes"].append({"container": "typo-svc", "critical": False})
     curated_file(mini_root, rows=rows)
     code, out, _c = inventory(mini_root, "--write")
     assert code != 0
@@ -1926,7 +1923,7 @@ def test_only_a_pinned_submodule_gets_the_declared_not_rendered_treatment(mini_r
     assert stack.is_pinned_submodule(submodule_root(mini_root), "OB1/docker/docker-compose.yml")
     # ...and nothing else. A plane whose compose lives in this repo must agree
     # with the manifest, because both land in the same commit.
-    for plane in ("inference", "frontend", "memory", "search", "coder", "agent-org"):
+    for plane in ("inference", "frontend", "notes", "search", "coder", "agent-org"):
         assert not stack.is_pinned_submodule(mini_root, manifest.plane(plane)["compose"])
 
 
@@ -2033,7 +2030,7 @@ def test_the_tailnet_probe_skips_itself_where_the_profile_is_not_deployed(root):
     assert "  [skip] frontend: 8 tailnet serve routes (no tailscale profile in this deployment)" in out
     names = [name for _s, name in probe_lines(out)]
     assert "frontend: 8 tailnet serve routes" not in names
-    assert len(names) == 15          # the other fifteen all still ran
+    assert len(names) == 14          # the other fourteen all still ran
     assert "ALL HEALTH PROBES PASSED" in out
 
 
@@ -2262,7 +2259,7 @@ def test_a_compose_file_that_exists_and_will_not_render_is_still_a_refusal(mini_
 
     class Broken(FakeCompose):
         def __call__(self, cmd, cwd):
-            if cmd[cmd.index("-f") + 1] == "memory/docker-compose.yml":
+            if cmd[cmd.index("-f") + 1] == "notes/docker-compose.yml":
                 return stack.CommandResult(
                     1, "", "yaml: while parsing a flow node at line 146: did not find expected node content")
             return super().__call__(cmd, cwd)
@@ -2651,7 +2648,7 @@ def test_every_shipped_example_value_of_a_required_key_is_refused_verbatim(root)
         expected = {k for k in manifest.keys(plane) if shipped.get(k, "").strip()}
         assert flagged == expected, plane
         checked += len(expected)
-    assert checked >= 8   # frontend, inference, memory, search, coder, agent-org, portal carry some
+    assert checked >= 7   # frontend, inference, search, coder, agent-org, portal carry some
 
 
 # --- health scoped to the planes this machine enables --------------------------
@@ -2668,11 +2665,11 @@ FRONTEND_ONLY_PROBES = [
 
 def test_health_on_a_fresh_clone_probes_only_the_frontend_and_the_anchor(root):
     """No state file = the default, frontend alone. RED at 3c3ff75: 16 probes, 11 of them FAIL here."""
-    host = FakeHost(http_status={"http://127.0.0.1:8060/health": 0, "http://127.0.0.1:8062/health": 0})
+    host = FakeHost(http_status={"http://127.0.0.1:8085/healthz": 0, "http://127.0.0.1:8062/health": 0})
     code, out = sweep(host, root, planes=None)
     assert [name for _s, name in probe_lines(out)] == FRONTEND_ONLY_PROBES
     assert ("  [skip] not enabled on this machine, probes not run: "
-            "inference, memory, search, coder, ob1, agent-org") in out
+            "inference, search, coder, ob1, agent-org") in out
     assert code == 0
     # a skipped plane is never even asked
     assert not any("llm-gateway" in c or "openbrain-db" in c for call in host.calls for c in call)
@@ -2792,7 +2789,7 @@ def _real_example_into(root, rel_dir):
 
 def test_the_placeholder_pattern_matches_the_shapes_and_no_real_default():
     for value in ("change-me-to-a-long-random-string", "sk-change-me-owui-virtual-key", "CHANGE_ME",
-                  "REPLACE_WITH_64_HEX_CHARS", "your-mnemory-api-key-here", "putyourtskeyhere",
+                  "REPLACE_WITH_64_HEX_CHARS", "your-api-key-here", "putyourtskeyhere",
                   "<your token>", "ai.example.com", "you@example.com", "placeholder-value"):
         assert stack.is_placeholder(value), value
     for value in ("llama", "8080", "http://gateway:8080/search?q=<query>", "stock", "true",
@@ -2915,100 +2912,40 @@ def test_a_submodule_only_refusal_does_not_talk_about_placeholders(root):
 
 
 def test_health_does_not_probe_a_required_plane_nobody_enabled(root):
-    """A hand-written state {coder, memory}: inference is required, but not enabled -> not probed."""
+    """A hand-written state {coder, agent-org}: inference is required, but not enabled -> not probed."""
     (root / stack.STATE_REL).parent.mkdir(parents=True, exist_ok=True)
-    (root / stack.STATE_REL).write_text(json.dumps({"version": 1, "planes": {"coder": {}, "memory": {}}}),
+    (root / stack.STATE_REL).write_text(json.dumps({"version": 1, "planes": {"coder": {}, "agent-org": {}}}),
                                         encoding="utf-8")
     host = FakeHost()
     code, out = sweep(host, root, planes=None)
     names = [name for _s, name in probe_lines(out)]
     assert not any(n.startswith("inference:") for n in names)
-    assert any(n.startswith("coder:") for n in names) and any(n.startswith("memory:") for n in names)
-    assert "probes not run: inference, frontend, search, ob1, agent-org" in out
+    assert any(n.startswith("coder:") for n in names) and any(n.startswith("agent-org:") for n in names)
+    assert "probes not run: inference, frontend, search, ob1" in out
 
 
-# --- ac-planes-contained: memory's sibling checkout, and the shared backup module ----
+# --- ac-planes-contained: host paths, and the shared backup module ----------------
+#
+# The first host path (a sibling checkout outside the repo) carried these shape tests
+# until mm-retire retired its plane (2026-09-30); the path-level shapes are pinned
+# here directly, the member kinds below, and the doctor/enable flow by agent-org's
+# worker configs (cf-small-fixes G18).
 
 
-MNEMORY_CLONE = ("git clone https://github.com/devonpveller/mnemory.git ../mnemory; "
-                 "git -C ../mnemory checkout e83cb54154812005fd363f9df82ee59e5e1c028b")
-
-
-def _without_mnemory(root):
-    sibling = root.parent / "mnemory"
-    if sibling.is_dir():
-        shutil.rmtree(sibling)
-    elif sibling.exists():
-        sibling.unlink()
-
-
-def test_doctor_fails_memory_without_the_sibling_mnemory_and_names_the_clone(root):
-    run(root, "init", "--planes", "inference,frontend,memory", "--force")
-    _without_mnemory(root)
-    code, out, _ = run(root, "doctor")
-    assert code == stack.EXIT_REFUSED
-    assert "[FAIL] ../mnemory is missing (plane memory)" in out
-    assert f"run `{MNEMORY_CLONE}` from the repo root" in out
-
-
-def test_doctor_passes_the_sibling_mnemory_when_it_is_there(root):
-    run(root, "init", "--planes", "inference,frontend,memory", "--force")
-    code, out, _ = run(root, "doctor")
-    assert "[OK]   host path ../mnemory" in out
-    assert "../mnemory is missing" not in out
-
-
-def test_enable_memory_without_the_sibling_mnemory_refuses_with_the_clone(root):
-    run(root, "init", "--planes", "inference,frontend", "--force")
-    _without_mnemory(root)
-    code, out, _ = run(root, "enable", "memory")
-    assert code == stack.EXIT_REFUSED
-    assert "../mnemory is missing (plane memory)" in out
-    assert f"Run `{MNEMORY_CLONE}`." in out
-    assert "memory" not in state_of(root)["planes"]
-
-
-@pytest.mark.parametrize("shape", ["empty-dir", "plain-file", "no-dockerfile", "no-git", "dockerfile-is-a-dir"])
-def test_an_unusable_sibling_mnemory_is_refused_by_doctor_and_enable(root, shape):
-    """Existing is not enough: only a directory holding .git and the Dockerfile passes."""
-    sibling = root.parent / "mnemory"
-    _without_mnemory(root)
+@pytest.mark.parametrize("shape, reason", [
+    ("missing", "is missing"),
+    ("plain-file", "is not a directory"),
+    ("empty-dir", "is not a checkout the plane can build from (no .git, Dockerfile)"),
+])
+def test_an_unusable_host_path_says_why(tmp_path, shape, reason):
+    """Existing is not enough: only a directory holding every `contains` member passes."""
+    target = tmp_path / "sibling"
     if shape == "plain-file":
-        sibling.write_text("not a checkout\n", encoding="utf-8")
-    else:
-        sibling.mkdir()
-        if shape == "no-dockerfile":
-            (sibling / ".git").mkdir()
-        if shape == "no-git":
-            (sibling / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
-        if shape == "dockerfile-is-a-dir":
-            # cf-small-fixes G10: a DIRECTORY named Dockerfile passed the old .exists() test
-            (sibling / ".git").mkdir()
-            (sibling / "Dockerfile").mkdir()
-    run(root, "init", "--planes", "inference,frontend", "--force")
-    code, out, _ = run(root, "enable", "memory")
-    assert code == stack.EXIT_REFUSED, out
-    assert f"Run `{MNEMORY_CLONE}`." in out
-    # init refuses memory here too, so write the state by hand: doctor must still catch it
-    (root / stack.STATE_REL).write_text(
-        json.dumps({"version": 1, "planes": {"inference": {}, "frontend": {}, "memory": {}}}), encoding="utf-8")
-    code, out, _ = run(root, "doctor")
-    assert code == stack.EXIT_REFUSED
-    assert "[FAIL] ../mnemory " in out and f"run `{MNEMORY_CLONE}`" in out
-    assert "[OK]   host path ../mnemory" not in out
-
-
-def test_a_sibling_mnemory_worktree_with_a_gitfile_is_usable(root):
-    """`.git` may be a FILE (a git worktree or submodule gitfile); only the Dockerfile must be a file."""
-    sibling = root.parent / "mnemory"
-    _without_mnemory(root)
-    sibling.mkdir()
-    (sibling / ".git").write_text("gitdir: /elsewhere/.git/worktrees/mnemory\n", encoding="utf-8")
-    (sibling / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
-    run(root, "init", "--planes", "inference,frontend", "--force")
-    code, out, _ = run(root, "enable", "memory")
-    assert code == 0, out
-    assert "memory" in state_of(root)["planes"]
+        target.write_text("not a checkout", encoding="utf-8")
+    elif shape == "empty-dir":
+        target.mkdir()
+    spec = {"path": "sibling", "contains": [".git", "Dockerfile"]}
+    assert stack.host_path_problem(tmp_path, spec) == reason
 
 
 def test_host_path_members_are_checked_by_kind(tmp_path):
@@ -3110,42 +3047,6 @@ def test_the_worker_config_host_path_is_what_the_compose_file_mounts():
     assert sorted(f"{m}/little-coder.config.yaml" for m in mounts) == sorted(spec["contains"])
     assert (REPO_ROOT / Path(spec["path"])).resolve() == \
         (REPO_ROOT / "agent-org" / "docker" / ".." / "agent-bridge" / "worker-configs").resolve()
-
-
-def test_the_mnemory_host_path_requires_the_dockerfile_the_compose_file_names():
-    manifest = stack.Manifest.load(REAL_MANIFEST)
-    (spec,) = manifest.plane("memory")["host_paths"]
-    text = (REPO_ROOT / manifest.plane("memory")["compose"]).read_text(encoding="utf-8")
-    block = text[text.index("context: ../../mnemory"):]
-    dockerfile = re.search(r"dockerfile:\s*(\S+)", block).group(1)
-    assert dockerfile in spec["contains"] and ".git" in spec["contains"]
-
-
-def test_enable_memory_with_the_sibling_mnemory_succeeds(root):
-    run(root, "init", "--planes", "inference,frontend", "--force")
-    code, out, _ = run(root, "enable", "memory")
-    assert code == 0, out
-    assert "memory" in state_of(root)["planes"]
-
-
-def test_the_memory_product_refuses_too(root):
-    run(root, "init", "--planes", "inference,frontend", "--force")
-    _without_mnemory(root)
-    code, out, _ = run(root, "enable", "--product", "memory")
-    assert code == stack.EXIT_REFUSED
-    assert f"Run `{MNEMORY_CLONE}`." in out
-
-
-def test_the_mnemory_host_path_is_the_memory_build_context():
-    """The manifest's ../mnemory must be where memory/docker-compose.yml builds from."""
-    manifest = stack.Manifest.load(REAL_MANIFEST)
-    declared = [(REPO_ROOT / Path(spec["path"])).resolve() for spec in manifest.plane("memory")["host_paths"]]
-    compose = REPO_ROOT / manifest.plane("memory")["compose"]
-    contexts = re.findall(r"^\s*context:\s*(\S+)\s*$", compose.read_text(encoding="utf-8"), re.MULTILINE)
-    outside = [(compose.parent / c).resolve() for c in contexts
-               if not (compose.parent / c).resolve().is_relative_to(REPO_ROOT.resolve())]
-    assert outside, "memory/docker-compose.yml no longer builds from outside the repo - drop host_paths"
-    assert declared == outside
 
 
 def test_every_backup_consumer_is_declared_and_every_declared_consumer_is_real():
@@ -4381,11 +4282,11 @@ def test_recover_renders_every_plane_before_it_stops_anything(root):
 
 
 def test_recover_one_plane_names_the_enabled_planes_that_depend_on_it(root):
-    code, out, _ = run(root, "init", "--planes", "inference,memory,frontend", "--force")
+    code, out, _ = run(root, "init", "--planes", "inference,coder,frontend", "--force")
     assert code == 0, out
     code, out = ops(root, OpsDaemon(RENDERS), "recover", "inference", "--dry-run")
     assert code == 0, out
-    assert "# note: memory require inference and are not restarted by this" in out
+    assert "# note: coder require inference and are not restarted by this" in out
     assert "frontend/docker-compose.yml" not in out
 
 
@@ -4995,8 +4896,8 @@ DOCS_RENDER = {
         "openwebui": {"container_name": "openwebui",
                       "ports": [{"host_ip": "127.0.0.1", "published": "3000", "target": 8080}]},
     }},
-    "memory/docker-compose.yml": {"name": "memory", "services": {
-        "mnemory-cloud-gateway": {"container_name": "mnemory-cloud-gateway",
+    "notes/docker-compose.yml": {"name": "notes", "services": {
+        "notes-gateway": {"container_name": "notes-gateway",
                                   "ports": [{"host_ip": "127.0.0.1", "published": "8060", "target": 8060}]},
     }},
     "search/docker-compose.yml": {"name": "search", "services": {
@@ -5378,7 +5279,8 @@ def test_the_product_menu_is_what_enable_resolves(tmp_path):
     assert "ob1: `idea-refinery`, `research`, `wiki`" in rows["**open-brain**"]
     assert "anchor, frontend, portal *(manual)*" in rows["**portal**"]
     # keys are the union over every plane started, not only the product's own
-    assert "`LITELLM_MASTER_KEY`" in rows["**memory**"] and "`MCP_API_KEY`" in rows["**memory**"]
+    assert ("`LITELLM_MASTER_KEY`" in rows["**coding-agent**"]
+            and "`OPEN_TERMINAL_API_KEY`" in rows["**coding-agent**"])
     for name in manifest.products:
         full, _profiles, _dp, _dprof = stack.product_plan(manifest, name, headless=False)
         assert rows[f"**{name}**"].split("|")[3].strip().replace(" *(manual)*", "") == ", ".join(full)
@@ -5446,17 +5348,17 @@ def test_the_shipped_manifest_only_blocks_match_without_docker():
 
 
 def test_a_hand_edit_of_a_derivable_row_is_stale_even_when_another_row_cannot_be_rendered(docs_root):
-    """X1: plane-table was all-or-nothing, so without ob1 a hand edit of the MEMORY row passed."""
+    """X1: plane-table was all-or-nothing, so without ob1 a hand edit of the NOTES row passed."""
     assert docs(docs_root, "--write")[0] == 0
     (docs_root / "OB1" / "docker" / "docker-compose.yml").unlink()
     text = doc(docs_root)
-    memory_row = next(line for line in text.splitlines() if line.startswith("| **memory**"))
-    (docs_root / "DOC.md").write_text(text.replace(memory_row, memory_row.replace("1 with no profile",
+    notes_row = next(line for line in text.splitlines() if line.startswith("| **notes**"))
+    (docs_root / "DOC.md").write_text(text.replace(notes_row, notes_row.replace("1 with no profile",
                                                                                   "5 with no profile")),
                                       encoding="utf-8")
     code, out, _h = docs(docs_root, "--check", "--allow-unverified")
     assert code == stack.EXIT_REFUSED, out
-    assert "block `plane-table` is STALE (row '**memory** (`memory`)'" in out
+    assert "block `plane-table` is STALE (row '**notes** (`notes`)'" in out
     assert "cell 3: committed '5 with no profile', generated '1 with no profile'" in out
 
 
@@ -5748,8 +5650,8 @@ def test_printable_quotes_a_value_a_shell_would_split():
     assert stack.printable(["docker", "ps"]) == "docker ps"
 
 
-def test_the_shared_names_are_the_five_the_docs_name():
-    assert SHARED_NAMES == ["agent-org", "inference", "memory", "portal", "search"]
+def test_the_shared_names_are_the_four_the_docs_name():
+    assert SHARED_NAMES == ["agent-org", "inference", "portal", "search"]
 
 
 @pytest.mark.parametrize("name", SHARED_NAMES)
@@ -5790,20 +5692,20 @@ def test_enable_inference_turns_on_local_and_prints_it(root):
     assert "  inference  profiles: local" in out
 
 
-def test_enable_memory_brings_inference_and_lists_both(root):
-    code, out, _ = run(root, "enable", "memory")
+def test_enable_coding_agent_brings_inference_and_lists_both(root):
+    code, out, _ = run(root, "enable", "coding-agent")
     assert code == 0, out
-    assert {"memory", "inference"} <= set(state_of(root)["planes"])
-    assert "enabled product memory:" in out
-    assert "\n  inference" in out and "\n  memory" in out
+    assert {"coder", "inference"} <= set(state_of(root)["planes"])
+    assert "enabled product coding-agent:" in out
+    assert "\n  inference" in out and "\n  coder" in out
 
 
 def test_disable_dash_dash_plane_is_the_plane_alone(root):
-    run(root, "init", "--planes", "inference,memory")
+    run(root, "init", "--planes", "inference,agent-org")
     code, out, _ = run(root, "disable", "--plane", "inference")
     assert code == stack.EXIT_REFUSED
-    assert "memory" in out
-    code, out, _ = run(root, "disable", "--plane", "memory")
+    assert "agent-org" in out
+    code, out, _ = run(root, "disable", "--plane", "agent-org")
     assert code == 0
     assert "acting on the PLANE alone" in out
     assert set(state_of(root)["planes"]) == {"inference"}
@@ -5811,7 +5713,7 @@ def test_disable_dash_dash_plane_is_the_plane_alone(root):
 
 # --------------------------------------------------------------------------
 # ac-driver-products attempt 2: disable removes only what the product added,
-# the memory product brings `local`, and a GPU-less daemon is refused up front
+# a product brings `local`, and a GPU-less daemon is refused up front
 # --------------------------------------------------------------------------
 
 
@@ -5852,12 +5754,11 @@ def test_disabling_one_product_keeps_every_plane_another_product_needs(root):
 
 def test_a_directly_enabled_plane_survives_disabling_a_product_that_lists_it(root):
     run(root, "init", "--planes", "frontend,inference", "--force")
-    assert run(root, "enable", "memory")[0] == 0
+    assert run(root, "enable", "inference")[0] == 0
     assert state_of(root)["planes"]["inference"]["profiles"] == ["local"]
-    code, out, _ = run(root, "disable", "memory")
+    code, out, _ = run(root, "disable", "inference")
     assert code == 0, out
     planes = state_of(root)["planes"]
-    assert "memory" not in planes
     assert set(planes) == {"frontend", "inference"}
     # the product added `local`, so the product takes it back out; the plane stays
     assert planes["inference"]["profiles"] == []
@@ -5866,21 +5767,22 @@ def test_a_directly_enabled_plane_survives_disabling_a_product_that_lists_it(roo
 
 
 def test_a_product_keeps_its_profile_while_another_product_asks_for_it(root):
-    assert run(root, "enable", "memory")[0] == 0
-    assert run(root, "enable", "inference")[0] == 0
-    code, out, _ = run(root, "disable", "memory")
+    """research and digest both ask for ob1's `research`; disabling one leaves it on."""
+    assert run(root, "enable", "research")[0] == 0
+    assert run(root, "enable", "digest")[0] == 0
+    code, out, _ = run(root, "disable", "digest")
     assert code == 0, out
     planes = state_of(root)["planes"]
-    assert "memory" not in planes
-    assert planes["inference"]["profiles"] == ["local"]
+    assert "research" in planes["ob1"]["profiles"]
+    assert set(state_of(root)["products"]) == {"research"}
 
 
 def test_disabling_the_only_product_removes_what_it_added(root):
-    code, _, _ = run(root, "enable", "memory")
+    code, _, _ = run(root, "enable", "coding-agent")
     assert code == 0
-    code, out, _ = run(root, "disable", "memory")
+    code, out, _ = run(root, "disable", "coding-agent")
     assert code == 0, out
-    # frontend was the no-state default, enabled directly; memory's closure goes
+    # frontend was the no-state default, enabled directly; coder's closure goes
     assert set(state_of(root)["planes"]) == {"frontend"}
     assert state_of(root)["products"] == {}
 
@@ -5888,12 +5790,12 @@ def test_disabling_the_only_product_removes_what_it_added(root):
 def test_a_plane_still_required_is_kept_when_its_product_goes(root):
     run(root, "init", "--planes", "frontend", "--force")
     assert run(root, "enable", "inference")[0] == 0
-    run(root, "enable", "--plane", "memory")
+    run(root, "enable", "--plane", "coder")
     code, out, _ = run(root, "disable", "inference")
     assert code == 0, out
     planes = state_of(root)["planes"]
     assert "inference" in planes and planes["inference"]["profiles"] == []
-    assert "required by memory" in out
+    assert "required by coder" in out
 
 
 def test_disable_plane_is_refused_while_a_product_owns_it(root):
@@ -5906,13 +5808,13 @@ def test_disable_plane_is_refused_while_a_product_owns_it(root):
 
 
 def test_enabled_products_are_recorded_in_the_state_file(root):
-    run(root, "enable", "memory")
+    run(root, "enable", "coding-agent")
     data = state_of(root)
-    assert set(data["products"]) == {"memory"}
-    assert "product:memory" in data["planes"]["memory"]["owners"]
-    assert "product:memory" in data["planes"]["inference"]["owners"]
+    assert set(data["products"]) == {"coding-agent"}
+    assert "product:coding-agent" in data["planes"]["coder"]["owners"]
+    assert "product:coding-agent" in data["planes"]["inference"]["owners"]
     _, out, _ = run(root, "list")
-    assert "[enabled]" in [ln for ln in out.splitlines() if ln.strip().startswith("memory ")][-1]
+    assert "[enabled]" in [ln for ln in out.splitlines() if ln.strip().startswith("coding-agent ")][-1]
 
 
 HOST_STYLE_STATE = {
@@ -5921,7 +5823,6 @@ HOST_STYLE_STATE = {
         "coder": {"context": None, "profiles": []},
         "frontend": {"context": None, "profiles": []},
         "inference": {"context": None, "profiles": []},
-        "memory": {"context": None, "profiles": []},
         "ob1": {"context": None, "profiles": ["idea-refinery", "research", "wiki", "notebook"]},
         "search": {"context": None, "profiles": []},
     },
@@ -5949,6 +5850,108 @@ def test_a_state_file_from_before_products_were_tracked_keeps_working(root):
     assert set(state_of(root)["planes"]) == set(HOST_STYLE_STATE["planes"]) - {"ob1"}
 
 
+# --- mm-retire: a host state file that still names a retired plane or product --------
+#
+# `.stack/state.json` is gitignored and per host, so retiring a plane from the manifest
+# cannot rewrite it. A host that ran `enable memory` keeps {plane memory, product memory,
+# inference owned only by product:memory} after the merge. RED at bd8f259: the driver
+# there still declares memory (no note, `disable memory` disables the product), and a
+# name the manifest does not know made every `disable` refuse in _collect_orphans.
+
+RETIRED_STATE = {
+    "version": 1,
+    "planes": {
+        "frontend": {"context": None, "profiles": [], "owners": {"plane": []}},
+        "inference": {"context": None, "profiles": ["local"], "owners": {"product:memory": ["local"]}},
+        "memory": {"context": None, "profiles": [], "owners": {"product:memory": []}},
+    },
+    "products": {"memory": {"headless": False}},
+}
+
+
+def _write_state(root, data):
+    path = root / stack.STATE_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return path
+
+
+def test_a_state_file_enabling_the_retired_memory_plane_is_noted_and_not_driven(root):
+    path = _write_state(root, RETIRED_STATE)
+    before = path.read_text(encoding="utf-8")
+    code, out, _ = run(root, "list")
+    assert code == 0, out
+    assert "enables plane memory, product memory, which stack.manifest.toml no longer declares" in out
+    assert "inference was enabled only for what was retired; kept, as enabled directly" in out
+    assert path.read_text(encoding="utf-8") == before            # reading never rewrites it
+    code, out, _ = run(root, "up", "--dry-run", capture=_no_capture)
+    assert code == 0, out
+    assert "memory/docker-compose.yml" not in out
+    assert "inference/docker-compose.yml --profile local up -d" in out   # what ran keeps running
+    code, out, _ = run(root, "status")
+    assert code == 0, out
+
+
+def test_disable_memory_after_the_retirement_cleans_the_state_file(root):
+    _write_state(root, RETIRED_STATE)
+    code, out, _ = run(root, "disable", "memory")
+    assert code == 0, out
+    assert "memory is retired from stack.manifest.toml" in out
+    data = state_of(root)
+    assert "memory" not in data["planes"] and data["products"] == {}
+    assert data["planes"]["inference"] == {"context": None, "profiles": ["local"], "owners": {"plane": ["local"]}}
+    code, out, _ = run(root, "list")
+    assert code == 0 and "no longer declares" not in out and "was enabled only for" not in out
+
+
+def test_an_unknown_plane_in_the_state_file_does_not_block_disabling_another_product(root):
+    """At base, _collect_orphans walked `requires` over every state plane and refused 'unknown plane'."""
+    _write_state(root, {
+        "version": 1,
+        "planes": {
+            "frontend": {"context": None, "profiles": [], "owners": {"plane": []}},
+            "inference": {"context": None, "profiles": [], "owners": {"product:coding-agent": []}},
+            "coder": {"context": None, "profiles": [], "owners": {"product:coding-agent": []}},
+            "gone": {"context": None, "profiles": [], "owners": {"product:gone": []}},
+        },
+        "products": {"coding-agent": {"headless": False}, "gone": {"headless": False}},
+    })
+    code, out, _ = run(root, "disable", "coding-agent")
+    assert code == 0, out
+    assert "unknown plane" not in out
+    assert set(state_of(root)["planes"]) == {"frontend"}
+    assert state_of(root)["products"] == {}
+
+
+def test_a_plane_owned_only_by_a_retired_product_survives_its_requirer_going(root):
+    """mm-retire X2: inference owned only by product:memory, coder (coding-agent) requires it.
+
+    Retiring the owner left inference unowned but still NEEDED, so the first cut did not
+    re-own it - and `disable coding-agent` then printed `removed planes: inference, coder`,
+    dropping a running `local` inference. RED at bc8990e."""
+    _write_state(root, {
+        "version": 1,
+        "planes": {
+            "frontend": {"context": None, "profiles": [], "owners": {"plane": []}},
+            "inference": {"context": None, "profiles": ["local"], "owners": {"product:memory": ["local"]}},
+            "memory": {"context": None, "profiles": [], "owners": {"product:memory": []}},
+            "coder": {"context": None, "profiles": [], "owners": {"product:coding-agent": []}},
+        },
+        "products": {"memory": {"headless": False}, "coding-agent": {"headless": False}},
+    })
+    state = stack.State.load(root / stack.STATE_REL)
+    planes, products, kept = state.forget_retired(_MANIFEST)
+    assert (planes, products, kept) == (["memory"], ["memory"], ["inference"])
+    assert state.owners_of("inference") == {stack.DIRECT: ["local"]}
+    code, out, _ = run(root, "disable", "coding-agent")
+    assert code == 0, out
+    assert "removed planes: coder" in out and "inference" not in out.split("removed planes:")[1].splitlines()[0]
+    data = state_of(root)
+    assert set(data["planes"]) == {"frontend", "inference"}
+    assert data["planes"]["inference"]["profiles"] == ["local"]
+    assert data["planes"]["inference"]["owners"] == {"plane": ["local"]}
+
+
 def test_disable_help_says_exactly_what_it_removes():
     parser = stack.build_parser()
     sub = next(a for a in parser._actions if isinstance(a, stack.argparse._SubParsersAction))
@@ -5957,23 +5960,6 @@ def test_disable_help_says_exactly_what_it_removes():
     assert "removes only the planes and profiles that product added" in flat
     assert "no-op" in flat
     assert "requires closure and its profiles" not in flat
-
-
-def test_the_memory_product_turns_on_local():
-    """mnemory's two models exist only in the gateway's `local` group."""
-    assert _MANIFEST.product("memory")["profiles"] == {"inference": ["local"]}
-    compose = (REPO_ROOT / "memory" / "docker-compose.yml").read_text(encoding="utf-8")
-    local = (REPO_ROOT / "inference" / "config" / "litellm" / "model_list" / "local.yaml").read_text(encoding="utf-8")
-    for var in ("LLM_MODEL", "EMBED_MODEL"):
-        model = re.search(rf"{var}=(\S+)", compose).group(1)
-        assert f"model_name: {model}" in local, (var, model)
-
-
-def test_enable_memory_writes_local(root):
-    code, out, _ = run(root, "enable", "memory")
-    assert code == 0, out
-    assert state_of(root)["planes"]["inference"]["profiles"] == ["local"]
-    assert "inference  profiles: local" in out
 
 
 INFERENCE_GPU_RENDER = {
@@ -5998,8 +5984,24 @@ INFERENCE_GPU_RENDER = {
 GPU_RENDERS = {
     "inference/docker-compose.yml": INFERENCE_GPU_RENDER,
     "frontend/docker-compose.yml": {"name": "frontend", "services": {"openwebui-stock": {"profiles": ["stock"]}}},
-    "memory/docker-compose.yml": {"name": "memory", "services": {"mnemory": {"image": "mnemory"}}},
+    "coder/docker-compose.yml": {"name": "coder", "services": {"little-coder": {"image": "little-coder"}}},
 }
+
+
+# The shipping manifest has no product that turns on inference's `local` through ANOTHER
+# plane since mm-retire (2026-09-30); the remedy logic for that shape is
+# still the driver's, so these tests add one to the throwaway root's manifest copy.
+LOCAL_PRODUCT = """
+[products.lab]
+description = "test-only: a product that owns inference's `local` through another plane"
+planes      = ["coder"]
+profiles    = { inference = ["local"] }
+"""
+
+
+def _with_local_product(root):
+    manifest = root / stack.MANIFEST_NAME
+    manifest.write_text(manifest.read_text(encoding="utf-8") + LOCAL_PRODUCT, encoding="utf-8")
 
 
 def test_a_gpu_less_daemon_refuses_local_before_anything_starts(root):
@@ -6112,12 +6114,13 @@ def _follow_gpu_remedy(root, out):
 
 
 @pytest.mark.parametrize("setup", [
-    ("frontend", ["enable", "memory"]),                 # T12b: the memory product owns inference + local
+    ("frontend", ["enable", "lab"]),                    # T12b: another product owns inference + local
     ("frontend", ["enable", "inference"]),              # the inference product path
-    ("frontend,inference", ["enable", "memory"]),       # inference ALSO enabled directly
+    ("frontend,inference", ["enable", "lab"]),          # inference ALSO enabled directly
 ])
 def test_following_the_gpu_remedy_gets_a_gpu_less_up_through(root, setup):
     planes, enable = setup
+    _with_local_product(root)
     run(root, "init", "--planes", planes, "--force")
     assert run(root, *enable)[0] == 0
     daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
@@ -6130,22 +6133,23 @@ def test_following_the_gpu_remedy_gets_a_gpu_less_up_through(root, setup):
     assert "docker compose -f inference/docker-compose.yml up -d" in [" ".join(c) for c in daemon.streamed]
 
 
-def test_the_memory_remedy_names_the_memory_product(root):
+def test_the_remedy_names_the_product_that_owns_local(root):
+    _with_local_product(root)
     run(root, "init", "--planes", "frontend", "--force")
-    run(root, "enable", "memory")
+    run(root, "enable", "lab")
     daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
     _, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
-    assert _remedy_commands(out) == [["disable", "memory"], ["enable", "--plane", "inference"], ["up"]]
+    assert _remedy_commands(out) == [["disable", "lab"], ["enable", "--plane", "inference"], ["up"]]
 
 
 def test_a_direct_local_on_a_pre_owners_file_is_not_offered_a_refused_command(root):
-    """Pre-owners state with local on a directly-enabled inference that memory requires."""
+    """Pre-owners state with local on a directly-enabled inference that coder requires."""
     path = root / stack.STATE_REL
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"version": 1, "planes": {
         "frontend": {"context": None, "profiles": []},
         "inference": {"context": None, "profiles": ["local"]},
-        "memory": {"context": None, "profiles": []}}}), encoding="utf-8")
+        "coder": {"context": None, "profiles": []}}}), encoding="utf-8")
     daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
     code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
     assert code == stack.EXIT_REFUSED
@@ -6175,33 +6179,34 @@ def test_a_requirement_kept_plane_survives_a_save_and_load_as_unowned(root):
     """N1: `owners: {}` must not come back as "enabled directly"."""
     run(root, "init", "--planes", "frontend", "--force")
     run(root, "enable", "inference")
-    run(root, "enable", "--plane", "memory")
+    run(root, "enable", "--plane", "coder")
     code, out, _ = run(root, "disable", "inference")
-    assert "required by memory" in out
+    assert "required by coder" in out
     assert state_of(root)["planes"]["inference"]["owners"] == {}
     loaded = stack.State.load(root / stack.STATE_REL)
     assert loaded.owners_of("inference") == {}                 # NOT {"plane": []}
-    code, out, _ = run(root, "disable", "--plane", "memory")
+    code, out, _ = run(root, "disable", "--plane", "coder")
     assert code == 0, out
     assert set(state_of(root)["planes"]) == {"frontend"}      # its last requirer went, so it went
-    assert "disabled: memory, inference" in out
+    assert "disabled: coder, inference" in out
 
 
 def test_the_pre_owners_hint_is_only_for_a_pre_owners_file(root):
     """N2: a tracked file whose last product was disabled is not a pre-owners file."""
-    run(root, "enable", "memory")
-    run(root, "disable", "memory")
-    code, out, _ = run(root, "disable", "memory")
+    run(root, "enable", "coding-agent")
+    run(root, "disable", "coding-agent")
+    code, out, _ = run(root, "disable", "coding-agent")
     assert code == 0 and "nothing to do" in out
     assert "before products were tracked" not in out and "disable --plane" not in out
 
 
 def test_enable_plane_labels_a_profile_a_product_added(root):
     """N3: `--plane` did not turn `local` on; say who did."""
-    run(root, "enable", "memory")
+    _with_local_product(root)
+    run(root, "enable", "lab")
     code, out, _ = run(root, "enable", "--plane", "inference")
     assert code == 0
-    assert "inference  profiles: local (already on: product memory)" in out
+    assert "inference  profiles: local (already on: product lab)" in out
     code, out, _ = run(root, "enable", "inference")
     assert "inference  profiles: local\n" in out                 # the product's own profile, unlabelled
 

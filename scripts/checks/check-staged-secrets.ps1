@@ -135,7 +135,7 @@ $patterns = @(
     @{ Name = 'AWS access key id';       Re = 'AKIA[0-9A-Z]{16}' },
     @{ Name = 'Telegram bot token';      Re = '[0-9]{8,10}:AA[A-Za-z0-9_\-]{33}' },
     @{ Name = 'Private key block';       Re = '-----BEGIN [A-Z ]*PRIVATE KEY-----' },
-    # This repo's own gateway-key format (mnemory/openbrain privacy gateways).
+    # This repo's own gateway-key format (the openbrain privacy gateways).
     # Added 2026-08-20: a live gw- key sat committed in .vscode/mcp.json and
     # openbrain-gateway/smoke_test.py for months - the one local token class
     # this guard could not see.

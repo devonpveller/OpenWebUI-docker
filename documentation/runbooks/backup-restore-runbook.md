@@ -38,7 +38,6 @@ archive deleted or damaged on D: stays intact on the NAS (§8).
 | llm-gateway | Postgres 16 SQL, gzipped | `llm-gateway-*.sql.gz` | `psql` |
 | open-notebook | SurrealDB export + notebook tar | `surreal-*.surql.gz` + `notebook-data-*.tar.gz` | `surreal import` + tar |
 | openwebui | volume tar | `openwebui-backup-*.tar.gz` | tar extract |
-| mnemory | volume tar | `mnemory-backup-*.tar.gz` | tar extract (see `backup/mnemory-restore.sh`) |
 | little-coder | volume tar (5 expertise vols) | `little-coder-backup-*.tar.gz` | tar extract |
 | openbrain-wiki | volume tar (git tree + assets) | `openbrain-wiki-*.tar.gz` | tar extract |
 | tailscale | state-dir tar | `tailscale-*.tar.gz` | tar extract |
@@ -150,17 +149,17 @@ docker compose start open_notebook
 
 ---
 
-## 7. Volume tar restore (openwebui, mnemory, little-coder, wiki, tailscale, lm-models, caddy, authelia)
+## 7. Volume tar restore (openwebui, little-coder, wiki, tailscale, lm-models, caddy, authelia)
 
 General pattern: stop consumers, wipe the volume, extract the tar, restart.
 
 ```bash
-SVC=mnemory ; VOL=mnemory-data ; CONSUMER=mnemory
+SVC=authelia ; VOL=portal_authelia-data ; CONSUMER=authelia
 F=$(ls -1t backups/$SVC/*.tar.gz | head -1)
-docker compose stop $CONSUMER
+docker compose -f portal/docker-compose.yml stop $CONSUMER
 docker run --rm -v $VOL:/data -v "$PWD/backups/$SVC":/b:ro alpine \
   sh -c 'rm -rf /data/* /data/..?* /data/.[!.]* 2>/dev/null; tar xzf /b/'"$(basename "$F")"' -C /data'
-docker compose start $CONSUMER
+docker compose -f portal/docker-compose.yml start $CONSUMER
 ```
 
 **Service-specific care:**
@@ -337,7 +336,6 @@ recreate that one sidecar (`docker compose -f <plane>/docker-compose.yml up -d
 
 | Variable | Sidecar (plane) | Default |
 |---|---|---|
-| `MNEMORY_BACKUP_INTERVAL` | mnemory-backup (memory) | 86400 (daily) |
 | `OPENWEBUI_BACKUP_INTERVAL` | openwebui-backup (frontend) | 86400 |
 | `TAILSCALE_BACKUP_INTERVAL` | tailscale-backup (frontend) | 86400 |
 | `LITTLE_CODER_BACKUP_INTERVAL` | little-coder-backup (coder) | 86400 |

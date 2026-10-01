@@ -9,7 +9,6 @@
 # Sources:
 #   ./backups/caddy/
 #   ./backups/authelia/
-#   ./backups/mnemory/        (existing -- pre-portal)
 #   ./backups/openwebui/      (existing -- pre-portal)
 #   ./backups/little-coder/   (existing -- pre-portal)
 # All of `./backups/` gets mirrored, so any future backup container

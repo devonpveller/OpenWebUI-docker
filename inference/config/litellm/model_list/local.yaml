@@ -66,7 +66,7 @@ model_list:
       model: hosted_vllm/bge-m3
       api_base: http://llm-queue:8080/v1
       api_key: dummy
-  - model_name: qllama/bge-m3:latest       # mnemory's current EMBED_MODEL value
+  - model_name: qllama/bge-m3:latest       # a legacy embed id; stays until every caller uses a role
     litellm_params:
       # hosted_vllm (NOT openai/): llama.cpp is a self-hosted OpenAI-compatible server. The openai
       # provider rejects bge-m3's `dimensions` param (UnsupportedParamsError) and drop_params does

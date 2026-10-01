@@ -1,9 +1,9 @@
 # .gitignore
 # NO LEADING SLASH, deliberately: a pattern without one matches at EVERY level,
 # so this single line covers the root .env AND every per-plane one - frontend/.env,
-# inference/.env, memory/.env, search/.env, coder/.env, portal/.env (sl-env-split,
+# inference/.env, search/.env, coder/.env, portal/.env (sl-env-split,
 # 2026-09-19; verified with `git check-ignore -v frontend/.env`). Anchoring it to
-# `/.env` would leave six live secret files committable. The same holds for every
+# `/.env` would leave those live secret files committable. The same holds for every
 # backup pattern below, and `.env.example` at any level stays tracked because no
 # rule matches it.
 .env
@@ -43,8 +43,6 @@ secrets/
 # --- Re-include backup scripts under backup/ that ARE meant to be tracked ---
 # The `backup/` line above hides everything; selectively un-ignore the scripts
 # the plan ships. Generated tarballs / restore artifacts stay ignored.
-!backup/mnemory-backup.sh
-!backup/mnemory-restore.sh
 !backup/openwebui-backup.sh
 !backup/openwebui-restore.sh
 !backup/little-coder-backup.sh

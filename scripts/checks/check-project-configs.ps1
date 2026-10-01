@@ -105,7 +105,6 @@ if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0) {
             @{ N = 'frontend';  F = 'frontend\docker-compose.yml';  A = @('--env-file', 'frontend\.env.example') }
             @{ N = 'frontend (gpu,tailscale)'; F = 'frontend\docker-compose.yml'; A = @('--env-file', 'frontend\.env.example', '--profile', 'gpu', '--profile', 'tailscale') }
             @{ N = 'inference (local)'; F = 'inference\docker-compose.yml'; A = @('--env-file', 'inference\.env.example', '--profile', 'local') }
-            @{ N = 'memory';    F = 'memory\docker-compose.yml';    A = @('--env-file', 'memory\.env.example') }
             @{ N = 'search';    F = 'search\docker-compose.yml';    A = @('--env-file', 'search\.env.example') }
             @{ N = 'coder';     F = 'coder\docker-compose.yml';     A = @('--env-file', 'coder\.env.example') }
             @{ N = 'portal';    F = 'portal\docker-compose.yml';    A = @('--env-file', 'portal\.env.example', '--profile', 'internet') }
@@ -153,7 +152,6 @@ if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0) {
                 # sl-inference-split; the frontend's pair from sl-frontend-solo.)
                 @{ P = 'inference'; F = 'inference\docker-compose.yml'; A = @('--env-file', 'inference\.env.example', '--profile', 'local') }
                 @{ P = 'frontend';  F = 'frontend\docker-compose.yml';  A = @('--env-file', 'frontend\.env.example', '--profile', 'gpu', '--profile', 'tailscale') }
-                @{ P = 'memory';    F = 'memory\docker-compose.yml';    A = @('--env-file', 'memory\.env.example') }
                 @{ P = 'search';    F = 'search\docker-compose.yml';    A = @('--env-file', 'search\.env.example') }
                 @{ P = 'coder';     F = 'coder\docker-compose.yml';     A = @('--env-file', 'coder\.env.example') }
             )

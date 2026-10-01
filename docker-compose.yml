@@ -23,7 +23,6 @@
 #
 #   frontend/   openwebui + tailscale (netns pair) + their backups   (K.5)
 #   inference/  llama.cpp upstreams + llm-queue + LiteLLM gateway    (K.1)
-#   memory/     mnemory + cloud gateway + backup                     (K.2)
 #   search/     Mullvad vpn + redis + searxng + gateway              (K.3)
 #   coder/      open-terminal + little-coder + lc-egress + backup    (K.4)
 #   portal/     internet front-end (portal-on.ps1 / portal-off.ps1)
@@ -48,7 +47,7 @@ name: ai-stack
 
 networks:
   # Internal-only CALLER plane: no internet access. Every inference consumer
-  # (frontend, memory, coder, OB1, agent-org) attaches here externally and
+  # (frontend, coder, OB1, agent-org) attaches here externally and
   # reaches inference ONLY via the `llama-cpp` / `llama-cpp-embed` aliases on
   # the inference project's llm-gateway. The real inference servers sit on the
   # inference project's NATIVE llm-backend-net, so callers physically cannot

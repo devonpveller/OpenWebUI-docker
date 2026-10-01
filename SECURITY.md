@@ -65,7 +65,7 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
 
 ### Port Exposure (production mode)
 - **Zero** host port bindings on portal services — Cloudflare Tunnel is the only ingress
-- Backend services (`openwebui`, `llama-cpp`, `mnemory`, `surrealdb`, etc.) all bound to `127.0.0.1` only
+- Backend services (`openwebui`, `llama-cpp`, `surrealdb`, etc.) all bound to `127.0.0.1` only
 - Pre-flight §6.1/§6.2 verified: `open_notebook` and `surrealdb` are LAN-unreachable
 
 ### Port Exposure (local-test mode)
@@ -74,7 +74,7 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
 
 ### Docker network segmentation
 - `auth-net` is `internal: true` — Authelia, watcher, tripwire have **no internet egress** (DNS resolution fails). Verified live 2026-05-29.
-- `app-net` is the **only** path from Caddy to backends; Caddy cannot DNS-resolve `mnemory`, `llama-cpp`, `surrealdb`
+- `app-net` is the **only** path from Caddy to backends; Caddy cannot DNS-resolve `llama-cpp`, `surrealdb`
 - `notify-net` is the only egress chokepoint in the portal slice. portal-alerter (intentional) and portal-cron (incidental — see §5 below) can both reach the internet from here
 - `edge-net` carries cloudflared ↔ caddy only
 
@@ -148,7 +148,7 @@ Authelia 4.39 logs warnings; auto-mapped to `AUTHELIA_IDENTITY_VALIDATION_RESET_
 - Scheduled traffic digest: `portal-cron` fires `POST /run` on the alerter daily 07:00 UTC by default
 
 ### Backup state
-- **Full-stack coverage** (post-2026-05-30): nightly logical/tar backups for caddy, authelia, openwebui, mnemory, little-coder (5 volumes), tailscale, openbrain-db (`pg_dump -Fc`), openbrain-wiki (volume tar), open-notebook (surreal export + notebook_data tar) — plus weekly lm-models tar (Sundays 01:00 UTC). (smolcrawl was in this set until its service and backup were retired 2026-08-21.)
+- **Full-stack coverage** (post-2026-05-30): nightly logical/tar backups for caddy, authelia, openwebui, little-coder (5 volumes), tailscale, openbrain-db (`pg_dump -Fc`), openbrain-wiki (volume tar), open-notebook (surreal export + notebook_data tar) — plus weekly lm-models tar (Sundays 01:00 UTC). (smolcrawl was in this set until its service and backup were retired 2026-08-21.)
 - Every backup writes a `.sha256` sentinel beside the archive; restore tooling verifies before touching anything
 - Convention for new services: [documentation/runbooks/backup-conventions.md](documentation/runbooks/backup-conventions.md). Coverage check: `.\scripts\check-backup-coverage.ps1`
 - Restore workflow: per-service in [documentation/runbooks/restore-from-snapshot.md](documentation/runbooks/restore-from-snapshot.md); disaster recovery via `.\scripts\restore-from-snapshot.ps1 -SnapshotRoot ... -Date ... -Apply`

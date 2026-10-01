@@ -4,7 +4,7 @@
 
 **Out of scope:**
 - Non-breach incidents (disk failure, container crash, tunnel outage) — handled by `scripts/recovery/emergency-recovery.ps1` and the recovery stack.
-- Compromises of services NOT in the portal slice (OpenWebUI native, llama-cpp, OB1, mnemory, etc.) — those have their own concerns; this doc focuses on the gateway.
+- Compromises of services NOT in the portal slice (OpenWebUI native, llama-cpp, OB1, etc.) — those have their own concerns; this doc focuses on the gateway.
 
 **Companion docs:**
 - Plan: [archive: auth-front-end/plan-internet-exposed-front-end.md](../../../documentation-plans-ai-stack/journal/archive/implementation-guide/auth-front-end/plan-internet-exposed-front-end.md)

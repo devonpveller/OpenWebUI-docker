@@ -353,7 +353,7 @@ verify by signing in.
 
 ---
 
-## Other tar-based services (openwebui, mnemory, little-coder, tailscale, lm-models)
+## Other tar-based services (openwebui, little-coder, tailscale, lm-models)
 
 All follow the same pattern. **Volume names carry their PROJECT prefix since
 Part K (2026-08-21)** — the live volumes are:
@@ -361,7 +361,6 @@ Part K (2026-08-21)** — the live volumes are:
 | Service | Volume(s) | Stop/start via |
 |---|---|---|
 | openwebui | `frontend_openwebui-data` | `docker compose -f frontend/docker-compose.yml --profile gpu --profile tailscale stop tailscale openwebui` (netns rule: tailscale first; start openwebui then tailscale). **The profile flags are not optional**: the frontend plane is profile-gated, and naming `tailscale` without `gpu` active exits 1 with `no such service: openwebui`. `scripts/backup/restore-from-snapshot.ps1` passes them for you. |
-| mnemory | `memory_mnemory-data` | `docker compose -f memory/docker-compose.yml stop mnemory mnemory-cloud-gateway` |
 | little-coder | `coder_little-coder-{journals,skill,cohorts,polyglot,sessions}` — **one archive, five volumes**, see below | `docker compose -f coder/docker-compose.yml stop little-coder open-terminal lc-egress` |
 | tailscale | bind `./data/tailscale` | frontend project, see below |
 | lm-models | bind `LM_MODELS_DIR` (from `inference/.env`; relative = against `inference/compose/`) | `docker compose -f inference/docker-compose.yml stop llama-cpp-upstream llama-cpp-embed-upstream` |

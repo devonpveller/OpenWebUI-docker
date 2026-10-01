@@ -37,7 +37,6 @@ compose projects: main `ai-stack` + separate `open-brain`).
             Scopable to any container below:
     core    openwebui · tailscale · llm-gateway · llm-queue · llama-cpp ·
             llama-cpp-embed
-    memory  mnemory · mnemory-cloud-gateway · mnemory-backup
     search  vpn · redis · searxng · gateway
     coder   open-terminal · little-coder · lc-egress ·
             little-coder-backup
@@ -45,15 +44,15 @@ compose projects: main `ai-stack` + separate `open-brain`).
     OB1     openbrain-db · openbrain-mcp · openbrain-ext · openbrain-mcpo ·
             openbrain-mcpo-ext · openbrain-postgrest · openbrain-rest ·
             openbrain-entity-worker · openbrain-wiki · openbrain-wiki-viewer
-  Examples: "status" · "status of mnemory-cloud-gateway" · "status of openbrain-mcpo"
+  Examples: "status" · "status of search-gateway" · "status of openbrain-mcpo"
 
 ─ System health  ──────────────────────────────── → modules/system-health
   Triggers: system health · health · monitor
   Output:   System Health Report — Docker services, network connectivity,
             AI Stack Services (live HTTP probes grouped by plane), system
             resources, container environment.
-  Coverage: 10 probe-backed services across every plane (core, memory,
-            search, little-coder, aux, OB1).
+  Coverage: 8 probe-backed services across every plane (core, search,
+            little-coder, aux, OB1).
 
 ─ Tailnet inventory  ──────────────────────────── → tailscale_serve_pipe
   Triggers: inventory · show services · list services · show tailnet ·

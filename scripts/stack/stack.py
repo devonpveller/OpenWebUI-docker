@@ -349,7 +349,7 @@ def order_planes(manifest: Manifest, names) -> list[str]:
     """Topological sort of `requires`, ties broken by manifest declaration order.
 
     That tie-break is the whole point: it is what makes the full set come out
-    anchor, inference, frontend, memory, search, coder, ob1, agent-org - the
+    anchor, inference, frontend, search, coder, ob1, agent-org - the
     order scripts/stack/stack.ps1 uses.
     """
     wanted = set(names)
@@ -436,6 +436,8 @@ class State:
         self.exists = exists
         # True only for a file written before `owners`/`products` existed (see load)
         self.pre_owners = False
+        # Plane/product names forget_retired() dropped because the manifest no longer has them
+        self.retired: set[str] = set()
 
     @classmethod
     def default(cls, path: Path | None = None) -> "State":
@@ -501,6 +503,57 @@ class State:
 
     def context_of(self, name: str) -> str | None:
         return self.planes.get(name, {}).get("context")
+
+    def forget_retired(self, manifest: "Manifest") -> tuple[list[str], list[str], list[str]]:
+        """Drop what this file enables that the manifest no longer declares.
+
+        Returns (planes dropped, products dropped, planes kept as direct). A plane
+        or product RETIRED from the manifest (mm-retire took out `memory`, plane
+        and product) can still sit in a host's gitignored state file, and every
+        path that walks `requires` over the state's planes - `disable`'s orphan
+        collection above all - would otherwise refuse with "unknown plane" until
+        someone edited the file by hand. So it is forgotten in memory here, the
+        caller says so, and the next verb that writes state leaves it out.
+
+        Nothing that still exists is stopped as a side effect: a plane that was
+        enabled only by a retired product (whether or not a remaining plane also
+        requires it - that requirer can be disabled later), or kept only because a
+        retired plane required it, would be collected as an orphan by a `disable`. It is
+        re-owned as enabled directly instead, with the profiles it already runs,
+        so the operator takes it out on purpose (`disable --plane <name>`).
+        """
+        planes = [name for name in self.planes if name not in manifest.planes]
+        products = [name for name in self.products if name not in manifest.products]
+        for name in planes:
+            del self.planes[name]
+        for name in products:
+            del self.products[name]
+        if not planes and not products and not any(
+            owner.startswith("product:") and owner.split(":", 1)[1] not in manifest.products
+            for entry in self.planes.values() for owner in (entry.get("owners") or {})
+        ):
+            return [], [], []
+        # Planes whose ONLY owners were retired products. Re-owned whatever else needs them:
+        # an unowned plane would go with its last requirer (e.g. `disable coding-agent`
+        # taking a `local` inference that product:memory had enabled) - mm-retire X2.
+        orphaned = set()
+        for name, entry in self.planes.items():
+            owners = entry.get("owners") or {}
+            gone = [o for o in owners if o.startswith("product:")
+                    and o.split(":", 1)[1] not in manifest.products]
+            for owner in gone:
+                del owners[owner]
+            entry["owners"] = owners
+            if gone and not owners:
+                orphaned.add(name)
+        owned = [name for name in self.planes if self.owners_of(name)]
+        needed = dependency_closure(manifest, owned) if owned else set()
+        kept = [name for name in manifest.order if name in self.planes and not self.owners_of(name)
+                and (name in orphaned or name not in needed)]
+        for name in kept:
+            self.planes[name]["owners"] = {DIRECT: list(self.planes[name]["profiles"])}
+        self.retired = set(planes) | set(products)
+        return planes, products, kept
 
 
 # --------------------------------------------------------------------------
@@ -596,8 +649,8 @@ def host_path_problem(root: Path, spec: dict) -> str | None:
 
     Existing is not enough: an empty directory or a plain file at the path
     would pass an .exists() test and still fail the build. The entry's
-    `contains` names what a real checkout holds there (memory: `.git` and the
-    Dockerfile its compose file builds with); each must be present, and each
+    `contains` names what a real path holds there (agent-org `workers`: one
+    generated little-coder.config.yaml per worker); each must be present, and each
     as the right KIND: `.git` may be a directory (a clone) or a file (a
     worktree or submodule gitfile), a name ending in `/` must be a directory,
     and any other name must be a regular file - a DIRECTORY called
@@ -634,9 +687,8 @@ def host_path_applies(spec: dict, active) -> bool:
 def missing_host_paths(manifest: Manifest, root: Path, plane: str, active=None) -> list[tuple[dict, str]]:
     """(entry, reason) for each of the plane's `host_paths` that is not usable.
 
-    A path the plane cannot run without that no clone carries - memory's sibling
-    ../mnemory, or agent-org's GENERATED worker configs (gitignored; only under
-    the `workers` profile). Each entry carries the `remedy` command that creates it.
+    A path the plane cannot run without that no clone carries - agent-org's
+    GENERATED worker configs (gitignored; only under the `workers` profile). Each entry carries the `remedy` command that creates it.
     """
     found = []
     for spec in manifest.plane(plane).get("host_paths", []):
@@ -665,7 +717,7 @@ def host_path_line(spec: dict, plane: str, reason: str = "is missing") -> str:
 #     change-me / change_me / changeme anywhere   (change-me-to-a-long-random-string,
 #                                                  sk-change-me-owui-virtual-key)
 #     starts with replace-with / REPLACE_WITH      (REPLACE_WITH_64_HEX_CHARS)
-#     starts with your- / your_ / putyour          (your-mnemory-api-key-here,
+#     starts with your- / your_ / putyour          (your-api-key-here,
 #                                                  putyourtskeyhere)
 #     the whole value is <...>                     (<your token>)
 #     an example.com/.org/.net domain or address   (ai.example.com, you@example.com)
@@ -1168,12 +1220,11 @@ def ensure_networks(manifest, state, root, console, runner, capture, plane, dry_
 def resolve_target(manifest: Manifest, name: str, kind: str = "auto") -> tuple[str, str]:
     """('plane'|'product', name).
 
-    PRODUCT wins a name collision (five names are both: inference, memory,
-    search, agent-org, portal - planes & products in the manifest). A newcomer
+    PRODUCT wins a name collision (four names are both: inference, search,
+    agent-org, portal - planes & products in the manifest). A newcomer
     types `enable <name>` from the product menu and must get the product: its
-    requires closure and its profiles (`enable inference` writes `local`,
-    `enable memory` brings inference). The plane used to win, which made the
-    menu's own commands do something else - `enable memory` refused and
+    requires closure and its profiles (`enable inference` writes `local`). The
+    plane used to win, which made the menu's own commands do something else -
     `enable inference` enabled a gateway with no local models (ac-driver-products,
     orchestrator decision). `--plane <name>` acts on the plane alone;
     `--product <name>` stays accepted. cmd_enable prints every plane and profile
@@ -1488,7 +1539,7 @@ def gpu_remedy(manifest: Manifest, state: State, root: Path, gpu_profiles: dict,
 
     `gpu_profiles` is {plane: {profile, ...}} (a None entry = a service that is
     always on). Attempt 2 printed a fixed string - `disable inference` (a no-op
-    when the memory product owned the plane) or `disable --plane inference`
+    when another product owned the plane) or `disable --plane inference`
     (refused while any product owns it) - and a reader who followed it got the
     same refusal back. Here each step is APPLIED to a copy of the state as it is
     chosen, so the list is what actually gets there, and `--plane` is offered only
@@ -1752,8 +1803,8 @@ def enable_remedy(manifest: Manifest, plane: str) -> str:
 def _profile_source(manifest: Manifest, state: State, plane: str, profile: str, mine: str) -> str:
     """`profile`, labelled with who turned it on when that is not the enable being printed.
 
-    Attempt-2 N3: `enable --plane inference` echoed `profiles: local` that the
-    memory product had added, which read as though `--plane` turned it on.
+    Attempt-2 N3: `enable --plane inference` echoed `profiles: local` that a
+    product had added, which read as though `--plane` turned it on.
     """
     owners = state.owners_of(plane)
     if profile in owners.get(mine, []):
@@ -1894,10 +1945,27 @@ def _owner_label(owner: str) -> str:
     return "enabled directly" if owner == DIRECT else f"product {owner.split(':', 1)[1]}"
 
 
+def _note_retired(manifest: Manifest, state: State, root: Path, console: Console) -> None:
+    """Forget what the state file enables that the manifest retired, and say so (State.forget_retired)."""
+    planes, products, kept = state.forget_retired(manifest)
+    if not (planes or products or kept):
+        return
+    where = rel(root, state.path) if state.path else str(STATE_REL)
+    gone = [f"plane {name}" for name in planes] + [f"product {name}" for name in products]
+    if gone:
+        console.line(f"# note: {where} enables " + ", ".join(gone) + f", which {manifest.path.name} no longer "
+                     "declares; ignored (the next verb that writes state - `disable <name>` is one - drops it from "
+                     "the file). Nothing is "
+                     "stopped by this - a container it left running is outside the driver now.")
+    for name in kept:
+        console.line(f"# note: {name} was enabled only for what was retired; kept, as enabled directly "
+                     f"(`disable --plane {name}` takes it out)")
+
+
 def _collect_orphans(manifest: Manifest, state: State) -> list[str]:
     """Remove every plane nobody owns any more and no owned plane requires; return them.
 
-    A plane stays while an owned plane's `requires` closure reaches it (memory
+    A plane stays while an owned plane's `requires` closure reaches it (coder
     keeps inference), whoever enabled it - so a product-disable never strands a
     plane something still running depends on.
     """
@@ -1930,6 +1998,12 @@ def cmd_disable(manifest, state, root, console, name, kind) -> int:
     A product that is not enabled here is a no-op. A PLANE (`--plane`) is refused
     while a product owns it or an enabled plane requires it.
     """
+    if name in state.retired and name not in manifest.planes and name not in manifest.products:
+        # The operator's natural cleanup of a retired name: write the state without it.
+        state.save()
+        console.line(f"# {name} is retired from {manifest.path.name}; removed from {rel(root, state.path)}, "
+                     "nothing else to do")
+        return EXIT_OK
     explicit = kind != "auto"
     kind, target = resolve_target(manifest, name, kind)
     _ambiguity_note(manifest, console, kind, target, explicit)
@@ -2313,7 +2387,7 @@ class HealthSweep:
 
     # The planes that own probes, in sweep order. `run` probes a plane only when
     # it is in `planes` (None = every one, the pre-scoping behaviour).
-    PROBED_PLANES = ("anchor", "inference", "frontend", "memory", "search", "coder", "ob1", "agent-org")
+    PROBED_PLANES = ("anchor", "inference", "frontend", "search", "coder", "ob1", "agent-org")
 
     def __init__(self, console: Console, root: Path, capture, http, planes=None, inference_local=None):
         self.console = console
@@ -2463,11 +2537,6 @@ class HealthSweep:
             else:
                 drift = self.owui_drift(shell)
                 self.probe(f"frontend: owui/ manifest rows drifted from live webui.db: {drift}", drift == "0")
-        if self.on("memory"):
-            self.probe(
-                "memory: cloud door http://127.0.0.1:8060/health",
-                lambda: self.http_ok("http://127.0.0.1:8060/health"),
-            )
         if self.on("search"):
             self.probe(
                 "search: gateway http://127.0.0.1:8085/healthz",
@@ -5022,7 +5091,6 @@ DOCS_BLOCKS: dict[str, list[str]] = {
     "README.md": ["count:frontend:stock", "product-menu", "plane-table", "health-count"],
     "frontend/README.md": ["plane-services:frontend", "profile-counts:frontend"],
     "inference/README.md": ["plane-services:inference", "profile-counts:inference"],
-    "memory/README.md": ["plane-services:memory", "profile-counts:memory"],
     "search/README.md": ["plane-services:search", "profile-counts:search"],
     "coder/README.md": ["plane-services:coder", "profile-counts:coder"],
     "portal/README.md": ["plane-services:portal", "profile-counts:portal"],
@@ -5031,7 +5099,7 @@ DOCS_BLOCKS: dict[str, list[str]] = {
         "plane-services:portal", "profile-counts:portal",
         "profile-counts:frontend", "plane-services:frontend",
         "plane-services:inference", "profile-counts:inference",
-        "plane-services:memory", "plane-services:search", "plane-services:coder",
+        "plane-services:search", "plane-services:coder",
         "profile-counts:ob1", "count:ob1:default", "count:ob1:all", "count:ob1:research",
         "plane-services:ob1",
         "plane-services:agent-org", "profile-counts:agent-org",
@@ -6171,6 +6239,7 @@ def main(argv=None, runner=None, stdout=None, capture=None, http=None, pipe=None
         manifest = Manifest.load(manifest_path)
         state = State.load(state_path)
         state.path = state_path
+        _note_retired(manifest, state, root, console)
 
         if args.verb == "list":
             return cmd_list(manifest, state, root, console)
