@@ -984,12 +984,12 @@ shell, `inference/.env` and the compose defaults itself, exactly as `up` will.
     THREAT MODEL (operator decision, 2026-09-29): this check protects against
     ORDINARY AND ACCIDENTAL edits - uncommitted or staged edits, index flags,
     symlinks and junctions, nested repositories, `GIT_*` overrides, filters and
-    attributes, replace refs, an fsmonitor program, a loose object overwritten in
+    attributes, replace refs, an fsmonitor program, a loose BLOB overwritten in
     place. It does NOT protect against someone who can write to `.git`'s
-    internals - a forged tree or commit object with a valid id, an alternates
-    object store or pack naming HEAD's ids, a rewritten ref - or to the stack's
-    own code: such a person can edit `scripts/stack` directly. Those cases are
-    out of scope by decision. What follows is defence in depth,
+    internals - a forged loose tree or commit object with a valid id, an
+    alternates object store or pack naming HEAD's ids, a rewritten ref - or to
+    the stack's own code: such a person can edit `scripts/stack` directly.
+    Those cases are out of scope by decision. What follows is defence in depth,
     ALLOWLISTS:
   - every `${env.*}` in the WHOLE llama-swap config (every entry and macro, YAML
     comments excepted), as compose renders it, and every model path, must match
