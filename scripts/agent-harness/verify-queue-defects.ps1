@@ -170,7 +170,7 @@ function Add-Registry($fix, [string[]]$Ids) {
 function Invoke-Q($fix, [string[]]$QArgs) {
     $prevState = $env:AI_STACK_WORKTREE_STATE; $prevLine = $env:AI_STACK_WORK_LINE
     $env:AI_STACK_WORKTREE_STATE = $fix.state
-    $env:AI_STACK_WORK_LINE = "base"
+    $env:AI_STACK_WORK_LINE = $(if ($script:LineOverride) { $script:LineOverride } else { "base" })
     Push-Location $fix.repo
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     try { $out = & $PsExe -NoProfile -NonInteractive -File $Script @QArgs 2>&1 }
@@ -1633,6 +1633,34 @@ try {
 $r = Invoke-Q $nf3 @("-Merged", "-Id", "qnf3", "-By", "qrev", "-Sha", $goodSha, "-FitsCodebase")
 Check "NF: a --no-ff merge containing the tested sha IS recorded" `
     (($r.code -eq 0) -and ((Get-QItem $nf3 "qnf3").state -eq "merged")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+
+# (f) P6: ff'd onto the line, then a --no-ff merge of ANOTHER branch is recorded for it
+$nf4 = New-NfReviewing "nf4" "qnf4"
+Push-Location $nf4.repo
+try {
+    Invoke-Git merge --ff-only -q work/qd | Out-Null
+    Invoke-Git checkout -q -b side2 base~1 | Out-Null
+    Set-Content -Path (Join-Path $nf4.repo "SIDE2.md") -Encoding ascii -Value "side2"
+    Invoke-Git add SIDE2.md | Out-Null
+    Invoke-Git commit -q -m "other branch" | Out-Null
+    Invoke-Git checkout -q base | Out-Null
+    Invoke-Git merge --no-ff -q side2 -m "merge other branch" | Out-Null
+    $p6Sha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+} finally { Pop-Location }
+$r = Invoke-Q $nf4 @("-Merged", "-Id", "qnf4", "-By", "qrev", "-Sha", $p6Sha, "-FitsCodebase")
+Check "NF: P6 - tested sha already behind the FIRST parent (entered by ff) is REFUSED" `
+    (($r.code -ne 0) -and ((Get-QItem $nf4 "qnf4").state -ne "merged") -and ($r.out -match "FIRST parent")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+# (g) P7: the work line resolves to no ref -> refuse, never skip
+$nf5 = New-NfReviewing "nf5" "qnf5"
+Push-Location $nf5.repo
+try {
+    Invoke-Git merge --no-ff -q work/qd -m "merge the work (evidence: drill)" | Out-Null
+    $p7Sha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+} finally { Pop-Location }
+$script:LineOverride = "no-such-line"
+try { $r = Invoke-Q $nf5 @("-Merged", "-Id", "qnf5", "-By", "qrev", "-Sha", $p7Sha, "-FitsCodebase") } finally { $script:LineOverride = $null }
+Check "NF: P7 - an unresolvable work line is REFUSED, not skipped" `
+    (($r.code -ne 0) -and ((Get-QItem $nf5 "qnf5").state -ne "merged") -and ($r.out -match "integration line")) ("exit=" + $r.code + " | " + (First-Line $r.out))
 
 # --- verdict --------------------------------------------------------------------------
 $fail = @($results | Where-Object { -not $_.pass })

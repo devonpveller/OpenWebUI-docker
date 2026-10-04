@@ -2116,6 +2116,13 @@ if ($Merged) {
             Die (("'{0}' is not a merge commit ({1} parent(s)): a fast-forward, cherry-pick or rebase/squash onto the line " +
                   "runs no commit hook, so the gates never saw it. {2}") -f $Sha, ($mgParts.Count - 1), $mgFix) 1
         }
+        # The tested work must be INTRODUCED by this merge: already behind the first parent means
+        # it entered the line some other way (a fast-forward) and this merge is of something else.
+        [void](Invoke-GitCapture @("merge-base", "--is-ancestor", $item.tested_at_sha, $mgParts[1]))
+        if ($LASTEXITCODE -eq 0) {
+            Die ("'$Sha' is a merge commit, but the tested commit '$($item.tested_at_sha)' is already behind its FIRST parent, " +
+                 "so this merge did not introduce the item's work - it reached the line some other way (a fast-forward?). $mgFix") 1
+        }
         $mgBehind = $false
         foreach ($mgP in @($mgParts | Select-Object -Skip 2)) {
             [void](Invoke-GitCapture @("merge-base", "--is-ancestor", $item.tested_at_sha, $mgP))
@@ -2126,12 +2133,18 @@ if ($Merged) {
                  "non-first parents, so it did not merge this item's work. $mgFix") 1
         }
         $mgLine = Resolve-WorkLine
-        [void](Invoke-GitCapture @("rev-parse", "--verify", "--quiet", "refs/heads/$mgLine"))
-        if ($LASTEXITCODE -eq 0) {
-            [void](Invoke-GitCapture @("merge-base", "--is-ancestor", $Sha, "refs/heads/$mgLine"))
-            if ($LASTEXITCODE -ne 0) {
-                Die ("'$Sha' is not on the integration line '$mgLine'. Merge onto the line first, then record. Nothing has been recorded.") 1
-            }
+        $mgRef = ""
+        foreach ($cand in @("refs/heads/$mgLine", "refs/remotes/origin/$mgLine")) {
+            [void](Invoke-GitCapture @("rev-parse", "--verify", "--quiet", $cand))
+            if ($LASTEXITCODE -eq 0) { $mgRef = $cand; break }
+        }
+        if (-not $mgRef) {
+            Die ("cannot prove '$Sha' is on the integration line: '$mgLine' resolves to no local branch and no origin/$mgLine here. " +
+                 "Run this where the line exists (or fetch it), then record the merge again. Nothing has been recorded.") 1
+        }
+        [void](Invoke-GitCapture @("merge-base", "--is-ancestor", $Sha, $mgRef))
+        if ($LASTEXITCODE -ne 0) {
+            Die ("'$Sha' is not on the integration line '$mgLine'. Merge onto the line first, then record. Nothing has been recorded.") 1
         }
     }
     [void](Invoke-GitCapture @("merge-base", "--is-ancestor", $item.tested_at_sha, $Sha))
