@@ -37,6 +37,8 @@
 #   - openbrain-rest        http://127.0.0.1:3001/   (PostgREST proxy reachable)
 #   - openbrain-postgrest / -wiki / -wiki-viewer / -entity-worker  running
 #   - openbrain-idea-refinery  running (Idea Refinery drain; profile-gated, liveness only)
+#   - openbrain-pantry      /health {"ok":true,"db":true} via docker exec (NO host port);
+#                           profile-gated 'pantry', OFF by default: ABSENT is a skip, never a fault
 #   - research_jobs         status='error' rows in the last 24 h -> WARN naming count +
 #                           newest id + left(error,80); none -> OK. Queried with
 #                           `docker exec <db> psql -U postgres` over the container's
@@ -298,6 +300,41 @@ if ($irState -eq 'running') {
   Write-Ob 'openbrain-idea-refinery' warn 'not present -- enable: docker compose -f OB1/docker/docker-compose.yml --profile idea-refinery up -d openbrain-idea-refinery'
 } else {
   Confirm-ObContainer 'openbrain-idea-refinery' | Out-Null
+}
+
+# ---- 7. Household pantry service (profile-gated 'pantry'; pantry-wire) -----
+# OFF by default: the container exists only after `stack.py enable pantry` + the
+# operator's deploy steps, so ABSENT is a quiet skip - not a WARN, not a fault - and
+# the stack-health line must not change on a host that never turned it on. When it IS
+# there it is checked like research/curator: it publishes NO host port (obnet +
+# ai-stack_llm-net only), so /health is read INSIDE the container with the same deno
+# one-liner its compose healthcheck uses; the service answers {"ok":true,"db":true}
+# (503 + db:false when its pool is dead, the stale-pool shape after an openbrain-db
+# restart). Repair is a restart, which re-opens the pool.
+$pantryProbe = "const r = await fetch('http://127.0.0.1:8000/health'); const j = await r.json(); Deno.exit(r.ok && j.db === true ? 0 : 1)"
+$pantryState = Get-CState 'openbrain-pantry'
+if ($pantryState -eq 'absent') {
+  if (-not $Quiet) { Write-Ob 'openbrain-pantry' ok 'not deployed (profile pantry is off) -- skipped' }
+} elseif ($pantryState -eq 'running') {
+  docker exec openbrain-pantry deno eval $pantryProbe 2>$null | Out-Null
+  if ($LASTEXITCODE -eq 0) {
+    Write-Ob 'openbrain-pantry' ok '/health db ok (in-container; no host port)'
+  } else {
+    Write-Ob 'openbrain-pantry' warn 'STALE DB POOL or service down: /health not db-ok'
+    if ($Repair) {
+      Write-Ob 'openbrain-pantry' fix 'docker restart openbrain-pantry (re-open DB pool)'
+      docker restart openbrain-pantry 2>&1 | Out-Null
+      Start-Sleep 8
+      docker exec openbrain-pantry deno eval $pantryProbe 2>$null | Out-Null
+      if ($LASTEXITCODE -eq 0) { Write-Ob 'openbrain-pantry' ok '/health recovered' }
+      else { Write-Ob 'openbrain-pantry' down '/health still failing'; $script:Faults++ }
+    } else {
+      Write-Ob 'openbrain-pantry' warn 'run with -Repair to restart (fixes pantry 5xx / stale pool)'
+      $script:Faults++
+    }
+  }
+} else {
+  Confirm-ObContainer 'openbrain-pantry' | Out-Null
 }
 
 Write-Host ""

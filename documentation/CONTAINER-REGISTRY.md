@@ -143,6 +143,7 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 | `openbrain-workbench` | Browser write/read API for the workbench (:8814) — NOT the MCP contract |
 | `openbrain-research` | The shared research engine (:8818; queue, GROUNDED synthesis, OWUI async callback) — replaced smolcrawl's in-repo harness |
 | `openbrain-curator` | Research-package ingest inlet (persists via openbrain-mcp) |
+| `openbrain-pantry` | Household pantry / meal planner HTTP service (pantry-meal-planner). Profile `pantry`, OFF until `stack.py enable pantry`; no host port (`obnet` + `llm-net`); no LLM call; tables in `openbrain-db` as the least-privilege `ob_pantry` role. Why: the OWUI Kitchen model's `pantry` tool does stock/cook/restock arithmetic here, never in the model |
 
 ### Scheduled slice
 

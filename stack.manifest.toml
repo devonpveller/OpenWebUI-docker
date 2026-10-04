@@ -462,6 +462,20 @@ opt_in      = true
 description = "the Open Notebook trio: surrealdb + open_notebook + its backup; a SURFACE of the `research` product, and an engine PROFILE of `digest` (openbrain-podcast renders through it)"
 opt_in      = true
 
+[planes.ob1.profiles.pantry]
+# OB1/docker/docker-compose.yml: openbrain-pantry (pantry-meal-planner; added to the
+# gitlink by pantry-core, 7953bc5 on OB1's work/pantry). ONE container, no host port,
+# on obnet + ai-stack_llm-net (the OWUI `pantry` tool reaches it by name,
+# http://openbrain-pantry:8000, with the x-pantry-key header). It makes NO LLM call, so
+# it is not an inference consumer and has no LiteLLM key; its only engine is openbrain-db
+# (compose `depends_on: openbrain-db: service_healthy`, which is what orders it after the
+# database in `up`, in recovery and on a bare `docker compose up`). `opt_in`, never
+# `default`: it is off until the operator runs `stack.py enable pantry` (and has done
+# the one-time deploy steps in the plan store's pantry-meal-planner/LANDING.md).
+# No `requires`: nothing in ANOTHER profile is needed.
+description = "the household pantry / meal-planner HTTP service: openbrain-pantry (no host port; obnet + llm-net); the `pantry` product enables it"
+opt_in      = true
+
 # --------------------------------------------------------------------------
 [planes.agent-org]
 # Mattermost + agent-bridge (the governed org bus) + profile-gated slices.
@@ -618,6 +632,17 @@ description = "the research engine: OB1 + inference + search, read through OWUI,
 planes      = ["inference", "search", "ob1", "frontend"]
 profiles    = { ob1 = ["research"] }
 surfaces    = { ob1 = ["wiki", "notebook"] }
+
+[products.pantry]
+# The Kitchen model: an OWUI tool (frontend/owui/tools/pantry.py) calling
+# openbrain-pantry, which keeps its tables in openbrain-db. `frontend` is the surface
+# (the tool is pasted into Open WebUI and the model is created there), `inference`
+# serves the Kitchen model's chat, and `ob1` carries the service. The service itself
+# calls no model, so only the tool's chat needs inference. The pantry profile is an
+# engine PROFILE of the product, not a surface: --headless must not drop the service.
+description = "the household pantry and meal planner: the OWUI Kitchen model + tool + the openbrain-pantry service (Open Brain's database holds the data)"
+planes      = ["inference", "ob1", "frontend"]
+profiles    = { ob1 = ["pantry"] }
 
 [products.coding-agent]
 description = "little-coder, the coding agent; its surface is Open WebUI"
