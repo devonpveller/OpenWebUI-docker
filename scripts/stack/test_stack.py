@@ -188,7 +188,7 @@ def test_real_manifest_parses_and_every_edge_names_a_real_plane():
     assert manifest.order == PS1_ORDER + ["portal"]
     assert list(manifest.products) == [
         "chat", "inference", "search", "open-brain",
-        "research", "coding-agent", "agent-org", "digest", "portal",
+        "research", "pantry", "coding-agent", "agent-org", "digest", "portal",
     ]
 
 
@@ -435,7 +435,7 @@ def test_enable_research_pulls_its_planes_and_ob1_profiles(root):
 def test_the_ob1_profiles_are_no_longer_pending(root):
     """The three OB1 profiles exist in the compose file, so nothing may mark them pending."""
     manifest = stack.Manifest.load(REAL_MANIFEST)
-    assert set(manifest.profiles("ob1")) == {"idea-refinery", "research", "wiki", "notebook"}
+    assert set(manifest.profiles("ob1")) == {"idea-refinery", "research", "wiki", "notebook", "pantry"}
     assert manifest.pending_profiles("ob1") == []
     # Only idea-refinery is `default`: `default` means "passed on every
     # invocation", and --headless has to be able to drop wiki and notebook.
@@ -842,6 +842,10 @@ class FakeHost:
         self.plugin_census_code = broken.get("plugin_census_code", 0)
         # ac-followups X1: does a llama-cpp-upstream container exist (any state)?
         self.upstream_exists = broken.get("upstream_exists", False)
+        # pantry-wire: does an openbrain-pantry container exist (any state), and can
+        # `docker ps -a` be read at all? Default = a host that never enabled the profile.
+        self.pantry_exists = broken.get("pantry_exists", False)
+        self.pantry_ps_code = broken.get("pantry_ps_code", 0)
         self.calls: list[list[str]] = []
 
     def capture(self, cmd, cwd):
@@ -854,6 +858,9 @@ class FakeHost:
         if cmd[:2] == ["docker", "ps"]:
             if "name=^llama-cpp-upstream$" in cmd:
                 return stack.CommandResult(0, "llama-cpp-upstream" if self.upstream_exists else "", "")
+            if "name=^openbrain-pantry$" in cmd:
+                return stack.CommandResult(self.pantry_ps_code,
+                                           "openbrain-pantry" if self.pantry_exists else "", "")
             if "name=tailscale" in cmd:
                 return stack.CommandResult(0, "\n".join(self.running), "")
             return stack.CommandResult(0, "\n".join(self.unhealthy), "")
@@ -933,6 +940,63 @@ def test_health_runs_exactly_the_probes_stack_ps1_ran_in_the_same_order(root):
     assert [name for _state, name in probe_lines(out)] == PS1_PROBES
     assert code == 0
     assert "ALL HEALTH PROBES PASSED" in out
+
+
+# --- the openbrain-pantry probe (pantry-wire, 2026-10-04) --------------------
+# Profile-gated and OFF by default, with no host port: the probe is the in-container
+# /health, it runs only when the `pantry` profile is enabled for ob1 (or a container of
+# that name exists / docker cannot say), and a host that never enabled it gets a [skip]
+# line - never a FAIL about a container that is not meant to exist.
+
+PANTRY_PROBE = "OB1: openbrain-pantry /health (in-container, db ok)"
+DB_PROBE = "OB1: openbrain-db accepting connections"
+
+
+def _enable_pantry(root: Path) -> None:
+    manifest = stack.Manifest.load(root / stack.MANIFEST_NAME)
+    state = stack.State.load(root / stack.STATE_REL)
+    stack.enable_plane_profiles(manifest, state, "ob1", ["pantry"])
+    state.save()
+
+
+def test_pantry_probe_is_skipped_on_a_host_that_never_enabled_it(root):
+    code, out = sweep(FakeHost(), root)
+    assert [name for _s, name in probe_lines(out)] == PS1_PROBES, "the pinned list must not move"
+    assert "[skip] OB1: openbrain-pantry /health (no pantry profile in this deployment)" in out
+    assert code == 0
+
+
+def test_pantry_probe_runs_after_the_db_probe_once_the_profile_is_enabled(root):
+    host = FakeHost()
+    sweep(host, root)            # writes the state
+    _enable_pantry(root)
+    code, out = sweep(host, root, planes=None)
+    at = PS1_PROBES.index(DB_PROBE) + 1
+    assert [name for _s, name in probe_lines(out)] == PS1_PROBES[:at] + [PANTRY_PROBE] + PS1_PROBES[at:]
+    assert any(c[:3] == ["docker", "exec", "openbrain-pantry"] and "deno" in c for c in host.calls)
+    assert code == 0
+
+
+def test_pantry_probe_fails_when_the_health_exec_fails(root):
+    host = FakeHost(exec_codes={"openbrain-pantry": 1})
+    sweep(host, root)
+    _enable_pantry(root)
+    code, out = sweep(host, root, planes=None)
+    assert ("FAIL", PANTRY_PROBE) in probe_lines(out)
+    assert code == 1
+
+
+def test_pantry_probe_runs_anyway_on_a_leftover_container_and_says_so(root):
+    code, out = sweep(FakeHost(pantry_exists=True), root)
+    assert ("OK", PANTRY_PROBE) in probe_lines(out)
+    assert "EXISTS but the `pantry` profile is not enabled" in out
+    assert code == 0
+
+
+def test_pantry_probe_runs_anyway_when_docker_ps_cannot_be_read(root):
+    code, out = sweep(FakeHost(pantry_ps_code=1), root)
+    assert ("OK", PANTRY_PROBE) in probe_lines(out)
+    assert "could not be read" in out
 
 
 # --- the inference serving-depth probe (sl-recovery-backups, 2026-09-21) ----
@@ -2005,7 +2069,7 @@ def test_the_shipped_manifest_accounts_for_the_three_ob1_profiles_as_opt_in():
     """
     manifest = stack.Manifest.load(REAL_MANIFEST)
     assert manifest.default_profiles("ob1") == ["idea-refinery"]
-    assert sorted(manifest.opt_in_profiles("ob1")) == ["notebook", "research", "wiki"]
+    assert sorted(manifest.opt_in_profiles("ob1")) == ["notebook", "pantry", "research", "wiki"]
     assert manifest.pending_profiles("ob1") == []
     assert manifest.unaccounted_profiles("ob1") == []
     # and the requires edge sl-ob1-profiles added is still enforced
@@ -5296,7 +5360,9 @@ def test_enable_still_writes_what_the_menu_says(root):
 
 def test_the_probe_catalogue_is_the_sweep_itself():
     catalogue = stack.probe_catalogue()
-    assert len(catalogue) == len(PS1_PROBES)
+    # PS1_PROBES is the pinned all-green list on a host WITHOUT the pantry profile; the
+    # catalogue also lists the pantry probe (pantry-wire), which runs only when it is on.
+    assert len(catalogue) == len(PS1_PROBES) + 1
     order = list(stack.HealthSweep.PROBED_PLANES)
     planes = [plane for plane, _label, _needs in catalogue]
     assert planes == sorted(planes, key=order.index)
@@ -5304,9 +5370,10 @@ def test_the_probe_catalogue_is_the_sweep_itself():
     assert conditional == {
         "frontend: 8 tailnet serve routes": ["tailscale"],
         "frontend: owui/ manifest rows drifted from live webui.db: <count>": ["shell", "plugins"],
+        "OB1: openbrain-pantry /health (in-container, db ok)": ["pantry"],
     }
     count = stack.DocsGenerator(stack.Manifest.load(REAL_MANIFEST), REPO_ROOT, DocsHost()).health_count()
-    assert count.startswith(f"{len(PS1_PROBES)} probes with every plane enabled")
+    assert count.startswith(f"{len(PS1_PROBES) + 1} probes with every plane enabled")
     assert f"({len(PS1_PROBES) - 2} when none of those holds)" in count
 
 

@@ -114,8 +114,19 @@ $Script:OB1Profiles = @(
     '--profile', 'research',
     '--profile', 'wiki',
     '--profile', 'notebook',
-    '--profile', 'idea-refinery'
+    '--profile', 'idea-refinery',
+    '--profile', 'pantry'
 )
+# PANTRY (pantry-wire, 2026-10-04) IS IN THAT LIST FOR TEARDOWN AND STATUS ONLY.
+# `openbrain-pantry` (compose profile `pantry`, opt_in, OFF by default) must be
+# named by every stop / down / ps so a running one is torn down with the rest -
+# a bare `down` would leave it behind holding endpoints on ai-stack_llm-net.
+# But it must NOT be named by an `up` unless the operator enabled it, or recovery
+# would start a service the operator never turned on. So the two `up` sites use
+# Get-OB1StartProfiles below, which is $Script:OB1Profiles minus pantry unless it
+# is enabled. compose ignores a profile no service carries, so the flag is also
+# harmless against an OB1 gitlink older than 7953bc5.
+$Script:OB1PantryProfile = 'pantry'
 # The project name that file declares (`name: open-brain`). Wait-ForRestartLoops
 # filters `docker ps` by it, so it sees the same containers compose does.
 $Script:OB1Project = "open-brain"
@@ -192,6 +203,12 @@ $Script:OB1Services = @(
     "openbrain-db-backup", "openbrain-wiki-backup",   # backup sidecars (moved from ai-stack 2026-08-21; output still lands in ai-stack/backups/)
     "surrealdb", "open_notebook", "open-notebook-backup",   # Open Notebook trio (moved from ai-stack 2026-08-21, K.5b -- ON is OB1-tethered; NOT retiring)
     "openbrain-idea-refinery"   # Idea Refinery drain (profile-gated 'idea-refinery'; started via the profile below)
+)
+# OPTIONAL: counted and started only when the operator enabled the profile
+# (Test-OB1PantryEnabled). Kept out of $Script:OB1Services so a host that never
+# enabled it does not read "30/31 running" as a fault.
+$Script:OB1OptionalServices = @(
+    "openbrain-pantry"          # household pantry / meal planner (profile-gated 'pantry'; no host port; obnet + llm-net)
 )
 
 # agent-org services, default plane only (workers/cloud profiles are gated + excluded,
@@ -598,6 +615,51 @@ function Wait-ForRestartLoops {
     return ,$looping
 }
 
+function Test-OB1PantryEnabled {
+    # Is the `pantry` profile ENABLED on this host? Two sources, exactly the two the
+    # driver itself unions (stack.py effective_profiles): the driver's state file
+    # (.stack\state.json -> planes.ob1.profiles, written by `stack.py enable pantry`)
+    # and COMPOSE_PROFILES in the plane's own OB1\docker\.env. Anything unreadable
+    # is "not enabled": the safe default for a service that is off until chosen.
+    # (Teardown does not call this - it always names the profile.)
+    try {
+        $state = '.stack\state.json'   # cwd is the repo root (Set-Location at the top of this file)
+        if (Test-Path $state) {
+            $j = Get-Content -Raw -Path $state | ConvertFrom-Json
+            if (@($j.planes.ob1.profiles) -contains $Script:OB1PantryProfile) { return $true }
+        }
+    }
+    catch { }
+    try {
+        $envFile = Join-Path (Split-Path -Parent $Script:OB1Compose) '.env'
+        if (Test-Path $envFile) {
+            foreach ($line in Get-Content -Path $envFile) {
+                if ($line -match '^\s*COMPOSE_PROFILES\s*=\s*(.*)$') {
+                    $vals = $Matches[1].Trim().Trim('"').Trim("'") -split '\s*,\s*'
+                    if ($vals -contains $Script:OB1PantryProfile) { return $true }
+                }
+            }
+        }
+    }
+    catch { }
+    return $false
+}
+
+function Get-OB1StartProfiles {
+    # The --profile flags for an OB1 `up`: the four the host runs, plus `pantry`
+    # only when it is enabled (see the note at $Script:OB1PantryProfile). Ordering
+    # after openbrain-db is compose's own: openbrain-pantry has
+    # `depends_on: openbrain-db: condition: service_healthy`, and an `up` of the
+    # whole project waits on it.
+    $flags = @()
+    for ($i = 0; $i -lt $Script:OB1Profiles.Count; $i += 2) {
+        if ($Script:OB1Profiles[$i + 1] -eq $Script:OB1PantryProfile) { continue }
+        $flags += $Script:OB1Profiles[$i]; $flags += $Script:OB1Profiles[$i + 1]
+    }
+    if (Test-OB1PantryEnabled) { $flags += '--profile'; $flags += $Script:OB1PantryProfile }
+    return ,$flags
+}
+
 function Start-OB1Stack {
     # Bring the Open Brain (OB1) compose project up. OB1's own depends_on
     # handles its internal ordering; it must run AFTER the main stack so
@@ -606,7 +668,8 @@ function Start-OB1Stack {
         Write-Log "INFO" "Open Brain (OB1) not deployed in this workspace - skipping"
         return
     }
-    Write-Log "INFO" "Starting Open Brain (OB1) stack ($($Script:OB1Services.Count) containers)..."
+    $obCount = $Script:OB1Services.Count + $(if (Test-OB1PantryEnabled) { $Script:OB1OptionalServices.Count } else { 0 })
+    Write-Log "INFO" "Starting Open Brain (OB1) stack ($obCount containers)..."
     try {
         # ALL FOUR profiles ($Script:OB1Profiles), or this starts 21 of the 30 it
         # just said it would start.
@@ -619,7 +682,8 @@ function Start-OB1Stack {
         # in OB1/docker/.env would NOT save this line - it has to carry them itself.
         # $Script:OB1Services above is the 30 this script claims to start; that is
         # the number these flags have to keep true.
-        $prof = $Script:OB1Profiles
+        # Get-OB1StartProfiles, not $Script:OB1Profiles: `pantry` only when enabled.
+        $prof = Get-OB1StartProfiles
         docker compose -f $Script:OB1Compose @prof up -d
         Write-Log "INFO" "OB1 up -d returned - watching 60 s for restart loops before calling it started..."
         $looping = Wait-ForRestartLoops -Seconds 60
@@ -653,6 +717,9 @@ function Reset-OB1Stack {
         $prof = $Script:OB1Profiles
         docker compose -f $Script:OB1Compose @prof down
         Start-Sleep -Seconds 5
+        # The `up` half names `pantry` only when it is enabled; the `down` half above
+        # always does (a running one must go).
+        $prof = Get-OB1StartProfiles
         docker compose -f $Script:OB1Compose @prof up -d
         Write-Log "INFO" "OB1 up -d returned - watching 60 s for restart loops before calling it recreated..."
         $looping = Wait-ForRestartLoops -Seconds 60
