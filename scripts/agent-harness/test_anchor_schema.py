@@ -220,6 +220,13 @@ CORPUS = [
     ("A-empty-acceptance", dict(VALID_A, acceptance=[])),
     ("A-lowercase-mode", dict(VALID_A, mode="a")),
     ("unknown-mode", dict(VALID_A, mode="Q")),
+    # mt-policy: the optional `tier` field and its `allowed` values - same problems in both
+    # readers, including the case-sensitivity PowerShell does not have by default.
+    ("B-tier-small", dict(VALID_B, tier="small")),
+    ("B-tier-blank", dict(VALID_B, tier="  ")),
+    ("B-tier-invalid", dict(VALID_B, tier="medium")),
+    ("B-tier-wrong-case", dict(VALID_B, tier="Large")),
+    ("A-tier-invalid", dict(VALID_A, tier="huge")),
 ]
 
 

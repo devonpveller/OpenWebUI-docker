@@ -534,6 +534,103 @@ function Get-ArrayField($item, [string]$name) {
 
 function Get-DeployPending($item) { return @(Get-ArrayField $item "deploy_pending") }
 
+
+# --- model tiers: the ADVISORY model recommendation (mt-policy, tracker H2) ----------
+# On -Propose / -Claim / -Submit / -Resubmit / -Approve the queue PRINTS which model the next
+# role should run on - in BOTH maps, cloud (Claude Code subagent) and local (agent-org model
+# role) - from harness.config.json `model_tiers`. It NEVER blocks and never changes an exit
+# code: a failure to compute it prints "unavailable" and the command carries on. The policy is
+# in the config and config.ps1 Resolve-ModelTier; this file only gathers the item's facts.
+
+function Get-ItemTier($item) {
+    # The item's own tier as recorded ("" = none -> model_tiers.default_tier). -Propose items
+    # are an [ordered] dictionary until first written; items read back are PSCustomObjects.
+    if ($item -is [System.Collections.IDictionary]) {
+        if ($item.Contains("tier") -and "$($item['tier'])".Trim()) { return "$($item['tier'])".Trim() }
+        return ""
+    }
+    if (($item.PSObject.Properties.Name -contains "tier") -and "$($item.tier)".Trim()) { return "$($item.tier)".Trim() }
+    return ""
+}
+
+function Get-AnchorTier($anchorObj) {
+    if ($null -eq $anchorObj) { return "" }
+    if (($anchorObj.PSObject.Properties.Name -contains "tier") -and "$($anchorObj.tier)".Trim()) { return "$($anchorObj.tier)".Trim() }
+    return ""
+}
+
+function Assert-AnchorTier($anchorObj) {
+    # The schema already refused a value outside its `allowed` list. This asks the CONFIG,
+    # which is what the recommendation reads - a harness.local.json that narrows the tiers
+    # must not let an anchor through that the resolver will then call unknown.
+    $t = Get-AnchorTier $anchorObj
+    if (-not $t) { return "" }
+    $bad = Test-ModelTierName $t
+    if ($bad) { Die ("the anchor's tier is refused: {0} (harness.config.json model_tiers.tiers). Leave it out for the default ({1})." -f $bad, (Get-DefaultModelTier)) }
+    return $t
+}
+
+function Get-AdviceDocOnly($item) {
+    # $true when EVERY file the branch changes against its line matches
+    # model_tiers.doc_only_patterns, $false when one does not, $null when that cannot be read
+    # (no branch yet, git refused, an empty diff). Unknown never satisfies a doc_only rule.
+    if (-not $item.branch -or -not $item.line) { return $null }
+    $files = @(Invoke-GitCapture @("diff", "--name-only", ("{0}...{1}" -f $item.line, $item.branch)))
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $files = @($files | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if ($files.Count -eq 0) { return $null }
+    $pats = @(Get-HarnessSetting "model_tiers.doc_only_patterns" @() | ForEach-Object { [string]$_ })
+    if ($pats.Count -eq 0) { return $null }
+    foreach ($f in $files) {
+        $hit = $false
+        foreach ($pat in $pats) { if ($f -like $pat) { $hit = $true; break } }
+        if (-not $hit) { return $false }
+    }
+    return $true
+}
+
+function Get-AdviceDeltaLines($item, [int]$attempt) {
+    # Lines changed (insertions + deletions) between the sha the LAST verdict was recorded at
+    # (results[] carries it) and the branch tip now. $null on attempt 1, or when there is no
+    # earlier verdict or git cannot answer - unknown never satisfies a max_delta_lines rule.
+    if ($attempt -lt 2 -or -not $item.branch) { return $null }
+    $prev = @(@(Get-ArrayField $item "results") | Where-Object {
+        ($_.PSObject.Properties.Name -contains "attempt") -and ([int]$_.attempt -lt $attempt) -and
+        ($_.PSObject.Properties.Name -contains "sha") -and $_.sha }) | Select-Object -Last 1
+    if (-not $prev) { return $null }
+    $stat = @(Invoke-GitCapture @("diff", "--shortstat", [string]$prev.sha, [string]$item.branch))
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $txt = ($stat -join " ")
+    $n = 0
+    if ($txt -match '(\d+) insertion') { $n += [int]$Matches[1] }
+    if ($txt -match '(\d+) deletion') { $n += [int]$Matches[1] }
+    return $n
+}
+
+function Write-ModelAdvice($item, [string]$role, [int]$attempt = 0) {
+    # ADVISORY, by contract: everything in here is inside one try, and the catch PRINTS. The
+    # only output is text; no field is written and no exit code is touched.
+    try {
+        if ($attempt -le 0) { $attempt = [int]$item.attempt }
+        if ($attempt -le 0) { $attempt = 1 }
+        $tier = Get-ItemTier $item
+        $doc = Get-AdviceDocOnly $item
+        $delta = if ($role -eq "tester") { Get-AdviceDeltaLines $item $attempt } else { $null }
+        $a = Resolve-ModelTier -Role $role -ItemTier $tier -Attempt $attempt -DocOnly $doc -DeltaLines $delta
+        $lines = @(Format-ModelTierAdvice $a)
+        Write-Host ""
+        Write-Host $lines[0] -ForegroundColor Cyan
+        for ($i = 1; $i -lt $lines.Count; $i++) { Write-Host $lines[$i] }
+        $docWord = if ($null -eq $doc) { "unknown" } elseif ($doc) { "yes" } else { "no" }
+        $deltaWord = if ($null -eq $delta) { "unknown" } else { [string]$delta }
+        $srcWord = if ($tier) { "set on the item" } else { "none set -> model_tiers.default_tier" }
+        Write-Host ("  facts: item tier {0}; doc-only {1}; lines changed since the last verdict {2}" -f $srcWord, $docWord, $deltaWord)
+    } catch {
+        Write-Host ""
+        Write-Host ("MODEL (advisory): unavailable - {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
+}
+
 function Convert-RepoRelative([string]$BaseDir, [string]$Rel) {
     # Combine a compose file's directory with a build context (or a context with a Dockerfile
     # name) and return the REPOSITORY-relative, forward-slash path - "" for the root, $null
@@ -1424,6 +1521,7 @@ if ($Propose) {
     if (-not $Id -or -not $Anchor) { Die "-Propose needs -Id and -Anchor <path to an anchor json>" }
     if (Test-Path (ItemPath $Id)) { Die "queue item '$Id' already exists (use a new -Id, or -Show it)" }
     try { $anchorObj = Read-AnchorFile $Anchor } catch { Die $_.Exception.Message }
+    $anchorTier = Assert-AnchorTier $anchorObj
     # Copy it beside the item, for the same reason the test plan is copied: the developer's
     # worktree is deleted at the end, and a tester or reviewer reading a dangling path is
     # exactly the failure this whole mechanism exists to prevent.
@@ -1434,6 +1532,9 @@ if ($Propose) {
         state = "anchor-draft"; anchor = $anchorObj; anchor_file = $anchorDest
         anchor_confirmed_by = ""; anchor_confirmed_at = 0; gates = (Get-EmptyGateMap)
         test_plan = ""; thread = $Thread; attempt = 1
+        # The model tier (mt-policy). "" = the anchor named none -> model_tiers.default_tier,
+        # resolved when advice is printed, so a changed default reaches old items too.
+        tier = $anchorTier
         line_mergeable = $true
         submitted_sha = ""; tested_at_sha = ""; merged_sha = ""
         results = @(); history = @()
@@ -1446,6 +1547,7 @@ if ($Propose) {
     Write-Host ""
     Write-Host ("  The operator confirms with: queue.ps1 -ConfirmAnchor -Id {0} -By <operator>" -f $Id)
     Write-Host "  Until then this is a proposal, not an agreement."
+    Write-ModelAdvice $item "developer" 1
     exit 0
 }
 
@@ -1460,8 +1562,10 @@ if ($ConfirmAnchor) {
     # work is for, and the record must show what was actually agreed, not what was asked.
     if ($Anchor) {
         try { $anchorObj = Read-AnchorFile $Anchor } catch { Die $_.Exception.Message }
+        $anchorTier = Assert-AnchorTier $anchorObj
         Copy-IntoQueue $Anchor $item.anchor_file "-Anchor" "anchor file for this item"
         $item.anchor = $anchorObj
+        Set-Field $item "tier" $anchorTier
         Add-History $item "anchor amended on confirmation" $By
     }
     $was = $item.state
@@ -1498,8 +1602,10 @@ if ($AmendAnchor) {
     if ($item.state -in @("merged", "deployed", "rejected")) { Die "'$Id' is '$($item.state)' - open a new item" }
     if ($item.state -eq "anchor-draft") { Die "'$Id' is not confirmed yet - amend it on -ConfirmAnchor instead" }
     try { $anchorObj = Read-AnchorFile $Anchor } catch { Die $_.Exception.Message }
+    $anchorTier = Assert-AnchorTier $anchorObj
     Copy-IntoQueue $Anchor $item.anchor_file "-Anchor" "anchor file for this item"
     Set-Field $item "anchor" $anchorObj
+    Set-Field $item "tier" $anchorTier
     Set-Field $item "anchor_confirmed_by" $By
     Set-Field $item "anchor_confirmed_at" (Now)
     $was = $item.state
@@ -1757,6 +1863,7 @@ if ($Submit) {
     # The unregistered-developer WARNING that used to sit here was replaced by a refusal at
     # the top of this handler (2026-09-04). It warned after the item was queued, which is
     # after the only moment the warning could have helped.
+    Write-ModelAdvice $item "tester"
     exit 0
 }
 
@@ -1833,6 +1940,7 @@ if ($Claim) {
         Write-Host ("  Review the diff: git diff {0}...{1}" -f $item.line, $item.branch)
         Write-Host ("  Tests passed at {0}; if your rebase moves it, send it BACK to test." -f $item.tested_at_sha)
     }
+    Write-ModelAdvice $item $Role
     exit 0
 }
 
@@ -2245,6 +2353,7 @@ if ($Approve) {
     [void](Write-GateRecord -Item $Id -Gate "pre_review" -Decision "passed" -Kind "human" -Principal $By `
              -GateProfile (Get-GateProfileName -Requested $GateProfile) -FromState $was -ToState $item.state)
     Write-Host ("'{0}' released for REVIEW by {1}." -f $Id, $By) -ForegroundColor Green
+    Write-ModelAdvice $item "reviewer"
     exit 0
 }
 
@@ -2291,6 +2400,7 @@ if ($Resubmit) {
         Write-Host "  Plan unchanged. If the failure showed the plan missed a case, add it and" -ForegroundColor Yellow
         Write-Host "  re-submit with -TestPlan <path> - the tester reads the queued copy, not yours." -ForegroundColor Yellow
     }
+    Write-ModelAdvice $item "tester"
     exit 0
 }
 

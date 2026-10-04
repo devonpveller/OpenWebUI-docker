@@ -8,7 +8,7 @@ config). The bridge seeds the DB from these JSON files at boot; lane-flips persi
 
 ## Lanes — the pre-P0.5 default is **local**
 
-Every profile ships `lane: "local"` (model `local-large`, the resident 27B - see `inference/README.md`). This is the honest, fail-safe
+Every profile ships `lane: "local"`, on its TIER's model role (see "Tiers" below: `local-large`, the resident 27B, for every judgement role; `local-small` for the file-scoped worker - see `inference/README.md`). This is the honest, fail-safe
 pre-decision posture: until the **P0.5 capability-floor test** decides whether local 27B
 judgment is strong enough, *everything runs local on the same model* (zero swap thrash;
 governance §2.1 "default everything local").
@@ -43,6 +43,43 @@ warning** (never silently trusts a weak monitor — the Human Operator carries m
 
 ⚠️ **Tune the local↔cloud boundary empirically** (operator): stretch local as `local-large`
 proves capable; the cloud budget caps the rest (UX-FLOW §6).
+
+## Tiers - which model SIZE a role's task kind deserves (mt-policy)
+
+Operator, 2026-09-30: *planning the work requires long horizon and plan considerations while
+the work to one file or another requires only their specific narrow scope of work.* So every
+profile carries a `tier`, and the tier names its model role per lane
+(`AO_PROFILE_TIER_MODELS_LOCAL`, default `large=local-large,small=local-small`;
+`AO_PROFILE_TIER_MODELS_CLOUD`, default `large=cloud-large,small=cloud-small`):
+
+| task kind | profile(s) | tier | local model role |
+|---|---|---|---|
+| planning, readiness | `planner` | large | `local-large` |
+| decomposition, intent, lifecycle plan | `po` | large | `local-large` |
+| monitoring: deviation, alignment, plan gate, triage | `pm` | large | `local-large` |
+| review (every lens) | `reviewer-*` | large | `local-large` |
+| operator-facing synthesis | `pm-voice` | large | `local-large` |
+| file-scoped edits, mechanical steps | `worker-default` | small | `local-small` |
+
+`pm-voice` stays large on purpose: what it writes is what the operator believes, and its
+charter calls a confident wrong answer the worst thing it can produce - not a mechanical step.
+
+The routing path is the one that already exists - a task kind runs under its profile and
+`ModelRouter` asks the gateway for that profile's `model`. Nothing new routes; the tier only
+says which model each profile SHOULD carry. `tier` is read from these seed files on every boot
+(it is policy, not a database column); the live `model` still belongs to the database and
+moves only by the governed intent below. `GET /profiles` reports `tier_drift`: every profile
+whose live model is off its tier, each with the exact command that would move it - it changes
+nothing itself.
+
+Known limit, stated rather than implied: the pooled little-coder WORKERS run the model in
+little-coder's own config (`little-coder/config/little-coder.config.yaml`, `agent.model`); their
+task API takes no model, so `worker-default`'s model is the org's recorded policy for that role
+and is not yet what a worker dispatch runs on.
+
+The ai-stack harness's tier policy for CLAUDE CODE subagents (opus / sonnet / haiku) is a
+separate configuration - `scripts/agent-harness/harness.config.json` `model_tiers` - and is
+deliberately not merged with this one.
 
 ## Changing a profile's model on a running install
 

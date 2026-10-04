@@ -2,6 +2,7 @@
   "profile": "reviewer-security",
   "lane": "local",
   "model": "local-large",
+  "tier": "large",
   "system_prompt_ref": "charters/reviewer-security.md",
   "temperature": 0.2,
   "tool_access": ["read", "grep"],

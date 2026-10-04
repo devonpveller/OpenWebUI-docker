@@ -273,6 +273,93 @@
     }
   },
 
+  "model_tiers": {
+    "_comment": [
+      "DELEGATE BY TIER (tracker H2, operator 2026-09-30 / 2026-10-04): planning the work needs",
+      "long-horizon judgement; work on one file or another needs only its narrow scope. So a work",
+      "item carries a TIER (large | small) and the model a role runs on is looked up here, never",
+      "remembered. ADVISORY: queue.ps1 PRINTS the recommendation on -Propose/-Claim/-Submit/",
+      "-Resubmit/-Approve and never blocks on it.",
+      "",
+      "TWO SEPARATE MAPS, kept separate on purpose (operator 2026-10-04: 'maintain the",
+      "configuration for cloud versus local model selections'): `cloud` is Claude Code subagents",
+      "(CLI aliases opus/sonnet/haiku), `local` is agent-org's model ROLES (LiteLLM aliases",
+      "local-large/local-small). Neither is derived from the other; changing one never moves the",
+      "other. Each is tier x role -> model, complete for every tier and every role.",
+      "",
+      "NOT the same thing as `profiles` above: a profile says which RUNNER a role executes on for",
+      "a whole surface; a tier says which MODEL SIZE a role on a given item deserves. The",
+      "research-workbench profiles are untouched and still mean what they meant.",
+      "",
+      "RULES are evaluated in order, first match wins. A rule matches when every condition it",
+      "states holds: `role`; `min_attempt` / `max_attempt` (the queue item's attempt number);",
+      "`doc_only` (every file the branch changes matches `doc_only_patterns` - unknown before",
+      "-Submit, and unknown never matches); `max_delta_lines` (lines changed since the previous",
+      "attempt's submitted sha - unknown on attempt 1, and unknown never matches). `tier` is the",
+      "result: a tier name, or `item` for the item's own tier (or `default_tier` when it has none).",
+      "",
+      "Readers: config.ps1 Resolve-ModelTier and config.py resolve_model_tier, pinned together by",
+      "test_model_tiers.py. Documented in README.md / MODULE.md, section 'Model tiers'."
+    ],
+    "tiers": ["large", "small"],
+    "default_tier": "large",
+    "_default_tier_note": "an item that names no tier is LARGE - today's behaviour (all-cloud opus) is the floor, so an item nobody classified never silently drops to a smaller model. The anchor's optional `tier` field is how an item says otherwise (anchor.schema.json).",
+    "doc_only_patterns": ["*.md"],
+    "rules": [
+      {
+        "id": "review-whole-change",
+        "role": "reviewer",
+        "tier": "large",
+        "why": "the reviewer reads the WHOLE change against the codebase and is the last gate before a merge - whole-change review is large whatever the item's tier"
+      },
+      {
+        "id": "doc-only",
+        "doc_only": true,
+        "tier": "small",
+        "why": "a change that touches only documentation has no new logic to break - developer and tester run small (the review rule above still holds)"
+      },
+      {
+        "id": "retest-small-diff",
+        "role": "tester",
+        "min_attempt": 2,
+        "max_delta_lines": 80,
+        "tier": "small",
+        "why": "attempt >= 2 with a small diff since the last attempt is a CONFIRMATION re-test of a narrow fix, not a fresh adversarial round (mm-mirror: 6 opus test rounds cost ~8-9% of the operator's usage)"
+      },
+      {
+        "id": "first-adversarial-round",
+        "role": "tester",
+        "max_attempt": 1,
+        "tier": "large",
+        "why": "the first adversarial test round of new logic is where the real defects are found - large whatever the item's tier"
+      },
+      {
+        "id": "item-tier",
+        "tier": "item",
+        "why": "no rule above applies - the item's own tier"
+      }
+    ],
+    "cloud": {
+      "substrate": "claude-code",
+      "_note": "Claude Code subagents (the Agent tool's model, or `claude -p --model`). CLI aliases, not API ids.",
+      "roles": {
+        "large": { "developer": "opus", "tester": "opus", "reviewer": "opus" },
+        "small": { "developer": "sonnet", "tester": "sonnet", "reviewer": "sonnet" }
+      },
+      "trivial": "haiku",
+      "_trivial_note": "haiku is ONLY for trivial lookups and evidence copying - never a pipeline role, so it appears in no tier x role cell above (test_model_tiers.py asserts that)."
+    },
+    "local": {
+      "substrate": "agent-org",
+      "_note": "agent-org's model ROLES - LiteLLM aliases served by the inference plane; agent-org's profiles carry them (agent-org/agent-bridge/profiles/README.md, 'Tiers'). Which concrete weights back each role is the inference plane's decision, not this file's.",
+      "roles": {
+        "large": { "developer": "local-large", "tester": "local-large", "reviewer": "local-large" },
+        "small": { "developer": "local-small", "tester": "local-small", "reviewer": "local-small" }
+      },
+      "trivial": "local-small"
+    }
+  },
+
   "gate_profiles": {
     "_comment": [
       "WHO passes a pipeline gate. Deliberately a SEPARATE block from `profiles`",

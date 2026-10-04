@@ -200,6 +200,19 @@ a per-worktree `info/exclude` is **not** honored — verified).
 .\scripts\agent-harness\remove-worktree.ps1 -Id wiki-perf
 ```
 
+## Which model each role should run on (model tiers)
+
+A work item has a **tier** - `large` (planning, long-horizon, new logic) or `small`
+(narrow, mechanical, doc-only) - set by the anchor's optional `"tier"` field and defaulting
+to `large`. `queue.ps1` prints the recommended model for the next role on `-Propose`,
+`-Claim`, `-Submit`, `-Resubmit` and `-Approve`, from `harness.config.json` `model_tiers`:
+one map for **cloud** (Claude Code subagents: opus / sonnet; haiku only for trivial lookups
+and evidence copying) and a separate one for **local** (agent-org's local-large /
+local-small). The rules: whole-change review is large; doc-only changes are small; an
+attempt >= 2 re-test of a small diff is small; the first adversarial test round is large;
+otherwise the item's tier. It is advice - nothing refuses on it. Details: MODULE.md,
+"Model tiers".
+
 ## What a merge SHIPS: `[UNDEPLOYED]` and `-Deployed`
 
 `merged` used to be the last thing the board said about an item, and for some items that

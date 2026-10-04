@@ -125,6 +125,13 @@ def problems(anchor: Any, schema: Dict[str, Any] | None = None) -> List[str]:
         else:
             if f.get("required") and (value is None or not str(value).strip()):
                 out.append(f"'{name}' is required - {f['why']}")
+            # A field with `allowed` values (mt-policy: `tier`): a PRESENT, non-blank value
+            # outside them is refused - case-SENSITIVE, matching anchor.ps1's -ccontains. Blank
+            # or absent falls to the field's documented default instead.
+            allowed = f.get("allowed")
+            if allowed and value is not None and str(value).strip()                     and str(value).strip() not in [str(a) for a in allowed]:
+                out.append(f"'{name}' must be one of: {', '.join(str(a) for a in allowed)} "
+                           f"(got '{str(value).strip()}') - {f['why']}")
 
     # Fields this mode REFUSES. Mode A rejecting `acceptance` is the load-bearing case: a
     # category error, not a style preference (see the schema's note on gym-024).

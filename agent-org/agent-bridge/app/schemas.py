@@ -310,6 +310,10 @@ class ProfileSchema(BaseModel):
     profile: str
     lane: Literal["local", "cloud"] = "local"
     model: str = "local-large"
+    # The model SIZE this role's task kind deserves (mt-policy): planning / decomposition /
+    # review / monitoring = large, file-scoped edits / mechanical steps = small. Policy from the
+    # seed file, not a DB column: the DB owns the live `model`, and tier_drift() compares them.
+    tier: Literal["large", "small"] | None = None
     system_prompt_ref: str
     temperature: float = 0.2
     tool_access: list[str] = Field(default_factory=list)

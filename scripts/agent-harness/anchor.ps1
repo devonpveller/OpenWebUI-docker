@@ -106,6 +106,16 @@ function Test-Anchor($anchor) {
             if ($f.required -and (-not $val -or -not "$val".Trim())) {
                 $problems += ("'{0}' is required - {1}" -f $k, $f.why)
             }
+            # A field with `allowed` values (mt-policy: `tier`): a PRESENT, non-blank value
+            # outside them is refused. -ccontains, not -contains: PowerShell compares strings
+            # case-INsensitively by default and Python does not, so `Large` would pass here
+            # and fail there - the cross-reader test compares problems, not verdicts.
+            if (($f.PSObject.Properties.Name -contains "allowed") -and $null -ne $val -and "$val".Trim()) {
+                $allowed = @($f.allowed | ForEach-Object { [string]$_ })
+                if (-not ($allowed -ccontains "$val".Trim())) {
+                    $problems += ("'{0}' must be one of: {1} (got '{2}') - {3}" -f $k, ($allowed -join ", "), "$val".Trim(), $f.why)
+                }
+            }
         }
     }
     # Fields this mode REFUSES. Mode A rejecting `acceptance` is the load-bearing case: it
@@ -204,6 +214,9 @@ function Format-Anchor($anchor) {
     }
     if ($anchor.PSObject.Properties.Name -contains "audience" -and $anchor.audience) {
         $out += "AUDIENCE  : " + $anchor.audience
+    }
+    if ($anchor.PSObject.Properties.Name -contains "tier" -and "$($anchor.tier)".Trim()) {
+        $out += "TIER      : " + "$($anchor.tier)".Trim() + " (model size - harness.config.json model_tiers)"
     }
     if ($anchor.PSObject.Properties.Name -contains "acceptance" -and @($anchor.acceptance).Count) {
         $out += "ACCEPTANCE:"

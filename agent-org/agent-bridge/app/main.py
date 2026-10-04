@@ -222,7 +222,10 @@ def create_app(orch: Orchestrator | None = None) -> FastAPI:
     # ── profiles (Pc.3 lane flip) ──────────────────────────────────────────────
     @app.get("/profiles")
     async def profiles() -> dict:
-        return {"profiles": {k: v.model_dump() for k, v in orch.profiles.all().items()}}
+        # tier_drift (mt-policy): profiles whose live model is off their tier, each with the exact
+        # governed command that would move it. Read-only - nothing here changes a profile.
+        return {"profiles": {k: v.model_dump() for k, v in orch.profiles.all().items()},
+                "tier_drift": orch.profiles.tier_drift(orch.s)}
 
     @app.post("/profiles/lane")
     async def set_lane(body: LaneIn) -> dict:

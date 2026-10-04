@@ -281,6 +281,15 @@ class Settings(BaseSettings):
         "local-large,local-large:nothink,local-small,local-small:nothink,"
         "qwen36-27b,qwen36-27b:nothink")
     profile_chat_models_cloud: str = "cloud-large,cloud-small"
+    # TIERS (mt-policy, tracker H2): which model ROLE a profile's tier asks for, per lane.
+    # profiles/*.json carry `tier`: planning / decomposition / review / monitoring -> large,
+    # file-scoped edits and mechanical steps -> small (profiles/README.md, "Tiers"). The live
+    # profile still moves ONLY through the governed `set profile <name> model <role>` intent -
+    # ProfileRegistry.tier_drift() names the command for each profile off its tier, and changes
+    # nothing itself. Kept separate from the ai-stack harness's CLOUD map (Claude Code subagents,
+    # scripts/agent-harness/harness.config.json model_tiers): a different substrate.
+    profile_tier_models_local: str = "large=local-large,small=local-small"
+    profile_tier_models_cloud: str = "large=cloud-large,small=cloud-small"
 
     # ── Cloud model lane (separate llm-gateway-cloud — CONDITIONAL, Pc) ──────
     # Only wired if the P0.5 capability-floor gate mandates a cloud judge.
