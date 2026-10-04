@@ -591,3 +591,269 @@ def test_coverage_gate_script_fails_on_an_uncovered_users_db(repo, tmp_path):
     code, out = gate()
     assert code == 0, out
     assert "config+secrets coverage: CLEAN" in out
+
+
+# ============================================================================= attempt 2
+# Added after cfg-backup attempt 1 (tester evidence: test-evidence/cfg-backup.attempt1.md).
+
+
+def _pin_fixture(tmp_path: Path) -> Path:
+    """Main checkout with an old branch that predates the ignore rules (the 09-28 shape)."""
+    root = tmp_path / "main"
+    root.mkdir()
+    write(root, {"README": "old\n", ".gitignore": "logs/\n"})
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "old: no ignore rules yet")
+    _git(root, "branch", "old-branch")
+    write(root, {".gitignore": "logs/\nbackups/\nportal/config/authelia/users_database.yml\n.stack/\nsecrets/\n"})
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "new: rules added")
+    write(root, {"portal/config/authelia/users_database.yml": f"fake: {MARK}\n",
+                 ".stack/state.json": '{"fake": 1}\n'})
+    return root
+
+
+def _pinned_block(root: Path) -> list[str]:
+    lines = (root / ".git/info/exclude").read_text(encoding="utf-8").splitlines()
+    if csb.PIN_BEGIN not in lines:
+        return []
+    return lines[lines.index(csb.PIN_BEGIN) + 1: lines.index(csb.PIN_END)]
+
+
+def test_a_linked_worktree_never_drops_the_main_checkouts_pins(tmp_path, policy):
+    """Tester repro (pin-worktree-clobber-repro.sh): info/exclude is in the COMMON git dir.
+    At 90adada a pin-ignores from a linked worktree REPLACED the block with that
+    worktree's inventory, and an old-branch checkout showed the users DB as untracked
+    again (stashable = deletable)."""
+    root = _pin_fixture(tmp_path)
+    assert csb.main(["pin-ignores", "--repo-root", str(root), "--policy", str(policy)]) == csb.EXIT_OK
+    main_pins = _pinned_block(root)
+    assert main_pins == ["/.stack/state.json", "/portal/config/authelia/users_database.yml"]
+    wt = tmp_path / "linked"
+    _git(root, "worktree", "add", "-q", str(wt), "-b", "wtb")
+    write(wt, {"secrets/wt-only": f"{MARK}-wt\n"})
+    before = (root / ".git/info/exclude").read_bytes()
+    rc = csb.main(["pin-ignores", "--repo-root", str(wt), "--policy", str(policy)])
+    assert rc == csb.EXIT_OK
+    assert (root / ".git/info/exclude").read_bytes() == before, "a linked worktree rewrote info/exclude"
+    assert _pinned_block(root) == main_pins
+    # and the hazard stays closed: the old branch does not see the files, stash -u keeps them
+    _git(root, "checkout", "-q", "old-branch")
+    status = _git(root, "status", "--porcelain", "--untracked-files=all").stdout
+    assert "users_database.yml" not in status and "state.json" not in status, status
+    _git(root, "stash", "push", "-q", "--include-untracked", "-m", "probe")
+    _git(root, "checkout", "-q", "main")
+    assert (root / "portal/config/authelia/users_database.yml").read_text(encoding="utf-8") == f"fake: {MARK}\n"
+    assert (root / ".stack/state.json").is_file()
+
+
+@needs_age
+def test_a_run_in_a_linked_worktree_logs_that_it_did_not_pin(tmp_path, policy, keys):
+    age, _, pub = keys
+    root = _pin_fixture(tmp_path)
+    wt = tmp_path / "linked"
+    _git(root, "worktree", "add", "-q", str(wt), "-b", "wtb")
+    write(wt, {".stack/state.json": "{}\n"})
+    install_recipient(wt, pub)
+    proc = run_cli(wt, policy, "run", "--age", str(age), tmp=tmp_path)
+    assert proc.returncode == csb.EXIT_OK, proc.stdout + proc.stderr
+    assert "pin-ignores skipped" in proc.stdout and "linked worktree" in proc.stdout
+    exclude = root / ".git/info/exclude"
+    assert csb.PIN_BEGIN not in exclude.read_text(encoding="utf-8")
+
+
+def test_pin_keeps_operator_lines_and_crlf(tmp_path):
+    root = _pin_fixture(tmp_path)
+    exclude = root / ".git/info/exclude"
+    exclude.write_bytes(b"# operator line 1\r\n*.mine\r\n")
+    changed, _ = csb.pin_ignores(root, ["portal/config/authelia/users_database.yml"])
+    raw = exclude.read_bytes()
+    assert changed and raw.startswith(b"# operator line 1\r\n*.mine\r\n")
+    assert b"\n" not in raw.replace(b"\r\n", b""), "line endings were normalised"
+
+
+def test_non_utf8_exclude_is_a_clear_failure_not_a_traceback(tmp_path):
+    root = _pin_fixture(tmp_path)
+    exclude = root / ".git/info/exclude"
+    exclude.write_bytes(b"# caf\xe9 operator note\n")
+    with pytest.raises(csb.Failed, match="not UTF-8"):
+        csb.pin_ignores(root, ["portal/config/authelia/users_database.yml"])
+    assert exclude.read_bytes() == b"# caf\xe9 operator note\n"
+
+
+@needs_age
+def test_run_with_a_non_utf8_exclude_logs_error_and_does_not_complete(tmp_path, policy, keys):
+    age, _, pub = keys
+    root = _pin_fixture(tmp_path)
+    (root / ".git/info/exclude").write_bytes(b"# caf\xe9\n")
+    install_recipient(root, pub)
+    proc = run_cli(root, policy, "run", "--age", str(age), tmp=tmp_path)
+    assert proc.returncode == csb.EXIT_PROBLEMS, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr
+    log = next((tmp_path / "logs").glob("config-secrets-backup-*.log")).read_text(encoding="utf-8")
+    assert "[ERROR] pin-ignores FAILED" in log and csb.SUCCESS_MARKER not in log
+    assert len(csb.complete_sets(root / "backups/config-secrets")) == 1  # the archive is still made
+
+
+def test_non_integer_retain_count_is_refused_with_an_error_line(repo, policy, tmp_path):
+    install_recipient(repo, "age1" + "q" * 58)
+    proc = run_cli(repo, policy, "run", tmp=tmp_path, extra_env={"CONFIG_SECRETS_BACKUP_RETAIN_COUNT": "two"})
+    assert proc.returncode == csb.EXIT_REFUSED, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr
+    log = next((tmp_path / "logs").glob("config-secrets-backup-*.log")).read_text(encoding="utf-8")
+    assert "[ERROR] REFUSED" in log and "not a whole number" in log
+
+
+def test_a_bom_recipients_file_is_refused_and_says_why(repo, policy, tmp_path):
+    p = install_recipient(repo, "age1" + "q" * 58)
+    p.write_bytes(b"\xef\xbb\xbf" + ("age1" + "q" * 58 + "\n").encode())
+    proc = run_cli(repo, policy, "run", tmp=tmp_path)
+    assert proc.returncode == csb.EXIT_REFUSED
+    assert "byte-order mark" in proc.stdout and "-Encoding ascii" in proc.stdout
+
+
+@needs_age
+def test_age_failure_logs_ages_own_error(repo, policy, tmp_path, monkeypatch):
+    """age rejects a recipient our syntax check lets through (bad checksum). With more
+    data than a pipe buffer the write fails first; the log must carry age's reason,
+    not '[Errno 22] Invalid argument'."""
+    age, _ = _age_bins()
+    install_recipient(repo, "age1" + "q" * 58)
+    (repo / "secrets/bulk.bin").write_bytes(os.urandom(2 * 1024 * 1024))
+    _patch_render(monkeypatch, repo)
+    out_dir = tmp_path / "out"
+    rc = csb.main(["run", "--repo-root", str(repo), "--policy", str(policy), "--age", str(age),
+                   "--backups-dir", str(out_dir), "--logs-dir", str(tmp_path / "logs"), "--no-pin"])
+    assert rc == csb.EXIT_FAILED
+    log = next((tmp_path / "logs").glob("config-secrets-backup-*.log")).read_text(encoding="utf-8")
+    assert "malformed recipient" in log, log
+    assert not out_dir.exists() or not list(out_dir.iterdir())
+
+
+def _make_dir_link(link: Path, target: Path) -> None:
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True, capture_output=True)
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def test_links_under_secret_dirs_are_reported_not_silently_skipped(repo, policy, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "cred.json").write_text("{}", encoding="utf-8")
+    _make_dir_link(repo / "secrets/junc", outside)
+    file_link = False
+    try:
+        os.symlink(outside / "cred.json", repo / "secrets/linked.json")
+        file_link = True
+    except OSError:
+        pass  # no symlink privilege on this Windows account: the junction case still runs
+    pol = csb.load_policy(policy)
+    inv = csb.derive_inventory(repo, pol, renderer=fake_renderer(repo))
+    links = {w for k, w, _ in inv.problems if k == "LINK"}
+    assert "secrets/junc" in links
+    if file_link:
+        assert "secrets/linked.json" in links
+    assert not any(f.startswith("secrets/junc/") for f in inv.files)
+    # an [[exclude]] with a reason accounts for it
+    pol.exclude.append({"glob": "secrets/junc", "reason": "fixture: deliberate link"})
+    inv = csb.derive_inventory(repo, pol, renderer=fake_renderer(repo))
+    assert "secrets/junc" not in {w for k, w, _ in inv.problems if k == "LINK"}
+
+
+GUARD = (
+    "import os, pathlib, stat, subprocess, sys\n"
+    "mark = os.environ['CS_GUARD_MARK'].encode()\n"
+    "if not stat.S_ISFIFO(os.fstat(0).st_mode):\n"
+    "    sys.stderr.write('GUARD: the stdin of age is not a pipe - the tar was staged somewhere')\n"
+    "    sys.exit(97)\n"
+    "for d in os.environ['CS_GUARD_DIRS'].split(os.pathsep):\n"
+    "    for p in pathlib.Path(d).rglob('*'):\n"
+    "        try:\n"
+    "            if p.is_file() and mark in p.read_bytes():\n"
+    "                sys.stderr.write('GUARD: plaintext on disk DURING the run: ' + str(p))\n"
+    "                sys.exit(98)\n"
+    "        except OSError:\n"
+    "            pass\n"
+    "with open(os.environ['CS_GUARD_LOG'], 'a') as fh:\n"
+    "    fh.write('checked' + chr(10))\n"
+    "sys.exit(subprocess.call(sys.argv[1:]))\n"
+)
+
+
+@needs_age
+def test_no_plaintext_on_disk_while_age_runs(repo, policy, tmp_path, keys, monkeypatch):
+    """'None LEFT afterwards' is not 'none written': a mutant that tars to a temp file,
+    has age encrypt that, then deletes it passed every attempt-1 test. Here age is
+    started through a guard that, at the moment age starts, (a) requires its stdin to
+    be a pipe and (b) scans the output dir and TEMP for the plaintext marker."""
+    import tempfile
+    age, _, pub = keys
+    install_recipient(repo, pub)
+    _patch_render(monkeypatch, repo)
+    out_dir = tmp_path / "out"
+    temp = tmp_path / "guarded-temp"
+    temp.mkdir()
+    guard = tmp_path / "guard.py"
+    guard.write_text(GUARD, encoding="utf-8")
+    glog = tmp_path / "guard.log"
+    for var in ("TMP", "TEMP", "TMPDIR"):
+        monkeypatch.setenv(var, str(temp))
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+    monkeypatch.setenv("CS_GUARD_MARK", MARK)
+    monkeypatch.setenv("CS_GUARD_DIRS", os.pathsep.join([str(out_dir), str(temp)]))
+    monkeypatch.setenv("CS_GUARD_LOG", str(glog))
+    real_popen = subprocess.Popen
+
+    def guarded(cmd, *a, **k):
+        if isinstance(cmd, (list, tuple)) and cmd and Path(str(cmd[0])).name.lower().startswith("age"):
+            cmd = [sys.executable, str(guard), *map(str, cmd)]
+        return real_popen(cmd, *a, **k)
+    monkeypatch.setattr(subprocess, "Popen", guarded)
+    rc = csb.main(["run", "--repo-root", str(repo), "--policy", str(policy), "--age", str(age),
+                   "--backups-dir", str(out_dir), "--logs-dir", str(tmp_path / "logs"), "--no-pin"])
+    log = next((tmp_path / "logs").glob("config-secrets-backup-*.log")).read_text(encoding="utf-8")
+    assert "GUARD" not in log, log
+    assert rc == csb.EXIT_OK, log
+    assert glog.read_text().count("checked") == 1  # the guard really ran in front of age
+
+
+WATCHDOG_HARNESS = """
+$src = '__SRC__'
+$tok = $null; $err = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($src, [ref]$tok, [ref]$err)
+$fns = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                      ($n.Name -eq 'Get-BackupSkipReason' -or $n.Name -eq 'Test-BackupRecency') }, $true)
+foreach ($f in $fns) { . ([scriptblock]::Create($f.Extent.Text)) }
+function Write-LogEntry { param($Message, $Level) Write-Output "LOG[$Level] $Message" }
+$PROJECT_DIR = '__PROJ__'
+$ExpectedBackupRecency = @(@{ Dir = 'config-secrets'; MaxAgeHours = 52 })
+Test-BackupRecency
+"""
+
+
+@pytest.mark.skipif(os.name != "nt" or shutil.which("powershell") is None, reason="needs Windows PowerShell")
+def test_watchdog_recency_counts_only_real_artifacts(tmp_path):
+    """stack-watchdog.ps1's Test-BackupRecency, lifted out of the script by its AST and run
+    against a scratch PROJECT_DIR: an old .tar.age beside a FRESH .files.txt and .partial
+    is STALE (at 90adada the fresh sidecar files made it look fresh)."""
+    proj = tmp_path / "proj"
+    d = proj / "backups/config-secrets"
+    d.mkdir(parents=True)
+    (proj / "logs").mkdir()
+    old = d / "config-secrets-20261001T063000Z.tar.age"
+    old.write_bytes(csb.AGE_MAGIC)
+    (d / (old.name + ".sha256")).write_text("x", encoding="ascii")
+    t = os.path.getmtime(old) - 60 * 3600
+    os.utime(old, (t, t))
+    os.utime(d / (old.name + ".sha256"), (t, t))
+    (d / (old.name + ".files.txt")).write_text("x", encoding="ascii")          # fresh
+    (d / "config-secrets-20261004T063000Z.tar.age.partial").write_text("x", encoding="ascii")  # fresh
+    ps = tmp_path / "run.ps1"
+    ps.write_text(WATCHDOG_HARNESS.replace("__SRC__", str(REPO / "scripts/checks/stack-watchdog.ps1"))
+                  .replace("__PROJ__", str(proj)), encoding="utf-8")
+    env = dict(os.environ, DOCKER_HOST="tcp://127.0.0.1:1")
+    out = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps)],
+                         capture_output=True, text=True, env=env, timeout=300).stdout
+    assert "BACKUP STALE - config-secrets" in out, out

@@ -1351,8 +1351,11 @@ function Test-BackupRecency {
             $stale += "$($exp.Dir): backup dir missing$because"
             continue
         }
+        # Sidecar files are not artifacts: a .sha256 sentinel, the config-secrets
+        # .files.txt listing, or a .partial left by an interrupted run must never make
+        # a dir look fresh.
         $newest = Get-ChildItem $dir -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notlike '*.sha256' } |
+            Where-Object { $_.Name -notlike '*.sha256' -and $_.Name -notlike '*.partial' -and $_.Name -notlike '*.files.txt' } |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
         if (-not $newest) {
             $stale += "$($exp.Dir): no artifacts at all$because"

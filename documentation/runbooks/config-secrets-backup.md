@@ -62,6 +62,15 @@ newest archive.
    on every branch: checking out an OLD branch whose `.gitignore` predates a rule can no
    longer turn a live secret into an "untracked change" that a GUI client then stashes
    away - which is how `users_database.yml` was lost on 2026-09-28.
+   **Only the main checkout writes that block.** `info/exclude` lives in the common git
+   directory and is shared by every worktree; a run from a linked worktree logs
+   `pin-ignores skipped: ... is a linked worktree` and leaves the file alone, so it can
+   never drop the main checkout's pins. Lines outside the marked block are never changed
+   and the file's line endings are kept; a file that is not UTF-8 is not rewritten and the
+   run fails with an `[ERROR] pin-ignores FAILED` line.
+7. **Links are not followed**: a symlink or junction where a secret would be archived
+   (under a secret dir, named like an env file, matching an include) or a bind-mounted
+   link is a `LINK` problem - never archived, never silently skipped.
 
 Exit codes of `run`: 0 complete; 1 archive written but a problem was logged; 2 refused
 (no recipient, a private key in the recipients file, an unpinned age binary, a bad
@@ -129,7 +138,9 @@ Set-Content -Encoding ascii secrets\config-backup\age-recipients.txt "age1...the
 
 One recipient per line; a second line (a second key pair, kept elsewhere) is allowed and
 either private key then decrypts. The job refuses the file if it ever contains a
-private key (`AGE-SECRET-KEY-...`).
+private key (`AGE-SECRET-KEY-...`), and refuses a file that starts with a byte-order
+mark - write it with `-Encoding ascii` exactly as above (PowerShell 5.1's `-Encoding utf8`
+and `unicode` both add a BOM).
 
 ### 4. First run by hand, and prove the round trip
 
@@ -248,6 +259,10 @@ key.
 | Symptom | Meaning | Fix |
 |---|---|---|
 | `REFUSED: NO AGE RECIPIENT CONFIGURED` | no `secrets/config-backup/age-recipients.txt` | setup step 3 |
+| `REFUSED: ... starts with a byte-order mark` | the recipients file was written with a BOM | rewrite it with `Set-Content -Encoding ascii` (setup step 3) |
+| `archive FAILED: age ... malformed recipient` | age rejected the recipient line (a typo in the `age1...` key) | copy the public key again from `age-keygen -y <key file>` |
+| `[ERROR] LINK <path>` | a symlink/junction where a secret would be archived | replace it with the real file, or `[[exclude]]` it with a reason |
+| `[ERROR] pin-ignores FAILED` | `.git/info/exclude` could not be rewritten (e.g. not UTF-8) | fix the file by hand; the archive itself was written |
 | `REFUSED: ... holds an age PRIVATE key` | the private key is on the host | move it offline, delete it, put the public key there |
 | `REFUSED: ... is not a pinned age build` | `--age` points at another binary | setup step 1, or pin the new build in a commit |
 | `[ERROR] MISSING <file>` | a required or bind-mounted file is absent, or a directory Docker made in its place | "Restore one file" |

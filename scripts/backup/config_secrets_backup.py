@@ -163,7 +163,12 @@ def load_policy(path: Path) -> Policy:
             raise Refused(f"policy {path}: every [[outside]] needs a reason ({entry.get('path')!r} has none)")
     env_retain = os.environ.get("CONFIG_SECRETS_BACKUP_RETAIN_COUNT", "").strip()
     if env_retain:
-        pol.retain_count = int(env_retain)
+        try:
+            pol.retain_count = int(env_retain)
+        except ValueError:
+            raise Refused(f"CONFIG_SECRETS_BACKUP_RETAIN_COUNT={env_retain!r} is not a whole number")
+    if not isinstance(pol.retain_count, int) or isinstance(pol.retain_count, bool):
+        raise Refused(f"policy {path}: retain_count must be a whole number")
     if pol.retain_count < 1:
         raise Refused("retain_count must be at least 1")
     return pol
@@ -311,7 +316,14 @@ class Inventory:
             self.problems.append(item)
 
 
-def walk_untracked(root: Path, pol: Policy, tracked: set[str]) -> list[str]:
+def _is_link(path) -> bool:
+    return os.path.islink(path) or (hasattr(os.path, "isjunction") and os.path.isjunction(path))
+
+
+def walk_untracked(root: Path, pol: Policy, tracked: set[str], links: list | None = None) -> list[str]:
+    """Untracked files under `root`, pruned per the policy. Symlinks and junctions are
+    never followed; their repo-relative paths go into `links` (when given) so the
+    caller can REPORT the ones that sit where a secret would be archived."""
     prune_paths = {p.strip("/") for p in pol.prune_paths}
     out = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
@@ -322,14 +334,20 @@ def walk_untracked(root: Path, pol: Policy, tracked: set[str]) -> list[str]:
             rel = f"{rel_dir}/{d}" if rel_dir else d
             if d in pol.prune_names or "venv" in d.lower() or rel in prune_paths:
                 continue
-            if os.path.islink(full) or (hasattr(os.path, "isjunction") and os.path.isjunction(full)):
+            if _is_link(full):
+                if links is not None and rel not in tracked:
+                    links.append(rel)
                 continue
             keep.append(d)
         dirnames[:] = sorted(keep)
         for f in filenames:
             rel = f"{rel_dir}/{f}" if rel_dir else f
             full = Path(dirpath) / f
-            if rel in tracked or os.path.islink(full):
+            if rel in tracked:
+                continue
+            if _is_link(full):
+                if links is not None:
+                    links.append(rel)
                 continue
             out.append(rel)
     return sorted(out)
@@ -340,7 +358,8 @@ def derive_inventory(root: Path, pol: Policy, manifest: Path | None = None, rend
     inv = Inventory()
     root = Path(root)
     tracked = git_tracked(root) if tracked is None else tracked
-    untracked = walk_untracked(root, pol, tracked)
+    links: list[str] = []
+    untracked = walk_untracked(root, pol, tracked, links)
     untracked_set = set(untracked)
 
     # 1. env files, 2. secret dirs, 4. include globs (over the walked set)
@@ -354,6 +373,19 @@ def derive_inventory(root: Path, pol: Policy, manifest: Path | None = None, rend
             inv.add(rel, "secret-dir")
         elif match_any(rel, include_globs):
             inv.add(rel, "include")
+    # A link where a secret would be archived is never followed (it could point
+    # anywhere) - and never silently dropped either: the secret behind it would
+    # then have no backup and no warning.
+    exclude_globs = [e["glob"] for e in pol.exclude]
+    for rel in sorted(links):
+        name = rel.rsplit("/", 1)[-1]
+        if match_any(rel, exclude_globs):
+            continue
+        if (any(rel.startswith(p) for p in secret_prefixes)
+                or (match_any(name, pol.env_names) and not match_any(name, pol.env_name_ignore))
+                or match_any(rel, include_globs)):
+            inv.problem("LINK", rel, "is a symlink/junction where a secret would be archived; links "
+                        "are not followed - replace it with the real file, or [[exclude]] it with a reason")
     # literal includes may sit in a pruned tree (.claude/settings.local.json)
     for e in pol.include:
         lit = e.get("path")
@@ -443,6 +475,10 @@ def _classify_source(root, src: Path, plane, pol, tracked, untracked, untracked_
         return
     if rel == "":
         return
+    if _is_link(src):
+        inv.problem("LINK", rel, f"plane {plane} bind-mounts a symlink/junction; links are not "
+                    "followed - mount the real file, or [[exclude]] it with a reason")
+        return
     if src.is_file():
         if rel not in tracked:
             inv.add(rel, f"bind:{plane}")
@@ -478,7 +514,12 @@ def resolve_recipients(root: Path, pol: Policy, override: str | None) -> Path:
         raise Refused(f"NO AGE RECIPIENT CONFIGURED: {path} does not exist. Nothing was backed up. "
                       "Install the operator's PUBLIC key there - "
                       "documentation/runbooks/config-secrets-backup.md, 'One-time setup'")
-    text = path.read_text(encoding="utf-8", errors="replace")
+    raw = path.read_bytes()
+    if raw.startswith(b"\xef\xbb\xbf") or raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        raise Refused(f"{path} starts with a byte-order mark (PowerShell 5.1 `-Encoding utf8`/`unicode` "
+                      "writes one). Write it as plain ASCII (`Set-Content -Encoding ascii`). "
+                      "Nothing was backed up.")
+    text = raw.decode("utf-8", errors="replace")
     if "AGE-SECRET-KEY-" in text.upper():
         raise Refused(f"{path} holds an age PRIVATE key. This host must hold ONLY the public key "
                       "(age1...). Move the private key offline, delete it here, and put the "
@@ -554,6 +595,13 @@ def complete_sets(out_dir: Path) -> list[ArchiveSet]:
     return sorted(sets, key=lambda s: s.name, reverse=True)
 
 
+def _age_reason(stderr: str) -> str:
+    """age's own error lines, minus its 'report unexpected errors' footer. age never
+    prints plaintext; it names files and recipients."""
+    lines = [ln.strip() for ln in stderr.splitlines() if ln.strip() and "report unexpected" not in ln]
+    return "; ".join(lines)[:1000]
+
+
 def write_archive(root: Path, files, out_dir: Path, recipients: Path, age: Path, now: dt.datetime) -> ArchiveSet:
     out_dir.mkdir(parents=True, exist_ok=True)
     name = f"{PREFIX}-{now.strftime('%Y%m%dT%H%M%SZ')}{ARCHIVE_SUFFIX}"
@@ -562,21 +610,35 @@ def write_archive(root: Path, files, out_dir: Path, recipients: Path, age: Path,
     proc = subprocess.Popen([str(age), "--encrypt", "--recipients-file", str(recipients), "--output", str(partial)],
                             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
-        # mode "w|": a pure stream, nothing is seeked or staged. Each file is read into
-        # memory (they are capped at max_file_bytes) and handed to age's stdin.
-        with tarfile.open(fileobj=proc.stdin, mode="w|", format=tarfile.PAX_FORMAT) as tar:
-            for rel in sorted(files):
-                full = root / rel
-                data = full.read_bytes()
-                info = tarfile.TarInfo(rel)
-                info.size = len(data)
-                info.mtime = int(full.stat().st_mtime)
-                info.mode = 0o600
-                tar.addfile(info, io.BytesIO(data))
-                del data
-        proc.stdin.close()
+        try:
+            # mode "w|": a pure stream, nothing is seeked or staged. Each file is read
+            # into memory (they are capped at max_file_bytes) and handed to age's stdin.
+            with tarfile.open(fileobj=proc.stdin, mode="w|", format=tarfile.PAX_FORMAT) as tar:
+                for rel in sorted(files):
+                    full = root / rel
+                    data = full.read_bytes()
+                    info = tarfile.TarInfo(rel)
+                    info.size = len(data)
+                    info.mtime = int(full.stat().st_mtime)
+                    info.mode = 0o600
+                    tar.addfile(info, io.BytesIO(data))
+                    del data
+            proc.stdin.close()
+        except OSError as exc:
+            # age died while we were writing (a bad recipient, killed, disk full): the
+            # pipe error says nothing - age's own stderr says why.
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+            err = proc.stderr.read().decode("utf-8", "replace").strip()
+            rc = proc.wait(timeout=60)
+            partial.unlink(missing_ok=True)
+            raise Failed(f"age stopped reading (exit {rc}): {_age_reason(err) or exc}")
         err = proc.stderr.read().decode("utf-8", "replace").strip()
         rc = proc.wait(timeout=300)
+    except Failed:
+        raise
     except BaseException:
         proc.kill()
         proc.wait()
@@ -584,7 +646,7 @@ def write_archive(root: Path, files, out_dir: Path, recipients: Path, age: Path,
         raise
     if rc != 0:
         partial.unlink(missing_ok=True)
-        raise Failed(f"age exited {rc}: {err[:300]}")
+        raise Failed(f"age exited {rc}: {_age_reason(err)}")
     with partial.open("rb") as fh:
         head = fh.read(len(AGE_MAGIC))
     if head != AGE_MAGIC:
@@ -630,6 +692,26 @@ def _gitignore_escape(rel: str) -> str:
     return "/" + out
 
 
+class NotMainWorktree(Exception):
+    """pin-ignores was asked to run in a LINKED worktree; it does not touch info/exclude."""
+
+
+def _git_path(root: Path, flag: str) -> Path:
+    proc = git(root, "rev-parse", flag)
+    if proc.returncode != 0:
+        raise Failed(f"`git rev-parse {flag}` failed (exit {proc.returncode})")
+    p = Path(proc.stdout.decode("utf-8", "surrogateescape").strip())
+    return p if p.is_absolute() else root / p
+
+
+def is_main_worktree(root: Path) -> bool:
+    """True in the main checkout (its git dir IS the common dir), False in a linked
+    worktree (its git dir is <common>/worktrees/<name>)."""
+    gd = os.path.normcase(os.path.realpath(_git_path(root, "--absolute-git-dir")))
+    cd = os.path.normcase(os.path.realpath(_git_path(root, "--git-common-dir")))
+    return gd == cd
+
+
 def pin_ignores(root: Path, files) -> tuple[bool, list[str]]:
     """Pin every archived path that git IGNORES today into <common-dir>/info/exclude.
     info/exclude is not versioned, so it applies on EVERY branch: an old branch
@@ -637,7 +719,17 @@ def pin_ignores(root: Path, files) -> tuple[bool, list[str]]:
     client that stashes untracked changes on a branch switch (GitHub Desktop's
     '!!GitHub_Desktop<branch>' stash, 2026-09-28) leaves it alone. Paths git does
     NOT ignore today (an uncommitted new file) are never pinned - that would hide
-    work in progress. Returns (changed, pinned)."""
+    work in progress. Returns (changed, pinned).
+
+    ONLY THE MAIN CHECKOUT WRITES IT. info/exclude lives in the COMMON git dir and is
+    shared by every worktree, and the block is replaced, not merged; a run from a
+    linked worktree (whose inventory is its own copy of .env files) would otherwise
+    drop the main checkout's pins (cfg-backup attempt 1). In a linked worktree this
+    raises NotMainWorktree before reading or writing anything. Lines outside the
+    marked block are never changed, and the file's line endings are kept."""
+    if not is_main_worktree(root):
+        raise NotMainWorktree(f"{root} is a linked worktree; info/exclude is shared by every "
+                              "worktree and only the main checkout writes the pinned block - not touched")
     files = sorted(files)
     if not files:
         return False, []
@@ -645,14 +737,14 @@ def pin_ignores(root: Path, files) -> tuple[bool, list[str]]:
     if proc.returncode not in (0, 1):
         raise Failed(f"`git check-ignore` failed (exit {proc.returncode})")
     ignored = sorted(p for p in proc.stdout.decode("utf-8", "surrogateescape").split("\0") if p)
-    cd = git(root, "rev-parse", "--git-common-dir")
-    if cd.returncode != 0:
-        raise Failed("`git rev-parse --git-common-dir` failed")
-    common = Path(cd.stdout.decode().strip())
-    if not common.is_absolute():
-        common = root / common
-    exclude = common / "info" / "exclude"
-    old = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+    exclude = _git_path(root, "--git-common-dir") / "info" / "exclude"
+    raw = exclude.read_bytes() if exclude.is_file() else b""
+    try:
+        old = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise Failed(f"{exclude} is not UTF-8 (byte {exc.start}); it was NOT rewritten - fix the "
+                     "file by hand, then re-run")
+    eol = "\r\n" if "\r\n" in old else "\n"
     lines = old.splitlines()
     if PIN_BEGIN in lines and PIN_END in lines:
         b, e = lines.index(PIN_BEGIN), lines.index(PIN_END)
@@ -660,12 +752,12 @@ def pin_ignores(root: Path, files) -> tuple[bool, list[str]]:
     else:
         before, after = lines, []
     block = [PIN_BEGIN] + [_gitignore_escape(p) for p in ignored] + [PIN_END]
-    new = "\n".join(before + block + after) + "\n"
+    new = eol.join(before + block + after) + eol
     if new == old:
         return False, ignored
     exclude.parent.mkdir(parents=True, exist_ok=True)
     tmp = exclude.with_name("exclude.config-secrets.tmp")
-    tmp.write_text(new, encoding="utf-8", newline="\n")
+    tmp.write_bytes(new.encode("utf-8"))
     os.replace(tmp, exclude)
     return True, ignored
 
@@ -699,6 +791,14 @@ def cmd_run(args) -> int:
     log = Log(Path(args.logs_dir) if args.logs_dir else root / "logs")
     log("INFO", START_MARKER)
     try:
+        return _run(args, root, log)
+    except Exception as exc:  # noqa: BLE001 - a crash must leave an [ERROR] line, not just a traceback
+        log("ERROR", f"run FAILED unexpectedly: {exc.__class__.__name__}: {exc}")
+        return EXIT_FAILED
+
+
+def _run(args, root: Path, log) -> int:
+    try:
         pol = load_policy(Path(args.policy))
         recipients = resolve_recipients(root, pol, args.recipients)
         age = resolve_age(root, pol, args.age)
@@ -722,13 +822,20 @@ def cmd_run(args) -> int:
     log("INFO", f"wrote {s.name} ({s.path.stat().st_size} bytes, {len(inv.files)} files, "
                 f"{len(inv.excluded)} excluded) -> {out_dir}")
     prune(out_dir, pol.retain_count, log)
+    pin_failed = False
     if pol.pin_ignores and not args.no_pin:
         try:
             changed, pinned = pin_ignores(root, inv.files)
             log("INFO", f"pin-ignores: {len(pinned)} path(s) pinned in info/exclude"
                         + (" (updated)" if changed else " (unchanged)"))
+        except NotMainWorktree as exc:
+            log("INFO", f"pin-ignores skipped: {exc}")
         except (Failed, OSError) as exc:
-            log("WARN", f"pin-ignores failed (the archive is fine): {exc}")
+            log("ERROR", f"pin-ignores FAILED (the archive is fine): {exc}")
+            pin_failed = True
+    if pin_failed and not inv.problems:
+        log("ERROR", "pin-ignores failed - the run is NOT complete")
+        return EXIT_PROBLEMS
     if inv.problems:
         log("ERROR", f"{len(inv.problems)} problem(s) above - the archive was written but the run is "
                      "NOT complete")
@@ -811,6 +918,9 @@ def cmd_pin(args) -> int:
         pol = load_policy(Path(args.policy))
         inv = derive_inventory(root, pol)
         changed, pinned = pin_ignores(root, inv.files)
+    except NotMainWorktree as exc:
+        print(f"pin-ignores skipped: {exc}")
+        return EXIT_OK
     except (Refused, Failed) as exc:
         print(f"REFUSED: {exc}")
         return EXIT_REFUSED
