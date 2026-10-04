@@ -13,11 +13,11 @@ the id is cryptic the filename uses the friendly name instead — e.g. the
 
 | Folder | OWUI kind | Files |
 |--------|-----------|-------|
-| `tools/`   | Tools (model-callable)        | `superpowers_tool`, `fileshed`, `deep_research`, `github_chat_mcp_tools` (GitHub Repo Analyzer) |
+| `tools/`   | Tools (model-callable)        | `superpowers_tool`, `fileshed`, `deep_research`, `github_chat_mcp_tools` (GitHub Repo Analyzer), `pantry` (Kitchen model, fronts `openbrain-pantry`) |
 | `filters/` | Filter functions              | `context_window_manager` |
 | `pipes/`   | Pipe functions (custom models)| `server_status` (the AI-Stack unified status pipe), `little_coder`, `githelper`, `github_chat_mcp` |
 | `actions/` | Action functions (buttons)    | `copy_research_note`, `copy_sources` (`add_web_sources_to_knowledge` retired 2026-08-20 — wrote into the retired OWUI Knowledge layer; deactivated in webui.db, snapshot in `scripts/archive/owui-retired/`) |
-| `skills/`  | Skills (attached to models via `skillIds`) | `skill-creator`, `docx`, `canvas-design`, `doc-coauthoring`, `github-repo-analyzer`, `feature-validation-workflow`, `github-repo-expert`, `openwebui-tools` |
+| `skills/`  | Skills (attached to models via `skillIds`) | `skill-creator`, `docx`, `canvas-design`, `doc-coauthoring`, `github-repo-analyzer`, `feature-validation-workflow`, `github-repo-expert`, `openwebui-tools`, `kitchen-pantry` |
 
 **Skills note (2026-08-20):** files are named by their OWUI **skill id**, which
 is what `skillIds` on a model references — NOT by display name (the trap that
@@ -26,8 +26,8 @@ file named `github-chat-mcp.md`). All 8 exported live from `webui.db`
 2026-08-20; the old partial root `skills/` folder (3 of 8, stale names) was
 retired the same day in favour of this complete set.
 
-`manifest.csv` lists `file, type, name, owui_id, sha256` for all 11 tool/function
-files + the 8 skills — 19 rows (`add_web_sources_to_knowledge`, `code_agent` and
+`manifest.csv` lists `file, type, name, owui_id, sha256` for all 12 tool/function
+files + the 9 skills — 21 rows (`add_web_sources_to_knowledge`, `code_agent` and
 `code_agent_tools` left the manifest in August 2026; the memory-layer tool and
 filter left with mm-retire, 2026-09-30). The `sha256` column is the CR-normalized digest of the repo file,
 which is what `scripts/checks/check-owui-drift.ps1` compares against the live
@@ -42,6 +42,8 @@ Self-contained plugins live **only** here. Plugins that front a **service** keep
 their service code in the service's own folder; only the OWUI-facing artifact is
 centralized here:
 
+- `tools/pantry.py` ← service: `openbrain-pantry` (HTTP contract: `API.md` in the
+  `pantry-meal-planner` plan set). Tests: `tools/tests/test_pantry.py`.
 - `pipes/little_coder.py` ← service: [`little-coder/`](../../little-coder/)
 - `tools/deep_research.py` ← service: `OB1/integrations/research-service/` (the
   `openbrain-research` Deno engine). The Python harness that used to live at
@@ -54,6 +56,20 @@ centralized here:
   schemas, consolidated 2026-08-20). The orchestrator loads
   `status-pipe/router.py` fresh from its mount on each call, so router/module
   edits go live without a re-paste; orchestrator edits need a re-paste.
+
+## Kitchen model (pantry)
+
+The Kitchen model is an ordinary OWUI model with two attachments: the **Pantry** tool
+(`tools/pantry.py`, id `pantry`) and the **Kitchen Pantry** skill (`skills/kitchen-pantry.md`,
+id `kitchen-pantry`, referenced by `skillIds`). Deploy is by paste, like every plugin here:
+paste both, set the tool's valves (`service_url` default `http://openbrain-pantry:8000`,
+`api_key` = the service's `PANTRY_API_KEY`, `request_timeout_s`), create a model, attach the
+tool and the skill, and grant it no other tools (the model should only ever see the pantry
+functions). Spreadsheets: `import_pantry` reads the raw attached `.csv`/`.xlsx` from
+`__files__`; `export_pantry` stores the file in OWUI's Files store and emits a `files`
+event (fallback: a fenced `csv` block). Run the tests with
+`python -m unittest discover -s frontend/owui/tools/tests` (xlsx cases need openpyxl; the
+docker command is in the test file's docstring). Not deployed by this repo change.
 
 ## Deployment sync status
 
