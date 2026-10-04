@@ -18,6 +18,7 @@ this module pretends to solve.)
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -88,6 +89,26 @@ def field_help(mode: str = "", schema: Dict[str, Any] | None = None) -> str:
     return "\n".join(lines)
 
 
+#: The shape every `allowed` value must have before it is compared (anchor.ps1 uses the same
+#: pattern, anchored with \z). fullmatch, because "$" would accept a trailing newline.
+_ALLOWED_NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+
+
+def _json_kind(v: Any) -> str:
+    """The JSON type of a json.loads value; anchor.ps1 Get-AnchorJsonKind is the twin."""
+    if v is None:
+        return "null"
+    if isinstance(v, str):
+        return "string"
+    if isinstance(v, bool):
+        return "boolean"
+    if isinstance(v, list):
+        return "array"
+    if isinstance(v, dict):
+        return "object"
+    return "number"
+
+
 def _nonempty_items(value: Any) -> List[Any]:
     if value is None:
         return []
@@ -125,6 +146,31 @@ def problems(anchor: Any, schema: Dict[str, Any] | None = None) -> List[str]:
         else:
             if f.get("required") and (value is None or not str(value).strip()):
                 out.append(f"'{name}' is required - {f['why']}")
+            # A field with `allowed` values (mt-policy: `tier`): a PRESENT, non-blank value
+            # outside them is refused - case-SENSITIVE, matching anchor.ps1's -ccontains. Blank
+            # or absent falls to the field's documented default instead.
+            #
+            # The value must be a JSON STRING first (mt-policy attempt 2). Stringifying before
+            # checking let `["small"]` through anchor.ps1 - PowerShell renders a one-element array
+            # as its element - while this reader refused it: same file, two verdicts. null is
+            # "absent"; every other non-string (array, number, boolean, object) is refused by
+            # its JSON type, named the same way in both readers.
+            #
+            # attempt 3: NO strip and no normalisation. The value must match the ASCII name
+            # pattern exactly and equal an allowed value ordinally. Python's strip() and .NET's
+            # Trim() disagree on U+001C-001F, and PowerShell's culture-aware -ccontains ignored
+            # U+00AD / U+200D / U+0000 ("sm­all" passed there). A padded or non-ASCII value
+            # is simply refused, identically. "" (exactly empty) is absent -> the default.
+            allowed = f.get("allowed")
+            if allowed and value is not None:
+                names = ", ".join(str(a) for a in allowed)
+                if not isinstance(value, str):
+                    out.append(f"'{name}' must be a string, one of: {names} "
+                               f"(got JSON type {_json_kind(value)}) - {f['why']}")
+                elif value != "" and not (_ALLOWED_NAME_RE.fullmatch(value)
+                                          and value in [str(a) for a in allowed]):
+                    out.append(f"'{name}' must be one of: {names} "
+                               f"(got '{value}') - {f['why']}")
 
     # Fields this mode REFUSES. Mode A rejecting `acceptance` is the load-bearing case: a
     # category error, not a style preference (see the schema's note on gym-024).

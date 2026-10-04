@@ -35,7 +35,8 @@
     "min_acceptance_criterion_chars": 12,
     "min_acceptance_criterion_why": "an acceptance criterion nobody can check is a wish; this catches the common shape - a single vague line - without pretending to judge English",
     "executable_criteria_why": "an acceptance criterion may be a STRING (prose a tester judges) or an OBJECT {check, why} whose `check` is a command the tester RUNS. \u00a710's finding->check pipeline is the elevation path: prose lands only when no executable form exists, and an anchor that says so is honest rather than lazy",
-    "min_executable_check_chars": 3
+    "min_executable_check_chars": 3,
+    "allowed_values_why": "a string field may name `allowed` values; a PRESENT, non-blank value outside them is refused (blank or absent falls to the field's documented default). Added for `tier` (mt-policy) so a typo like \"medum\" is refused at -Propose rather than silently read as the default"
   },
   "modes": {
     "B": {
@@ -70,6 +71,12 @@
           "kind": "list",
           "why": "explicit non-goals - where 'and also fix what you find' gets refused"
         },
+        "tier": {
+          "required": false,
+          "kind": "string",
+          "allowed": ["large", "small"],
+          "why": "the MODEL SIZE this item deserves (harness.config.json model_tiers): large for planning / long-horizon / new-logic work, small for narrow mechanical or doc-only work. Absent means model_tiers.default_tier (large). Advisory: queue.ps1 prints the recommended model per role and never blocks on it. `allowed` must equal model_tiers.tiers (test_model_tiers.py pins them)"
+        },
         "findings_sink": {
           "required": false,
           "kind": "string",
@@ -100,6 +107,12 @@
           "required": false,
           "kind": "list",
           "why": "directions ruled out up front - the same refusal as mode B, but advisory here because Mode A expects the boundary to sharpen as the path is walked"
+        },
+        "tier": {
+          "required": false,
+          "kind": "string",
+          "allowed": ["large", "small"],
+          "why": "as mode B - the model size this item deserves; absent means model_tiers.default_tier (large)"
         },
         "findings_sink": {
           "required": false,

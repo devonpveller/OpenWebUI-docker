@@ -40,6 +40,7 @@ Everything else in here is internal and may change without notice.
 | `verify-reap.ps1` | the executable drill over the reaper - most cases build the resource that must survive beside the one that must go; others take the daemon away, or read the live stack and build nothing. Its header states the invariants, and its teardown enumerates the fixtures a run actually made - neither describes the set in prose |
 | `andon.ps1` | the andon board: evaluate the stop-the-line conditions (`-Evaluate`, `-List`, `-Baseline`) |
 | `drill-dark-factory.ps1` | the executable drill over the andon board, the gate profiles and the audit trail |
+| `verify-model-tiers.ps1` | the executable drill for the ADVISORY model-tier recommendation `queue.ps1` prints (hermetic fixtures; `-Script` points it at another copy) |
 | `harness.config.json` | the configuration (see below) |
 | `config.py` | the reader other Python code imports (`bridge.py` does) |
 | `quadrant/` | the runner x target comparison - its own submodule with its own boundary, see [quadrant/MODULE.md](quadrant/MODULE.md). One of the TWO places that actually run a resolved runner - `dispatch.ps1` is the other, and `adapters.py` here calls the same docker-exec transport. Everything else in the module only resolves one. |
@@ -193,6 +194,92 @@ the entry-point table above (`dispatch.ps1 | RUN the work: role+profile -> runne
 submit`) and the *Runners* section (`dispatch.ps1 is what CALLS it`) in the same file.
 Corrected 2026-08-31 after a verifier found the contradiction. The old paragraph ended
 "a dispatcher must be built against the second" — one was.
+
+## Model tiers: which model SIZE a role on an item deserves
+
+`profiles` (above) say which RUNNER each role uses on a surface. `model_tiers` in
+`harness.config.json` answers a different question, per work item: planning, long-horizon
+and new-logic work deserve a large model; narrow, mechanical or doc-only work a small one
+(operator, 2026-09-30). It is **advisory**: `queue.ps1` prints a recommendation on
+`-Propose`, `-Claim`, `-Submit`, `-Resubmit` and `-Approve` and never blocks on it - a
+broken block prints `MODEL (advisory): unavailable - <why>` and the command carries on.
+
+- **The item's tier** is the anchor's optional `tier` field: a JSON string that is exactly
+  `large` or `small`. Both anchor readers refuse anything else:
+  - a non-string (a list such as `["small"]`, a number, a boolean, an object), named by its
+    JSON type;
+  - a string that does not match `^[a-z][a-z0-9_-]{0,31}$` exactly. Nothing is trimmed or
+    normalised, so `" small"`, `"Large"`, `"sm<U+00AD>all"` and `"small<U+0000>"` are all
+    refused, in the same words by both readers.
+
+  Exactly `""` or `null` means absent. Absent means `model_tiers.default_tier`, which is `large`, so an
+  unclassified item never silently drops to a smaller model. The queue item records it as
+  `tier` (`""` = default, resolved when advice is printed). When the `model_tiers` block
+  is USABLE, `-Propose` (and `-ConfirmAnchor`/`-AmendAnchor -Anchor`) also refuses a tier
+  that the block's `tiers` list narrows away. When the block is missing or broken, only the
+  schema's fixed `large|small` check applies: the item is created with its tier and the
+  advice prints `unavailable`.
+- **Two separate maps**, tier x role (`developer` / `tester` / `reviewer`) -> model, and
+  neither is derived from the other (operator, 2026-10-04): `cloud` is Claude Code
+  subagents (`opus` large, `sonnet` small), `local` is agent-org's model roles
+  (`local-large` / `local-small`). `haiku` is `cloud.trivial` - lookups and evidence copying
+  only, never a pipeline role.
+- **The whole block is validated before any rule is evaluated** (`Get-ModelTiersProblems`
+  / `model_tiers_problems`). These are refused rather than ignored, rounded or trimmed, even
+  when an earlier rule would have matched first:
+  - a key at ANY level that is not exactly a canonical spelling (`_`-prefixed notes
+    excepted): `Cloud`, `Rules`, `Roles`, a role-map tier `Large`, a role `Tester`, a rule
+    key `Role` or `max_attemp`;
+  - a tier, role or `default_tier` that is not a name or not configured;
+  - an attempt or delta bound that is not a whole number in 0..2147483647 (e.g. `1.5`, a
+    20-digit number, or `-1`);
+  - a non-boolean `doc_only`;
+  - a missing map cell.
+
+  The two readers apply the same four rules (stated in config.ps1's model-tier header):
+  1. every name must match `^[a-z][a-z0-9_-]{0,31}$` before it is compared;
+  2. every comparison is ordinal;
+  3. every key is found by an ordinal scan, never through a case-insensitive PowerShell
+     hashtable lookup;
+  4. numeric bounds are range-checked.
+
+  The tester's 42,840-input matrix gets the same answer or the same refusal from both.
+- **Rules**, first match wins (`model_tiers.rules`, conditions `role`, `min_attempt`,
+  `max_attempt`, `doc_only`, `max_delta_lines`):
+
+  | rule | when | tier |
+  |---|---|---|
+  | `review-whole-change` | role reviewer | large |
+  | `doc-only` | every changed file matches `doc_only_patterns` (`*.md`) | small |
+  | `retest-small-diff` | tester, attempt >= 2, <= 80 lines changed since the last verdict's sha | small |
+  | `first-adversarial-round` | tester, attempt 1 | large |
+  | `item-tier` | otherwise | the item's tier |
+
+  `doc_only` and the delta are read from git at print time:
+  - doc-only uses `git diff --no-renames --name-only <line>...<branch>`. A rename counts as
+    its old path AND its new path, so `big.py -> big.md` is not doc-only. Note that `-like`
+    is case-insensitive, so `NOTES.MD` counts as a doc.
+  - the delta uses `git diff --raw --numstat <last verdict sha> <branch>`, adding
+    insertions and deletions. A pure rename counts its content change (0). A binary file
+    has no line count, and a submodule (gitlink, mode 160000) bump numstats as "1 1" while
+    it may move any amount of code, so either one makes the delta UNKNOWN.
+
+  When either fact cannot be read it is UNKNOWN, and unknown never satisfies a rule that
+  conditions on it.
+
+The printed block:
+
+```
+MODEL (advisory): next role tester, attempt 2 -> tier small [rule retest-small-diff; item tier large]
+  cloud (Claude Code subagent): sonnet   |   local (agent-org model role): local-small
+  why: attempt >= 2 with a small diff since the last attempt is a CONFIRMATION re-test ...
+  facts: item tier set on the item; doc-only no; lines changed since the last verdict 3
+```
+
+Readers: `config.ps1` `Resolve-ModelTier` and `config.py` `resolve_model_tier`, pinned
+together by `test_model_tiers.py`; `verify-model-tiers.ps1` drives `queue.ps1` end to end
+on hermetic fixtures. agent-org applies the same tiers to its own roles through its
+profiles (`agent-org/agent-bridge/profiles/README.md`, "Tiers").
 
 ## Frontier-oracle-on-stall
 

@@ -25,5 +25,9 @@
     "Findings about problems elsewhere are real, and they still do not belong in the artifact."
   ],
 
+  "tier": "large",
+
+  "_tier_howto": "OPTIONAL. large | small - the MODEL SIZE this item deserves (harness.config.json model_tiers). large: planning, long-horizon or new-logic work. small: narrow, mechanical or doc-only work. Leave it out and the item is large (model_tiers.default_tier). Any other value is refused at -Propose. Advisory: queue.ps1 prints the recommended model for each next role and never blocks on it.",
+
   "findings_sink": "../documentation-plans-ai-stack/implementation-guide/<feature>/findings/<id>.md (or ../documentation-plans-ai-stack/journal/notes/<topic>-<yyyy-mm-dd>.md when there is no feature) - IN THE PLAN STORE, never this repo, whose pre-commit refuses new files under documentation/notes. Where anything true but out of scope gets written down instead of being pasted into the deliverable or discarded. HELD TO THE SAME STANDARD AS THE ARTIFACT: a claim here about what a script does is verified against that code path, not against its comments. An unverified sink is worse than no sink - it looks like a record, and the next item acts on it."
 }

@@ -122,6 +122,7 @@ is `AI_STACK_PLAN_IN_CODE_REPO=1` with the reason in the commit message.
   message, backgrounded). Name the claim and what would disprove it; ask only for what it
   verified. Check the part of its report you act on before relaying it. A subagent you
   spawned is not an independent party for the harness's separation of duties.
+- **Delegate by tier:** see `scripts/agent-harness/harness.config.json` `model_tiers` (cloud and local maps; `queue.ps1` prints the pick).
 
 ## Pointers
 

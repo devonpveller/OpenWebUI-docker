@@ -353,7 +353,11 @@ async def test_every_shipped_profile_seeds_a_role(db_url):
     orch, chat, db = await _orch(db_url, ROOT / "profiles")
     try:
         assert len(orch.profiles.all()) == 9
-        assert {p.model for p in orch.profiles.all().values()} == {"local-large"}
+        # mt-policy: every shipped profile seeds its TIER's model role - local-large for the
+        # planning / decomposition / review roles, local-small for the file-scoped worker
+        # (test_profile_tiers.py holds the rule itself).
+        assert {n: p.model for n, p in orch.profiles.all().items() if p.model != "local-large"} == {
+            "worker-default": "local-small"}
     finally:
         await db.dispose()
 

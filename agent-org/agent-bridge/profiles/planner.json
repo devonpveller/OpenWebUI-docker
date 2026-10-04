@@ -2,6 +2,7 @@
   "profile": "planner",
   "lane": "local",
   "model": "local-large",
+  "tier": "large",
   "system_prompt_ref": "charters/planner.md",
   "temperature": 0.3,
   "tool_access": ["read", "grep"],
