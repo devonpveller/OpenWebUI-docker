@@ -52,7 +52,9 @@ were retired by the follow-up item (ac-legacy-recovery) rather than fixed.
   `logs/tailscale-health.log` for continuity.
 - `check-openbrain-health.ps1`, `check-agent-org-health.ps1` — per-project
   probes (fanned out from the watchdog).
-- `check-backup-coverage.ps1` — every stateful path has a sidecar (manual).
+- `check-backup-coverage.ps1` — every stateful path has a sidecar, and every
+  required gitignored config/secret file is in the newest encrypted
+  config-secrets archive (manual).
 - Pre-commit (via `.githooks/`), ten checks in this order:
   `check-staged-secrets.ps1`, `validate-lineendings.ps1`,
   `check-doc-placement.ps1`, `check-llm-gateway-routing.ps1`,
@@ -75,7 +77,11 @@ were retired by the follow-up item (ac-legacy-recovery) rather than fixed.
 never-replacing archive copy of `../backup/<subdir>/`; Task via `install-nas-backup-task.ps1`; helpers
 in `nas-sync-lib.ps1`, tests in `test-nas-sync.ps1`), `copy-archives-to-nas.ps1`
 (one-time, sha256-verified archive copy; never deletes), `set-nas-credential.ps1`,
-`restore-from-snapshot.ps1` (DR driver). Container-side sidecar scripts live
+`restore-from-snapshot.ps1` (DR driver), `config_secrets_backup.py` (nightly
+age-encrypted archive of the gitignored `.env`s / `secrets/` / users DB into
+`../backups/config-secrets/`; policy `config-secrets.toml`, Task via
+`install-config-secrets-task.ps1`, tests `test_config_secrets_backup.py`, runbook
+`../documentation/runbooks/config-secrets-backup.md`). Container-side sidecar scripts live
 in `../backup/`; conventions in
 `../documentation/runbooks/backup-conventions.md`.
 

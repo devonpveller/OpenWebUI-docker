@@ -7,6 +7,16 @@
 #   - Explicitly excluded from backup (covered by a known excluded list
 #     in this script)
 #
+# Since 2026-10-04 (config-backup) it ALSO audits the gitignored FILES the
+# stack cannot run or be recovered without - every plane's .env, secrets/,
+# portal/config/authelia/users_database.yml, bind-mounted credential files -
+# through `scripts/backup/config_secrets_backup.py check`: any such file that is
+# not in the newest encrypted config-secrets archive, any required one that is
+# missing (or is an empty directory Docker made in its place), and a host with no
+# age recipient configured are GAPS. Until then this check said CLEAN while
+# users_database.yml had never been backed up (Authelia crash-looped 205 times
+# on 2026-10-04 when it turned out to be gone).
+#
 # Reports gaps with severity. Returns exit code 0 if clean, 1 if any gap.
 #
 # Also pre-creates ./backups/<service>/ directories that backup services
@@ -142,7 +152,8 @@ try {
     'openbrain-db', 'openbrain-wiki', 'open-notebook',
     'tailscale', 'lm-models',
     'agent-bridge-db', 'mattermost-db',
-    'ao-worker-1-journals', 'ao-worker-2-journals'
+    'ao-worker-1-journals', 'ao-worker-2-journals',
+    'config-secrets'
   )
   $missingDirs = @()
   foreach ($d in $expectedBackupDirs) {
@@ -206,16 +217,47 @@ try {
   }
   Write-Host ""
 
+  # ----- Config + secrets coverage (gitignored FILES) -----------------
+  # One implementation of the inventory: the backup job's own `check`, so the
+  # gate and the job can never disagree about what has to be covered.
+  Write-Host "==> Config + secrets coverage (gitignored files)" -ForegroundColor Cyan
+  $configGap = $false
+  $csScript = Join-Path $projectRoot 'scripts\backup\config_secrets_backup.py'
+  $py = Join-Path $projectRoot '.venv\Scripts\python.exe'
+  if (-not (Test-Path $py)) { $py = 'python' }
+  if (-not (Test-Path $csScript)) {
+    Write-Host "  [GAP]  config_secrets_backup.py not found at $csScript" -ForegroundColor Red
+    $configGap = $true
+  } else {
+    $csOut = & $py $csScript check --repo-root $projectRoot 2>&1
+    $csCode = $LASTEXITCODE
+    foreach ($line in @($csOut)) {
+      $color = if ("$line" -match '^\s*\[(INFO|NOTE)\]') { 'DarkGray' } elseif ("$line" -match '^\s*\[') { 'Red' } else { 'Gray' }
+      Write-Host "$line" -ForegroundColor $color
+    }
+    if ($csCode -ne 0) { $configGap = $true }
+  }
+  Write-Host ""
+
   # ----- Summary -----------------------------------------------------
-  if ($gaps.Count -eq 0) {
+  if ($gaps.Count -eq 0 -and -not $configGap) {
     Write-Host "==> Coverage: CLEAN" -ForegroundColor Green
-    Write-Host "    Every named volume is either backed up or explicitly excluded."
+    Write-Host "    Every named volume is either backed up or explicitly excluded, and"
+    Write-Host "    every required gitignored file is in the newest config-secrets archive."
     exit 0
   } else {
-    Write-Host ("==> Coverage: {0} GAPS" -f $gaps.Count) -ForegroundColor Red
-    Write-Host "    Add backup containers for the volumes flagged above, or mark them"
-    Write-Host "    excluded in `$intentionallyExcluded with a reason. See:"
-    Write-Host "    documentation/runbooks/backup-conventions.md"
+    if ($gaps.Count -gt 0) {
+      Write-Host ("==> Coverage: {0} VOLUME GAPS" -f $gaps.Count) -ForegroundColor Red
+      Write-Host "    Add backup containers for the volumes flagged above, or mark them"
+      Write-Host "    excluded in `$intentionallyExcluded with a reason. See:"
+      Write-Host "    documentation/runbooks/backup-conventions.md"
+    }
+    if ($configGap) {
+      Write-Host "==> Coverage: CONFIG + SECRETS GAPS (rows above)" -ForegroundColor Red
+      Write-Host "    Run the job (python scripts/backup/config_secrets_backup.py run), restore a"
+      Write-Host "    MISSING file, or edit scripts/backup/config-secrets.toml. See:"
+      Write-Host "    documentation/runbooks/config-secrets-backup.md"
+    }
     exit 1
   }
 } finally {
