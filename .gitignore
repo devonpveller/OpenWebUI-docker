@@ -117,3 +117,5 @@ documentation/issue-plans/
 .stack/
 scripts/.mm-session-threads
 scripts/.mm-session-threads.*
+# The conversation mirror's per-session high-water marks, locks and log (mm-mirror).
+scripts/.mm-mirror/

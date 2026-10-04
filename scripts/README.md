@@ -84,7 +84,12 @@ in `../backup/`; conventions in
 `notify-mattermost.sh` — Claude Code Stop/Notification hook target (one thread per
 interactive session in #claude-sessions, recorded in `scripts/.mm-session-threads`, which the
 claude-sessions bridge reads; its Stop-hook runs stand down inside bridge sessions; per-session allowlist
-`scripts/.mm-notify-sessions`).
+`scripts/.mm-notify-sessions`). Hook runs hand off to `notify_mattermost_mirror.py`, which makes
+the thread a copy of the conversation (operator prompts + Claude's replies, no mention; state in
+`scripts/.mm-mirror/`) and @-mentions the operator only for an AskUserQuestion or a permission
+prompt. The hook registration it needs (Stop, Notification, PreToolUse/AskUserQuestion) is in the
+script's header; `python scripts/notify_mattermost_mirror.py seed <transcripts dir>` starts already-open
+sessions from now instead of back-filling them; tests: `python scripts/test_notify_mattermost_mirror.py` (fake Mattermost only).
 
 ## Rules
 

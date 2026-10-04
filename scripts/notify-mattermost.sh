@@ -34,6 +34,34 @@
 # than inventing a second scheme. Every message mentions the operator, by their decision —
 # an unread channel stays unread, and a mention is what survives that.
 #
+# SUPERSEDED FOR HOOK RUNS (mm-mirror, operator 2026-10-01: the turn ping "just pings me when I
+# have the Claude app up anyway"). A hook run now mirrors the conversation into the thread with
+# NO mention and mentions the operator only when they are needed - see 2b) below and
+# scripts/notify_mattermost_mirror.py. Manual and legacy runs still mention, as above.
+#
+# HOOK REGISTRATION (operator-local .claude/settings.local.json, gitignored - applied by hand).
+# All four hooks run this script with the hook JSON on stdin; nothing else:
+#
+#   "hooks": {
+#     "Stop": [ { "hooks": [ { "type": "command", "shell": "bash", "timeout": 15,
+#         "command": "bash \"<repo>/scripts/notify-mattermost.sh\"" } ] } ],
+#     "Notification": [ { "hooks": [ { "type": "command", "shell": "bash", "timeout": 20,
+#         "async": true,
+#         "command": "bash \"<repo>/scripts/notify-mattermost.sh\" || true" } ] } ],
+#     "PreToolUse": [ { "matcher": "AskUserQuestion", "hooks": [ { "type": "command",
+#         "shell": "bash", "timeout": 15,
+#         "command": "bash \"<repo>/scripts/notify-mattermost.sh\" || true" } ] } ],
+#     "SessionEnd": [ { "hooks": [ { "type": "command", "shell": "bash", "timeout": 15,
+#         "command": "bash \"<repo>/scripts/notify-mattermost.sh\" || true" } ] } ]
+#   }
+#
+# The Notification entry changes: it used to format the text itself and call this script with
+# stdin closed; now the payload (message, notification_type, transcript_path) reaches the mirror.
+# <repo> is the absolute path the live Stop entry already uses (the main checkout), forward
+# slashes. SessionEnd (verified 2026-10-02 with a `claude -p` probe on 2.1.261: it fires with
+# transcript_path and reason) triggers a final drain, so a session's last turn is not left behind.
+# Rollback = the previous Stop/Notification entries and no PreToolUse/SessionEnd entries.
+#
 # The bot token is read from a .env at RUN TIME — never hardcoded or committed.
 # Best-effort by design: it never fails its caller (a down Mattermost must not break a turn).
 set +e
@@ -329,6 +357,46 @@ if [ -s "$ALLOW" ] && [ -n "$key" ]; then
     [ "$(normkey "$_entry")" = "$key" ] && { _hit=1; break; }
   done < "$ALLOW"
   [ -z "$_hit" ] && exit 0
+fi
+
+# 2b) THE CONVERSATION MIRROR (mm-mirror, operator 2026-10-01). A HOOK run - session id from the
+#     payload on stdin, no message argument - hands the payload to notify_mattermost_mirror.py and
+#     returns. That helper copies the operator's prompts and Claude's replies from the transcript
+#     into this session's thread WITHOUT a mention, and mentions the operator only for an
+#     AskUserQuestion (PreToolUse) or a permission-style Notification. It replaces the "finished a
+#     turn - your move" ping, which pinged someone already looking at the IDE.
+#
+#     WHY DETACHED. The work is N posts, and the Stop hook has 15 seconds that this file's whole
+#     history above is spent defending (the live hook was measured TIMED OUT at 15.46 s on
+#     2026-10-01 - a `hook_cancelled` attachment in a session transcript). So the hook pays one
+#     interpreter start; the posting happens in a detached worker with its own bound, serialised
+#     per session, which is what keeps the order (see the helper's docstring).
+#
+#     Not taken - the legacy path below runs instead - when the helper is not beside this script
+#     (a test copy of the .sh alone), or a Stop payload carries no transcript_path. The legacy
+#     "finished a turn" ping is for Stop (and manual runs) ONLY: a PreToolUse, Notification or
+#     SessionEnd hook run without the helper posts nothing (attempt-4 tester: SessionEnd fell
+#     through to the old ping when the helper was removed).
+#     Bridge sessions never get here (1c), and the allowlist (2) applies to the mirror too.
+MIRROR_PY="$ROOT_DIR/scripts/notify_mattermost_mirror.py"
+if [ -n "$SID_FROM_HOOK" ] && [ -z "$1" ]; then
+  HOOK_EVENT=""
+  if [[ "$hook_json" =~ \"hook_event_name\"[[:space:]]*:[[:space:]]*\"([A-Za-z]+)\" ]]; then
+    HOOK_EVENT="${BASH_REMATCH[1]}"
+  fi
+  _mirror=""
+  case "$HOOK_EVENT" in
+    Stop) [[ "$hook_json" =~ \"transcript_path\"[[:space:]]*:[[:space:]]*\"[^\"]+\" ]] && _mirror=1 ;;
+    PreToolUse|Notification|SessionEnd) _mirror=1 ;;
+  esac
+  if [ -n "$_mirror" ] && [ -n "$key" ] && [ -f "$MIRROR_PY" ]; then
+    if printf '%s' "$hook_json" | MM_API="$API" MM_CHANNEL="$CHANNEL" MM_THREADS="$THREADS" \
+         MM_KEY="$key" MM_FULL_SID="$FULL_SID" MM_ROOT_DIR="$ROOT_DIR" \
+         python "$MIRROR_PY" spawn >/dev/null 2>&1; then
+      exit 0
+    fi
+  fi
+  case "$HOOK_EVENT" in PreToolUse|Notification|SessionEnd) exit 0 ;; esac
 fi
 
 short="${key:-${sid:0:8}}"
