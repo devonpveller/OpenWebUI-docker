@@ -712,32 +712,54 @@ def is_main_worktree(root: Path) -> bool:
     return gd == cd
 
 
-def pin_ignores(root: Path, files) -> tuple[bool, list[str]]:
-    """Pin every archived path that git IGNORES today into <common-dir>/info/exclude.
-    info/exclude is not versioned, so it applies on EVERY branch: an old branch
-    whose .gitignore predates a rule can no longer show the file as untracked, and a
-    client that stashes untracked changes on a branch switch (GitHub Desktop's
-    '!!GitHub_Desktop<branch>' stash, 2026-09-28) leaves it alone. Paths git does
-    NOT ignore today (an uncommitted new file) are never pinned - that would hide
-    work in progress. Returns (changed, pinned).
+def _submodule_paths(root: Path) -> list[str]:
+    """Paths (relative to root, '/'-separated) of the submodules declared in root's .gitmodules."""
+    if not (root / ".gitmodules").is_file():
+        return []
+    proc = git(root, "config", "-f", ".gitmodules", "-z", "--get-regexp", r"^submodule\..*\.path$")
+    if proc.returncode != 0:
+        return []
+    out = []
+    for rec in proc.stdout.decode("utf-8", "surrogateescape").split("\0"):
+        if rec and "\n" in rec:
+            out.append(rec.split("\n", 1)[1].strip("/"))
+    return sorted(out, key=len, reverse=True)
 
-    ONLY THE MAIN CHECKOUT WRITES IT. info/exclude lives in the COMMON git dir and is
-    shared by every worktree, and the block is replaced, not merged; a run from a
-    linked worktree (whose inventory is its own copy of .env files) would otherwise
-    drop the main checkout's pins (cfg-backup attempt 1). In a linked worktree this
-    raises NotMainWorktree before reading or writing anything. Lines outside the
-    marked block are never changed, and the file's line endings are kept."""
-    if not is_main_worktree(root):
-        raise NotMainWorktree(f"{root} is a linked worktree; info/exclude is shared by every "
-                              "worktree and only the main checkout writes the pinned block - not touched")
-    files = sorted(files)
-    if not files:
-        return False, []
-    proc = git(root, "check-ignore", "-z", "--stdin", stdin="\0".join(files).encode("utf-8") + b"\0")
-    if proc.returncode not in (0, 1):
-        raise Failed(f"`git check-ignore` failed (exit {proc.returncode})")
-    ignored = sorted(p for p in proc.stdout.decode("utf-8", "surrogateescape").split("\0") if p)
-    exclude = _git_path(root, "--git-common-dir") / "info" / "exclude"
+
+def _partition(root: Path, files, log=None) -> dict:
+    """{repo root: [path relative to that repo]}: each file goes to the repository that
+    OWNS it (the superproject, or the innermost checked-out submodule). `git check-ignore`
+    fatals on a pathspec inside a submodule, so each repo is asked about its own paths.
+    A submodule that is not checked out is skipped with a log line."""
+    groups: dict = {}
+    subs = _submodule_paths(root)
+    for f in files:
+        owner = next((s for s in subs if f.startswith(s + "/")), None)
+        if owner is None:
+            groups.setdefault(root, []).append(f)
+        elif not (root / owner / ".git").exists():
+            if log:
+                log("INFO", f"pin-ignores: submodule {owner} is not checked out; its paths are skipped")
+        else:
+            groups.setdefault(root / owner, []).append(f[len(owner) + 1:])
+    out: dict = {}
+    for r, fl in groups.items():
+        if r == root:
+            out[r] = fl
+        else:  # a submodule may itself hold submodules
+            for rr, ff in _partition(r, fl, log).items():
+                out[rr] = out.get(rr, []) + ff
+    return out
+
+
+def _pin_one(repo: Path, files) -> tuple[bool, list[str]]:
+    ignored: list[str] = []
+    if files:
+        proc = git(repo, "check-ignore", "-z", "--stdin", stdin="\0".join(files).encode("utf-8") + b"\0")
+        if proc.returncode not in (0, 1):
+            raise Failed(f"`git check-ignore` failed in {repo} (exit {proc.returncode})")
+        ignored = sorted(p for p in proc.stdout.decode("utf-8", "surrogateescape").split("\0") if p)
+    exclude = _git_path(repo, "--git-common-dir") / "info" / "exclude"
     raw = exclude.read_bytes() if exclude.is_file() else b""
     try:
         old = raw.decode("utf-8")
@@ -760,6 +782,46 @@ def pin_ignores(root: Path, files) -> tuple[bool, list[str]]:
     tmp.write_bytes(new.encode("utf-8"))
     os.replace(tmp, exclude)
     return True, ignored
+
+
+def pin_ignores(root: Path, files, log=None) -> tuple[bool, list[str]]:
+    """Pin every archived path that git IGNORES today into the info/exclude of the
+    repository that owns it. info/exclude is not versioned, so it applies on EVERY
+    branch: an old branch whose .gitignore predates a rule can no longer show the file
+    as untracked, and a client that stashes untracked changes on a branch switch
+    (GitHub Desktop's '!!GitHub_Desktop<branch>' stash, 2026-09-28) leaves it alone.
+    Paths git does NOT ignore today (an uncommitted new file) are never pinned - that
+    would hide work in progress. Returns (changed, pinned), pinned as
+    superproject-relative paths.
+
+    SUBMODULES (cfg-pin-sub): paths are partitioned by owning repository (git
+    check-ignore refuses a pathspec inside a submodule); the superproject's pins go to
+    its <common-dir>/info/exclude and each checked-out submodule's to ITS OWN git dir's
+    info/exclude, as repo-relative rules. A submodule that is not checked out is
+    skipped with a log line.
+
+    ONLY THE MAIN CHECKOUT WRITES. info/exclude lives in the COMMON git dir and is
+    shared by every worktree, and the block is replaced, not merged; a run from a
+    linked worktree (whose inventory is its own copy of .env files) would otherwise
+    drop the main checkout's pins (cfg-backup attempt 1). In a linked worktree this
+    raises NotMainWorktree before reading or writing anything. Lines outside the
+    marked block are never changed, and the file's line endings are kept."""
+    if not is_main_worktree(root):
+        raise NotMainWorktree(f"{root} is a linked worktree; info/exclude is shared by every "
+                              "worktree and only the main checkout writes the pinned block - not touched")
+    files = sorted(files)
+    if not files:
+        return False, []
+    groups = _partition(root, files, log)
+    groups.setdefault(root, [])  # the superproject's block is always (re)written
+    changed_any = False
+    pinned: list[str] = []
+    for repo, rel_files in groups.items():
+        changed, ignored = _pin_one(repo, sorted(rel_files))
+        changed_any = changed_any or changed
+        prefix = "" if repo == root else repo.relative_to(root).as_posix() + "/"
+        pinned += [prefix + p for p in ignored]
+    return changed_any, sorted(pinned)
 
 
 # --------------------------------------------------------------------------- logging
@@ -825,7 +887,7 @@ def _run(args, root: Path, log) -> int:
     pin_failed = False
     if pol.pin_ignores and not args.no_pin:
         try:
-            changed, pinned = pin_ignores(root, inv.files)
+            changed, pinned = pin_ignores(root, inv.files, log)
             log("INFO", f"pin-ignores: {len(pinned)} path(s) pinned in info/exclude"
                         + (" (updated)" if changed else " (unchanged)"))
         except NotMainWorktree as exc:
@@ -917,7 +979,7 @@ def cmd_pin(args) -> int:
     try:
         pol = load_policy(Path(args.policy))
         inv = derive_inventory(root, pol)
-        changed, pinned = pin_ignores(root, inv.files)
+        changed, pinned = pin_ignores(root, inv.files, lambda lvl, m: print(f"[{lvl}] {m}"))
     except NotMainWorktree as exc:
         print(f"pin-ignores skipped: {exc}")
         return EXIT_OK

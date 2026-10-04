@@ -857,3 +857,137 @@ def test_watchdog_recency_counts_only_real_artifacts(tmp_path):
     out = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps)],
                          capture_output=True, text=True, env=env, timeout=300).stdout
     assert "BACKUP STALE - config-secrets" in out, out
+
+
+# ----------------------------------------------------------------------------- submodule (cfg-pin-sub)
+
+def _sub_fixture(tmp_path: Path) -> Path:
+    """Main checkout WITH a submodule (the live shape: OB1/docker/.env). Both repos have an
+    old-branch that predates their ignore rules (the 09-28 shape, once per repository)."""
+    src = tmp_path / "subsrc"
+    src.mkdir()
+    write(src, {"README": "sub old\n"})
+    _git(src, "init", "-q", "-b", "main")
+    _git(src, "add", "-A")
+    _git(src, "commit", "-q", "-m", "sub old")
+    _git(src, "branch", "old-branch")
+    write(src, {".gitignore": ".env\n"})
+    _git(src, "add", "-A")
+    _git(src, "commit", "-q", "-m", "sub: ignore rule")
+    root = tmp_path / "main"
+    root.mkdir()
+    write(root, {"README": "old\n", ".gitignore": "logs/\n"})
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "old")
+    _git(root, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(src), "OB1")
+    _git(root, "commit", "-q", "-m", "add OB1")
+    _git(root, "branch", "old-branch")
+    _git(root / "OB1", "branch", "old-branch", "HEAD~1")
+    write(root, {".gitignore": "logs/\n.stack/\n"})
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "new: rules added")
+    write(root, {".stack/state.json": '{"fake": 1}\n', "OB1/docker/.env": f"FAKE={MARK}\n"})
+    return root
+
+
+def _sub_pins(root: Path) -> list[str]:
+    gd = Path(_git(root / "OB1", "rev-parse", "--absolute-git-dir").stdout.strip())
+    lines = (gd / "info/exclude").read_text(encoding="utf-8").splitlines() if (gd / "info/exclude").is_file() else []
+    if csb.PIN_BEGIN not in lines:
+        return []
+    return lines[lines.index(csb.PIN_BEGIN) + 1: lines.index(csb.PIN_END)]
+
+
+def _sub_hazard_closed(root: Path) -> None:
+    """Old-branch checkout + `stash -u` in EACH repo leaves both secrets on disk."""
+    for repo in (root, root / "OB1"):
+        _git(repo, "checkout", "-q", "old-branch")
+        status = _git(repo, "status", "--porcelain", "--untracked-files=all").stdout
+        assert ".env" not in status and "state.json" not in status, (repo, status)
+        _git(repo, "stash", "push", "-q", "--include-untracked", "-m", "probe")
+        _git(repo, "checkout", "-q", "main")
+    assert (root / "OB1/docker/.env").read_text(encoding="utf-8") == f"FAKE={MARK}\n"
+    assert (root / ".stack/state.json").is_file()
+
+
+FILES_SUB = [".stack/state.json", "OB1/docker/.env"]
+
+
+def test_premise_git_check_ignore_refuses_a_path_inside_a_submodule(tmp_path):
+    root = _sub_fixture(tmp_path)
+    proc = subprocess.run(["git", "-C", str(root), "check-ignore", "-z", "--stdin"],
+                          input=b"OB1/docker/.env\0", capture_output=True)
+    assert proc.returncode == 128 and b"in submodule" in proc.stderr
+
+
+def test_pin_ignores_pins_the_superproject_and_the_submodule_each_in_its_own_exclude(tmp_path):
+    root = _sub_fixture(tmp_path)
+    changed, pinned = csb.pin_ignores(root, FILES_SUB)
+    assert changed and pinned == FILES_SUB
+    assert _pinned_block(root) == ["/.stack/state.json"]
+    assert _sub_pins(root) == ["/docker/.env"]
+    # nothing was written to the superproject's exclude for the submodule's path
+    assert "OB1" not in (root / ".git/info/exclude").read_text(encoding="utf-8")
+    _sub_hazard_closed(root)
+
+
+def test_without_the_pins_the_submodule_secret_is_stashed_away(tmp_path):
+    root = _sub_fixture(tmp_path)
+    _git(root / "OB1", "checkout", "-q", "old-branch")
+    assert "?? docker/.env" in _git(root / "OB1", "status", "--porcelain", "--untracked-files=all").stdout
+    _git(root / "OB1", "stash", "push", "-q", "--include-untracked", "-m", "probe")
+    assert not (root / "OB1/docker/.env").exists()
+
+
+def test_submodule_pins_are_idempotent_keep_operator_lines_and_crlf(tmp_path):
+    root = _sub_fixture(tmp_path)
+    gd = Path(_git(root / "OB1", "rev-parse", "--absolute-git-dir").stdout.strip())
+    (gd / "info").mkdir(exist_ok=True)
+    (gd / "info/exclude").write_bytes(b"# operator\r\nmine.tmp\r\n")
+    assert csb.pin_ignores(root, FILES_SUB)[0]
+    first = (gd / "info/exclude").read_bytes(), (root / ".git/info/exclude").read_bytes()
+    raw = first[0]
+    assert raw.startswith(b"# operator\r\nmine.tmp\r\n") and b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b"")
+    changed, pinned = csb.pin_ignores(root, FILES_SUB)
+    assert not changed and pinned == FILES_SUB
+    assert ((gd / "info/exclude").read_bytes(), (root / ".git/info/exclude").read_bytes()) == first
+    assert raw.count(csb.PIN_BEGIN.encode()) == 1
+
+
+def test_a_linked_worktree_of_a_superproject_with_a_submodule_never_writes(tmp_path, policy):
+    root = _sub_fixture(tmp_path)
+    csb.pin_ignores(root, FILES_SUB)
+    gd = Path(_git(root / "OB1", "rev-parse", "--absolute-git-dir").stdout.strip())
+    before = ((root / ".git/info/exclude").read_bytes(), (gd / "info/exclude").read_bytes())
+    wt = tmp_path / "linked"
+    _git(root, "worktree", "add", "-q", str(wt), "-b", "wtb")
+    write(wt, {".stack/state.json": "{}\n"})
+    rc = csb.main(["pin-ignores", "--repo-root", str(wt), "--policy", str(policy)])
+    assert rc == csb.EXIT_OK
+    assert ((root / ".git/info/exclude").read_bytes(), (gd / "info/exclude").read_bytes()) == before
+    with pytest.raises(csb.NotMainWorktree):
+        csb.pin_ignores(wt, FILES_SUB)
+    assert ((root / ".git/info/exclude").read_bytes(), (gd / "info/exclude").read_bytes()) == before
+
+
+def test_a_submodule_that_is_not_checked_out_is_skipped_with_a_log_line(tmp_path):
+    root = _sub_fixture(tmp_path)
+    shutil.rmtree(root / "OB1")
+    (root / "OB1").mkdir()  # declared in .gitmodules, empty: not checked out
+    logs: list = []
+    changed, pinned = csb.pin_ignores(root, FILES_SUB, lambda lvl, msg: logs.append((lvl, msg)))
+    assert pinned == [".stack/state.json"] and changed
+    assert any("OB1 is not checked out" in m for _, m in logs)
+
+
+def test_cli_pin_ignores_on_a_checkout_with_a_submodule(tmp_path, policy, monkeypatch):
+    """The failing live call: the inventory holds an OB1/... path. At 40968db this
+    exits non-zero with `git check-ignore failed (exit 128)`."""
+    root = _sub_fixture(tmp_path)
+    inv = csb.Inventory()
+    for f in FILES_SUB:
+        inv.add(f, "env")
+    monkeypatch.setattr(csb, "derive_inventory", lambda *a, **k: inv)
+    assert csb.main(["pin-ignores", "--repo-root", str(root), "--policy", str(policy)]) == csb.EXIT_OK
+    assert _pinned_block(root) == ["/.stack/state.json"] and _sub_pins(root) == ["/docker/.env"]
