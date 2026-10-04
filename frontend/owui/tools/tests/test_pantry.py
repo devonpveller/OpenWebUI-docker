@@ -468,6 +468,143 @@ class Import(Base):
         self.assertIn("again", out["instruction"])
 
 
+UNPLAIN = [
+    "1,000", "1.000", "12.500", "1,5", "$5", "5 kg", "5kg", "nan", "NaN", "inf", "-inf", "-3", "-0.5",
+    "1e3", "5.", "+5", "0x10", "1_000", "", "1 000", "1,000.50", "£1", "lots",
+    "٣",  # ARABIC-INDIC DIGIT THREE
+    "５",  # FULLWIDTH DIGIT FIVE
+    "5\n6",
+]
+PLAIN = {"0": 0, "2": 2, ".25": 0.25, "0.125": 0.125, "1.5": 1.5, "1000": 1000, "12.34": 12.34, " 5 ": 5}
+
+
+class NumberParsing(unittest.TestCase):
+    """_to_number must never guess."""
+
+    def test_unplain_numbers_refused(self):
+        for bad in UNPLAIN:
+            with self.subTest(value=bad):
+                self.assertIsNone(pantry.Tools._to_number(bad))
+
+    def test_plain_numbers_accepted(self):
+        for text, want in PLAIN.items():
+            with self.subTest(value=text):
+                self.assertEqual(pantry.Tools._to_number(text), want)
+
+    def test_xlsx_numbers_cells(self):
+        cell = pantry.Tools._cell_text
+        # numeric cells are unambiguous: 1.125 and 12.500 (a float) are real numbers
+        for v, want in ((1000, 1000), (1000.0, 1000), (1.125, 1.125), (12.5, 12.5), (0, 0), (0.5, 0.5)):
+            with self.subTest(cell=v):
+                self.assertEqual(pantry.Tools._to_number(cell(v)), want)
+        # negative, nan, inf, bool and text cells that are not plain numbers are refused
+        for v in (-3, -0.5, -3.0, float("nan"), float("inf"), float("-inf"), True, False, "1,000", "1.000", "$5", "5 kg", "abc"):
+            with self.subTest(cell=v):
+                self.assertIsNone(pantry.Tools._to_number(cell(v)))
+
+    def test_ambiguous_text_but_not_numeric_cell(self):
+        self.assertIsNone(pantry.Tools._to_number("1.000"))
+        self.assertEqual(pantry.Tools._to_number(pantry._Num("1.000")), 1.0)
+
+
+class NumberImport(Base):
+    def _csv(self, bad, col="quantity"):
+        if col == "quantity":
+            return f'name,quantity,actual\nGood,2,\nRice,"{bad}",\nBeans,1,\n'
+        return f'name,quantity,actual\nGood,2,\nRice,1,"{bad}"\nBeans,1,\n'
+
+    def test_unplain_numbers_never_posted_end_to_end(self):
+        self.preview_echo()
+        for bad in UNPLAIN:
+            if bad in ("", "5\n6"):  # an empty cell is simply "no value"; a newline needs quoting tricks
+                continue
+            for col in ("quantity", "actual"):
+                with self.subTest(value=bad, column=col):
+                    self.svc.requests.clear()
+                    out = json.loads(run(self.tool.import_pantry(__files__=self.attach("n.csv", self._csv(bad, col).encode("utf-8")))))
+                    self.assertFalse(out["ok"])
+                    self.assertTrue(out["nothing_sent"])
+                    self.assertEqual(self.svc.requests, [])
+                    self.assertEqual([(i["row"], i["column"], i["value"]) for i in out["invalid"]], [(3, col, bad)])
+
+    def test_plain_numbers_accepted_end_to_end(self):
+        self.preview_echo()
+        data = "name,quantity\n" + "".join(f"n{i},{t}\n" for i, t in enumerate(k for k in PLAIN if k.strip() == k))
+        run(self.tool.import_pantry(__files__=self.attach("ok.csv", data.encode())))
+        want = [v for k, v in PLAIN.items() if k.strip() == k]
+        self.assertEqual([r["quantity"] for r in self.last()["body"]["rows"]], want)
+
+    @unittest.skipIf(openpyxl is None, "openpyxl not installed (run the container command)")
+    def test_xlsx_numbers_end_to_end(self):
+        def sheet(vals):
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.append(["name", "quantity"])
+            for i, v in enumerate(vals):
+                ws.append([f"n{i}", v])
+            out = io.BytesIO()
+            wb.save(out)
+            return out.getvalue()
+
+        self.preview_echo()
+        run(self.tool.import_pantry(__files__=self.attach("g.xlsx", sheet([1000, 1.125, 0.5, 3.0, 0]))))
+        self.assertEqual([r["quantity"] for r in self.last()["body"]["rows"]], [1000, 1.125, 0.5, 3, 0])
+        # (openpyxl cannot store nan/inf in a cell; those are covered at cell level in test_xlsx_numbers_cells)
+        for bad in (-3, -0.5, True, "1,000", "1.000", "$5", "5 kg", "nan", "٣"):
+            with self.subTest(value=bad):
+                self.svc.requests.clear()
+                out = json.loads(run(self.tool.import_pantry(__files__=self.attach("b.xlsx", sheet([2, bad])))))
+                self.assertFalse(out["ok"])
+                self.assertTrue(out["nothing_sent"])
+                self.assertEqual(self.svc.requests, [])
+                self.assertEqual(out["invalid"][0]["row"], 3)
+
+
+class StapleLevels(Base):
+    def _post(self, data):
+        self.svc.requests.clear()
+        return json.loads(run(self.tool.import_pantry(__files__=self.attach("s.csv", data.encode()))))
+
+    def test_staple_actual_must_be_a_level(self):
+        self.preview_echo()
+        for word, want in (("LOW", "low"), (" Plenty ", "plenty"), ("out", "out")):
+            with self.subTest(actual=word):
+                out = self._post(f'name,kind,level,actual\nOil,staple,plenty,"{word}"\n')
+                self.assertTrue(out["ok"])
+                self.assertEqual(self.last()["body"]["rows"], [{"name": "Oil", "kind": "staple", "level": want}])
+        for bad in ("5", "lowish", "medium", "1,000", "-1", "nan"):
+            with self.subTest(actual=bad):
+                out = self._post(f'name,kind,level,actual\nOil,staple,plenty,"{bad}"\n')
+                self.assertFalse(out["ok"])
+                self.assertTrue(out["nothing_sent"])
+                self.assertEqual(self.svc.requests, [])
+                self.assertEqual([(i["row"], i["column"], i["value"]) for i in out["invalid"]], [(2, "actual", bad)])
+
+    def test_counted_actual_level_word_is_invalid_not_posted_as_both(self):
+        for word in ("LOW", "out", "plenty"):
+            with self.subTest(actual=word):
+                out = self._post(f"name,kind,quantity,unit,actual\nRice,counted,500,g,{word}\n")
+                self.assertFalse(out["ok"])
+                self.assertEqual(self.svc.requests, [])
+                self.assertEqual([(i["row"], i["column"], i["value"]) for i in out["invalid"]], [(2, "actual", word)])
+
+    def test_level_column_must_be_a_level(self):
+        self.preview_echo()
+        for bad in ("Medium", "half", "5", "lo"):
+            with self.subTest(level=bad):
+                out = self._post(f"name,kind,level\nOil,staple,{bad}\n")
+                self.assertFalse(out["ok"])
+                self.assertEqual(self.svc.requests, [])
+                self.assertEqual([(i["row"], i["column"], i["value"]) for i in out["invalid"]], [(2, "level", bad)])
+        self._post("name,kind,level\nOil,staple, LOW \n")
+        self.assertEqual(self.last()["body"]["rows"][0]["level"], "low")
+
+    def test_unknown_kind_level_word_is_a_level(self):
+        self.preview_echo()
+        self._post("id,name,actual\ni2,Oil,out\n")
+        self.assertEqual(self.last()["body"]["rows"], [{"id": "i2", "name": "Oil", "level": "out"}])
+
+
 class SkillMatchesTool(unittest.TestCase):
     def test_write_rule_lists_exactly_the_write_functions(self):
         import inspect

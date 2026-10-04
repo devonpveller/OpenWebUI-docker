@@ -85,9 +85,10 @@ class _Num(str):
     """Text of a numeric spreadsheet cell (xlsx int/float): unambiguous, unlike csv text."""
 
 
-_PLAIN_NUMBER = re.compile(r"^(\d+(\.\d+)?|\.\d+)$")
+_PLAIN_NUMBER = re.compile(r"(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)")  # ASCII digits only; used with fullmatch
+_LEVELS = ("plenty", "low", "out")
 # "1.000" / "12.500": could be a thousands separator in some locales - ask, do not guess.
-_AMBIGUOUS_THOUSANDS = re.compile(r"^[1-9]\d{0,2}\.\d{3}$")
+_AMBIGUOUS_THOUSANDS = re.compile(r"[1-9][0-9]{0,2}\.[0-9]{3}")
 
 
 class ServiceError(Exception):
@@ -951,9 +952,9 @@ class Tools:
         (thousands or decimal?), "1,5", currency, units, nan/inf and negatives are all None.
         A genuinely numeric spreadsheet cell (_Num) is unambiguous, so "1.125" is accepted there."""
         t = str(text).strip()
-        if not _PLAIN_NUMBER.match(t):
+        if not _PLAIN_NUMBER.fullmatch(t):
             return None
-        if not isinstance(text, _Num) and _AMBIGUOUS_THOUSANDS.match(t):
+        if not isinstance(text, _Num) and _AMBIGUOUS_THOUSANDS.fullmatch(t):
             return None
         return float(t)
 
@@ -984,15 +985,29 @@ class Tools:
                         invalid.append({"row": n, "column": field, "value": val})
                         continue
                     row[field] = int(num) if float(num).is_integer() else num
+                elif field == "level":
+                    if val.lower() in _LEVELS:
+                        row[field] = val.lower()
+                    else:
+                        invalid.append({"row": n, "column": "level", "value": val})
                 elif field in _LIST_FIELDS:
                     row[field] = [p.strip() for p in re.split(r"[;|,]", val) if p.strip()]
                 else:
                     row[field] = val
             actual = cell("actual")
             if actual != "":
-                if row.get("kind") == "staple" or (
-                    self._to_number(actual) is None and actual.lower() in ("plenty", "low", "out")
-                ):
+                kind = str(row.get("kind", "")).strip().lower()
+                is_level = actual.lower() in _LEVELS
+                if kind == "staple":
+                    # a staple's actual is a level, exactly one of plenty|low|out
+                    if is_level:
+                        row["level"] = actual.lower()
+                    else:
+                        invalid.append({"row": n, "column": "actual", "value": actual})
+                elif kind == "counted" and is_level:
+                    # a counted item has a number, never a level: refuse, do not post both
+                    invalid.append({"row": n, "column": "actual", "value": actual})
+                elif is_level:  # kind unknown: a level word can only mean a level
                     row["level"] = actual.lower()
                 else:
                     num = self._to_number(actual)
@@ -1069,7 +1084,7 @@ class Tools:
         if invalid:
             return _compact(
                 {"ok": False, "error": "invalid", "nothing_sent": True,
-                 "detail": "some quantity cells are not plain numbers",
+                 "detail": "some quantity/actual cells are not plain numbers, or some level/actual cells for staples are not plenty|low|out",
                  "invalid": invalid[:50], "invalid_count": len(invalid),
                  "instruction": (
                      "Nothing was sent. Show the user each row and value, and ask what number they mean "
