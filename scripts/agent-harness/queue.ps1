@@ -2101,6 +2101,52 @@ if ($Merged) {
              "contains. Only a tested item reaches review - if this one did not, it must not " +
              "be recorded as merged. Nothing has been recorded.") 1
     }
+    # A MERGE THAT RAN NO COMMIT HOOK IS NOT RECORDED (mg-nonff, tracker F5 option b,
+    # 2026-10-04). A fast-forward, a cherry-pick or a rebase/squash onto the line creates no
+    # merge commit, so the pre-commit gates never ran on it. The recorded sha must be a MERGE
+    # commit (>= 2 parents) with the tested work behind a NON-first parent, and must sit on the
+    # integration line. Host settings merge.ff=false + pull.ff=only make git itself refuse the
+    # silent fast-forward; this is the same rule where the merge is recorded. No escape hatch
+    # (MERGE-PROTOCOL documents none).
+    $mgRev = @(Invoke-GitCapture @("rev-list", "--parents", "-n", "1", $Sha) | Select-Object -First 1)
+    if ($LASTEXITCODE -eq 0 -and $mgRev.Count -gt 0) {
+        $mgParts = @(([string]$mgRev[0]).Trim() -split '\s+' | Where-Object { $_ })
+        $mgFix = "Redo it as a real merge commit: git merge --no-ff work/<id> -F <msg-file> on the work line (MERGE-PROTOCOL Step 5), then record THAT sha. Nothing has been recorded."
+        if ($mgParts.Count -lt 3) {
+            Die (("'{0}' is not a merge commit ({1} parent(s)): a fast-forward, cherry-pick or rebase/squash onto the line " +
+                  "runs no commit hook, so the gates never saw it. {2}") -f $Sha, ($mgParts.Count - 1), $mgFix) 1
+        }
+        # The tested work must be INTRODUCED by this merge: already behind the first parent means
+        # it entered the line some other way (a fast-forward) and this merge is of something else.
+        [void](Invoke-GitCapture @("merge-base", "--is-ancestor", $item.tested_at_sha, $mgParts[1]))
+        if ($LASTEXITCODE -eq 0) {
+            Die ("'$Sha' is a merge commit, but the tested commit '$($item.tested_at_sha)' is already behind its FIRST parent, " +
+                 "so this merge did not introduce the item's work - it reached the line some other way (a fast-forward?). $mgFix") 1
+        }
+        $mgBehind = $false
+        foreach ($mgP in @($mgParts | Select-Object -Skip 2)) {
+            [void](Invoke-GitCapture @("merge-base", "--is-ancestor", $item.tested_at_sha, $mgP))
+            if ($LASTEXITCODE -eq 0) { $mgBehind = $true; break }
+        }
+        if (-not $mgBehind) {
+            Die ("'$Sha' is a merge commit, but the tested commit '$($item.tested_at_sha)' is not behind any of its " +
+                 "non-first parents, so it did not merge this item's work. $mgFix") 1
+        }
+        $mgLine = Resolve-WorkLine
+        $mgRef = ""
+        foreach ($cand in @("refs/heads/$mgLine", "refs/remotes/origin/$mgLine")) {
+            [void](Invoke-GitCapture @("rev-parse", "--verify", "--quiet", $cand))
+            if ($LASTEXITCODE -eq 0) { $mgRef = $cand; break }
+        }
+        if (-not $mgRef) {
+            Die ("cannot prove '$Sha' is on the integration line: '$mgLine' resolves to no local branch and no origin/$mgLine here. " +
+                 "Run this where the line exists (or fetch it), then record the merge again. Nothing has been recorded.") 1
+        }
+        [void](Invoke-GitCapture @("merge-base", "--is-ancestor", $Sha, $mgRef))
+        if ($LASTEXITCODE -ne 0) {
+            Die ("'$Sha' is not on the integration line '$mgLine'. Merge onto the line first, then record. Nothing has been recorded.") 1
+        }
+    }
     [void](Invoke-GitCapture @("merge-base", "--is-ancestor", $item.tested_at_sha, $Sha))
     if ($LASTEXITCODE -ne 0) {
         Die ("'$Sha' does not contain '$($item.tested_at_sha)' - the commit this item's tests " +

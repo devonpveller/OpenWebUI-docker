@@ -170,7 +170,7 @@ function Add-Registry($fix, [string[]]$Ids) {
 function Invoke-Q($fix, [string[]]$QArgs) {
     $prevState = $env:AI_STACK_WORKTREE_STATE; $prevLine = $env:AI_STACK_WORK_LINE
     $env:AI_STACK_WORKTREE_STATE = $fix.state
-    $env:AI_STACK_WORK_LINE = "base"
+    $env:AI_STACK_WORK_LINE = $(if ($script:LineOverride) { $script:LineOverride } else { "base" })
     Push-Location $fix.repo
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     try { $out = & $PsExe -NoProfile -NonInteractive -File $Script @QArgs 2>&1 }
@@ -1562,6 +1562,105 @@ Invoke-Q $fr2 @("-Resubmit", "-Id", "qr3", "-By", "qdev", "-TestPlan", $planV2) 
 $it = Get-QItem $fr2 "qr3"
 Check "R: -Resubmit still bumps the attempt and replaces the plan" `
     (([int]$it.attempt -eq 2) -and ((Get-Content -Raw (Get-QFile $fr2 "qr3.plan.md")) -match "REVISED")) ("attempt=" + $it.attempt)
+
+# ======================================================================================
+Step "NF  -Merged records only a real merge commit (mg-nonff, tracker F5 option b)"
+# ======================================================================================
+# A fast-forward, cherry-pick or rebase/squash onto the line runs no commit hook. RED at
+# 56251ff: -Merged recorded a fast-forwarded item without complaint (its only question was
+# 'is the tested sha an ancestor', and a ff tip trivially is).
+function New-NfReviewing([string]$name, [string]$id) {
+    $fx = New-Fixture $name
+    $evn = Join-Path $Root ($name + "-evidence.md")
+    Set-Content -Path $evn -Encoding ascii -Value @($case1Pass, "ran case 1.")
+    Initialize-ToReview $fx $id "qdev" $evn
+    return $fx
+}
+# (a) fast-forward: the line tip IS the tested commit
+$nf1 = New-NfReviewing "nf1" "qnf1"
+Push-Location $nf1.repo
+try {
+    Invoke-Git merge --ff-only -q work/qd | Out-Null
+    $ffSha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+} finally { Pop-Location }
+$r = Invoke-Q $nf1 @("-Merged", "-Id", "qnf1", "-By", "qrev", "-Sha", $ffSha, "-FitsCodebase")
+Check "NF: a fast-forwarded item is REFUSED, naming the reason and the fix" `
+    (($r.code -ne 0) -and ((Get-QItem $nf1 "qnf1").state -ne "merged") -and ($r.out -match "not a merge commit") -and ($r.out -match "--no-ff")) `
+    ("exit=" + $r.code + " state=" + (Get-QItem $nf1 "qnf1").state + " | " + (First-Line $r.out))
+# (b) single-parent commit that contains the tested sha (ff, then a follow-up commit)
+Push-Location $nf1.repo
+try {
+    Set-Content -Path (Join-Path $nf1.repo "MORE.md") -Encoding ascii -Value "more"
+    Invoke-Git add MORE.md | Out-Null
+    Invoke-Git commit -q -m "follow-up" | Out-Null
+    $spSha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+} finally { Pop-Location }
+$r = Invoke-Q $nf1 @("-Merged", "-Id", "qnf1", "-By", "qrev", "-Sha", $spSha, "-FitsCodebase")
+Check "NF: a single-parent tip that contains the tested sha is REFUSED" `
+    (($r.code -ne 0) -and ((Get-QItem $nf1 "qnf1").state -ne "merged") -and ($r.out -match "not a merge commit")) `
+    ("exit=" + $r.code + " | " + (First-Line $r.out))
+# (c) cherry-pick: single parent, different sha
+$nf2 = New-NfReviewing "nf2" "qnf2"
+Push-Location $nf2.repo
+try {
+    Invoke-Git cherry-pick work/qd | Out-Null
+    $cpSha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+} finally { Pop-Location }
+$r = Invoke-Q $nf2 @("-Merged", "-Id", "qnf2", "-By", "qrev", "-Sha", $cpSha, "-FitsCodebase")
+Check "NF: a cherry-pick onto the line is REFUSED" `
+    (($r.code -ne 0) -and ((Get-QItem $nf2 "qnf2").state -ne "merged")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+# (d) a merge commit whose parents do not hold the tested sha
+$nf3 = New-NfReviewing "nf3" "qnf3"
+Push-Location $nf3.repo
+try {
+    Invoke-Git checkout -q -b side base | Out-Null
+    Set-Content -Path (Join-Path $nf3.repo "SIDE.md") -Encoding ascii -Value "side"
+    Invoke-Git add SIDE.md | Out-Null
+    Invoke-Git commit -q -m "unrelated side work" | Out-Null
+    Invoke-Git checkout -q base | Out-Null
+    Invoke-Git merge --no-ff -q side -m "merge unrelated work" | Out-Null
+    $otherSha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+} finally { Pop-Location }
+$r = Invoke-Q $nf3 @("-Merged", "-Id", "qnf3", "-By", "qrev", "-Sha", $otherSha, "-FitsCodebase")
+Check "NF: a merge commit that does not contain the tested sha is REFUSED" `
+    (($r.code -ne 0) -and ((Get-QItem $nf3 "qnf3").state -ne "merged")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+# (e) the real thing still records
+Push-Location $nf3.repo
+try {
+    Invoke-Git merge --no-ff -q work/qd -m "merge the work (evidence: drill)" | Out-Null
+    $goodSha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+} finally { Pop-Location }
+$r = Invoke-Q $nf3 @("-Merged", "-Id", "qnf3", "-By", "qrev", "-Sha", $goodSha, "-FitsCodebase")
+Check "NF: a --no-ff merge containing the tested sha IS recorded" `
+    (($r.code -eq 0) -and ((Get-QItem $nf3 "qnf3").state -eq "merged")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+
+# (f) P6: ff'd onto the line, then a --no-ff merge of ANOTHER branch is recorded for it
+$nf4 = New-NfReviewing "nf4" "qnf4"
+Push-Location $nf4.repo
+try {
+    Invoke-Git merge --ff-only -q work/qd | Out-Null
+    Invoke-Git checkout -q -b side2 base~1 | Out-Null
+    Set-Content -Path (Join-Path $nf4.repo "SIDE2.md") -Encoding ascii -Value "side2"
+    Invoke-Git add SIDE2.md | Out-Null
+    Invoke-Git commit -q -m "other branch" | Out-Null
+    Invoke-Git checkout -q base | Out-Null
+    Invoke-Git merge --no-ff -q side2 -m "merge other branch" | Out-Null
+    $p6Sha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+} finally { Pop-Location }
+$r = Invoke-Q $nf4 @("-Merged", "-Id", "qnf4", "-By", "qrev", "-Sha", $p6Sha, "-FitsCodebase")
+Check "NF: P6 - tested sha already behind the FIRST parent (entered by ff) is REFUSED" `
+    (($r.code -ne 0) -and ((Get-QItem $nf4 "qnf4").state -ne "merged") -and ($r.out -match "FIRST parent")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+# (g) P7: the work line resolves to no ref -> refuse, never skip
+$nf5 = New-NfReviewing "nf5" "qnf5"
+Push-Location $nf5.repo
+try {
+    Invoke-Git merge --no-ff -q work/qd -m "merge the work (evidence: drill)" | Out-Null
+    $p7Sha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+} finally { Pop-Location }
+$script:LineOverride = "no-such-line"
+try { $r = Invoke-Q $nf5 @("-Merged", "-Id", "qnf5", "-By", "qrev", "-Sha", $p7Sha, "-FitsCodebase") } finally { $script:LineOverride = $null }
+Check "NF: P7 - an unresolvable work line is REFUSED, not skipped" `
+    (($r.code -ne 0) -and ((Get-QItem $nf5 "qnf5").state -ne "merged") -and ($r.out -match "integration line")) ("exit=" + $r.code + " | " + (First-Line $r.out))
 
 # --- verdict --------------------------------------------------------------------------
 $fail = @($results | Where-Object { -not $_.pass })
