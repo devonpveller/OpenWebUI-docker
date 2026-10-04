@@ -70,7 +70,9 @@ says which model each profile SHOULD carry. `tier` is read from these seed files
 (it is policy, not a database column); the live `model` still belongs to the database and
 moves only by the governed intent below. `GET /profiles` reports `tier_drift`: every profile
 whose live model is off its tier, each with the exact command that would move it - it changes
-nothing itself.
+nothing itself. If `AO_PROFILE_TIER_MODELS_LOCAL`/`_CLOUD` is malformed or leaves a tier without a
+model (e.g. `large=local-large`), the listing still answers 200 with `tier_drift: null` and a
+`tier_drift_error` naming the variable, and the bridge logs it.
 
 Known limit, stated rather than implied: the pooled little-coder WORKERS run the model in
 little-coder's own config (`little-coder/config/little-coder.config.yaml`, `agent.model`); their

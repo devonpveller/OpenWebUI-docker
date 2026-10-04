@@ -46,6 +46,27 @@ def parse_tier_models(spec: str) -> dict[str, str]:
     return out
 
 
+#: The env var behind each lane's spec, so a refusal names the thing an operator edits.
+TIER_MODEL_ENV = {"local": "AO_PROFILE_TIER_MODELS_LOCAL", "cloud": "AO_PROFILE_TIER_MODELS_CLOUD"}
+
+
+def check_tier_models(settings) -> None:
+    """Raise ValueError naming the env var unless BOTH lanes' specs parse and name a model for
+    EVERY tier. tier_drift() calls it first, so a half-written spec ('large=local-large') is one
+    clear refusal rather than a KeyError deep inside whichever profile happened to need `small`."""
+    for lane, env in TIER_MODEL_ENV.items():
+        spec = (settings.profile_tier_models_cloud if lane == "cloud"
+                else settings.profile_tier_models_local)
+        try:
+            models = parse_tier_models(spec)
+        except ValueError as exc:
+            raise ValueError(f"{env}={spec!r}: {exc}") from exc
+        missing = [t for t in TIERS if t not in models]
+        if missing:
+            raise ValueError(f"{env}={spec!r} names no model for tier(s) {', '.join(missing)} "
+                             f"(want e.g. large=<model>,small=<model>)")
+
+
 def tier_model(settings, tier: str, lane: str) -> str:
     """The model role a profile of `tier` asks for on `lane` ("local" | "cloud" - the EFFECTIVE
     lane: a cloud profile with the cloud lane disabled routes local, as ModelRouter does)."""
@@ -137,7 +158,9 @@ class ProfileRegistry:
         """Every active profile whose live `model` is not its tier's model role, with the EXACT
         governed command that would move it (`set profile <name> model <role>`). Read-only: the
         landing - or the operator - sends the command; this never writes a profile. A profile with
-        no tier is not judged."""
+        no tier is not judged. Raises ValueError (naming the env var) when a tier-model spec is
+        malformed or incomplete - the caller reports drift as unavailable, never 500s the listing."""
+        check_tier_models(settings)
         out: list[dict] = []
         for name, p in sorted(self._cache.items()):
             if not p.tier:

@@ -444,44 +444,151 @@ function Get-HarnessProfileNames {
 # the ordered rules in harness.config.json `model_tiers`, looked up in one of TWO SEPARATE
 # maps - `cloud` (Claude Code subagents) and `local` (agent-org model roles). ADVISORY only:
 # queue.ps1 prints the answer and never blocks on it. Mirrored by config.py
-# resolve_model_tier; test_model_tiers.py asks both the same questions.
+# resolve_model_tier; test_model_tiers.py asks both the same questions - including
+# non-canonical ones - and requires the same answer or the same refusal.
 #
-# The rule CONDITIONS are a closed set. A rule carrying a key outside it is refused rather
-# than ignored: an ignored condition is a misspelt `max_attemp` that silently widens the rule
-# to every attempt, which is the declared-but-governs-nothing shape the andon board exists for.
+# CASE-SENSITIVE throughout (-ceq / -ccontains), like anchor.ps1's `allowed` check. PowerShell
+# compares strings case-INsensitively by default and Python does not; mt-policy attempt 1
+# shipped -contains here, and `LARGE`, `Tester` or a config rule `"role": "Reviewer"` resolved in
+# this reader while the Python twin refused or never matched (1,800 of 3,780 generated inputs).
+#
+# The WHOLE block is validated before any rule is evaluated (Get-ModelTiersProblems). A rule
+# carrying an unknown key, a wrong-case tier or role, or a fractional number is refused rather
+# than ignored or rounded - and refused even when an earlier rule would have matched first,
+# because a defect a reviewer's path never reaches is still a defect in the policy.
 $script:ModelTierRuleKeys = @("id", "why", "tier", "role", "min_attempt", "max_attempt", "doc_only", "max_delta_lines")
+$script:ModelTierIntKeys = @("min_attempt", "max_attempt", "max_delta_lines")
 $script:ModelTierRoles = @("developer", "tester", "reviewer")
 $script:ModelTierSubstrates = @("cloud", "local")
 $script:ModelTierFallbackDefault = "large"
 
+function Get-JsonKindName($v) {
+    # The JSON type of a value as ConvertFrom-Json produced it, named the way config.py's
+    # _json_kind names the json.loads value - so refusal messages are byte-identical.
+    if ($null -eq $v) { return "null" }
+    if ($v -is [string]) { return "string" }
+    if ($v -is [bool]) { return "boolean" }
+    if (($v -is [array]) -or ($v -is [System.Collections.IList])) { return "array" }
+    if (($v -is [System.Collections.IDictionary]) -or ($v -is [System.Management.Automation.PSCustomObject])) { return "object" }
+    if ($v -is [ValueType]) { return "number" }
+    return "object"
+}
+
+function Test-WholeNumber($v) {
+    # An integer, and not a boolean. 1.5 is refused rather than rounded: [int] rounds half to
+    # even here and Python's int() truncates, so a fractional value meant two different rules.
+    return (($v -is [int]) -or ($v -is [long]) -or ($v -is [int16]) -or ($v -is [byte]))
+}
+
 function Get-ModelTierNames {
     $mt = Get-HarnessSetting "model_tiers"
-    if (-not $mt -or -not $mt.Contains("tiers")) { return @() }
-    return @($mt["tiers"] | ForEach-Object { [string]$_ })
+    if (-not ($mt -is [System.Collections.IDictionary]) -or -not $mt.Contains("tiers")) { return @() }
+    return @(@($mt["tiers"]) | Where-Object { $_ -is [string] } | ForEach-Object { [string]$_ })
+}
+
+function Get-ModelTiersProblems {
+    # Everything wrong with the model_tiers block, in a fixed order; empty when it is usable.
+    # Mirrors config.py model_tiers_problems() message for message.
+    $mt = Get-HarnessSetting "model_tiers"
+    if ($null -eq $mt) { return @("harness.config.json has no model_tiers block") }
+    if (-not ($mt -is [System.Collections.IDictionary])) { return @("model_tiers must be an object") }
+    $p = @()
+    $tiers = @()
+    if (-not $mt.Contains("tiers") -or (Get-JsonKindName $mt["tiers"]) -ne "array" -or @($mt["tiers"]).Count -eq 0) {
+        $p += "model_tiers.tiers must be a non-empty list of tier names"
+    } else {
+        foreach ($t in @($mt["tiers"])) {
+            if (-not ($t -is [string]) -or -not $t) { $p += ("model_tiers.tiers holds a {0}, not a tier name" -f (Get-JsonKindName $t)); continue }
+            $tiers += $t
+        }
+    }
+    if ($mt.Contains("default_tier")) {
+        $d = $mt["default_tier"]
+        if (-not ($d -is [string])) {
+            $p += ("model_tiers.default_tier must be a tier name (got a {0})" -f (Get-JsonKindName $d))
+        } elseif (-not ($tiers -ccontains $d)) {
+            $p += ("model_tiers.default_tier '{0}' is not one of the tiers: {1}" -f $d, ($tiers -join ", "))
+        }
+    }
+    $rules = $null
+    if ($mt.Contains("rules")) { $rules = $mt["rules"] }   # direct: a one-rule list must stay a list
+    if ((Get-JsonKindName $rules) -ne "array") {
+        $p += "model_tiers.rules must be a list"
+    } else {
+        $n = 0
+        foreach ($r in @($rules)) {
+            $n++
+            if (-not ($r -is [System.Collections.IDictionary])) { $p += ("model_tiers rule #{0} is a {1}, not an object" -f $n, (Get-JsonKindName $r)); continue }
+            $rid = if ($r.Contains("id") -and $r["id"] -is [string] -and $r["id"]) { [string]$r["id"] } else { "#$n" }
+            foreach ($k in @($r.Keys)) {
+                if ($k -clike "_*") { continue }
+                if (-not ($script:ModelTierRuleKeys -ccontains $k)) {
+                    $p += ("model_tiers rule '{0}' has an unknown key '{1}' - rule keys: {2}" -f $rid, $k, ($script:ModelTierRuleKeys -join ", "))
+                }
+            }
+            # Direct assignment: `$tv = if (...) { $r["tier"] }` would unroll ["item"] to "item".
+            $tv = $null
+            if ($r.Contains("tier")) { $tv = $r["tier"] }
+            if (-not ($tv -is [string])) {
+                $p += ("model_tiers rule '{0}' tier must be a tier name (got a {1})" -f $rid, (Get-JsonKindName $tv))
+            } elseif (-not (($tv -ceq "item") -or ($tiers -ccontains $tv))) {
+                $p += ("model_tiers rule '{0}' names unknown tier '{1}' - known tiers: {2} (or item)" -f $rid, $tv, ($tiers -join ", "))
+            }
+            if ($r.Contains("role")) {
+                $rv = $r["role"]
+                if (-not ($rv -is [string])) {
+                    $p += ("model_tiers rule '{0}' role must be a role name (got a {1})" -f $rid, (Get-JsonKindName $rv))
+                } elseif (-not ($script:ModelTierRoles -ccontains $rv)) {
+                    $p += ("model_tiers rule '{0}' names unknown role '{1}' - known roles: {2}" -f $rid, $rv, ($script:ModelTierRoles -join ", "))
+                }
+            }
+            foreach ($k in $script:ModelTierIntKeys) {
+                if ($r.Contains($k) -and -not (Test-WholeNumber $r[$k])) {
+                    $p += ("model_tiers rule '{0}' key '{1}' must be a whole number (got a {2})" -f $rid, $k, (Get-JsonKindName $r[$k]))
+                }
+            }
+            if ($r.Contains("doc_only") -and -not ($r["doc_only"] -is [bool])) {
+                $p += ("model_tiers rule '{0}' key 'doc_only' must be true or false (got a {1})" -f $rid, (Get-JsonKindName $r["doc_only"]))
+            }
+        }
+    }
+    foreach ($sub in $script:ModelTierSubstrates) {
+        foreach ($t in $tiers) {
+            foreach ($role in $script:ModelTierRoles) {
+                $m = $null
+                if ($mt.Contains($sub) -and $mt[$sub] -is [System.Collections.IDictionary] -and $mt[$sub].Contains("roles") -and
+                    $mt[$sub]["roles"] -is [System.Collections.IDictionary] -and $mt[$sub]["roles"].Contains($t) -and
+                    $mt[$sub]["roles"][$t] -is [System.Collections.IDictionary] -and $mt[$sub]["roles"][$t].Contains($role)) {
+                    $m = $mt[$sub]["roles"][$t][$role]
+                }
+                if (-not ($m -is [string]) -or -not $m) { $p += ("model_tiers.{0}.roles.{1}.{2} is not set" -f $sub, $t, $role) }
+            }
+        }
+    }
+    return $p
 }
 
 function Get-DefaultModelTier {
     # The documented default for an item that names no tier: `model_tiers.default_tier`, and
     # "large" if even that is missing - an unclassified item never drops to a smaller model.
     $d = Get-HarnessSetting "model_tiers.default_tier"
-    if ($d) { return [string]$d }
+    if ($d -is [string] -and $d) { return [string]$d }
     return $script:ModelTierFallbackDefault
 }
 
 function Test-ModelTierName {
-    # "" when the name is a configured tier, else the sentence a caller prints. Returns
-    # rather than throws so queue.ps1 and anchor validation decide what a bad tier costs.
+    # "" when the name is a configured tier (case-sensitive), else the sentence a caller prints.
     param([string]$Tier)
     $known = @(Get-ModelTierNames)
-    if ($known -contains $Tier) { return "" }
+    if ($known -ccontains $Tier) { return "" }
     return ("unknown tier '{0}' - known tiers: {1}" -f $Tier, ($known -join ", "))
 }
 
 function Resolve-ModelTier {
     # role + item facts -> the tier that applies, the rule that decided it, and the model in
-    # EACH map. Throws on a malformed block (an unknown tier, an unknown rule key, a missing
-    # map cell, no rule matching) - the caller is advisory and reports the throw as
-    # "unavailable"; it is the CONFIG that must be loud, not the queue that must stop.
+    # EACH map. Throws on a malformed block or an unknown (or wrong-case) role or tier - the
+    # caller is advisory and reports the throw as "unavailable"; it is the CONFIG that must be
+    # loud, not the queue that must stop.
     #   -DocOnly    $true / $false, or $null when unknown (unknown never matches a doc_only rule)
     #   -DeltaLines lines changed since the previous attempt, or $null when unknown
     param(
@@ -491,57 +598,41 @@ function Resolve-ModelTier {
         $DocOnly = $null,
         $DeltaLines = $null
     )
-    if ($script:ModelTierRoles -notcontains $Role) {
+    if (-not ($script:ModelTierRoles -ccontains $Role)) {
         throw ("unknown role '{0}' for a model tier - known roles: {1}" -f $Role, ($script:ModelTierRoles -join ", "))
     }
+    $problems = @(Get-ModelTiersProblems)
+    if ($problems.Count -gt 0) { throw $problems[0] }
     $mt = Get-HarnessSetting "model_tiers"
-    if (-not $mt) { throw "harness.config.json has no model_tiers block" }
     $itemT = if ($ItemTier) { $ItemTier } else { Get-DefaultModelTier }
     $bad = Test-ModelTierName $itemT
     if ($bad) { throw $bad }
-    $tiers = @(Get-ModelTierNames)
     foreach ($r in @($mt["rules"])) {
-        if ($null -eq $r) { continue }
-        foreach ($k in @($r.Keys)) {
-            if ($k -like "_*") { continue }
-            if ($script:ModelTierRuleKeys -notcontains $k) {
-                throw ("model_tiers rule '{0}' has an unknown key '{1}' - rule keys: {2}" -f $r["id"], $k, ($script:ModelTierRuleKeys -join ", "))
-            }
-        }
-        if ($r.Contains("role") -and [string]$r["role"] -ne $Role) { continue }
-        if ($r.Contains("min_attempt") -and $Attempt -lt [int]$r["min_attempt"]) { continue }
-        if ($r.Contains("max_attempt") -and $Attempt -gt [int]$r["max_attempt"]) { continue }
+        if ($r.Contains("role") -and -not ([string]$r["role"] -ceq $Role)) { continue }
+        if ($r.Contains("min_attempt") -and $Attempt -lt [long]$r["min_attempt"]) { continue }
+        if ($r.Contains("max_attempt") -and $Attempt -gt [long]$r["max_attempt"]) { continue }
         if ($r.Contains("doc_only")) {
             if ($null -eq $DocOnly) { continue }
             if ([bool]$DocOnly -ne [bool]$r["doc_only"]) { continue }
         }
         if ($r.Contains("max_delta_lines")) {
             if ($null -eq $DeltaLines) { continue }
-            if ([int]$DeltaLines -gt [int]$r["max_delta_lines"]) { continue }
+            if ([long]$DeltaLines -gt [long]$r["max_delta_lines"]) { continue }
         }
         $t = [string]$r["tier"]
-        if ($t -eq "item") { $t = $itemT }
-        if ($tiers -notcontains $t) {
-            throw ("model_tiers rule '{0}' names unknown tier '{1}' - known tiers: {2}" -f $r["id"], $t, ($tiers -join ", "))
-        }
+        if ($t -ceq "item") { $t = $itemT }
         $out = [ordered]@{
             role = $Role; attempt = $Attempt; item_tier = $itemT; tier = $t
             rule = [string]$r["id"]; why = [string]$r["why"]
         }
-        foreach ($sub in $script:ModelTierSubstrates) {
-            $m = $null
-            if ($mt.Contains($sub) -and $mt[$sub].Contains("roles") -and $mt[$sub]["roles"].Contains($t) -and
-                $mt[$sub]["roles"][$t].Contains($Role)) { $m = [string]$mt[$sub]["roles"][$t][$Role] }
-            if (-not $m) { throw ("model_tiers.{0}.roles.{1}.{2} is not set" -f $sub, $t, $Role) }
-            $out[$sub] = $m
-        }
+        foreach ($sub in $script:ModelTierSubstrates) { $out[$sub] = [string]$mt[$sub]["roles"][$t][$Role] }
         return $out
     }
     throw ("no model_tiers rule matched role '{0}' - the rule list needs a final catch-all (tier: item)" -f $Role)
 }
 
 function Format-ModelTierAdvice {
-    # The two lines queue.ps1 prints. One rendering, so every door says it the same way.
+    # The lines queue.ps1 prints. One rendering, so every door says it the same way.
     param([Parameter(Mandatory = $true)]$Advice)
     $l1 = ("MODEL (advisory): next role {0}, attempt {1} -> tier {2} [rule {3}; item tier {4}]" -f
            $Advice.role, $Advice.attempt, $Advice.tier, $Advice.rule, $Advice.item_tier)

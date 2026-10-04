@@ -555,16 +555,28 @@ function Get-ItemTier($item) {
 
 function Get-AnchorTier($anchorObj) {
     if ($null -eq $anchorObj) { return "" }
-    if (($anchorObj.PSObject.Properties.Name -contains "tier") -and "$($anchorObj.tier)".Trim()) { return "$($anchorObj.tier)".Trim() }
+    if (-not ($anchorObj.PSObject.Properties.Name -contains "tier")) { return "" }
+    $v = $null
+    $v = $anchorObj.tier
+    # Only a string is a tier - the schema refuses anything else, and stringifying a list here
+    # is how attempt 1 recorded ["small"] as "small".
+    if (($v -is [string]) -and $v.Trim()) { return $v.Trim() }
     return ""
 }
 
 function Assert-AnchorTier($anchorObj) {
-    # The schema already refused a value outside its `allowed` list. This asks the CONFIG,
-    # which is what the recommendation reads - a harness.local.json that narrows the tiers
-    # must not let an anchor through that the resolver will then call unknown.
+    # The schema already refused a value outside its FIXED `allowed` list (large|small) and any
+    # non-string. This additionally asks a USABLE config - a harness.local.json that narrows
+    # model_tiers.tiers must not let an anchor through that the resolver will then call unknown.
+    #
+    # ONLY a usable config may refuse here (mt-policy attempt 2). With the block missing or
+    # broken, attempt 1 refused a schema-valid `large` - the template's own value - saying
+    # "known tiers: (none) ... leave it out for the default (large)", and -Propose exited 1 where
+    # base exited 0. A broken POLICY block is the advice's problem, not the anchor's: the schema
+    # check stands, the item records its tier, and Write-ModelAdvice prints "unavailable".
     $t = Get-AnchorTier $anchorObj
     if (-not $t) { return "" }
+    if (@(Get-ModelTiersProblems).Count -gt 0) { return $t }
     $bad = Test-ModelTierName $t
     if ($bad) { Die ("the anchor's tier is refused: {0} (harness.config.json model_tiers.tiers). Leave it out for the default ({1})." -f $bad, (Get-DefaultModelTier)) }
     return $t
@@ -575,7 +587,9 @@ function Get-AdviceDocOnly($item) {
     # model_tiers.doc_only_patterns, $false when one does not, $null when that cannot be read
     # (no branch yet, git refused, an empty diff). Unknown never satisfies a doc_only rule.
     if (-not $item.branch -or -not $item.line) { return $null }
-    $files = @(Invoke-GitCapture @("diff", "--name-only", ("{0}...{1}" -f $item.line, $item.branch)))
+    # --no-renames: a rename is listed as its OLD path deleted and its NEW path added, so both
+    # must be docs. With rename folding `big.py -> big.md` listed only big.md (attempt 2).
+    $files = @(Invoke-GitCapture @("diff", "--no-renames", "--name-only", ("{0}...{1}" -f $item.line, $item.branch)))
     if ($LASTEXITCODE -ne 0) { return $null }
     $files = @($files | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     if ($files.Count -eq 0) { return $null }
@@ -598,12 +612,19 @@ function Get-AdviceDeltaLines($item, [int]$attempt) {
         ($_.PSObject.Properties.Name -contains "attempt") -and ([int]$_.attempt -lt $attempt) -and
         ($_.PSObject.Properties.Name -contains "sha") -and $_.sha }) | Select-Object -Last 1
     if (-not $prev) { return $null }
-    $stat = @(Invoke-GitCapture @("diff", "--shortstat", [string]$prev.sha, [string]$item.branch))
+    # --numstat, not --shortstat (attempt 2): a BINARY file counts 0 lines in --shortstat, so a
+    # 200 KB blob added after a failure read as a 0-line "small diff". numstat prints `-` for a
+    # binary file, and an unmeasurable change is UNKNOWN, which never satisfies the rule. Renames
+    # stay folded (git's default) so a pure rename counts its CONTENT change, not 2x its size.
+    $stat = @(Invoke-GitCapture @("diff", "--numstat", [string]$prev.sha, [string]$item.branch))
     if ($LASTEXITCODE -ne 0) { return $null }
-    $txt = ($stat -join " ")
     $n = 0
-    if ($txt -match '(\d+) insertion') { $n += [int]$Matches[1] }
-    if ($txt -match '(\d+) deletion') { $n += [int]$Matches[1] }
+    foreach ($row in $stat) {
+        $cols = "$row" -split "`t"
+        if ($cols.Count -lt 3) { continue }
+        if ($cols[0] -eq "-" -or $cols[1] -eq "-") { return $null }
+        $n += [long]$cols[0] + [long]$cols[1]
+    }
     return $n
 }
 

@@ -77,6 +77,16 @@ function Get-AnchorFieldHelp([string]$mode = "") {
     return ($lines -join "`n")
 }
 
+function Get-AnchorJsonKind($v) {
+    # The JSON type of a ConvertFrom-Json value, named as anchor_schema.py _json_kind names it.
+    if ($null -eq $v) { return "null" }
+    if ($v -is [string]) { return "string" }
+    if ($v -is [bool]) { return "boolean" }
+    if (($v -is [array]) -or ($v -is [System.Collections.IList])) { return "array" }
+    if ($v -is [System.Management.Automation.PSCustomObject]) { return "object" }
+    return "number"
+}
+
 function Test-Anchor($anchor) {
     # Returns a list of problems, empty when the anchor is usable. Deliberately returns
     # rather than throws: the caller decides whether a bad anchor is fatal (queue.ps1) or
@@ -96,7 +106,11 @@ function Test-Anchor($anchor) {
         $k = $p.Name
         $f = $p.Value
         $has = ($anchor.PSObject.Properties.Name -contains $k)
-        $val = if ($has) { $anchor.$k } else { $null }
+        # A direct assignment, NOT `$val = if (...) { $anchor.$k }`: an if-statement's output is
+        # a pipeline, which unrolls `["small"]` to the string "small" and `[]` to $null before
+        # any check sees it (mt-policy attempt 2).
+        $val = $null
+        if ($has) { $val = $anchor.$k }
         if ($f.kind -eq "list") {
             $items = @($val | Where-Object { $_ -ne $null -and "$_".Trim() })
             if ($f.required -and $items.Count -lt 1) {
@@ -110,10 +124,16 @@ function Test-Anchor($anchor) {
             # outside them is refused. -ccontains, not -contains: PowerShell compares strings
             # case-INsensitively by default and Python does not, so `Large` would pass here
             # and fail there - the cross-reader test compares problems, not verdicts.
-            if (($f.PSObject.Properties.Name -contains "allowed") -and $null -ne $val -and "$val".Trim()) {
+            # The value must be a JSON STRING first (mt-policy attempt 2): "$val" renders a
+            # one-element array as its element, so `["small"]` passed here while anchor_schema.py
+            # refused it. `$null -eq $val` (null on the LEFT) - `$null -ne @()` is an empty,
+            # falsy array, which would wave an empty list through as "absent".
+            if (($f.PSObject.Properties.Name -contains "allowed") -and $has -and -not ($null -eq $val)) {
                 $allowed = @($f.allowed | ForEach-Object { [string]$_ })
-                if (-not ($allowed -ccontains "$val".Trim())) {
-                    $problems += ("'{0}' must be one of: {1} (got '{2}') - {3}" -f $k, ($allowed -join ", "), "$val".Trim(), $f.why)
+                if (-not ($val -is [string])) {
+                    $problems += ("'{0}' must be a string, one of: {1} (got JSON type {2}) - {3}" -f $k, ($allowed -join ", "), (Get-AnchorJsonKind $val), $f.why)
+                } elseif ($val.Trim() -and -not ($allowed -ccontains $val.Trim())) {
+                    $problems += ("'{0}' must be one of: {1} (got '{2}') - {3}" -f $k, ($allowed -join ", "), $val.Trim(), $f.why)
                 }
             }
         }

@@ -204,18 +204,31 @@ and new-logic work deserve a large model; narrow, mechanical or doc-only work a 
 `-Propose`, `-Claim`, `-Submit`, `-Resubmit` and `-Approve` and never blocks on it - a
 broken block prints `MODEL (advisory): unavailable - <why>` and the command carries on.
 
-- **The item's tier** is the anchor's optional `tier` field (`large` | `small`, case
-  sensitive, validated by `anchor.schema.json`'s `allowed` list and again against
-  `model_tiers.tiers` at `-Propose`). Absent means `model_tiers.default_tier`, which is
-  `large` - an unclassified item never silently drops to a smaller model. The queue item
-  records it as `tier` (`""` = default, resolved when advice is printed).
+- **The item's tier** is the anchor's optional `tier` field: a JSON string, `large` or
+  `small`, case sensitive. Both anchor readers refuse anything else - a list such as
+  `["small"]`, a number, a boolean, an object - naming its JSON type. Blank or `null`
+  means absent. Absent means `model_tiers.default_tier`, which is `large`, so an
+  unclassified item never silently drops to a smaller model. The queue item records it as
+  `tier` (`""` = default, resolved when advice is printed). When the `model_tiers` block
+  is USABLE, `-Propose` (and `-ConfirmAnchor`/`-AmendAnchor -Anchor`) also refuses a tier
+  that the block's `tiers` list narrows away. When the block is missing or broken, only the
+  schema's fixed `large|small` check applies: the item is created with its tier and the
+  advice prints `unavailable`.
 - **Two separate maps**, tier x role (`developer` / `tester` / `reviewer`) -> model, and
   neither is derived from the other (operator, 2026-10-04): `cloud` is Claude Code
   subagents (`opus` large, `sonnet` small), `local` is agent-org's model roles
   (`local-large` / `local-small`). `haiku` is `cloud.trivial` - lookups and evidence copying
   only, never a pipeline role.
+- **The whole block is validated before any rule is evaluated** (`Get-ModelTiersProblems`
+  / `model_tiers_problems`). These are refused rather than ignored or rounded, even when an
+  earlier rule would have matched first: an unknown rule key, a rule `tier` that is not a
+  configured tier or `item`, a rule `role` that is not `developer`/`tester`/`reviewer`, a
+  non-integer attempt or delta bound (e.g. `1.5`), a non-boolean `doc_only`, a wrong-case
+  `default_tier`, or a missing map cell. Every comparison is **case sensitive** in both
+  readers (PowerShell uses `-ceq`/`-ccontains`), so `LARGE`, `Tester` or a config
+  `"role": "Reviewer"` get the same refusal from both.
 - **Rules**, first match wins (`model_tiers.rules`, conditions `role`, `min_attempt`,
-  `max_attempt`, `doc_only`, `max_delta_lines`; any other key is refused, not ignored):
+  `max_attempt`, `doc_only`, `max_delta_lines`):
 
   | rule | when | tier |
   |---|---|---|
@@ -225,9 +238,16 @@ broken block prints `MODEL (advisory): unavailable - <why>` and the command carr
   | `first-adversarial-round` | tester, attempt 1 | large |
   | `item-tier` | otherwise | the item's tier |
 
-  `doc_only` and the delta are read from git at print time (`git diff --name-only
-  <line>...<branch>`; `git diff --shortstat <last verdict sha> <branch>`). When either
-  cannot be read it is UNKNOWN, and unknown never satisfies a rule that conditions on it.
+  `doc_only` and the delta are read from git at print time:
+  - doc-only uses `git diff --no-renames --name-only <line>...<branch>`. A rename counts as
+    its old path AND its new path, so `big.py -> big.md` is not doc-only. Note that `-like`
+    is case-insensitive, so `NOTES.MD` counts as a doc.
+  - the delta uses `git diff --numstat <last verdict sha> <branch>`, adding insertions and
+    deletions. A pure rename counts its content change (0). A binary file has no line
+    count, so the delta is UNKNOWN.
+
+  When either fact cannot be read it is UNKNOWN, and unknown never satisfies a rule that
+  conditions on it.
 
 The printed block:
 

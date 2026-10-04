@@ -221,6 +221,18 @@ def test_an_invalid_tier_is_refused_naming_the_allowed_values(tier):
     assert found[0].startswith(f"'tier' must be one of: large, small (got '{tier}')")
 
 
+@pytest.mark.parametrize("tier,kind", [(["small"], "array"), ([], "array"), (1, "number"),
+                                       (1.5, "number"), (True, "boolean"),
+                                       ({"tier": "small"}, "object")])
+def test_a_non_string_tier_is_refused_by_its_json_type(tier, kind):
+    """Attempt 2 (tester F2). The cross-reader corpus in test_anchor_schema.py asks PowerShell the
+    same; this pins the words."""
+    found = anchor_schema.problems(dict(VALID_B, tier=tier))
+    assert len(found) == 1
+    assert found[0].startswith(
+        f"'tier' must be a string, one of: large, small (got JSON type {kind})")
+
+
 # ── THE ANTI-DRIFT TEST: both resolvers, same questions, same answers ───────
 def _ps_resolve(cases) -> list:
     dot = (HERE / "config.ps1").as_posix()
@@ -259,3 +271,103 @@ def _py_resolve(cases) -> list:
 def test_powershell_and_python_resolvers_agree():
     cases = [a for a, _ in RULE_CASES] + [("developer", "medium", 1, None, None)]
     assert _ps_resolve(cases) == _py_resolve(cases)
+
+
+# ── attempt 2 (tester F3): same answer OR the same refusal on NON-canonical inputs ──
+# The tester's generated matrix, kept: roles and tiers in the wrong case, a padded tier, an
+# unknown role, attempts below 1, every doc/delta shape. Attempt 1's agreement test asked only
+# canonical inputs and PowerShell's case-INsensitive -contains disagreed on 1,800 of 3,780.
+import itertools  # noqa: E402
+
+MATRIX_ROLES = ["developer", "tester", "reviewer", "Tester", "REVIEWER", "worker"]
+MATRIX_TIERS = ["", "large", "small", "LARGE", "Small", "medium", " small"]
+MATRIX = list(itertools.product(MATRIX_ROLES, MATRIX_TIERS, [0, 1, 2, 3, -1],
+                                [None, True, False], [None, 0, 79, 80, 81, 500]))
+
+
+def _ps_matrix(cases, tmp_path, cfg: Path | None = None) -> list:
+    inp = tmp_path / "cases.json"
+    outp = tmp_path / "ps_out.json"
+    inp.write_text(json.dumps([{"r": r, "t": t, "a": a, "d": d, "dl": dl}
+                               for r, t, a, d, dl in cases]), encoding="utf-8")
+    env_line = f"$env:AI_STACK_HARNESS_CONFIG='{cfg.as_posix()}';" if cfg else         "Remove-Item Env:AI_STACK_HARNESS_CONFIG -ErrorAction SilentlyContinue;"
+    script = (
+        env_line + f". '{(HERE / 'config.ps1').as_posix()}';"
+        + f"$cs = Get-Content -Raw '{inp.as_posix()}' | ConvertFrom-Json;"
+        + "$res = New-Object System.Collections.ArrayList;"
+        + "foreach ($c in $cs) { try {"
+        + " $o = Resolve-ModelTier -Role $c.r -ItemTier $c.t -Attempt $c.a -DocOnly $c.d -DeltaLines $c.dl;"
+        + " [void]$res.Add([ordered]@{tier=$o.tier; rule=$o.rule; cloud=$o.cloud; local=$o.local; item_tier=$o.item_tier})"
+        + " } catch { [void]$res.Add([ordered]@{err=$_.Exception.Message}) } };"
+        + f"$res | ConvertTo-Json -Depth 4 -Compress | Set-Content -Encoding utf8 '{outp.as_posix()}'"
+    )
+    out = subprocess.run([PS, "-NoProfile", "-NonInteractive", "-Command", script],
+                         capture_output=True, text=True, timeout=1200)
+    assert out.returncode == 0, out.stderr
+    return json.loads(outp.read_text(encoding="utf-8-sig"))
+
+
+def _py_matrix(cases) -> list:
+    res = []
+    for r, t, a, d, dl in cases:
+        try:
+            o = config.resolve_model_tier(r, t, a, d, dl)
+            res.append({k: o[k] for k in ("tier", "rule", "cloud", "local", "item_tier")})
+        except config.HarnessConfigError as exc:
+            res.append({"err": str(exc)})
+    return res
+
+
+def _divergences(ps, py) -> list:
+    assert len(ps) == len(py) == len(MATRIX)
+    return [(c, p, q) for c, p, q in zip(MATRIX, py, ps) if p != q]
+
+
+@pytest.mark.skipif(PS is None, reason="no PowerShell on PATH")
+def test_the_full_generated_matrix_agrees_on_the_shipped_config(tmp_path):
+    div = _divergences(_ps_matrix(MATRIX, tmp_path), _py_matrix(MATRIX))
+    assert div == [], f"{len(div)} divergences, first: {div[:3]}"
+    # Non-vacuous: the matrix really does contain refusals AND answers.
+    py = _py_matrix(MATRIX)
+    assert sum("err" in r for r in py) > 0 and sum("err" not in r for r in py) > 0
+
+
+# Config defects the tester planted: each must be a LOUD refusal, identical in both readers,
+# on EVERY input (validated at load, not only on the path a rule match happens to take).
+PLANTED = [
+    ("rule-tier-wrong-case", lambda c: c["model_tiers"]["rules"][1].update(tier="Small"),
+     "model_tiers rule 'doc-only' names unknown tier 'Small' - known tiers: large, small (or item)"),
+    ("rule-role-wrong-case", lambda c: c["model_tiers"]["rules"][0].update(role="Reviewer"),
+     "model_tiers rule 'review-whole-change' names unknown role 'Reviewer' - known roles: developer, tester, reviewer"),
+    ("fractional-min-attempt", lambda c: c["model_tiers"]["rules"][2].update(min_attempt=1.5),
+     "model_tiers rule 'retest-small-diff' key 'min_attempt' must be a whole number (got a number)"),
+    ("bad-key-in-a-late-rule", lambda c: c["model_tiers"]["rules"][3].update(max_attemp=1),
+     "model_tiers rule 'first-adversarial-round' has an unknown key 'max_attemp'"),
+    ("doc-only-not-boolean", lambda c: c["model_tiers"]["rules"][1].update(doc_only="yes"),
+     "model_tiers rule 'doc-only' key 'doc_only' must be true or false (got a string)"),
+    ("tier-not-a-string", lambda c: c["model_tiers"]["rules"][4].update(tier=["item"]),
+     "model_tiers rule 'item-tier' tier must be a tier name (got a array)"),
+    ("default-tier-wrong-case", lambda c: c["model_tiers"].update(default_tier="Large"),
+     "model_tiers.default_tier 'Large' is not one of the tiers: large, small"),
+    ("block-missing", lambda c: c.pop("model_tiers"),
+     "harness.config.json has no model_tiers block"),
+]
+
+
+@pytest.mark.parametrize("name,mutate,msg", PLANTED, ids=[p[0] for p in PLANTED])
+def test_a_planted_config_defect_is_loud_and_identical_in_both(monkeypatch, tmp_path, name, mutate, msg):
+    cfg = _shipped()
+    mutate(cfg)
+    path = _use(monkeypatch, tmp_path, cfg)
+    assert any(p.startswith(msg) for p in config.model_tiers_problems()), config.model_tiers_problems()
+    # Loud on the REVIEWER path too, where rule 1 would match before a later rule is reached.
+    with pytest.raises(config.HarnessConfigError):
+        config.resolve_model_tier("reviewer", "large", 1, None, None)
+    if PS is None:
+        return
+    py = _py_matrix(MATRIX)
+    ps = _ps_matrix(MATRIX, tmp_path, path)
+    div = _divergences(ps, py)
+    assert div == [], f"{name}: {len(div)} divergences, first: {div[:3]}"
+    canonical = [i for i, c in enumerate(MATRIX) if c[0] in ("developer", "tester", "reviewer")]
+    assert all("err" in py[i] for i in canonical), name   # no canonical input slips through

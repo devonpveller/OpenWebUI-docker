@@ -161,3 +161,54 @@ async def test_get_profiles_reports_tier_and_drift(db_url, tmp_path):
     assert body["profiles"]["planner"]["tier"] == "large"
     assert body["profiles"]["worker-default"]["tier"] == "small"
     assert [x["command"] for x in body["tier_drift"]] == ["set profile worker-default model local-small"]
+
+
+# ── attempt 2 (tester F4): a malformed tier-model spec must not 500 the profile listing ──
+async def _get_profiles(db_url, tmp_path, **extra) -> tuple[int, dict]:
+    import httpx
+
+    from app.adapters.chat import FakeChatAdapter
+    from app.db import Database
+    from app.main import create_app
+    from app.modules.model_router import FakeModelClient
+    from app.orchestrator import Orchestrator
+    from app.worker.harness import FakeHarness
+
+    d = _profiles_on(tmp_path, "local-large")
+    settings = Settings(
+        _env_file=None, chat_adapter="fake", database_url=db_url, profiles_dir=str(d),
+        charters_dir=str(ROOT / "charters"), floor_dir=str(ROOT / "floor"),
+        worker_instance_urls="http://w1:8090", **extra)
+    orch = Orchestrator(settings, Database(db_url), FakeChatAdapter(),
+                        model_client=FakeModelClient(), harness=FakeHarness())
+    app = create_app(orch)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get("/profiles")
+    return r.status_code, r.json()
+
+
+@pytest.mark.parametrize("field,spec,env,needle", [
+    ("profile_tier_models_local", "large=local-large", "AO_PROFILE_TIER_MODELS_LOCAL", "small"),
+    ("profile_tier_models_local", "LARGE=local-large,small=local-small", "AO_PROFILE_TIER_MODELS_LOCAL", "LARGE"),
+    ("profile_tier_models_local", "garbage", "AO_PROFILE_TIER_MODELS_LOCAL", "garbage"),
+    ("profile_tier_models_local", "", "AO_PROFILE_TIER_MODELS_LOCAL", "large, small"),
+    ("profile_tier_models_cloud", "small=cloud-small", "AO_PROFILE_TIER_MODELS_CLOUD", "large"),
+])
+async def test_a_malformed_tier_model_spec_reports_drift_unavailable_not_500(
+        db_url, tmp_path, caplog, field, spec, env, needle):
+    import logging
+    caplog.set_level(logging.WARNING)
+    status, body = await _get_profiles(db_url, tmp_path, **{field: spec})
+    assert status == 200
+    assert len(body["profiles"]) == 9                       # the listing survives
+    assert body["tier_drift"] is None
+    assert env in body["tier_drift_error"] and needle in body["tier_drift_error"]
+    assert any("tier_drift unavailable" in r.getMessage() and env in r.getMessage()
+               for r in caplog.records)
+
+
+async def test_a_well_formed_spec_has_no_error_key(db_url, tmp_path):
+    status, body = await _get_profiles(db_url, tmp_path)
+    assert status == 200 and "tier_drift_error" not in body
+    assert [x["profile"] for x in body["tier_drift"]] == ["worker-default"]

@@ -227,6 +227,18 @@ CORPUS = [
     ("B-tier-invalid", dict(VALID_B, tier="medium")),
     ("B-tier-wrong-case", dict(VALID_B, tier="Large")),
     ("A-tier-invalid", dict(VALID_A, tier="huge")),
+    # attempt 2 (tester F2): a NON-STRING tier gets the same verdict from both readers. PowerShell
+    # rendered ["small"] as "small" and accepted it; Python refused it.
+    ("B-tier-one-element-array", dict(VALID_B, tier=["small"])),
+    ("B-tier-two-element-array", dict(VALID_B, tier=["small", "large"])),
+    ("B-tier-empty-array", dict(VALID_B, tier=[])),
+    ("B-tier-number", dict(VALID_B, tier=1)),
+    ("B-tier-fraction", dict(VALID_B, tier=1.5)),
+    ("B-tier-boolean", dict(VALID_B, tier=True)),
+    ("B-tier-object", dict(VALID_B, tier={"tier": "small"})),
+    ("B-tier-null", dict(VALID_B, tier=None)),
+    ("B-tier-empty-string", dict(VALID_B, tier="")),
+    ("B-tier-padded", dict(VALID_B, tier="  small  ")),
 ]
 
 

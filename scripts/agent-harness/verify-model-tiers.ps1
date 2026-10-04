@@ -31,6 +31,14 @@
 #       "unavailable" and -Propose still exits 0 with the item created.
 #   M11 A tier the schema allows but the CONFIG does not (model_tiers.tiers narrowed) is
 #       refused at -Propose with the config's own words.
+# ADDED attempt 2 (the tester's findings on attempt 1):
+#   M12 model_tiers block DELETED: -Propose of the shipped anchor.template.json ("tier": "large")
+#       and of a tier-small anchor exits 0, creates the item with its tier, prints "unavailable".
+#       (Attempt 1 exited 1 here - a broken policy block refused a schema-valid anchor.)
+#   M13 a NON-STRING tier (["small"], 1) is refused at -Propose by its JSON type; no item.
+#   M14 a BINARY change after a failure is an UNKNOWN delta (not 0 lines): no retest-small-diff.
+#   M15 a rename big.py -> big.md is NOT doc-only (both paths are classified).
+#   M16 a pure RENAME after a failure counts its content delta (0), so the retest is small.
 
 [CmdletBinding()]
 param(
@@ -142,6 +150,12 @@ function Get-Advice([string]$out) {
     # The MODEL block as printed: the headline, the two-map line, and the facts line.
     $l = @($out -split "`n" | Where-Object { $_ -match 'MODEL \(advisory\)|cloud \(Claude Code subagent\)|facts:' })
     return ($l -join " / ")
+}
+
+function First-Line([string]$s) {
+    $l = @($s -split "`n" | Where-Object { $_.Trim() })
+    if ($l.Count -eq 0) { return "(no output)" }
+    return $l[0].Trim()
 }
 
 function New-Anchor([string]$name, [string]$tierLine) {
@@ -318,13 +332,110 @@ Check "M10 the advice says unavailable and names the unknown key" ($r.out -match
 Step "M11 a tier the schema allows but the CONFIG does not is refused at -Propose"
 # ======================================================================================
 $cfg = Get-Content -Raw -Path $shipped | ConvertFrom-Json
-if ($hasTiers) { $cfg.model_tiers.tiers = @("large") }
+if ($hasTiers) {
+    # A CONSISTENT narrowing (attempt 2): rules that named `small` now name `large`, so the block
+    # is usable and it is the config - not a broken block - that refuses the anchor's tier.
+    $cfg.model_tiers.tiers = @("large")
+    foreach ($rule in $cfg.model_tiers.rules) { if ($rule.tier -ceq "small") { $rule.tier = "large" } }
+}
 $narrow = Join-Path $Root "narrow.config.json"
 [System.IO.File]::WriteAllText($narrow, ($cfg | ConvertTo-Json -Depth 30), (New-Object System.Text.UTF8Encoding($false)))
 $f = New-Fixture "m11"
 $f.config = $narrow
 $r = Invoke-Q $f @("-Propose", "-Id", "m11", "-Anchor", $anchorSmall, "-Developer", "mtdev")
 Check "M11 refused (exit 1), naming the config's known tiers, no item" (($r.code -eq 1) -and ($r.out -match "unknown tier 'small' - known tiers: large") -and ($null -eq (Get-QItem $f "m11"))) ("exit=" + $r.code)
+
+# ======================================================================================
+Step "M12 model_tiers DELETED: a templated anchor still proposes; the advice says unavailable"
+# ======================================================================================
+$cfg = Get-Content -Raw -Path $shipped | ConvertFrom-Json
+if ($hasTiers) { $cfg.PSObject.Properties.Remove("model_tiers") }
+$nomt = Join-Path $Root "nomt.config.json"
+[System.IO.File]::WriteAllText($nomt, ($cfg | ConvertTo-Json -Depth 30), (New-Object System.Text.UTF8Encoding($false)))
+$f = New-Fixture "m12"
+$f.config = $nomt
+$template = Join-Path (Split-Path -Parent $Script) "anchor.template.json"
+$r = Invoke-Q $f @("-Propose", "-Id", "m12t", "-Anchor", $template, "-Developer", "mtdev")
+$it = Get-QItem $f "m12t"
+Check "M12 the TEMPLATE anchor (tier large) proposes: exit 0, item created, tier recorded" (($r.code -eq 0) -and $it -and ($it.tier -eq "large")) ("exit=" + $r.code + " " + (First-Line $r.out))
+Check "M12 ... and the advice says unavailable, naming the missing block" ($r.out -match "MODEL \(advisory\): unavailable - harness.config.json has no model_tiers block") (Get-Advice $r.out)
+$r = Invoke-Q $f @("-Propose", "-Id", "m12s", "-Anchor", $anchorSmall, "-Developer", "mtdev")
+Check "M12 a tier-small anchor proposes too (exit 0, tier small)" (($r.code -eq 0) -and ((Get-QItem $f "m12s").tier -eq "small")) ("exit=" + $r.code)
+Check "M12 no contradictory 'unknown tier' refusal anywhere" (-not ($r.out -match "unknown tier")) ""
+
+# ======================================================================================
+Step "M13 a non-string tier is refused at -Propose by its JSON type"
+# ======================================================================================
+$f = New-Fixture "m13"
+foreach ($shape in @(@{ n = "array"; v = '["small"]' }, @{ n = "number"; v = '1' })) {
+    $p = Join-Path $Root ("anchor-shape-" + $shape.n + ".json")
+    (Get-Content -Raw $anchorNone) -replace '"findings_sink"', ('"tier": ' + $shape.v + ', "findings_sink"') |
+        Set-Content -Path $p -Encoding ascii
+    $id = "m13" + $shape.n
+    $r = Invoke-Q $f @("-Propose", "-Id", $id, "-Anchor", $p, "-Developer", "mtdev")
+    Check ("M13 tier " + $shape.v + " refused (exit 1), named by JSON type, no item") `
+        (($r.code -eq 1) -and ($r.out -match ("'tier' must be a string, one of: large, small \(got JSON type " + $shape.n + "\)")) -and ($null -eq (Get-QItem $f $id))) ("exit=" + $r.code)
+}
+
+function First-Commit($fix, [string]$branch, [scriptblock]$change, [string]$msg) {
+    Push-Location $fix.repo
+    try {
+        Invoke-Git checkout -q $branch | Out-Null
+        & $change
+        Invoke-Git add -A | Out-Null
+        Invoke-Git commit -q -m $msg | Out-Null
+        Invoke-Git checkout -q base | Out-Null
+    } finally { Pop-Location }
+}
+
+# ======================================================================================
+Step "M14 a BINARY change after a failure is an UNKNOWN delta, not 0 lines"
+# ======================================================================================
+$f = New-Fixture "m14"
+Initialize-Submitted $f "m14" $anchorLarge "work/code" | Out-Null
+Invoke-Q $f @("-Claim", "-Id", "m14", "-Role", "tester", "-By", "mttester") | Out-Null
+Invoke-Q $f @("-Fail", "-Id", "m14", "-By", "mttester", "-Reason", "case 1", "-Evidence", $evFail, "-PlanAdequate") | Out-Null
+First-Commit $f "work/code" { $b = New-Object byte[] 4096; (New-Object System.Random 7).NextBytes($b); $b[0] = 0; [System.IO.File]::WriteAllBytes((Join-Path $f.repo "blob.bin"), $b) } "add a binary"
+$r = Invoke-Q $f @("-Resubmit", "-Id", "m14", "-By", "mtdev")
+$a = Get-Advice $r.out
+Check "M14 binary delta is unknown -> item-tier large, not retest-small-diff" (($a -match 'attempt 2 -> tier large \[rule item-tier') -and ($a -match 'lines changed since the last verdict unknown')) $a
+
+# ======================================================================================
+Step "M15 big.py -> big.md is NOT a doc-only change"
+# ======================================================================================
+$f = New-Fixture "m15"
+Push-Location $f.repo
+try {
+    Invoke-Git checkout -q base | Out-Null
+    Set-Content -Path (Join-Path $f.repo "big.py") -Encoding ascii -Value @(1..30 | ForEach-Object { "x = $_" })
+    Invoke-Git add big.py | Out-Null
+    Invoke-Git commit -q -m "base code" | Out-Null
+    Invoke-Git checkout -q -b work/rename | Out-Null
+    Invoke-Git mv big.py big.md | Out-Null
+    Invoke-Git commit -q -m "code moved into a doc name" | Out-Null
+    Invoke-Git checkout -q base | Out-Null
+} finally { Pop-Location }
+$r = Initialize-Submitted $f "m15" $anchorNone "work/rename"
+$a = Get-Advice $r.out
+Check "M15 doc-only no -> first-adversarial-round large" (($a -match 'doc-only no') -and ($a -match 'tier large \[rule first-adversarial-round')) $a
+
+# ======================================================================================
+Step "M16 a pure RENAME after a failure counts its content delta (0) -> retest small"
+# ======================================================================================
+$f = New-Fixture "m16"
+Initialize-Submitted $f "m16" $anchorLarge "work/code" | Out-Null
+Invoke-Q $f @("-Claim", "-Id", "m16", "-Role", "tester", "-By", "mttester") | Out-Null
+Invoke-Q $f @("-Fail", "-Id", "m16", "-By", "mttester", "-Reason", "case 1", "-Evidence", $evFail, "-PlanAdequate") | Out-Null
+Push-Location $f.repo
+try {
+    Invoke-Git checkout -q work/code | Out-Null
+    Invoke-Git mv tool.ps1 renamed-tool.ps1 | Out-Null
+    Invoke-Git commit -q -m "rename only" | Out-Null
+    Invoke-Git checkout -q base | Out-Null
+} finally { Pop-Location }
+$r = Invoke-Q $f @("-Resubmit", "-Id", "m16", "-By", "mtdev")
+$a = Get-Advice $r.out
+Check "M16 rename delta 0 -> retest-small-diff small" (($a -match 'attempt 2 -> tier small \[rule retest-small-diff') -and ($a -match 'lines changed since the last verdict 0')) $a
 
 # --- verdict --------------------------------------------------------------------------
 $fail = @($results | Where-Object { -not $_.pass })

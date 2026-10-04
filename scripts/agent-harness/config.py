@@ -467,31 +467,129 @@ def describe_runner(name: str) -> str:
 
 
 # --- MODEL TIERS (tracker H2, mt-policy) ----------------------------------------------
-# Mirror of the model-tier block in config.ps1 (Resolve-ModelTier). The item's tier plus the
-# ordered rules in ``model_tiers`` decide a tier; the model comes from one of TWO SEPARATE
-# maps, ``cloud`` (Claude Code subagents) and ``local`` (agent-org model roles). Advisory:
-# the queue prints it and never blocks on it. test_model_tiers.py pins the two readers.
+# Mirror of the model-tier block in config.ps1 (Get-ModelTiersProblems / Resolve-ModelTier).
+# The item's tier plus the ordered rules in ``model_tiers`` decide a tier; the model comes from
+# one of TWO SEPARATE maps, ``cloud`` (Claude Code subagents) and ``local`` (agent-org model
+# roles). Advisory: the queue prints it and never blocks on it. Case-sensitive, the whole block
+# validated before any rule is evaluated, fractional numbers refused - see config.ps1 for why.
+# test_model_tiers.py pins the two readers on canonical AND non-canonical inputs.
 
 #: The closed set of rule keys. A rule with any other (non ``_``) key is refused: an ignored
 #: condition is a misspelt ``max_attemp`` that silently widens the rule to every attempt.
 MODEL_TIER_RULE_KEYS = ("id", "why", "tier", "role", "min_attempt", "max_attempt",
                         "doc_only", "max_delta_lines")
+MODEL_TIER_INT_KEYS = ("min_attempt", "max_attempt", "max_delta_lines")
 MODEL_TIER_ROLES = ("developer", "tester", "reviewer")
 MODEL_TIER_SUBSTRATES = ("cloud", "local")
 MODEL_TIER_FALLBACK_DEFAULT = "large"
 
 
+def _json_kind(v: Any) -> str:
+    """The JSON type name of a json.loads value - config.ps1 Get-JsonKindName's twin."""
+    if v is None:
+        return "null"
+    if isinstance(v, str):
+        return "string"
+    if isinstance(v, bool):
+        return "boolean"
+    if isinstance(v, list):
+        return "array"
+    if isinstance(v, dict):
+        return "object"
+    if isinstance(v, (int, float)):
+        return "number"
+    return "object"
+
+
+def _whole(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
 def model_tier_names() -> List[str]:
-    return [str(t) for t in (get("model_tiers.tiers") or [])]
+    mt = get("model_tiers")
+    if not isinstance(mt, dict) or not isinstance(mt.get("tiers"), list):
+        return []
+    return [t for t in mt["tiers"] if isinstance(t, str)]
+
+
+def model_tiers_problems() -> List[str]:
+    """Everything wrong with the model_tiers block, in config.ps1's order and words."""
+    mt = get("model_tiers")
+    if mt is None:
+        return ["harness.config.json has no model_tiers block"]
+    if not isinstance(mt, dict):
+        return ["model_tiers must be an object"]
+    p: List[str] = []
+    tiers: List[str] = []
+    raw = mt.get("tiers")
+    if not isinstance(raw, list) or not raw:
+        p.append("model_tiers.tiers must be a non-empty list of tier names")
+    else:
+        for t in raw:
+            if not isinstance(t, str) or not t:
+                p.append(f"model_tiers.tiers holds a {_json_kind(t)}, not a tier name")
+                continue
+            tiers.append(t)
+    if "default_tier" in mt:
+        d = mt["default_tier"]
+        if not isinstance(d, str):
+            p.append(f"model_tiers.default_tier must be a tier name (got a {_json_kind(d)})")
+        elif d not in tiers:
+            p.append(f"model_tiers.default_tier '{d}' is not one of the tiers: {', '.join(tiers)}")
+    rules = mt.get("rules")
+    if not isinstance(rules, list):
+        p.append("model_tiers.rules must be a list")
+    else:
+        for n, r in enumerate(rules, 1):
+            if not isinstance(r, dict):
+                p.append(f"model_tiers rule #{n} is a {_json_kind(r)}, not an object")
+                continue
+            rid = r["id"] if isinstance(r.get("id"), str) and r.get("id") else f"#{n}"
+            for k in r:
+                if k.startswith("_"):
+                    continue
+                if k not in MODEL_TIER_RULE_KEYS:
+                    p.append(f"model_tiers rule '{rid}' has an unknown key '{k}' - rule keys: "
+                             f"{', '.join(MODEL_TIER_RULE_KEYS)}")
+            tv = r.get("tier")
+            if not isinstance(tv, str):
+                p.append(f"model_tiers rule '{rid}' tier must be a tier name (got a {_json_kind(tv)})")
+            elif not (tv == "item" or tv in tiers):
+                p.append(f"model_tiers rule '{rid}' names unknown tier '{tv}' - known tiers: "
+                         f"{', '.join(tiers)} (or item)")
+            if "role" in r:
+                rv = r["role"]
+                if not isinstance(rv, str):
+                    p.append(f"model_tiers rule '{rid}' role must be a role name (got a {_json_kind(rv)})")
+                elif rv not in MODEL_TIER_ROLES:
+                    p.append(f"model_tiers rule '{rid}' names unknown role '{rv}' - known roles: "
+                             f"{', '.join(MODEL_TIER_ROLES)}")
+            for k in MODEL_TIER_INT_KEYS:
+                if k in r and not _whole(r[k]):
+                    p.append(f"model_tiers rule '{rid}' key '{k}' must be a whole number "
+                             f"(got a {_json_kind(r[k])})")
+            if "doc_only" in r and not isinstance(r["doc_only"], bool):
+                p.append(f"model_tiers rule '{rid}' key 'doc_only' must be true or false "
+                         f"(got a {_json_kind(r['doc_only'])})")
+    for sub in MODEL_TIER_SUBSTRATES:
+        for t in tiers:
+            for role in MODEL_TIER_ROLES:
+                node: Any = mt.get(sub)
+                for part in ("roles", t, role):
+                    node = node.get(part) if isinstance(node, dict) else None
+                if not isinstance(node, str) or not node:
+                    p.append(f"model_tiers.{sub}.roles.{t}.{role} is not set")
+    return p
 
 
 def default_model_tier() -> str:
     """The documented default for an item that names no tier (never smaller than large)."""
-    return str(get("model_tiers.default_tier") or MODEL_TIER_FALLBACK_DEFAULT)
+    d = get("model_tiers.default_tier")
+    return d if isinstance(d, str) and d else MODEL_TIER_FALLBACK_DEFAULT
 
 
 def model_tier_problem(tier: str) -> str:
-    """"" when ``tier`` is configured, else the sentence a caller prints."""
+    """"" when ``tier`` is configured (case-sensitive), else the sentence a caller prints."""
     known = model_tier_names()
     if tier in known:
         return ""
@@ -503,58 +601,40 @@ def resolve_model_tier(role: str, item_tier: str = "", attempt: int = 1,
                        delta_lines: int | None = None) -> Dict[str, Any]:
     """role + item facts -> tier, deciding rule, and the model in EACH map.
 
-    Raises HarnessConfigError on a malformed block; callers are advisory and report it.
-    ``doc_only`` / ``delta_lines`` of None mean UNKNOWN, and unknown never matches a rule
-    that conditions on it.
+    Raises HarnessConfigError on a malformed block or an unknown/wrong-case role or tier;
+    callers are advisory and report it. ``doc_only`` / ``delta_lines`` of None mean UNKNOWN,
+    and unknown never matches a rule that conditions on it.
     """
     if role not in MODEL_TIER_ROLES:
         raise HarnessConfigError(
             f"unknown role '{role}' for a model tier - known roles: {', '.join(MODEL_TIER_ROLES)}")
+    problems = model_tiers_problems()
+    if problems:
+        raise HarnessConfigError(problems[0])
     mt = get("model_tiers")
-    if not isinstance(mt, dict):
-        raise HarnessConfigError("harness.config.json has no model_tiers block")
     item_t = item_tier or default_model_tier()
     bad = model_tier_problem(item_t)
     if bad:
         raise HarnessConfigError(bad)
-    tiers = model_tier_names()
-    for r in mt.get("rules") or []:
-        if not isinstance(r, dict):
+    for r in mt["rules"]:
+        if "role" in r and r["role"] != role:
             continue
-        for k in r:
-            if k.startswith("_"):
-                continue
-            if k not in MODEL_TIER_RULE_KEYS:
-                raise HarnessConfigError(
-                    f"model_tiers rule '{r.get('id')}' has an unknown key '{k}' - rule keys: "
-                    f"{', '.join(MODEL_TIER_RULE_KEYS)}")
-        if "role" in r and str(r["role"]) != role:
+        if "min_attempt" in r and attempt < r["min_attempt"]:
             continue
-        if "min_attempt" in r and attempt < int(r["min_attempt"]):
+        if "max_attempt" in r and attempt > r["max_attempt"]:
             continue
-        if "max_attempt" in r and attempt > int(r["max_attempt"]):
-            continue
-        if "doc_only" in r and (doc_only is None or bool(doc_only) != bool(r["doc_only"])):
+        if "doc_only" in r and (doc_only is None or bool(doc_only) != r["doc_only"]):
             continue
         if "max_delta_lines" in r and (delta_lines is None
-                                       or int(delta_lines) > int(r["max_delta_lines"])):
+                                       or int(delta_lines) > r["max_delta_lines"]):
             continue
-        t = str(r.get("tier", ""))
-        if t == "item":
-            t = item_t
-        if t not in tiers:
-            raise HarnessConfigError(
-                f"model_tiers rule '{r.get('id')}' names unknown tier '{t}' - known tiers: "
-                f"{', '.join(tiers)}")
+        t = item_t if r["tier"] == "item" else r["tier"]
         out: Dict[str, Any] = {
             "role": role, "attempt": attempt, "item_tier": item_t, "tier": t,
             "rule": str(r.get("id", "")), "why": str(r.get("why", "")),
         }
         for sub in MODEL_TIER_SUBSTRATES:
-            m = (((mt.get(sub) or {}).get("roles") or {}).get(t) or {}).get(role)
-            if not m:
-                raise HarnessConfigError(f"model_tiers.{sub}.roles.{t}.{role} is not set")
-            out[sub] = str(m)
+            out[sub] = mt[sub]["roles"][t][role]
         return out
     raise HarnessConfigError(
         f"no model_tiers rule matched role '{role}' - the rule list needs a final catch-all "
