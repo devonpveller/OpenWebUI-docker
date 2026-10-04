@@ -133,6 +133,8 @@ untracked** — one `git add .` from the accident `.gitignore`'s own comment war
 about. The script now adds any such copy to `.git/info/exclude` (the *common* one;
 a per-worktree `info/exclude` is **not** honored — verified).
 
+**`-Merged` records only a real merge commit (mg-nonff, 2026-10-04).** The recorded sha must have >= 2 parents with the tested commit behind a non-first parent and sit on the work line; fast-forwards, cherry-picks and rebase/squash commits ran no commit hook and are refused (redo with `git merge --no-ff`; no escape hatch). Host git settings that back it, applied 2026-10-04 to ai-stack and OB1: `git config merge.ff false` and `git config pull.ff only`.
+
 ## Gotchas paid for in this code
 
 - **A TRUNCATED SEARCH IS NOT A SEARCH.** An agent put a script out of scope on the

@@ -1563,6 +1563,77 @@ $it = Get-QItem $fr2 "qr3"
 Check "R: -Resubmit still bumps the attempt and replaces the plan" `
     (([int]$it.attempt -eq 2) -and ((Get-Content -Raw (Get-QFile $fr2 "qr3.plan.md")) -match "REVISED")) ("attempt=" + $it.attempt)
 
+# ======================================================================================
+Step "NF  -Merged records only a real merge commit (mg-nonff, tracker F5 option b)"
+# ======================================================================================
+# A fast-forward, cherry-pick or rebase/squash onto the line runs no commit hook. RED at
+# 56251ff: -Merged recorded a fast-forwarded item without complaint (its only question was
+# 'is the tested sha an ancestor', and a ff tip trivially is).
+function New-NfReviewing([string]$name, [string]$id) {
+    $fx = New-Fixture $name
+    $evn = Join-Path $Root ($name + "-evidence.md")
+    Set-Content -Path $evn -Encoding ascii -Value @($case1Pass, "ran case 1.")
+    Initialize-ToReview $fx $id "qdev" $evn
+    return $fx
+}
+# (a) fast-forward: the line tip IS the tested commit
+$nf1 = New-NfReviewing "nf1" "qnf1"
+Push-Location $nf1.repo
+try {
+    Invoke-Git merge --ff-only -q work/qd | Out-Null
+    $ffSha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+} finally { Pop-Location }
+$r = Invoke-Q $nf1 @("-Merged", "-Id", "qnf1", "-By", "qrev", "-Sha", $ffSha, "-FitsCodebase")
+Check "NF: a fast-forwarded item is REFUSED, naming the reason and the fix" `
+    (($r.code -ne 0) -and ((Get-QItem $nf1 "qnf1").state -ne "merged") -and ($r.out -match "not a merge commit") -and ($r.out -match "--no-ff")) `
+    ("exit=" + $r.code + " state=" + (Get-QItem $nf1 "qnf1").state + " | " + (First-Line $r.out))
+# (b) single-parent commit that contains the tested sha (ff, then a follow-up commit)
+Push-Location $nf1.repo
+try {
+    Set-Content -Path (Join-Path $nf1.repo "MORE.md") -Encoding ascii -Value "more"
+    Invoke-Git add MORE.md | Out-Null
+    Invoke-Git commit -q -m "follow-up" | Out-Null
+    $spSha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+} finally { Pop-Location }
+$r = Invoke-Q $nf1 @("-Merged", "-Id", "qnf1", "-By", "qrev", "-Sha", $spSha, "-FitsCodebase")
+Check "NF: a single-parent tip that contains the tested sha is REFUSED" `
+    (($r.code -ne 0) -and ((Get-QItem $nf1 "qnf1").state -ne "merged") -and ($r.out -match "not a merge commit")) `
+    ("exit=" + $r.code + " | " + (First-Line $r.out))
+# (c) cherry-pick: single parent, different sha
+$nf2 = New-NfReviewing "nf2" "qnf2"
+Push-Location $nf2.repo
+try {
+    Invoke-Git cherry-pick work/qd | Out-Null
+    $cpSha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+} finally { Pop-Location }
+$r = Invoke-Q $nf2 @("-Merged", "-Id", "qnf2", "-By", "qrev", "-Sha", $cpSha, "-FitsCodebase")
+Check "NF: a cherry-pick onto the line is REFUSED" `
+    (($r.code -ne 0) -and ((Get-QItem $nf2 "qnf2").state -ne "merged")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+# (d) a merge commit whose parents do not hold the tested sha
+$nf3 = New-NfReviewing "nf3" "qnf3"
+Push-Location $nf3.repo
+try {
+    Invoke-Git checkout -q -b side base | Out-Null
+    Set-Content -Path (Join-Path $nf3.repo "SIDE.md") -Encoding ascii -Value "side"
+    Invoke-Git add SIDE.md | Out-Null
+    Invoke-Git commit -q -m "unrelated side work" | Out-Null
+    Invoke-Git checkout -q base | Out-Null
+    Invoke-Git merge --no-ff -q side -m "merge unrelated work" | Out-Null
+    $otherSha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+} finally { Pop-Location }
+$r = Invoke-Q $nf3 @("-Merged", "-Id", "qnf3", "-By", "qrev", "-Sha", $otherSha, "-FitsCodebase")
+Check "NF: a merge commit that does not contain the tested sha is REFUSED" `
+    (($r.code -ne 0) -and ((Get-QItem $nf3 "qnf3").state -ne "merged")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+# (e) the real thing still records
+Push-Location $nf3.repo
+try {
+    Invoke-Git merge --no-ff -q work/qd -m "merge the work (evidence: drill)" | Out-Null
+    $goodSha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+} finally { Pop-Location }
+$r = Invoke-Q $nf3 @("-Merged", "-Id", "qnf3", "-By", "qrev", "-Sha", $goodSha, "-FitsCodebase")
+Check "NF: a --no-ff merge containing the tested sha IS recorded" `
+    (($r.code -eq 0) -and ((Get-QItem $nf3 "qnf3").state -eq "merged")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+
 # --- verdict --------------------------------------------------------------------------
 $fail = @($results | Where-Object { -not $_.pass })
 Write-Host ""
