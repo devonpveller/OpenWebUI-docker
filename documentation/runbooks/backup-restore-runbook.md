@@ -43,6 +43,7 @@ archive deleted or damaged on D: stays intact on the NAS (§8).
 | tailscale | state-dir tar | `tailscale-*.tar.gz` | tar extract |
 | lm-models | llama.cpp model store tar (~120 GB) | `lm-models-*.tar.gz` | tar extract |
 | caddy / authelia | volume tar (portal) | `caddy-*` / `authelia-*.tar.gz` | tar extract |
+| config-secrets | age-encrypted tar of the gitignored config + secrets (every `.env`, `secrets/`, the Authelia users DB, bind-mounted credentials); a host scheduled task, not a sidecar | `config-secrets-*.tar.age` (+ `.files.txt`) | `age --decrypt` with the operator's OFFLINE key, then tar - [config-secrets-backup.md](config-secrets-backup.md) |
 
 `smolcrawl` is retired and has no backup sidecar any more; an old `smolcrawl-*.tar.gz`
 archive has nothing to restore into (see `restore-from-snapshot.md`).
@@ -277,6 +278,13 @@ alerter's Gmail refresh token is dead, so it returns 500 to every `/alert` while
 its `/health` still answers `ready: true` with HTTP 200 — the healthcheck only
 proves the listener is up, not that mail can be sent. Both 2026-09 backup
 failures alerted correctly into that void.
+
+Since pa-channels (2026-10-04) the alerter itself sends to Telegram and/or
+Mattermost as well as Gmail and returns 200 when any one delivered; a refused
+Gmail token now shows as `email disabled: OAuth not configured (...)` in its log
+and as `channel email off` in `portal-status.ps1`, and an alert that reached no
+channel is paged by the host watchdog. The rest of this section still applies to
+the email copy.
 
 **`portal-alerter` and the daily digest are different services with different
 OAuth clients.** `openbrain-digest` has been sending fine throughout. A working

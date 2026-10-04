@@ -304,6 +304,77 @@ def test_evaluate_reports_the_mount() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+# --- the HOST-JOB layer (config-backup, 2026-10-04) ------------------------
+# The encrypted config + secrets archive is a scheduled task, not a sidecar. It
+# writes an archive even when a REQUIRED file (the Authelia users DB) is missing,
+# so a fresh artifact must not read as healthy when the last run did not complete.
+
+CS_GOOD = """[2026-10-05T02:30:00-04:00] [INFO] === config-secrets backup start ===
+[2026-10-05T02:30:04-04:00] [INFO] wrote config-secrets-20261005T063000Z.tar.age (9000 bytes, 40 files, 8 excluded)
+[2026-10-05T02:30:04-04:00] [INFO] === config-secrets backup complete ===
+"""
+CS_MISSING = """[2026-10-05T02:30:00-04:00] [INFO] === config-secrets backup start ===
+[2026-10-05T02:30:03-04:00] [ERROR] MISSING portal/config/authelia/users_database.yml - required file is absent
+[2026-10-05T02:30:04-04:00] [INFO] wrote config-secrets-20261005T063000Z.tar.age (9000 bytes, 39 files, 8 excluded)
+[2026-10-05T02:30:04-04:00] [ERROR] 1 problem(s) above - the archive was written but the run is NOT complete
+"""
+
+
+def test_host_job() -> None:
+    print("\nHOST JOB - config-secrets: fresh is not enough, the run must complete")
+    real_root, real_backups = cb._REPO_ROOT, cb._BACKUPS
+    real_running = cb._running_containers
+    roots = []
+
+    def setup(log_body, log_age_h, archive_age_h):
+        r = _with_logs({"config-secrets-backup-2026-10-05.log": (log_body, log_age_h)} if log_body else {})
+        roots.append(r)
+        d = os.path.join(r, "backups", "config-secrets")
+        os.makedirs(d)
+        if archive_age_h is not None:
+            p = os.path.join(d, "config-secrets-20261005T063000Z.tar.age")
+            with open(p, "wb") as fh:
+                fh.write(b"age-encryption.org/v1\n")
+            when = time.time() - archive_age_h * 3600
+            os.utime(p, (when, when))
+        cb._REPO_ROOT, cb._BACKUPS = r, os.path.join(r, "backups")
+
+    try:
+        args = cb._HOST_JOBS[0]
+        setup(CS_GOOD, 3, 3)
+        check("fresh archive + completed run is healthy", cb._host_job_status(*args) == {},
+              str(cb._host_job_status(*args)))
+
+        setup(CS_MISSING, 3, 3)
+        s = cb._host_job_status(*args)
+        check("fresh archive but INCOMPLETE run is stale", s != {}, str(s))
+        check("  ... and names the missing file", "users_database.yml" in s.get("detail", ""), str(s))
+        msg = cb.build_message({"stale": [s], "skipped": [], "ok": []})
+        check("  ... message prints the age plainly, not as over the limit",
+              "(> " not in msg.split("config-secrets", 1)[1].splitlines()[0], msg)
+
+        setup(CS_GOOD, 60, 60)
+        s = cb._host_job_status(*args)
+        check("archive older than 36h is stale", s != {} and s["age_h"] > 36, str(s))
+
+        setup(None, 0, None)
+        s = cb._host_job_status(*args)
+        check("never ran: stale and points at the setup doc",
+              s != {} and s["age_h"] is None and "config-secrets-backup.md" in s.get("detail", ""), str(s))
+
+        # never SKIPPED for want of a container
+        cb._running_containers = lambda: set()
+        res = cb.evaluate()
+        check("evaluate reports it with ZERO containers running",
+              "config-secrets" in [x["name"] for x in res["stale"]] and "config-secrets" not in res["skipped"],
+              str(res))
+    finally:
+        cb._REPO_ROOT, cb._BACKUPS = real_root, real_backups
+        cb._running_containers = real_running
+        for r in roots:
+            shutil.rmtree(r, ignore_errors=True)
+
+
 if __name__ == "__main__":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -313,5 +384,6 @@ if __name__ == "__main__":
     test_precheck()
     test_stamp_parsing_is_utc_all_year()
     test_evaluate_reports_the_mount()
+    test_host_job()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

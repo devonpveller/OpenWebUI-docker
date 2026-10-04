@@ -69,7 +69,7 @@ production start, so exposure is never a standing setting.
 | `portal-init` | One-shot, no network. Chowns the volumes to the users the services run as; everything else waits for it to exit 0. |
 | `caddy` | The reverse proxy and `forward_auth` client. Binds no host port. Config: [`config/caddy/Caddyfile`](config/caddy/Caddyfile). |
 | `authelia` | Single sign-on and 2FA, on `auth-net` only. Its domains come from `PUBLIC_DOMAIN`. |
-| `portal-alerter` | Receives alerts from the watchers and mails them through Gmail. |
+| `portal-alerter` | Receives alerts from the watchers and sends each one to every configured channel - Telegram and/or Mattermost (primary), Gmail (second copy) - succeeding if any one delivers. See [Alert delivery](#alert-delivery). |
 | `authelia-watcher` | Tails the Authelia and Caddy logs and alerts on new source IPs, recording them in [`config/watcher/known-ips.txt`](config/watcher/known-ips.txt). |
 | `authelia-notif-bridge` | Forwards Authelia's user notifications (2FA enrolment codes, password resets) to the alerter, so you receive them away from the machine. |
 | `integrity-tripwire` | Hashes the Caddyfile and the Authelia configs on a schedule (`TRIPWIRE_CRON`) and alerts on drift. |
@@ -90,13 +90,14 @@ production start, so exposure is never a standing setting.
   off, and the rest of the portal serves.
 - **A public domain and a Cloudflare tunnel** for it, with the tunnel's
   hostnames added in the Cloudflare dashboard.
-- **A Gmail account the alerter can send from**, with its OAuth client at
-  `secrets/google/portal-alerter/credentials.json` and a token at
-  `secrets/google/portal-alerter/token.json` (the header of
+- **At least one alert channel** (see [Alert delivery](#alert-delivery)):
+  the sysadmin Telegram bot, a Mattermost bot + channel, and/or a Gmail account
+  the alerter can send from (OAuth client at
+  `secrets/google/portal-alerter/credentials.json`, token at
+  `secrets/google/portal-alerter/token.json`; the header of
   [`config/alerter/setup-token.ts`](config/alerter/setup-token.ts) creates the
-  token). Without them the alerter runs but every send fails, and
-  `portal-status.ps1` shows the error. `DIGEST_TO` must be set or it does not
-  start at all.
+  token). With none configured the alerter still starts, logs a warning, and
+  every alert is recorded as undelivered - which the host watchdog pages on.
 - **An Authelia user database**: copy
   [`config/authelia/users_database.yml.template`](config/authelia/users_database.yml.template)
   to `config/authelia/users_database.yml` (gitignored) and follow its header to
@@ -109,7 +110,9 @@ Keys, in `portal/.env`:
 | `CLOUDFLARE_TUNNEL_TOKEN`, `AUTHELIA_SESSION_SECRET`, `AUTHELIA_STORAGE_ENCRYPTION_KEY` | Blank: `portal-on.ps1` refuses before starting anything, and `stack.py enable --plane portal` / `doctor` refuse. |
 | `AUTHELIA_JWT_SECRET` | Blank: as above, and the compose file itself refuses to render. Still the shipped `change-me-...`: `enable` and `doctor` refuse. |
 | `PUBLIC_DOMAIN`, `ACME_EMAIL` | Still the shipped `ai.example.com` / `you@example.com`: `enable` and `doctor` refuse. |
-| `DIGEST_TO`, `DIGEST_FROM` | Not checked by any script. The alerter crash-loops with `DIGEST_TO is required` while it is blank. |
+| `PORTAL_ALERT_TELEGRAM_BOT_TOKEN`, `PORTAL_ALERT_TELEGRAM_CHAT_ID` | Not checked by any script. Blank: Telegram is off (`portal-status.ps1` shows `channel telegram off`). Wrong: each send fails, logged per channel; after 3 in a row the host watchdog pages. |
+| `PORTAL_ALERT_MM_URL`, `PORTAL_ALERT_MM_TOKEN`, `PORTAL_ALERT_MM_CHANNEL_ID`, `PORTAL_ALERT_MM_MENTION` | As above, for Mattermost. `PORTAL_ALERT_MM_MENTION` is optional. |
+| `DIGEST_TO`, `DIGEST_FROM` | Not checked by any script. Blank `DIGEST_TO`: email is off (it used to crash-loop the alerter; it no longer does). |
 | `WORKBENCH_KEY` | Not checked. Caddy sends it to Open Brain's workbench, and it must equal Open Brain's `MCP_ACCESS_KEY`; blank means every `/workbench` call is refused. |
 
 `portal-on.ps1` reads its list of required keys from `[planes.portal] keys` in
@@ -190,7 +193,9 @@ your own tools.
 |---|---|
 | `portal-on.ps1` stops before starting anything, naming keys | They are blank in `portal/.env`. |
 | `required variable AUTHELIA_JWT_SECRET is missing a value` | `portal/.env` is missing, or that key is blank. |
-| `dependency failed to start: container portal-alerter is unhealthy` | `docker logs portal-alerter` - usually `DIGEST_TO is required (your own Gmail address).` |
+| `dependency failed to start: container portal-alerter is unhealthy` | `docker logs portal-alerter`. |
+| A sender logs `alerter POST failed` | No channel delivered that alert. `docker logs portal-alerter` has one line per alert naming each channel's outcome (`telegram=FAILED(...) mattermost=off(...) email=off(...)`); fix the failing or missing channel, then `docker exec portal-alerter deno run --allow-net --allow-read --allow-write --allow-env alerter.ts --selftest`. |
+| `email disabled: OAuth not configured (...)` in the alerter log | Expected while the Gmail OAuth files are missing, empty or refused by Google (a Testing-mode OAuth app's refresh tokens expire after 7 days - publish the app to Production to stop that). Re-authorize with `setup-token.ts` on the host; email turns back on by itself at the next send. If it does not, the single-file bind mount is still showing the old inode (an editor that replaces the file): recreate the alerter. |
 | `authelia` restarting with `Errors occurred performing startup checks` | Authelia logs that line without its cause. First check that `config/authelia/users_database.yml` is a file: if a container started before you created it, Docker made an empty directory of that name. Remove the directory, create the file from the template, and start again. |
 | `network ai-stack_app-net declared as external, but could not be found` | The anchor's networks are missing; `python scripts/stack/stack.py up` creates them. |
 | The main site answers 502 | Open WebUI is not reachable on `ai-stack_app-net`: the frontend is down, or running under `stock`. |
@@ -198,12 +203,45 @@ your own tools.
 | After `portal-off.ps1`, `tunnel-watcher` and `authelia-notif-bridge` are still running | The script stops ten services by name and does not name those two. `docker compose -p portal -f portal/docker-compose.yml ps` shows what is left. |
 | Changing `PUBLIC_DOMAIN` breaks login | Authelia validates its config against the domain: recreate it in the same sitting, `docker compose -p portal -f portal/docker-compose.yml up -d --no-deps authelia`. |
 
+## Alert delivery
+
+`portal-alerter` is the portal's one alert sink: the tripwire, the watchers,
+the Authelia notification bridge and the NAS backup script all POST to its
+`/alert`. Each alert goes to **every configured channel at once**:
+
+| Channel | Role | Gets | Off while |
+|---|---|---|---|
+| Telegram (the sysadmin bot) | primary | one minimal line: severity, event, host label (`PORTAL_ALERT_HOST_LABEL`), time | `PORTAL_ALERT_TELEGRAM_*` blank |
+| Mattermost (bot post into one channel) | primary | the same minimal line (optionally `@mention`-prefixed) | `PORTAL_ALERT_MM_*` blank |
+| Gmail | second copy; the scheduled digest is email-only | the full detail (source IP, username, log line) | `DIGEST_TO` blank, or the OAuth files missing / empty / unparseable / refused by Google |
+
+The sender gets `200 {"ok": true}` if **at least one** channel delivered, so a
+sender's `alerter POST failed` means no channel did. One exception: past
+`ALERT_RATE_LIMIT_PER_MIN` an alert is queued for the minute-close summary and
+answered `200 {"ok": true, "coalesced": true}` before anything is sent; the
+summary's outcome is still recorded for the watchdog. Telegram and Mattermost
+never get source IPs, usernames or the log line: the notification bridge's log
+line carries Authelia's one-time codes and reset links. The event name goes out
+only if it is shaped like an identifier (`config.drift`, `nas-backup.failure`:
+dotted `[A-Za-z0-9_-]` words, at most 48 characters, no run of 4+ digits);
+anything else - a URL, a path, a code - is sent as `portal.event`.
+
+**When delivery fails, the host watchdog says so - not the alerter.** Each
+outcome is written to `reports/portal-digest/alerter-delivery-state.json` (the
+alerter's `/reports` mount). `scripts/checks/stack-watchdog.ps1`
+(`Test-PortalAlertDelivery`) reads it every pass and pages through its own
+path (host Telegram + the Mattermost mirror) when an alert reached **no**
+channel, or a **configured** channel failed 3 sends in a row; it sends the
+all-clear when that clears (the next delivered alert, or a `--selftest`). A
+channel that is merely not configured never pages. `portal-status.ps1` shows
+each channel's state, and `/health` carries the same.
+
 ## Security notes
 
 - **No host port in production.** All ingress arrives through `cloudflared`;
   test mode adds `127.0.0.1:8443` only.
 - **`auth-net` is internal.** The portal's routes out are `edge-net` (the tunnel,
-  and `caddy-backup`), `notify-net` (the alerter mailing Gmail, and
+  and `caddy-backup`), `notify-net` (the alerter: Gmail, Telegram, the host's Mattermost port; and
   `portal-cron`) and the project's `default` network (the two backups).
 - **The hardening floor** is declared once at the top of the compose file
   (`x-hardening`, `x-hardening-ro`, `x-healthcheck-http`) and merged into each
