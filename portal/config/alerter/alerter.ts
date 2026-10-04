@@ -1,72 +1,155 @@
 #!/usr/bin/env -S deno run --allow-net --allow-read --allow-write --allow-env
 
 /**
- * Portal Alerter — single Gmail egress point for the internet-exposed portal.
+ * Portal Alerter - the single alert egress point for the internet-exposed portal.
  *
- * Modeled on OB1's send-digest.ts (OB1/recipes/daily-digest/send-digest.ts).
- * Reuses the same OAuth client (open-brain-email) by default; the refresh
- * token is portal-specific (secrets/google/portal-alerter/token.json) so the
- * two senders can be revoked independently.
+ * Every /alert goes to EVERY enabled channel (pa-channels, 2026-10-04):
+ *   telegram    PRIMARY. The operator's sysadmin bot -> the operator's chat.
+ *   mattermost  PRIMARY. A bot post into one channel (e.g. #sysadmin).
+ *   email       SECOND COPY. Gmail self-send (OAuth, modeled on OB1's
+ *               send-digest.ts); the only channel that carries the full detail.
+ * The caller gets success if AT LEAST ONE channel delivered, so a sender's
+ * "alerter POST failed" now means "no channel delivered". Each outcome is logged
+ * per channel and written to a delivery-state file the HOST watchdog reads
+ * (scripts/checks/stack-watchdog.ps1, Test-PortalAlertDelivery): "no channel
+ * delivered" and "a configured channel keeps failing" become the watchdog's own
+ * alert, through its own path - never through this service.
+ *
+ * Why: 09-29..10-04 the integrity tripwire saw the Authelia users DB vanish every
+ * night and every alert died in here ("Token refresh failed: Bad Request" - the
+ * Gmail OAuth files were 0-byte placeholders). Email was the only channel and
+ * nothing recorded the failure anywhere a human or a watchdog would look.
+ *
+ * What third parties see. Telegram and Mattermost (whose push notifications go
+ * through Mattermost's push proxy) get ONE minimal line: severity, a sanitized
+ * event name, a short host label and the time. Never source_ip, username or
+ * log_line: the Authelia notification bridge's log_line carries one-time codes
+ * and reset links. Email keeps the full detail, as before.
+ *
+ * Email turns itself on and off. credentials.json / token.json are re-read on
+ * every send: missing, empty (the 0-byte placeholders), unparseable or lacking
+ * client_id/client_secret/refresh_token = "email disabled: OAuth not configured",
+ * logged ONCE per change, and that is not a failure. Valid files appearing later
+ * (setup-token.ts on the host writes token.json in place) re-enable it on the
+ * next send, with no code change and no restart. Google REFUSING the stored
+ * refresh token (invalid_grant: revoked, or a Testing-mode app's 7-day expiry -
+ * what the live "Token refresh failed: Bad Request" was) is the same "not
+ * configured" state, remembered against those exact file contents so it is not
+ * retried on every alert; a new token.json turns email back on. A configured
+ * email whose SENDS fail (Gmail down, quota) IS a failure, counted like any other
+ * channel.
  *
  * Endpoints:
- *   POST /alert     — instant email for a discrete event from a watcher
- *   POST /run       — scheduled traffic + threats digest (DIGEST_WINDOW_HOURS)
- *   GET  /health    — liveness for healthcheck, portal-status.ps1, killswitch
+ *   POST /alert     - instant alert for a discrete event from a watcher
+ *   POST /run       - scheduled traffic + threats digest (EMAIL ONLY: the digest
+ *                     lists source IPs, which do not go to Telegram/Mattermost)
+ *   GET  /health    - liveness + per-channel status (no secret values)
  *
  * CLI:
- *   --selftest      — send one test email with subject "Portal alerter self-test"
- *                     and exit 0. Used by plan §6.9 step 4.
+ *   --selftest      - send one test alert through every enabled channel, print
+ *                     each outcome, exit 0 if at least one delivered.
  *
- * Environment:
- *   DIGEST_TO                  Required. Operator's own Gmail address.
- *   DIGEST_FROM                Required. Must match the consented Google
- *                              account; mismatches produce Gmail errors.
+ * Environment (names only; values live in portal/.env):
+ *   PORTAL_ALERT_TELEGRAM_BOT_TOKEN  Telegram bot token (the sysadmin bot).
+ *   PORTAL_ALERT_TELEGRAM_CHAT_ID    The operator's chat id with that bot.
+ *   PORTAL_ALERT_MM_URL              Mattermost base URL, e.g.
+ *                                    http://host.docker.internal:8065.
+ *   PORTAL_ALERT_MM_TOKEN            Bot token allowed to post in the channel.
+ *   PORTAL_ALERT_MM_CHANNEL_ID       Channel id (not name) to post into.
+ *   PORTAL_ALERT_MM_MENTION          Optional, e.g. "@you" - prefixed so the post
+ *                                    notifies instead of sitting unread.
+ *   PORTAL_ALERT_HOST_LABEL          Short host label in the minimal text
+ *                                    (default "portal").
+ *   PORTAL_ALERT_STATE_FILE          Delivery-state file (default
+ *                                    /reports/alerter-delivery-state.json =
+ *                                    <repo>/reports/portal-digest/ on the host).
+ *   PORTAL_ALERT_TELEGRAM_API, PORTAL_ALERT_GOOGLE_TOKEN_URL,
+ *   PORTAL_ALERT_GMAIL_SEND_URL      Endpoint overrides for the tests' fakes;
+ *                                    leave unset in production.
+ *   DIGEST_TO                  Operator's Gmail address. Unset = email disabled.
+ *   DIGEST_FROM                Must match the consented Google account.
  *   DIGEST_WINDOW_HOURS        Default 24. Window the /run digest covers.
- *   ALERT_RATE_LIMIT_PER_MIN   Default 20. Max /alert emails per rolling
- *                              minute; excess are coalesced.
+ *   ALERT_RATE_LIMIT_PER_MIN   Default 20. Max /alert sends per rolling minute;
+ *                              excess are coalesced into one summary.
  *   PUBLIC_DOMAIN              Optional. Appears in email footers.
  *
  * Paths inside the container (matches docker-compose mounts):
- *   /app/credentials.json       — OAuth client (read-only, from secrets/google/open-brain-email)
- *   /app/token.json             — refresh token (writable, from secrets/google/portal-alerter)
- *   /logs/authelia/authelia.log — Authelia JSON log (read-only)
- *   /logs/caddy/caddy-access.log— Caddy JSON access log (read-only)
- *   /reports                    — markdown audit copies (writable)
- *
- * The container's root FS is read-only; only the four paths above are
- * writable per the compose bind mounts.
+ *   /app/credentials.json       - OAuth client (read-only)
+ *   /app/token.json             - refresh token (writable)
+ *   /logs/authelia/authelia.log - Authelia JSON log (read-only)
+ *   /logs/caddy/caddy-access.log- Caddy JSON access log (read-only)
+ *   /reports                    - markdown audit copies + delivery state (writable)
  */
 
-// ─── Paths ───────────────────────────────────────────────────────────────────
+// --- Paths -------------------------------------------------------------------
 
-const SCRIPT_DIR = new URL(".", import.meta.url).pathname;
-const CREDENTIALS_PATH = `${SCRIPT_DIR}credentials.json`;
-const TOKEN_PATH = `${SCRIPT_DIR}token.json`;
+// URLs, not pathname strings: Deno's file APIs take a file: URL directly, which
+// also works when the tests run this file from a Windows temp directory.
+const CREDENTIALS_URL = new URL("./credentials.json", import.meta.url);
+const TOKEN_URL = new URL("./token.json", import.meta.url);
 const REPORT_DIR = "/reports";
 const AUTHELIA_LOG = "/logs/authelia/authelia.log";
 const CADDY_LOG = "/logs/caddy/caddy-access.log";
 
-// ─── Configuration ───────────────────────────────────────────────────────────
+// --- Configuration -----------------------------------------------------------
 
-const TO_EMAIL = Deno.env.get("DIGEST_TO") || "";
-const FROM_EMAIL = Deno.env.get("DIGEST_FROM") || TO_EMAIL;
-const WINDOW_HOURS = parseInt(Deno.env.get("DIGEST_WINDOW_HOURS") || "24", 10);
-const RATE_LIMIT_PER_MIN = parseInt(
-  Deno.env.get("ALERT_RATE_LIMIT_PER_MIN") || "20",
-  10,
-);
-const PUBLIC_DOMAIN = Deno.env.get("PUBLIC_DOMAIN") || "";
-const PORT = parseInt(Deno.env.get("DIGEST_PORT") || "8080", 10);
-
-if (!TO_EMAIL) {
-  console.error("DIGEST_TO is required (your own Gmail address).");
-  Deno.exit(1);
+function env(name: string): string {
+  return (Deno.env.get(name) ?? "").trim();
 }
 
-// ─── OAuth (mirrors OB1 send-digest.ts) ──────────────────────────────────────
+const TO_EMAIL = env("DIGEST_TO");
+const FROM_EMAIL = env("DIGEST_FROM") || TO_EMAIL;
+const WINDOW_HOURS = parseInt(env("DIGEST_WINDOW_HOURS") || "24", 10);
+const RATE_LIMIT_PER_MIN = parseInt(env("ALERT_RATE_LIMIT_PER_MIN") || "20", 10);
+const PUBLIC_DOMAIN = env("PUBLIC_DOMAIN");
+const PORT = parseInt(env("DIGEST_PORT") || "8080", 10);
 
-interface OAuthCredentials {
-  installed: { client_id: string; client_secret: string; redirect_uris: string[] };
+const HOST_LABEL = (env("PORTAL_ALERT_HOST_LABEL") || "portal")
+  .replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 32);
+const STATE_FILE = env("PORTAL_ALERT_STATE_FILE") || "/reports/alerter-delivery-state.json";
+const SEND_TIMEOUT_MS = 10_000;
+
+const TG_TOKEN = env("PORTAL_ALERT_TELEGRAM_BOT_TOKEN");
+const TG_CHAT = env("PORTAL_ALERT_TELEGRAM_CHAT_ID");
+const TG_API = (env("PORTAL_ALERT_TELEGRAM_API") || "https://api.telegram.org").replace(/\/+$/, "");
+
+const MM_URL = env("PORTAL_ALERT_MM_URL").replace(/\/+$/, "");
+const MM_TOKEN = env("PORTAL_ALERT_MM_TOKEN");
+const MM_CHANNEL = env("PORTAL_ALERT_MM_CHANNEL_ID");
+const MM_MENTION = env("PORTAL_ALERT_MM_MENTION").replace(/[^@A-Za-z0-9._ -]/g, "").slice(0, 64);
+
+const GOOGLE_TOKEN_URL = env("PORTAL_ALERT_GOOGLE_TOKEN_URL") || "https://oauth2.googleapis.com/token";
+const GMAIL_SEND_URL = env("PORTAL_ALERT_GMAIL_SEND_URL") ||
+  "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
+
+// --- Secret redaction ----------------------------------------------------------
+// Error text can carry a secret: Deno's fetch errors quote the request URL, and
+// the Telegram URL embeds the bot token. Everything that reaches a log line, the
+// state file or an HTTP response goes through redact().
+
+const secretValues = new Set<string>([TG_TOKEN, MM_TOKEN].filter((s) => s.length >= 6));
+
+function addSecret(s: string | undefined | null) {
+  if (s && s.length >= 6) secretValues.add(s);
+}
+
+function redact(text: string): string {
+  let out = text;
+  for (const s of secretValues) out = out.split(s).join("[redacted]");
+  out = out.replace(/bot\d+:[A-Za-z0-9_-]+/g, "bot[redacted]");
+  out = out.replace(/Bearer\s+\S+/gi, "Bearer [redacted]");
+  return out.replace(/\s+/g, " ").slice(0, 300);
+}
+
+function errText(err: unknown): string {
+  return redact(err instanceof Error ? err.message : String(err));
+}
+
+// --- OAuth (mirrors OB1 send-digest.ts) --------------------------------------
+
+interface OAuthClient {
+  client_id: string;
+  client_secret: string;
 }
 
 interface TokenData {
@@ -76,69 +159,130 @@ interface TokenData {
   expiry_date: number;
 }
 
-async function refreshAccessToken(
-  creds: OAuthCredentials,
-  token: TokenData,
-): Promise<TokenData> {
-  const res = await fetch("https://oauth2.googleapis.com/token", {
+type EmailConfig =
+  | { ok: true; client: OAuthClient; token: TokenData; raw: string }
+  | { ok: false; reason: string };
+
+// A channel that turns out, mid-send, to be unusable for a CONFIGURATION reason
+// (not an outage). dispatch() reports it as "off", not as a failed send.
+class ChannelNotConfigured extends Error {}
+
+// Google refusing the stored refresh token (revoked, or expired - a Testing-mode
+// OAuth app's tokens die after 7 days) is a configuration fact, not an outage:
+// retrying it on every alert only repeats "Token refresh failed: Bad Request",
+// the 09-29..10-04 incident line. Remembered against the exact file contents,
+// so writing a new token.json (setup-token.ts) turns email back on by itself.
+let refusedOAuth: { raw: string; reason: string } | null = null;
+const REFUSED_OAUTH_ERRORS = new Set(["invalid_grant", "invalid_client", "unauthorized_client"]);
+
+class OAuthRefused extends Error {}
+
+// Re-read on every call: this is what lets email turn itself back on when valid
+// files appear. The reasons name files and fields, never values.
+async function loadEmailConfig(): Promise<EmailConfig> {
+  if (!TO_EMAIL) return { ok: false, reason: "DIGEST_TO not set" };
+  let credsRaw: string;
+  try {
+    credsRaw = await Deno.readTextFile(CREDENTIALS_URL);
+  } catch {
+    return { ok: false, reason: "credentials.json missing" };
+  }
+  if (!credsRaw.trim()) return { ok: false, reason: "credentials.json is empty" };
+  let client: OAuthClient | undefined;
+  try {
+    const j = JSON.parse(credsRaw);
+    client = j?.installed ?? j?.web;
+  } catch {
+    return { ok: false, reason: "credentials.json is not valid JSON" };
+  }
+  if (!client?.client_id || !client?.client_secret) {
+    return { ok: false, reason: "credentials.json has no client_id/client_secret" };
+  }
+  let tokenRaw: string;
+  try {
+    tokenRaw = await Deno.readTextFile(TOKEN_URL);
+  } catch {
+    return { ok: false, reason: "token.json missing" };
+  }
+  if (!tokenRaw.trim()) return { ok: false, reason: "token.json is empty" };
+  let token: TokenData;
+  try {
+    token = JSON.parse(tokenRaw);
+  } catch {
+    return { ok: false, reason: "token.json is not valid JSON" };
+  }
+  if (!token?.refresh_token) return { ok: false, reason: "token.json has no refresh_token" };
+  addSecret(client.client_secret);
+  addSecret(token.refresh_token);
+  addSecret(token.access_token);
+  const raw = JSON.stringify([credsRaw, tokenRaw]);
+  if (refusedOAuth) {
+    if (refusedOAuth.raw === raw) return { ok: false, reason: refusedOAuth.reason };
+    refusedOAuth = null; // the files changed: try them
+  }
+  return { ok: true, client, token, raw };
+}
+
+let emailEnabledLogged: boolean | null = null;
+
+// Logs ONLY on a change of state, so a long-disabled email is one line, not one
+// per alert.
+function noteEmailState(cfg: EmailConfig) {
+  if (cfg.ok && emailEnabledLogged !== true) {
+    console.log("email enabled: OAuth credentials present");
+    emailEnabledLogged = true;
+  } else if (!cfg.ok && emailEnabledLogged !== false) {
+    console.log(
+      `email disabled: OAuth not configured (${cfg.reason}). Alerts still go to the other channels; ` +
+        "email turns back on by itself when valid credentials.json + token.json are in place.",
+    );
+    emailEnabledLogged = false;
+  }
+}
+
+async function refreshAccessToken(client: OAuthClient, token: TokenData): Promise<TokenData> {
+  const res = await fetch(GOOGLE_TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      client_id: creds.installed.client_id,
-      client_secret: creds.installed.client_secret,
+      client_id: client.client_id,
+      client_secret: client.client_secret,
       refresh_token: token.refresh_token,
       grant_type: "refresh_token",
     }),
+    signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
   });
-  const data = await res.json();
+  const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
   if (data.error) {
-    throw new Error(`Token refresh failed: ${data.error_description || data.error}`);
+    const msg = `Token refresh failed: ${data.error_description || data.error}`;
+    if (REFUSED_OAUTH_ERRORS.has(String(data.error))) throw new OAuthRefused(msg);
+    throw new Error(msg);
   }
+  addSecret(data.access_token);
   const updated: TokenData = {
     access_token: data.access_token,
     refresh_token: token.refresh_token,
     token_type: data.token_type,
     expiry_date: Date.now() + data.expires_in * 1000,
   };
-  await Deno.writeTextFile(TOKEN_PATH, JSON.stringify(updated, null, 2));
+  await Deno.writeTextFile(TOKEN_URL, JSON.stringify(updated, null, 2));
   return updated;
 }
 
-async function getAccessToken(): Promise<string> {
-  let creds: OAuthCredentials;
-  try {
-    creds = JSON.parse(await Deno.readTextFile(CREDENTIALS_PATH));
-  } catch {
-    throw new Error(
-      `No credentials.json at ${CREDENTIALS_PATH}. Mount the OAuth client secret from secrets/google/open-brain-email/.`,
-    );
-  }
-
-  let token: TokenData;
-  try {
-    token = JSON.parse(await Deno.readTextFile(TOKEN_PATH));
-  } catch {
-    throw new Error(
-      `No token.json at ${TOKEN_PATH}. Run setup-token.ts on the host once to bootstrap (one-time OAuth consent for gmail.send scope).`,
-    );
-  }
-
-  if (Date.now() < token.expiry_date - 60_000) return token.access_token;
-  return (await refreshAccessToken(creds, token)).access_token;
+async function getAccessToken(cfg: { client: OAuthClient; token: TokenData }): Promise<string> {
+  const t = cfg.token;
+  if (t.access_token && t.expiry_date && Date.now() < t.expiry_date - 60_000) return t.access_token;
+  return (await refreshAccessToken(cfg.client, t)).access_token;
 }
 
-// ─── Gmail send ──────────────────────────────────────────────────────────────
+// --- Gmail send ----------------------------------------------------------------
 
 function base64UrlEncode(text: string): string {
   const utf8 = unescape(encodeURIComponent(text));
   return btoa(utf8).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-async function sendEmail(
-  accessToken: string,
-  subject: string,
-  html: string,
-): Promise<void> {
+async function sendEmail(accessToken: string, subject: string, html: string): Promise<void> {
   const encodedSubject =
     `=?UTF-8?B?${base64UrlEncode(subject).replace(/-/g, "+").replace(/_/g, "/")}?=`;
   const raw = [
@@ -152,25 +296,364 @@ async function sendEmail(
     html,
   ].join("\r\n");
 
-  const res = await fetch(
-    "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ raw: base64UrlEncode(raw) }),
+  const res = await fetch(GMAIL_SEND_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
     },
-  );
+    body: JSON.stringify({ raw: base64UrlEncode(raw) }),
+    signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+  });
 
   if (!res.ok) {
     const err = await res.text().catch(() => "");
-    throw new Error(`Gmail send failed: ${res.status} ${err}`);
+    throw new Error(`Gmail send failed: ${res.status} ${err.slice(0, 200)}`);
   }
 }
 
-// ─── HTML helpers ────────────────────────────────────────────────────────────
+// --- Channels ------------------------------------------------------------------
+
+type ChannelName = "telegram" | "mattermost" | "email";
+
+interface OutboundMessage {
+  text: string; // the minimal line: Telegram + Mattermost
+  subject: string; // email
+  html: string; // email (full detail)
+}
+
+interface ChannelStatus {
+  configured: boolean;
+  reason?: string;
+}
+
+interface Channel {
+  name: ChannelName;
+  status(): Promise<ChannelStatus>;
+  send(m: OutboundMessage): Promise<void>;
+}
+
+const telegram: Channel = {
+  name: "telegram",
+  status() {
+    if (!TG_TOKEN && !TG_CHAT) return Promise.resolve({ configured: false, reason: "not set" });
+    if (!TG_TOKEN) return Promise.resolve({ configured: false, reason: "PORTAL_ALERT_TELEGRAM_BOT_TOKEN not set" });
+    if (!TG_CHAT) return Promise.resolve({ configured: false, reason: "PORTAL_ALERT_TELEGRAM_CHAT_ID not set" });
+    return Promise.resolve({ configured: true });
+  },
+  async send(m) {
+    const res = await fetch(`${TG_API}/bot${TG_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: TG_CHAT, text: m.text, disable_web_page_preview: true }),
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok || !body?.ok) {
+      throw new Error(`Telegram HTTP ${res.status}${body?.description ? ` ${body.description}` : ""}`);
+    }
+  },
+};
+
+const mattermost: Channel = {
+  name: "mattermost",
+  status() {
+    const missing = [
+      ["PORTAL_ALERT_MM_URL", MM_URL],
+      ["PORTAL_ALERT_MM_TOKEN", MM_TOKEN],
+      ["PORTAL_ALERT_MM_CHANNEL_ID", MM_CHANNEL],
+    ].filter(([, v]) => !v).map(([k]) => k);
+    if (missing.length === 3) return Promise.resolve({ configured: false, reason: "not set" });
+    if (missing.length > 0) return Promise.resolve({ configured: false, reason: `${missing.join(", ")} not set` });
+    return Promise.resolve({ configured: true });
+  },
+  async send(m) {
+    const message = MM_MENTION ? `${MM_MENTION} ${m.text}` : m.text;
+    const res = await fetch(`${MM_URL}/api/v4/posts`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${MM_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ channel_id: MM_CHANNEL, message }),
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+    });
+    if (res.status !== 201 && res.status !== 200) {
+      const t = await res.text().catch(() => "");
+      throw new Error(`Mattermost HTTP ${res.status} ${t.slice(0, 120)}`);
+    }
+    await res.body?.cancel().catch(() => {});
+  },
+};
+
+const email: Channel = {
+  name: "email",
+  async status() {
+    const cfg = await loadEmailConfig();
+    noteEmailState(cfg);
+    return cfg.ok ? { configured: true } : { configured: false, reason: `OAuth not configured (${cfg.reason})` };
+  },
+  async send(m) {
+    const cfg = await loadEmailConfig();
+    if (!cfg.ok) throw new ChannelNotConfigured(`OAuth not configured (${cfg.reason})`);
+    let accessToken: string;
+    try {
+      accessToken = await getAccessToken(cfg);
+    } catch (err) {
+      if (!(err instanceof OAuthRefused)) throw err;
+      const reason = `Google refused the stored OAuth token: ${errText(err)}; re-authorize with setup-token.ts`;
+      refusedOAuth = { raw: cfg.raw, reason };
+      noteEmailState({ ok: false, reason });
+      throw new ChannelNotConfigured(`OAuth not configured (${reason})`);
+    }
+    await sendEmail(accessToken, m.subject, m.html);
+  },
+};
+
+const CHANNELS: Channel[] = [telegram, mattermost, email];
+
+// --- Delivery state (read by the HOST watchdog) ------------------------------
+
+interface ChannelState {
+  configured: boolean;
+  disabled_reason: string | null;
+  consecutive_failures: number;
+  last_ok_at: string | null;
+  last_error_at: string | null;
+  last_error: string | null;
+}
+
+interface DeliveryState {
+  schema: 1;
+  updated_at: string;
+  // Set when an alert reached NO channel; cleared by the next one that reaches any.
+  undelivered_since: string | null;
+  undelivered_count: number;
+  last_undelivered_event: string | null;
+  last_delivered_at: string | null;
+  last_attempt: {
+    at: string;
+    event: string;
+    delivered: string[];
+    failed: string[];
+    skipped: string[];
+  } | null;
+  channels: Record<string, ChannelState>;
+}
+
+function emptyState(): DeliveryState {
+  return {
+    schema: 1,
+    updated_at: new Date().toISOString(),
+    undelivered_since: null,
+    undelivered_count: 0,
+    last_undelivered_event: null,
+    last_delivered_at: null,
+    last_attempt: null,
+    channels: {},
+  };
+}
+
+function channelState(s: DeliveryState, name: string): ChannelState {
+  s.channels[name] ??= {
+    configured: false,
+    disabled_reason: null,
+    consecutive_failures: 0,
+    last_ok_at: null,
+    last_error_at: null,
+    last_error: null,
+  };
+  return s.channels[name];
+}
+
+async function readState(): Promise<DeliveryState> {
+  try {
+    const s = JSON.parse(await Deno.readTextFile(STATE_FILE));
+    if (s && s.schema === 1 && typeof s.channels === "object") return s as DeliveryState;
+  } catch { /* missing or torn: start fresh */ }
+  return emptyState();
+}
+
+// Read-modify-write. Serialized in this process (stateChain) AND across
+// processes (a lock file created exclusively beside the state file): the server
+// and a --selftest via docker exec are two writers, and losing the undelivered
+// marker is the failure this file exists to prevent. Each write goes to a
+// UNIQUE tmp name and is renamed over the state file, retried while a reader
+// (the host watchdog, /health) holds it open - Windows refuses the rename then.
+let stateChain: Promise<void> = Promise.resolve();
+let lastWriteError: string | null = null;
+const LOCK_FILE = `${STATE_FILE}.lock`;
+const LOCK_STALE_MS = 10_000;
+const LOCK_WAIT_MS = 20_000;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function acquireStateLock(): Promise<void> {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  while (true) {
+    try {
+      const f = await Deno.open(LOCK_FILE, { createNew: true, write: true });
+      f.close();
+      return;
+    } catch (err) {
+      if (!(err instanceof Deno.errors.AlreadyExists)) throw err;
+    }
+    // A writer that died holding the lock must not block every later write.
+    try {
+      const st = await Deno.stat(LOCK_FILE);
+      if (st.mtime && Date.now() - st.mtime.getTime() > LOCK_STALE_MS) {
+        await Deno.remove(LOCK_FILE).catch(() => {});
+        continue;
+      }
+    } catch {
+      continue; // released between open and stat
+    }
+    if (Date.now() > deadline) throw new Error("delivery-state lock not acquired in time");
+    await sleep(10 + Math.random() * 40);
+  }
+}
+
+// Atomic replace where the OS allows it. On Windows a rename over a file some
+// reader has open fails ("Access is denied"); after a short retry the content
+// is written IN PLACE instead - still under the lock, so no writer can read a
+// torn file, and an outside reader that catches one mid-write just skips that
+// read (the watchdog does). Losing the update is the one outcome not allowed.
+async function replaceWithRetry(tmp: string, target: string, content: string): Promise<void> {
+  for (let i = 0; i < 8; i++) {
+    try {
+      await Deno.rename(tmp, target);
+      return;
+    } catch {
+      await sleep(15 + i * 15);
+    }
+  }
+  await Deno.remove(tmp).catch(() => {});
+  let last: unknown = null;
+  for (let i = 0; i < 20; i++) {
+    try {
+      await Deno.writeTextFile(target, content);
+      return;
+    } catch (err) {
+      last = err;
+      await sleep(25 + i * 10);
+    }
+  }
+  throw last;
+}
+
+function updateState(mutate: (s: DeliveryState) => void): Promise<void> {
+  stateChain = stateChain.then(async () => {
+    try {
+      await acquireStateLock();
+      try {
+        const s = await readState();
+        mutate(s);
+        s.updated_at = new Date().toISOString();
+        const tmp = `${STATE_FILE}.${Deno.pid}.${crypto.randomUUID()}.tmp`;
+        const content = JSON.stringify(s, null, 2) + "\n";
+        await Deno.writeTextFile(tmp, content);
+        await replaceWithRetry(tmp, STATE_FILE, content);
+      } finally {
+        await Deno.remove(LOCK_FILE).catch(() => {});
+      }
+      lastWriteError = null;
+    } catch (err) {
+      const msg = errText(err);
+      if (msg !== lastWriteError) console.error(`delivery state not written to ${STATE_FILE}: ${msg}`);
+      lastWriteError = msg;
+    }
+  });
+  return stateChain;
+}
+
+// --- Dispatch: every enabled channel, success if any delivered ---------------
+
+interface DispatchResult {
+  delivered: ChannelName[];
+  failed: { channel: ChannelName; error: string }[];
+  skipped: { channel: ChannelName; reason: string }[];
+}
+
+async function dispatch(label: string, m: OutboundMessage, only?: ChannelName[]): Promise<DispatchResult> {
+  const result: DispatchResult = { delivered: [], failed: [], skipped: [] };
+  const statuses = new Map<ChannelName, ChannelStatus>();
+  const chans = CHANNELS.filter((c) => !only || only.includes(c.name));
+  await Promise.all(chans.map(async (c) => {
+    const st = await c.status();
+    statuses.set(c.name, st);
+    if (!st.configured) {
+      result.skipped.push({ channel: c.name, reason: st.reason ?? "not configured" });
+      return;
+    }
+    try {
+      await c.send(m);
+      result.delivered.push(c.name);
+    } catch (err) {
+      if (err instanceof ChannelNotConfigured) {
+        const reason = errText(err);
+        statuses.set(c.name, { configured: false, reason });
+        result.skipped.push({ channel: c.name, reason });
+      } else {
+        result.failed.push({ channel: c.name, error: errText(err) });
+      }
+    }
+  }));
+
+  const parts = chans.map((c) => {
+    if (result.delivered.includes(c.name)) return `${c.name}=delivered`;
+    const f = result.failed.find((x) => x.channel === c.name);
+    if (f) return `${c.name}=FAILED(${f.error})`;
+    return `${c.name}=off(${statuses.get(c.name)?.reason ?? "not configured"})`;
+  });
+  const line = `${label}: ${parts.join(" ")}`;
+  if (result.delivered.length > 0) console.log(line);
+  else console.error(`${line} -> NO CHANNEL DELIVERED`);
+
+  const now = new Date().toISOString();
+  await updateState((s) => {
+    for (const c of chans) {
+      const cs = channelState(s, c.name);
+      const st = statuses.get(c.name)!;
+      cs.configured = st.configured;
+      cs.disabled_reason = st.configured ? null : (st.reason ?? "not configured");
+      if (result.delivered.includes(c.name)) {
+        cs.consecutive_failures = 0;
+        cs.last_ok_at = now;
+      } else {
+        const f = result.failed.find((x) => x.channel === c.name);
+        if (f) {
+          cs.consecutive_failures += 1;
+          cs.last_error_at = now;
+          cs.last_error = f.error;
+        } else {
+          // Not configured: not a failure, and a stale count must not page.
+          cs.consecutive_failures = 0;
+        }
+      }
+    }
+    // Only full alert dispatches decide "undelivered" (the email-only digest
+    // does not: its channel outcome above is enough).
+    if (!only) {
+      s.last_attempt = {
+        at: now,
+        event: label,
+        delivered: result.delivered,
+        failed: result.failed.map((f) => f.channel),
+        skipped: result.skipped.map((x) => x.channel),
+      };
+      if (result.delivered.length > 0) {
+        s.last_delivered_at = now;
+        s.undelivered_since = null;
+        s.undelivered_count = 0;
+        s.last_undelivered_event = null;
+      } else {
+        s.undelivered_since ??= now;
+        s.undelivered_count += 1;
+        s.last_undelivered_event = label;
+      }
+    }
+  });
+  return result;
+}
+
+// --- HTML helpers --------------------------------------------------------------
 
 function escHtml(s: string): string {
   return s
@@ -199,7 +682,7 @@ function footer(): string {
   </div>`;
 }
 
-// ─── /alert payload ──────────────────────────────────────────────────────────
+// --- /alert payload --------------------------------------------------------------
 
 interface AlertPayload {
   severity: string;
@@ -240,11 +723,40 @@ function alertSubject(p: AlertPayload): string {
   return `[${p.severity.toUpperCase()}] ${p.event}${ip}`;
 }
 
-// ─── Rate limiter for /alert ─────────────────────────────────────────────────
+// The ONLY text Telegram/Mattermost get: severity, event, host label, time.
+// The event name is caller-supplied, so it goes out only if it is SHAPED like an
+// event identifier (config.drift, nas-backup.failure, auth.notification):
+// dotted words of [A-Za-z0-9_-], at most 48 chars, no run of 4+ digits (a code,
+// a token fragment). Anything else - a URL, a path, a sentence, a one-time code -
+// becomes a generic label; the email copy still carries the original.
+const SEVERITIES = new Set(["critical", "high", "medium", "low", "info"]);
+const EVENT_ID_RE = /^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+){0,5}$/;
+const GENERIC_EVENT = "portal.event";
+
+function safeEvent(ev: unknown): string {
+  const s = typeof ev === "string" ? ev.trim() : "";
+  if (s.length === 0 || s.length > 48 || !EVENT_ID_RE.test(s) || /[0-9]{4,}/.test(s)) {
+    return GENERIC_EVENT;
+  }
+  return s;
+}
+
+function safeTime(ts?: string): string {
+  if (ts && /^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9:.]+Z?$/.test(ts)) return ts;
+  return new Date().toISOString().replace(/\.\d+Z$/, "Z");
+}
+
+function minimalText(p: AlertPayload): string {
+  const sev = String(p.severity).toLowerCase();
+  const s = SEVERITIES.has(sev) ? sev.toUpperCase() : "ALERT";
+  return `Portal alert [${s}] ${safeEvent(p.event)} on ${HOST_LABEL} at ${safeTime(p.timestamp_utc)}`;
+}
+
+// --- Rate limiter for /alert -----------------------------------------------------
 
 const recentAlerts: { sentAt: number; payload: AlertPayload }[] = [];
 const coalescedQueue: AlertPayload[] = [];
-let coalesceTimer: number | null = null;
+let coalesceTimer: ReturnType<typeof setTimeout> | null = null;
 
 function pruneOldAlerts() {
   const cutoff = Date.now() - 60_000;
@@ -268,15 +780,18 @@ async function flushCoalesced(): Promise<void> {
 </table>
 ${footer()}
 </body></html>`;
+  const events = [...new Set(items.map((i) => safeEvent(i.event)))].slice(0, 5).join(", ");
+  const text = `Portal alerts: ${items.length} coalesced (rate limit) on ${HOST_LABEL} at ${safeTime()}: ${events}`;
   try {
-    const token = await getAccessToken();
-    await sendEmail(token, `[COALESCED] ${items.length} alerts`, html);
+    await dispatch(`coalesced(${items.length})`, { text, subject: `[COALESCED] ${items.length} alerts`, html });
   } catch (err) {
-    console.error(`Coalesced flush failed: ${err instanceof Error ? err.message : err}`);
+    console.error(`Coalesced flush failed: ${errText(err)}`);
   }
 }
 
-async function handleAlert(payload: AlertPayload): Promise<{ delivered: boolean; coalesced: boolean }> {
+async function handleAlert(
+  payload: AlertPayload,
+): Promise<{ delivered: boolean; coalesced: boolean; channels: Record<string, string> }> {
   pruneOldAlerts();
   if (recentAlerts.length >= RATE_LIMIT_PER_MIN) {
     coalescedQueue.push(payload);
@@ -286,14 +801,21 @@ async function handleAlert(payload: AlertPayload): Promise<{ delivered: boolean;
         await flushCoalesced();
       }, 60_000);
     }
-    return { delivered: false, coalesced: true };
+    return { delivered: false, coalesced: true, channels: {} };
   }
-  const subject = alertSubject(payload);
-  const html = renderAlertHtml(payload);
-  const token = await getAccessToken();
-  await sendEmail(token, subject, html);
+  // Counted as an attempt whatever the outcome: the limit protects the
+  // channels from a log flood whether or not the sends succeed.
   recentAlerts.push({ sentAt: Date.now(), payload });
-  return { delivered: true, coalesced: false };
+  const r = await dispatch(safeEvent(payload.event), {
+    text: minimalText(payload),
+    subject: alertSubject(payload),
+    html: renderAlertHtml(payload),
+  });
+  const channels: Record<string, string> = {};
+  for (const c of r.delivered) channels[c] = "delivered";
+  for (const f of r.failed) channels[f.channel] = "failed";
+  for (const x of r.skipped) channels[x.channel] = "off";
+  return { delivered: r.delivered.length > 0, coalesced: false, channels };
 }
 
 // ─── /run digest: log scanning ───────────────────────────────────────────────
@@ -605,7 +1127,9 @@ async function writeAuditTrail(markdown: string, subject: string): Promise<void>
   }
 }
 
-async function runDigest(windowHoursOverride?: number): Promise<DigestStats> {
+async function runDigest(
+  windowHoursOverride?: number,
+): Promise<{ stats: DigestStats; email: string }> {
   const windowHours = windowHoursOverride ?? WINDOW_HOURS;
   const sinceMs = Date.now() - windowHours * 3600_000;
   const [caddy, authelia, knownIps] = await Promise.all([
@@ -618,32 +1142,41 @@ async function runDigest(windowHoursOverride?: number): Promise<DigestStats> {
   const html = renderDigestHtml(stats, windowHours);
   const markdown = renderDigestMarkdown(stats, windowHours);
   await writeAuditTrail(markdown, subject);
-  const token = await getAccessToken();
-  await sendEmail(token, subject, html);
-  return stats;
+  // EMAIL ONLY (the digest lists source IPs). Email not configured = the
+  // markdown copy above is the digest, and that is not an error; email
+  // configured but failing IS one (and counts toward the channel's failures).
+  const r = await dispatch("digest", { text: "", subject, html }, ["email"]);
+  if (r.delivered.length > 0) return { stats, email: "delivered" };
+  if (r.failed.length > 0) throw new Error(`digest email failed: ${r.failed[0].error}`);
+  return { stats, email: `off (${r.skipped[0]?.reason ?? "not configured"})` };
 }
 
-// ─── --selftest mode ─────────────────────────────────────────────────────────
+// --- --selftest mode -------------------------------------------------------------
 
 if (Deno.args.includes("--selftest")) {
-  try {
-    const token = await getAccessToken();
-    const html = `<!DOCTYPE html><html><body style="font-family:sans-serif;padding:16px;">
+  const now = new Date().toISOString().replace(/\.\d+Z$/, "Z");
+  const html = `<!DOCTYPE html><html><body style="font-family:sans-serif;padding:16px;">
 <h2>Portal alerter self-test</h2>
-<p>OAuth refresh succeeded; Gmail send succeeded.</p>
-<p>From: <code>${escHtml(FROM_EMAIL)}</code><br>To: <code>${escHtml(TO_EMAIL)}</code></p>
-<p>Generated: ${escHtml(new Date().toISOString())}</p>
+<p>Every enabled channel was sent this test; this copy is the email one.</p>
+<p>Generated: ${escHtml(now)}</p>
 </body></html>`;
-    await sendEmail(token, "Portal alerter self-test", html);
-    console.log(`Self-test sent to ${TO_EMAIL}.`);
+  const r = await dispatch("selftest", {
+    text: `Portal alerter self-test on ${HOST_LABEL} at ${now}`,
+    subject: "Portal alerter self-test",
+    html,
+  });
+  for (const c of r.delivered) console.log(`  ${c}: delivered`);
+  for (const f of r.failed) console.log(`  ${f.channel}: FAILED ${f.error}`);
+  for (const x of r.skipped) console.log(`  ${x.channel}: off (${x.reason})`);
+  if (r.delivered.length > 0) {
+    console.log(`Self-test delivered via: ${r.delivered.join(", ")}`);
     Deno.exit(0);
-  } catch (err) {
-    console.error(`Self-test failed: ${err instanceof Error ? err.message : err}`);
-    Deno.exit(1);
   }
+  console.error("Self-test FAILED: no channel delivered.");
+  Deno.exit(1);
 }
 
-// ─── HTTP server ─────────────────────────────────────────────────────────────
+// --- HTTP server -------------------------------------------------------------------
 
 let lastAlertAt: string | null = null;
 let lastDigestAt: string | null = null;
@@ -656,10 +1189,25 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
+async function channelSummary(): Promise<Record<string, unknown>> {
+  const state = await readState();
+  const out: Record<string, unknown> = {};
+  for (const c of CHANNELS) {
+    const st = await c.status();
+    out[c.name] = {
+      configured: st.configured,
+      reason: st.reason ?? null,
+      consecutive_failures: state.channels[c.name]?.consecutive_failures ?? 0,
+    };
+  }
+  return out;
+}
+
+Deno.serve({ port: PORT, hostname: "0.0.0.0", onListen: () => {} }, async (req) => {
   const url = new URL(req.url);
 
   if (req.method === "GET" && url.pathname === "/health") {
+    const state = await readState();
     return json({
       service: "portal-alerter",
       ready: true,
@@ -669,6 +1217,8 @@ Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
       rate_limit_per_min: RATE_LIMIT_PER_MIN,
       window_hours: WINDOW_HOURS,
       coalesce_queue_depth: coalescedQueue.length,
+      undelivered_since: state.undelivered_since,
+      channels: await channelSummary(),
     });
   }
 
@@ -690,17 +1240,21 @@ Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
       );
       return json({ error: "invalid JSON" }, 400);
     }
-    if (!payload.severity || !payload.event) {
+    if (!payload || !payload.severity || !payload.event) {
       const ip = req.headers.get("x-forwarded-for") ?? "(local)";
-      console.error(`/alert 400 missing required fields from ${ip}: severity=${payload.severity} event=${payload.event}`);
+      console.error(`/alert 400 missing required fields from ${ip}: severity=${payload?.severity} event=${payload?.event}`);
       return json({ error: "severity and event required" }, 400);
     }
     try {
       const result = await handleAlert(payload);
       lastAlertAt = new Date().toISOString();
+      if (!result.delivered && !result.coalesced) {
+        lastError = "no channel delivered";
+        return json({ ok: false, error: "no channel delivered", ...result }, 500);
+      }
       return json({ ok: true, ...result });
     } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
+      lastError = errText(err);
       console.error(`/alert failed: ${lastError}`);
       return json({ error: lastError }, 500);
     }
@@ -713,11 +1267,11 @@ Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
       if (typeof body.window_hours === "number") windowOverride = body.window_hours;
     } catch { /* empty body is fine */ }
     try {
-      const stats = await runDigest(windowOverride);
+      const { stats, email: emailOutcome } = await runDigest(windowOverride);
       lastDigestAt = new Date().toISOString();
-      return json({ ok: true, stats });
+      return json({ ok: true, email: emailOutcome, stats });
     } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
+      lastError = errText(err);
       console.error(`/run failed: ${lastError}`);
       return json({ error: lastError }, 500);
     }
@@ -726,4 +1280,14 @@ Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
   return json({ error: "not found", path: url.pathname }, 404);
 });
 
-console.log(`portal-alerter listening on :${PORT} (DIGEST_TO=${TO_EMAIL})`);
+{
+  const parts: string[] = [];
+  for (const c of CHANNELS) {
+    const st = await c.status();
+    parts.push(st.configured ? `${c.name}=on` : `${c.name}=off(${st.reason})`);
+  }
+  console.log(`portal-alerter listening on :${PORT}; channels: ${parts.join(" ")}`);
+  if (!parts.some((p) => p.endsWith("=on"))) {
+    console.error("WARNING: no alert channel is configured - every /alert will fail and be recorded as undelivered.");
+  }
+}

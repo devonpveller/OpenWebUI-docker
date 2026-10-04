@@ -83,6 +83,23 @@ if ($alerterRunning) {
       if ($h.coalesce_queue_depth -gt 0) {
         Write-Check 'coalesce_queue' warn "$($h.coalesce_queue_depth) pending"
       }
+      # Per-channel delivery (pa-channels): telegram / mattermost / email.
+      if ($h.channels) {
+        foreach ($name in @('telegram', 'mattermost', 'email')) {
+          $c = $h.channels.$name
+          if (-not $c) { continue }
+          if (-not $c.configured) {
+            Write-Check "channel $name" warn "off: $($c.reason)"
+          } elseif ($c.consecutive_failures -gt 0) {
+            Write-Check "channel $name" warn "$($c.consecutive_failures) consecutive failed sends"
+          } else {
+            Write-Check "channel $name" ok 'configured'
+          }
+        }
+      }
+      if ($h.undelivered_since) {
+        Write-Check 'alert delivery' down "an alert reached NO channel (since $($h.undelivered_since))"
+      }
     } catch {
       Write-Check '/health' warn "unparseable JSON: $healthJson"
     }

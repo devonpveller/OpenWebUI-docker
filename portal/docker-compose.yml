@@ -131,7 +131,11 @@ services:
     container_name: portal-alerter
     networks:
       - auth-net          # internal: true — watcher + tripwire POST /alert here
-      - notify-net        # outbound to oauth2.googleapis.com + gmail.googleapis.com
+      # outbound: oauth2.googleapis.com + gmail.googleapis.com (email copy),
+      # api.telegram.org (when PORTAL_ALERT_TELEGRAM_* are set), and the host's
+      # published Mattermost port (when PORTAL_ALERT_MM_URL is set, e.g.
+      # http://host.docker.internal:8065). See POSTURE.md.
+      - notify-net
     working_dir: /app
     volumes:
       # NOT :ro — Docker can't create the /app/token.json mount target
@@ -143,11 +147,23 @@ services:
       - caddy-data:/logs/caddy:ro
       # Daily digest markdown reports. Persists to host so the operator
       # can browse via documentation/portal-digest/ (see also
-      # portal-status.ps1's "Most recent digest" probe).
+      # portal-status.ps1's "Most recent digest" probe). Also holds
+      # alerter-delivery-state.json, which the HOST watchdog reads
+      # (stack-watchdog.ps1 Test-PortalAlertDelivery) - keep this mount.
       - ../reports/portal-digest:/reports
     environment:
-      - DIGEST_TO=${DIGEST_TO}
-      - DIGEST_FROM=${DIGEST_FROM}
+      # Channels (pa-channels): every alert goes to every channel set here;
+      # success = at least one delivered. Blank = that channel is off.
+      - PORTAL_ALERT_TELEGRAM_BOT_TOKEN=${PORTAL_ALERT_TELEGRAM_BOT_TOKEN:-}
+      - PORTAL_ALERT_TELEGRAM_CHAT_ID=${PORTAL_ALERT_TELEGRAM_CHAT_ID:-}
+      - PORTAL_ALERT_MM_URL=${PORTAL_ALERT_MM_URL:-}
+      - PORTAL_ALERT_MM_TOKEN=${PORTAL_ALERT_MM_TOKEN:-}
+      - PORTAL_ALERT_MM_CHANNEL_ID=${PORTAL_ALERT_MM_CHANNEL_ID:-}
+      - PORTAL_ALERT_MM_MENTION=${PORTAL_ALERT_MM_MENTION:-}
+      - PORTAL_ALERT_HOST_LABEL=${PORTAL_ALERT_HOST_LABEL:-portal}
+      # Email: blank DIGEST_TO or unusable OAuth files = email off (logged once).
+      - DIGEST_TO=${DIGEST_TO:-}
+      - DIGEST_FROM=${DIGEST_FROM:-}
       - DIGEST_WINDOW_HOURS=${DIGEST_WINDOW_HOURS:-24}
       - ALERT_RATE_LIMIT_PER_MIN=${ALERT_RATE_LIMIT_PER_MIN:-20}
       - PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
@@ -617,7 +633,8 @@ networks:
   auth-net:
     driver: bridge
     internal: true
-  # notify-net: portal-alerter (egress to Gmail) + portal-cron.
+  # notify-net: portal-alerter (egress to Gmail, api.telegram.org, and the
+  # host's Mattermost port) + portal-cron.
   # NOT internal - the single internet-egress chokepoint in the portal.
   notify-net:
     driver: bridge
