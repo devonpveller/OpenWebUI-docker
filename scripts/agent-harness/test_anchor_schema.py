@@ -70,14 +70,18 @@ def _ps_problems(anchor: dict, schema_path: Path | None = None,
         + override
         + f"$a = Get-Content -Raw -LiteralPath '{payload.as_posix()}' | ConvertFrom-Json;"
         + "$p = @(Test-Anchor $a);"
-        + "ConvertTo-Json -Depth 4 -Compress @{ problems = $p }"
+        # The answer goes back through a UTF-8 FILE, not stdout (mt-policy attempt 3): the
+        # console code page turned a non-ASCII character in a problem text into '?', so the
+        # comparison was of the console, not of the reader.
+        + f"[IO.File]::WriteAllText('{(d / 'problems.json').as_posix()}', "
+        + "(ConvertTo-Json -Depth 4 -Compress @{ problems = $p }), (New-Object System.Text.UTF8Encoding($false)))"
     )
     out = subprocess.run(
         [PS, "-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True, text=True, timeout=120,
     )
     assert out.returncode == 0, out.stderr
-    parsed = json.loads(out.stdout.strip())["problems"]
+    parsed = json.loads((d / "problems.json").read_text(encoding="utf-8"))["problems"]
     # ConvertTo-Json renders a 0- or 1-element array as null / a bare string.
     if parsed is None:
         return []
@@ -239,6 +243,28 @@ CORPUS = [
     ("B-tier-null", dict(VALID_B, tier=None)),
     ("B-tier-empty-string", dict(VALID_B, tier="")),
     ("B-tier-padded", dict(VALID_B, tier="  small  ")),
+    # attempt 3 (tester N2): ignorable and control characters, look-alikes, numeric strings, a long
+    # string. PowerShell's culture-aware -ccontains ignored U+00AD/U+200D/U+0000, and .NET Trim()
+    # and Python strip() disagree on U+001C-001F; both readers now refuse every one identically.
+    ("B-tier-soft-hyphen", dict(VALID_B, tier="sm\u00adall")),
+    ("B-tier-zwj", dict(VALID_B, tier="sma\u200dll")),
+    ("B-tier-zwsp", dict(VALID_B, tier="sm\u200ball")),
+    ("B-tier-nul", dict(VALID_B, tier="small\u0000")),
+    ("B-tier-trailing-soft-hyphen", dict(VALID_B, tier="large\u00ad")),
+    ("B-tier-unit-sep", dict(VALID_B, tier="small\x1f")),
+    ("B-tier-file-sep", dict(VALID_B, tier="\x1csmall")),
+    ("B-tier-nel", dict(VALID_B, tier="small\u0085")),
+    ("B-tier-nbsp", dict(VALID_B, tier="\u00a0small")),
+    ("B-tier-em-space", dict(VALID_B, tier="small\u2003")),
+    ("B-tier-tab-newline", dict(VALID_B, tier="\tsmall\n")),
+    ("B-tier-trailing-newline", dict(VALID_B, tier="small\n")),
+    ("B-tier-spaces", dict(VALID_B, tier="   ")),
+    ("B-tier-cyrillic", dict(VALID_B, tier="\u0455mall")),
+    ("B-tier-fullwidth", dict(VALID_B, tier="\uff53\uff4d\uff41\uff4c\uff4c")),
+    ("B-tier-long-s", dict(VALID_B, tier="\u017fmall")),
+    ("B-tier-numeric-string", dict(VALID_B, tier="1")),
+    ("B-tier-item", dict(VALID_B, tier="item")),
+    ("B-tier-long", dict(VALID_B, tier="small" * 20000)),
 ]
 
 

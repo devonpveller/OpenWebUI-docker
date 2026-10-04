@@ -555,12 +555,15 @@ function Get-ItemTier($item) {
 
 function Get-AnchorTier($anchorObj) {
     if ($null -eq $anchorObj) { return "" }
-    if (-not ($anchorObj.PSObject.Properties.Name -contains "tier")) { return "" }
+    # The property spelled EXACTLY "tier" (ordinal): PSObject property access is case-
+    # insensitive, so `$anchorObj.tier` would read a "TIER" key Python never sees (attempt 3).
     $v = $null
-    $v = $anchorObj.tier
+    foreach ($prop in $anchorObj.PSObject.Properties) {
+        if ([string]::Equals($prop.Name, "tier", [System.StringComparison]::Ordinal)) { $v = $prop.Value }
+    }
     # Only a string is a tier - the schema refuses anything else, and stringifying a list here
-    # is how attempt 1 recorded ["small"] as "small".
-    if (($v -is [string]) -and $v.Trim()) { return $v.Trim() }
+    # is how attempt 1 recorded ["small"] as "small". No Trim: the schema refuses padding.
+    if (($v -is [string]) -and $v.Length -gt 0) { return $v }
     return ""
 }
 
@@ -616,10 +619,18 @@ function Get-AdviceDeltaLines($item, [int]$attempt) {
     # 200 KB blob added after a failure read as a 0-line "small diff". numstat prints `-` for a
     # binary file, and an unmeasurable change is UNKNOWN, which never satisfies the rule. Renames
     # stay folded (git's default) so a pure rename counts its CONTENT change, not 2x its size.
-    $stat = @(Invoke-GitCapture @("diff", "--numstat", [string]$prev.sha, [string]$item.branch))
+    # --raw beside --numstat (attempt 3): a SUBMODULE bump (gitlink, mode 160000) numstats as
+    # "1 1" - a 2-line "small diff" for what may be any amount of moved code. A gitlink change,
+    # like a binary one, is UNKNOWN. --raw rows start with ':' and carry both modes.
+    $stat = @(Invoke-GitCapture @("diff", "--raw", "--numstat", [string]$prev.sha, [string]$item.branch))
     if ($LASTEXITCODE -ne 0) { return $null }
     $n = 0
     foreach ($row in $stat) {
+        if ("$row".StartsWith(":")) {
+            $modes = ("$row".Substring(1) -split " ")
+            if (($modes.Count -ge 2) -and (($modes[0] -eq "160000") -or ($modes[1] -eq "160000"))) { return $null }
+            continue
+        }
         $cols = "$row" -split "`t"
         if ($cols.Count -lt 3) { continue }
         if ($cols[0] -eq "-" -or $cols[1] -eq "-") { return $null }

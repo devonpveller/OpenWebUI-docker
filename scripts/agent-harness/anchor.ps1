@@ -130,10 +130,20 @@ function Test-Anchor($anchor) {
             # falsy array, which would wave an empty list through as "absent".
             if (($f.PSObject.Properties.Name -contains "allowed") -and $has -and -not ($null -eq $val)) {
                 $allowed = @($f.allowed | ForEach-Object { [string]$_ })
+                # attempt 3: no Trim and no culture. -ccontains is culture-aware and ignored
+                # U+00AD/U+200D/U+0000, and .NET Trim() and Python strip() disagree on
+                # U+001C-001F. The value must match the ASCII name pattern exactly (\z, not $)
+                # and equal an allowed value ORDINALLY; "" (exactly empty) is absent.
                 if (-not ($val -is [string])) {
                     $problems += ("'{0}' must be a string, one of: {1} (got JSON type {2}) - {3}" -f $k, ($allowed -join ", "), (Get-AnchorJsonKind $val), $f.why)
-                } elseif ($val.Trim() -and -not ($allowed -ccontains $val.Trim())) {
-                    $problems += ("'{0}' must be one of: {1} (got '{2}') - {3}" -f $k, ($allowed -join ", "), $val.Trim(), $f.why)
+                } elseif ($val.Length -gt 0) {
+                    $isAllowed = $false
+                    if ([regex]::IsMatch($val, '^[a-z][a-z0-9_-]{0,31}\z')) {
+                        foreach ($a in $allowed) { if ([string]::Equals($val, $a, [System.StringComparison]::Ordinal)) { $isAllowed = $true } }
+                    }
+                    if (-not $isAllowed) {
+                        $problems += ("'{0}' must be one of: {1} (got '{2}') - {3}" -f $k, ($allowed -join ", "), $val, $f.why)
+                    }
                 }
             }
         }
@@ -235,8 +245,8 @@ function Format-Anchor($anchor) {
     if ($anchor.PSObject.Properties.Name -contains "audience" -and $anchor.audience) {
         $out += "AUDIENCE  : " + $anchor.audience
     }
-    if ($anchor.PSObject.Properties.Name -contains "tier" -and "$($anchor.tier)".Trim()) {
-        $out += "TIER      : " + "$($anchor.tier)".Trim() + " (model size - harness.config.json model_tiers)"
+    if ($anchor.PSObject.Properties.Name -contains "tier" -and ($anchor.tier -is [string]) -and $anchor.tier.Length -gt 0) {
+        $out += "TIER      : " + $anchor.tier + " (model size - harness.config.json model_tiers)"
     }
     if ($anchor.PSObject.Properties.Name -contains "acceptance" -and @($anchor.acceptance).Count) {
         $out += "ACCEPTANCE:"

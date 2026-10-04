@@ -204,10 +204,15 @@ and new-logic work deserve a large model; narrow, mechanical or doc-only work a 
 `-Propose`, `-Claim`, `-Submit`, `-Resubmit` and `-Approve` and never blocks on it - a
 broken block prints `MODEL (advisory): unavailable - <why>` and the command carries on.
 
-- **The item's tier** is the anchor's optional `tier` field: a JSON string, `large` or
-  `small`, case sensitive. Both anchor readers refuse anything else - a list such as
-  `["small"]`, a number, a boolean, an object - naming its JSON type. Blank or `null`
-  means absent. Absent means `model_tiers.default_tier`, which is `large`, so an
+- **The item's tier** is the anchor's optional `tier` field: a JSON string that is exactly
+  `large` or `small`. Both anchor readers refuse anything else:
+  - a non-string (a list such as `["small"]`, a number, a boolean, an object), named by its
+    JSON type;
+  - a string that does not match `^[a-z][a-z0-9_-]{0,31}$` exactly. Nothing is trimmed or
+    normalised, so `" small"`, `"Large"`, `"sm<U+00AD>all"` and `"small<U+0000>"` are all
+    refused, in the same words by both readers.
+
+  Exactly `""` or `null` means absent. Absent means `model_tiers.default_tier`, which is `large`, so an
   unclassified item never silently drops to a smaller model. The queue item records it as
   `tier` (`""` = default, resolved when advice is printed). When the `model_tiers` block
   is USABLE, `-Propose` (and `-ConfirmAnchor`/`-AmendAnchor -Anchor`) also refuses a tier
@@ -220,13 +225,25 @@ broken block prints `MODEL (advisory): unavailable - <why>` and the command carr
   (`local-large` / `local-small`). `haiku` is `cloud.trivial` - lookups and evidence copying
   only, never a pipeline role.
 - **The whole block is validated before any rule is evaluated** (`Get-ModelTiersProblems`
-  / `model_tiers_problems`). These are refused rather than ignored or rounded, even when an
-  earlier rule would have matched first: an unknown rule key, a rule `tier` that is not a
-  configured tier or `item`, a rule `role` that is not `developer`/`tester`/`reviewer`, a
-  non-integer attempt or delta bound (e.g. `1.5`), a non-boolean `doc_only`, a wrong-case
-  `default_tier`, or a missing map cell. Every comparison is **case sensitive** in both
-  readers (PowerShell uses `-ceq`/`-ccontains`), so `LARGE`, `Tester` or a config
-  `"role": "Reviewer"` get the same refusal from both.
+  / `model_tiers_problems`). These are refused rather than ignored, rounded or trimmed, even
+  when an earlier rule would have matched first:
+  - a key at ANY level that is not exactly a canonical spelling (`_`-prefixed notes
+    excepted): `Cloud`, `Rules`, `Roles`, a role-map tier `Large`, a role `Tester`, a rule
+    key `Role` or `max_attemp`;
+  - a tier, role or `default_tier` that is not a name or not configured;
+  - an attempt or delta bound that is not a whole number in 0..2147483647 (e.g. `1.5`, a
+    20-digit number, or `-1`);
+  - a non-boolean `doc_only`;
+  - a missing map cell.
+
+  The two readers apply the same four rules (stated in config.ps1's model-tier header):
+  1. every name must match `^[a-z][a-z0-9_-]{0,31}$` before it is compared;
+  2. every comparison is ordinal;
+  3. every key is found by an ordinal scan, never through a case-insensitive PowerShell
+     hashtable lookup;
+  4. numeric bounds are range-checked.
+
+  The tester's 42,840-input matrix gets the same answer or the same refusal from both.
 - **Rules**, first match wins (`model_tiers.rules`, conditions `role`, `min_attempt`,
   `max_attempt`, `doc_only`, `max_delta_lines`):
 
@@ -242,9 +259,10 @@ broken block prints `MODEL (advisory): unavailable - <why>` and the command carr
   - doc-only uses `git diff --no-renames --name-only <line>...<branch>`. A rename counts as
     its old path AND its new path, so `big.py -> big.md` is not doc-only. Note that `-like`
     is case-insensitive, so `NOTES.MD` counts as a doc.
-  - the delta uses `git diff --numstat <last verdict sha> <branch>`, adding insertions and
-    deletions. A pure rename counts its content change (0). A binary file has no line
-    count, so the delta is UNKNOWN.
+  - the delta uses `git diff --raw --numstat <last verdict sha> <branch>`, adding
+    insertions and deletions. A pure rename counts its content change (0). A binary file
+    has no line count, and a submodule (gitlink, mode 160000) bump numstats as "1 1" while
+    it may move any amount of code, so either one makes the delta UNKNOWN.
 
   When either fact cannot be read it is UNKNOWN, and unknown never satisfies a rule that
   conditions on it.

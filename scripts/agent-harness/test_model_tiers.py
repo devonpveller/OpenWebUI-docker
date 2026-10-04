@@ -209,12 +209,14 @@ VALID_B = {
 }
 
 
-@pytest.mark.parametrize("tier", ["large", "small", "", "   "])
+@pytest.mark.parametrize("tier", ["large", "small", ""])
 def test_a_valid_or_blank_tier_is_accepted(tier):
     assert anchor_schema.problems(dict(VALID_B, tier=tier)) == []
 
 
-@pytest.mark.parametrize("tier", ["medium", "Large", "SMALL", "opus"])
+# attempt 3: no strip, no normalisation - padding, control and ignorable characters are refused.
+@pytest.mark.parametrize("tier", ["medium", "Large", "SMALL", "opus", "   ", " small", "small\x1f",
+                                  "\x1csmall", "sm\u00adall", "sma\u200dll", "small\u0000"])
 def test_an_invalid_tier_is_refused_naming_the_allowed_values(tier):
     found = anchor_schema.problems(dict(VALID_B, tier=tier))
     assert len(found) == 1
@@ -289,17 +291,17 @@ def _ps_matrix(cases, tmp_path, cfg: Path | None = None) -> list:
     inp = tmp_path / "cases.json"
     outp = tmp_path / "ps_out.json"
     inp.write_text(json.dumps([{"r": r, "t": t, "a": a, "d": d, "dl": dl}
-                               for r, t, a, d, dl in cases]), encoding="utf-8")
+                               for r, t, a, d, dl in cases], ensure_ascii=True), encoding="ascii")
     env_line = f"$env:AI_STACK_HARNESS_CONFIG='{cfg.as_posix()}';" if cfg else         "Remove-Item Env:AI_STACK_HARNESS_CONFIG -ErrorAction SilentlyContinue;"
     script = (
         env_line + f". '{(HERE / 'config.ps1').as_posix()}';"
-        + f"$cs = Get-Content -Raw '{inp.as_posix()}' | ConvertFrom-Json;"
+        + f"$cs = [IO.File]::ReadAllText('{inp.as_posix()}') | ConvertFrom-Json;"
         + "$res = New-Object System.Collections.ArrayList;"
         + "foreach ($c in $cs) { try {"
         + " $o = Resolve-ModelTier -Role $c.r -ItemTier $c.t -Attempt $c.a -DocOnly $c.d -DeltaLines $c.dl;"
         + " [void]$res.Add([ordered]@{tier=$o.tier; rule=$o.rule; cloud=$o.cloud; local=$o.local; item_tier=$o.item_tier})"
         + " } catch { [void]$res.Add([ordered]@{err=$_.Exception.Message}) } };"
-        + f"$res | ConvertTo-Json -Depth 4 -Compress | Set-Content -Encoding utf8 '{outp.as_posix()}'"
+        + f"[IO.File]::WriteAllText('{outp.as_posix()}', ($res | ConvertTo-Json -Depth 4 -Compress), (New-Object System.Text.UTF8Encoding($false)))"
     )
     out = subprocess.run([PS, "-NoProfile", "-NonInteractive", "-Command", script],
                          capture_output=True, text=True, timeout=1200)
@@ -319,7 +321,7 @@ def _py_matrix(cases) -> list:
 
 
 def _divergences(ps, py) -> list:
-    assert len(ps) == len(py) == len(MATRIX)
+    assert len(ps) == len(py) == len(MATRIX), (len(ps), len(py))
     return [(c, p, q) for c, p, q in zip(MATRIX, py, ps) if p != q]
 
 
@@ -340,7 +342,34 @@ PLANTED = [
     ("rule-role-wrong-case", lambda c: c["model_tiers"]["rules"][0].update(role="Reviewer"),
      "model_tiers rule 'review-whole-change' names unknown role 'Reviewer' - known roles: developer, tester, reviewer"),
     ("fractional-min-attempt", lambda c: c["model_tiers"]["rules"][2].update(min_attempt=1.5),
-     "model_tiers rule 'retest-small-diff' key 'min_attempt' must be a whole number (got a number)"),
+     "model_tiers rule 'retest-small-diff' key 'min_attempt' must be a whole number from 0 to 2147483647 (got a number)"),
+    # attempt 3 (tester N1/N2): KEY case at every level, ignorable characters in VALUES, and an
+    # out-of-range bound. PowerShell found "Cloud" for "cloud" and compared "sm\u00adall" equal to
+    # "small"; Python did neither.
+    ("key-Cloud", lambda c: c["model_tiers"].__setitem__("Cloud", c["model_tiers"].pop("cloud")),
+     "model_tiers has an unknown key 'Cloud' - keys: tiers, default_tier, doc_only_patterns, rules, cloud, local"),
+    ("key-Rules", lambda c: c["model_tiers"].__setitem__("Rules", c["model_tiers"].pop("rules")),
+     "model_tiers has an unknown key 'Rules'"),
+    ("key-local-Roles", lambda c: c["model_tiers"]["local"].__setitem__("Roles", c["model_tiers"]["local"].pop("roles")),
+     "model_tiers.local has an unknown key 'Roles' - keys: substrate, roles, trivial"),
+    ("key-roles-Large", lambda c: c["model_tiers"]["cloud"]["roles"].__setitem__("Large", c["model_tiers"]["cloud"]["roles"].pop("large")),
+     "model_tiers.cloud.roles has an unknown key 'Large' - keys: large, small"),
+    ("key-role-map-Tester", lambda c: c["model_tiers"]["local"]["roles"]["small"].__setitem__("Tester", c["model_tiers"]["local"]["roles"]["small"].pop("tester")),
+     "model_tiers.local.roles.small has an unknown key 'Tester' - keys: developer, tester, reviewer"),
+    ("key-rule-Role", lambda c: c["model_tiers"]["rules"][2].__setitem__("Role", c["model_tiers"]["rules"][2].pop("role")),
+     "model_tiers rule 'retest-small-diff' has an unknown key 'Role'"),
+    ("rule-tier-softhyphen", lambda c: c["model_tiers"]["rules"][1].update(tier="sm\u00adall"),
+     "model_tiers rule 'doc-only' names unknown tier 'sm\u00adall'"),
+    ("rule-role-softhyphen", lambda c: c["model_tiers"]["rules"][2].update(role="test\u00ader"),
+     "model_tiers rule 'retest-small-diff' names unknown role 'test\u00ader'"),
+    ("default-tier-softhyphen", lambda c: c["model_tiers"].update(default_tier="large\u00ad"),
+     "model_tiers.default_tier 'large\u00ad' is not one of the tiers: large, small"),
+    ("tiers-entry-nul", lambda c: c["model_tiers"].update(tiers=["large", "small\u0000"]),
+     "model_tiers.tiers entry 'small\u0000' is not a name"),
+    ("min-attempt-bigint", lambda c: c["model_tiers"]["rules"][2].update(min_attempt=99999999999999999999),
+     "model_tiers rule 'retest-small-diff' key 'min_attempt' must be a whole number from 0 to 2147483647"),
+    ("max-delta-negative", lambda c: c["model_tiers"]["rules"][2].update(max_delta_lines=-1),
+     "model_tiers rule 'retest-small-diff' key 'max_delta_lines' must be a whole number from 0 to 2147483647"),
     ("bad-key-in-a-late-rule", lambda c: c["model_tiers"]["rules"][3].update(max_attemp=1),
      "model_tiers rule 'first-adversarial-round' has an unknown key 'max_attemp'"),
     ("doc-only-not-boolean", lambda c: c["model_tiers"]["rules"][1].update(doc_only="yes"),
@@ -371,3 +400,36 @@ def test_a_planted_config_defect_is_loud_and_identical_in_both(monkeypatch, tmp_
     assert div == [], f"{name}: {len(div)} divergences, first: {div[:3]}"
     canonical = [i for i, c in enumerate(MATRIX) if c[0] in ("developer", "tester", "reviewer")]
     assert all("err" in py[i] for i in canonical), name   # no canonical input slips through
+
+
+# ── attempt 3 (tester N1/N2): the tester's 42,840-input matrix, both readers, shipped config ──
+# Roles and tiers with case variants, whitespace, Unicode look-alikes, IGNORABLE characters
+# (U+00AD, U+200D, U+0000 - which PowerShell's culture-aware -ceq skipped), control characters,
+# numeric strings and 10 KB / 100 KB strings; attempts incl. 2^31-1; deltas incl. 2^40.
+SH, ZWJ, ZWSP, NBSP = "\u00ad", "\u200d", "\u200b", "\u00a0"
+M2_LOOKALIKE = ["s" + SH + "mall", "sma" + ZWJ + "ll", "sm" + ZWSP + "all", "small\u0000",
+                "\u0455mall", "l\u0430rge", "\uff53\uff4d\uff41\uff4c\uff4c", "\u017fmall", "larg\u00e9",
+                "LARGE", "Small", "large" + SH]
+M2_WS = [" small", "small ", "\tsmall", "small\n", NBSP + "small", "small\u2003", "small\x1f", " ", "\t"]
+M2_NUMERIC = ["1", "0", "1.0", "-1", "1e3", "item"]
+M2_LONGS = ["small" * 2000, "x" * 100000, "large" + " " * 5000]
+M2_ROLES = ["developer", "tester", "reviewer", "Tester", "REVIEWER", "worker", "test" + SH + "er",
+            "revie" + ZWJ + "wer", " tester", "tester ", "developer\u0000", "1", "d" * 50000, ""]
+M2_TIERS = ["", "large", "small", "medium"] + M2_LOOKALIKE + M2_WS + M2_NUMERIC + M2_LONGS
+MATRIX2 = list(itertools.product(M2_ROLES, M2_TIERS, [0, 1, 2, 3, -1, 2**31 - 1],
+                                 [None, True, False], [None, 0, 80, 81, 2**40]))
+
+
+@pytest.mark.skipif(PS is None, reason="no PowerShell on PATH")
+def test_the_testers_42840_input_matrix_agrees_on_the_shipped_config(tmp_path):
+    assert len(MATRIX2) == 42840
+    ps = _ps_matrix(MATRIX2, tmp_path)
+    py = _py_matrix(MATRIX2)
+    assert len(ps) == len(py) == len(MATRIX2)
+    div = [(c, p, q) for c, p, q in zip(MATRIX2, py, ps) if p != q]
+    assert div == [], f"{len(div)} divergences, first: {[(repr(c)[:120], p, q) for c, p, q in div[:3]]}"
+    # Non-vacuous: refusals AND answers, and every ignorable/control-character input is a refusal.
+    assert sum("err" in r for r in py) > 0 and sum("err" not in r for r in py) > 0
+    for c, r in zip(MATRIX2, py):
+        if any(ch in (c[0] + c[1]) for ch in (SH, ZWJ, "\u0000", "\x1f")):
+            assert "err" in r, repr(c)[:120]
