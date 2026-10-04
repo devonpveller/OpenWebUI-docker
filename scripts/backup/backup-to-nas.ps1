@@ -70,7 +70,9 @@
 # Failure alerting:
 #   On non-zero Robocopy exit codes (>= 8), the script POSTs a JSON alert
 #   to the portal-alerter at http://portal-alerter:8080/alert IF the alerter
-#   is reachable from the host -- operator gets an email about the failure.
+#   is reachable from the host -- the alerter delivers it on every channel it
+#   has (Telegram / Mattermost / Gmail copy); see Send-AlerterFailure for the
+#   independent Mattermost + Telegram fan-out this script also does.
 #
 # Exit codes:
 #   0  - sync succeeded (Robocopy exit 0-7 are "success or minor warnings")
@@ -156,7 +158,9 @@ function Write-LogLine {
 # (a) builds the JSON body via ConvertTo-Json -- avoiding the double-escape
 # bug that the inline implementation had with UNC paths, and (b) actually
 # checks wget's exit code + the alerter's response body, so we know whether
-# the email truly dispatched. See scripts/lib/portal-alerter-client.ps1.
+# the alerter delivered it on at least one of its channels (Telegram /
+# Mattermost / Gmail copy - not necessarily email). See
+# scripts/lib/portal-alerter-client.ps1.
 . (Join-Path $PSScriptRoot '..\lib\portal-alerter-client.ps1')
 
 # Resolve an interpreter for the sysadmin-mcp notifiers (Mattermost / Telegram).

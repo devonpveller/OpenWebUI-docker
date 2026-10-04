@@ -7,9 +7,11 @@ automatically.
 
 ## What alerts you automatically (via email)
 
-All emails arrive in `${DIGEST_TO}` (your Gmail). The portal-alerter
-container is the single Gmail egress; everything POSTs to it over the
-internal `auth-net` Docker network.
+All emails arrive in `${DIGEST_TO}` (your Gmail); each instant alert also
+arrives as one line on Telegram and/or Mattermost when those channels are set
+(portal/README.md, "Alert delivery"). The portal-alerter container is the
+single alert egress; everything POSTs to it over the internal `auth-net`
+Docker network.
 
 | Source | Condition | Severity |
 |---|---|---|

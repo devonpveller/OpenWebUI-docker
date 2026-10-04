@@ -14,7 +14,7 @@
 
 ## 1. Detection signals
 
-All signals arrive via Gmail to the `DIGEST_TO` inbox. The watchers (`authelia-watcher`, `integrity-tripwire`) POST JSON to `portal-alerter:8080/alert`; the alerter sends the email.
+Signals arrive on every channel the alerter has configured: a one-line notice on Telegram and/or Mattermost (severity, event, host label, time), and the full detail by email to the `DIGEST_TO` inbox. The watchers (`authelia-watcher`, `integrity-tripwire`) POST JSON to `portal-alerter:8080/alert`; the alerter fans it out (portal/README.md, "Alert delivery"). The subject-line convention below is the email copy's.
 
 **Subject-line convention:** `[<SEVERITY>] <event> <source_ip>` — e.g., `[HIGH] authentication.failed.burst 203.0.113.42`.
 

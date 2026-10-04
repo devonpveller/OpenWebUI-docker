@@ -2523,6 +2523,107 @@ function Invoke-ContainerLoopCheck {
 }
 # === END CONTAINER LOOPS ======================================================
 
+# === PORTAL ALERT DELIVERY (pa-channels, 2026-10-04) ==========================
+# portal-alerter sends every portal alert (integrity tripwire, Authelia
+# watchers, the notification bridge) to Telegram / Mattermost / email and
+# writes what happened to a delivery-state file in its /reports bind mount:
+# <repo>\reports\portal-digest\alerter-delivery-state.json. 09-29..10-04 every
+# tripwire alert died inside portal-alerter (0-byte Gmail OAuth files) and
+# NOTHING noticed: a failed alert path cannot report its own failure. So this
+# rule reads that file and pages through the WATCHDOG's own path (host Telegram
+# + the Mattermost mirror, via Send-LoopAlert) - never through portal-alerter.
+#   undelivered_since set            -> an alert reached NO channel
+#   a CONFIGURED channel with >= $PortalAlertChannelFailThreshold consecutive
+#   failed sends                      -> that channel keeps failing
+# A channel that is simply not configured (e.g. email before Gmail is
+# re-authorized) is not a failure. File only: no docker call, so it also runs
+# when the portal is off (no file, or an old one, is quiet unless it says a
+# delivery failed). Each key pages once per $LoopAlertCooldownHours and sends
+# its all-clear when the state clears (the next delivered alert, or
+# `alerter.ts --selftest` in the container). The file is written by a
+# container, so every value taken from it is cast or reduced to a short
+# identifier before it goes into a message.
+$PortalAlertChannelFailThreshold = 3
+
+function Get-PortalAlertStatePath {
+    return (Join-Path $PROJECT_DIR 'reports\portal-digest\alerter-delivery-state.json')
+}
+
+# A count from the container-written file, never trusted to fit an [int]: a
+# value past Int32 used to fail the cast and read as 0 (no page). Non-numbers
+# and negatives are 0; anything past Int64 is clamped to Int64.MaxValue.
+function ConvertTo-AlertCount {
+    param($Value)
+    $d = 0.0
+    try { $d = [double]$Value } catch { return [int64]0 }
+    if ([double]::IsNaN($d) -or $d -le 0) { return [int64]0 }
+    if ($d -ge [double][int64]::MaxValue) { return [int64]::MaxValue }
+    return [int64][math]::Floor($d)
+}
+
+function ConvertTo-SafeAlertToken {
+    param([string]$Value, [int]$Max = 64)
+    if (-not $Value) { return 'unknown' }
+    $s = $Value -replace '[^A-Za-z0-9._:/-]', '_'
+    if ($s.Length -gt $Max) { $s = $s.Substring(0, $Max) }
+    return $s
+}
+
+function Test-PortalAlertDelivery {
+    [CmdletBinding()]
+    param()
+    $path = Get-PortalAlertStatePath
+    if (-not (Test-Path -LiteralPath $path)) {
+        Write-LogEntry "portal alert delivery: no state file yet ($path) - nothing to judge" "DEBUG"
+        return $true
+    }
+    $state = $null
+    try {
+        $state = [IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        Write-LogEntry "portal alert delivery: state file unreadable ($($_.Exception.Message)) - skipped this pass" "WARN"
+        return $true
+    }
+    $ok = $true
+
+    $undeliveredKey = 'portal-alerts-undelivered'
+    if ($state.undelivered_since) {
+        $ok = $false
+        $count = 0
+        $count = ConvertTo-AlertCount $state.undelivered_count
+        $since = ConvertTo-SafeAlertToken ([string]$state.undelivered_since) 32
+        $ev = ConvertTo-SafeAlertToken ([string]$state.last_undelivered_event)
+        $msg = "portal-alerter: $count portal alert(s) since $since reached NO channel (last: $ev). Portal alerts are not reaching you - check 'docker logs portal-alerter' and the PORTAL_ALERT_* / Gmail OAuth settings in portal/.env. Clears on the next delivered alert."
+        Write-LogEntry "PORTAL ALERTS UNDELIVERED: $msg" "ERROR"
+        Send-LoopAlert -Key $undeliveredKey -Message $msg | Out-Null
+    } else {
+        Resolve-LoopAlert -Key $undeliveredKey -Message "portal-alerter is delivering portal alerts again." | Out-Null
+    }
+
+    foreach ($name in @('telegram', 'mattermost', 'email')) {
+        $key = "portal-alert-channel-$name"
+        $ch = $null
+        if ($state.channels) { $ch = $state.channels.$name }
+        $fails = 0
+        $configured = $false
+        if ($ch) {
+            $fails = ConvertTo-AlertCount $ch.consecutive_failures
+            $configured = ($ch.configured -eq $true)
+        }
+        if ($configured -and $fails -ge $PortalAlertChannelFailThreshold) {
+            $ok = $false
+            $at = ConvertTo-SafeAlertToken ([string]$ch.last_error_at) 32
+            $msg = "portal-alerter: its $name channel failed $fails sends in a row (last at $at). Other channels may still deliver; check 'docker logs portal-alerter' for the $name error."
+            Write-LogEntry "PORTAL ALERT CHANNEL FAILING: $msg" "ERROR"
+            Send-LoopAlert -Key $key -Message $msg | Out-Null
+        } else {
+            Resolve-LoopAlert -Key $key -Message "portal-alerter's $name channel is no longer failing." | Out-Null
+        }
+    }
+    return $ok
+}
+# === END PORTAL ALERT DELIVERY ================================================
+
 function Invoke-HealthCheck {
     Write-LogEntry "Starting comprehensive health check..."
     # Faults found this cycle. Checks RECORD into this and carry on rather
@@ -2904,6 +3005,12 @@ function Invoke-HealthCheck {
     # it must stop the log claiming "All health checks passed".
     if (-not [bool](@(Test-BackupRecency) | Select-Object -Last 1)) {
         $script:HealthIssues += 'backup-stale'
+    }
+
+    # --- portal alert DELIVERY: portal-alerter's own outcome file. Pages through
+    #     this watchdog's path, never through portal-alerter (pa-channels).
+    if (-not [bool](@(Test-PortalAlertDelivery) | Select-Object -Last 1)) {
+        $script:HealthIssues += 'portal-alert-delivery'
     }
 
     # Honest summary. This used to print "All health checks passed" even when
