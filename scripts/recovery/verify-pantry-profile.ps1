@@ -46,18 +46,40 @@ $Script:OB1PantryProfile = 'pantry'
 $Script:OB1Compose = 'OB1\docker\docker-compose.yml'
 
 Check 'teardown/status list names pantry (a running one must go)' ($Script:OB1Profiles -contains 'pantry')
-$upLines = @($src -split "`r?`n" | Where-Object { $_ -match 'compose -f \$Script:OB1Compose @prof up ' })
-Check 'there are exactly two OB1 up sites' ($upLines.Count -eq 2) "(found $($upLines.Count))"
-# each up site must be preceded by `$prof = Get-OB1StartProfiles`
-$lines = $src -split "`r?`n"
-$bad = @()
-for ($i = 0; $i -lt $lines.Count; $i++) {
-    if ($lines[$i] -match 'compose -f \$Script:OB1Compose @prof up ') {
-        $prev = ($lines[[Math]::Max(0, $i - 3)..($i - 1)] -join "`n")
-        if ($prev -notmatch 'Get-OB1StartProfiles') { $bad += ($i + 1) }
+# CODE, NOT TEXT (attempt 1's tester: a comment containing "Get-OB1StartProfiles" above an up
+# site satisfied a text look-back while the mutant `$prof = $Script:OB1Profiles` was live).
+# Walk the AST: every compose `up` invocation inside the two start functions must splat a
+# variable whose LAST assignment before that command is a call to Get-OB1StartProfiles.
+# Comments are not in the AST, so they cannot satisfy this.
+function Get-UpSiteVerdicts($ast, [string]$fn) {
+    $def = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fn }, $true)
+    if (-not $def) { return @(@{ fn = $fn; ok = $false; why = 'function not found' }) }
+    $cmds = $def.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)
+    $verdicts = @()
+    foreach ($c in $cmds) {
+        if ($c.GetCommandName() -ne 'docker') { continue }
+        $words = @($c.CommandElements | ForEach-Object { $_.Extent.Text })
+        if (($words -notcontains 'compose') -or ($words -notcontains 'up')) { continue }
+        $splat = @($c.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.VariableExpressionAst] -and $_.Splatted })
+        if ($splat.Count -ne 1) { $verdicts += @{ fn = $fn; ok = $false; why = 'up site does not splat exactly one variable' }; continue }
+        $var = $splat[0].VariablePath.UserPath
+        $assigns = $def.FindAll({ param($n)
+            $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $n.Left.VariablePath.UserPath -eq $var -and
+            $n.Extent.EndOffset -le $c.Extent.StartOffset }, $true)
+        if ($assigns.Count -eq 0) { $verdicts += @{ fn = $fn; ok = $false; why = "no assignment of $var before the up site" }; continue }
+        $last = $assigns | Sort-Object { $_.Extent.StartOffset } | Select-Object -Last 1
+        $calls = @($last.Right.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Get-OB1StartProfiles' }, $true))
+        $verdicts += @{ fn = $fn; ok = ($calls.Count -ge 1); why = "last assignment: $($last.Extent.Text)" }
     }
+    if ($verdicts.Count -eq 0) { $verdicts += @{ fn = $fn; ok = $false; why = 'no compose up site found' } }
+    return $verdicts
 }
-Check 'both up sites take their flags from Get-OB1StartProfiles' ($bad.Count -eq 0) "(line(s) $($bad -join ','))"
+foreach ($fn in 'Start-OB1Stack', 'Reset-OB1Stack') {
+    $vs = @(Get-UpSiteVerdicts $ast $fn)
+    Check "${fn}: its one compose up takes its flags from Get-OB1StartProfiles (AST)" ((@($vs | Where-Object { -not $_.ok }).Count -eq 0) -and ($vs.Count -eq 1)) (($vs | ForEach-Object { $_.why }) -join '; ')
+}
 
 function Flags { ((Get-OB1StartProfiles) -join ' ') }
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('pantry-rec-' + [guid]::NewGuid().ToString('N'))
