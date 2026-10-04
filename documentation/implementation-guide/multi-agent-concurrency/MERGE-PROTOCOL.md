@@ -419,6 +419,8 @@ git -C <main-checkout> worktree remove .claude/worktrees/merge-line
 .\scripts\agent-harness\queue.ps1 -Merged -Id <id> -By <their-id> -Sha <merge sha>
 ```
 
+`-Merged` also refuses (exit 1, no escape hatch) a sha that is not a merge commit with the tested commit behind a non-first parent on the work line - a fast-forward, cherry-pick or rebase/squash skipped the commit hooks; redo it with `git merge --no-ff` (host: `merge.ff=false`, `pull.ff=only`).  
+
 **If the work line is checked out in the main checkout, you cannot merge - hand off
 instead.** Git refuses a second checkout of one branch, and force-moving the ref would
 leave that working tree's index lying about its contents. With the work line defaulting to
