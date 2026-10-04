@@ -43,6 +43,7 @@ archive deleted or damaged on D: stays intact on the NAS (§8).
 | tailscale | state-dir tar | `tailscale-*.tar.gz` | tar extract |
 | lm-models | llama.cpp model store tar (~120 GB) | `lm-models-*.tar.gz` | tar extract |
 | caddy / authelia | volume tar (portal) | `caddy-*` / `authelia-*.tar.gz` | tar extract |
+| config-secrets | age-encrypted tar of the gitignored config + secrets (every `.env`, `secrets/`, the Authelia users DB, bind-mounted credentials); a host scheduled task, not a sidecar | `config-secrets-*.tar.age` (+ `.files.txt`) | `age --decrypt` with the operator's OFFLINE key, then tar - [config-secrets-backup.md](config-secrets-backup.md) |
 
 `smolcrawl` is retired and has no backup sidecar any more; an old `smolcrawl-*.tar.gz`
 archive has nothing to restore into (see `restore-from-snapshot.md`).

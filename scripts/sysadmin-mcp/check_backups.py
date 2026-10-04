@@ -44,7 +44,7 @@ sys.path.insert(0, _HERE)
 
 # Only these count as real backup artifacts (ignore .sha256 sentinels, _manual
 # logs, and anything else that shares the dir).
-_ARTIFACT_EXTS = (".tar.gz", ".dump", ".sql.gz")
+_ARTIFACT_EXTS = (".tar.gz", ".dump", ".sql.gz", ".tar.age")
 
 # (backup subdir, *-backup container, max_age_hours). Daily sidecars get a 36h
 # threshold (one missed nightly run + slack); lm-models is weekly, so ~8.5 days.
@@ -279,6 +279,58 @@ def _offsite_status() -> dict:
     return {}
 
 
+# The HOST-JOB layer. Not every backup is a sidecar: the encrypted config +
+# secrets archive (every .env, secrets/, the Authelia users DB; config-backup,
+# 2026-10-04) is a Windows scheduled task, scripts/backup/config_secrets_backup.py.
+# Like the NAS row it is never gated on a container, and like the NAS row a fresh
+# artifact is not enough: the job still writes an archive when a REQUIRED file is
+# missing (everything else is worth keeping), so the log's last run must also have
+# reached its completion marker - otherwise the row fails with the run's last
+# [ERROR], which names the missing file. That is the users_database.yml shape: gone
+# on 2026-09-28, noticed on 2026-10-04 only because Authelia restarted.
+_HOST_JOBS = [
+    # (backups subdir, max_age_h, log glob, start marker, success marker, setup doc)
+    ("config-secrets", 36, "config-secrets-backup-*.log",
+     "=== config-secrets backup start ===", "=== config-secrets backup complete ===",
+     "documentation/runbooks/config-secrets-backup.md"),
+]
+
+
+def _host_job_status(subdir: str, max_h: float, log_glob: str, start: str, marker: str,
+                     doc: str) -> dict:
+    """{} when the job's newest artifact is fresh AND its last run completed."""
+    age = _newest_artifact_age_h(subdir)
+    row = {"name": subdir, "age_h": None if age is None else round(age, 1), "max_h": max_h}
+    import glob
+    logs = glob.glob(os.path.join(_REPO_ROOT, "logs", log_glob))
+    last_run = ""
+    if logs:
+        newest = max(logs, key=os.path.getmtime)
+        try:
+            with open(newest, "r", encoding="utf-8", errors="replace") as fh:
+                body = fh.read()
+        except Exception:  # noqa: BLE001
+            body = ""
+        idx = body.rfind(start)
+        last_run = body[idx:] if idx >= 0 else body
+    if age is None:
+        row["detail"] = (f"no archive in ./backups/{subdir} - is the scheduled task installed and an "
+                         f"age recipient configured? ({doc})")
+    elif age > max_h:
+        row["detail"] = f"newest archive is {round(age / 24, 1)} days old - the nightly task is not running"
+    elif last_run and marker not in last_run:
+        # The FIRST errors name the cause (MISSING <file>, REFUSED: ...); the last
+        # one is only the run's summary line.
+        errs = [ln.split("[ERROR]", 1)[1].strip()[:200] for ln in last_run.splitlines() if "[ERROR]" in ln]
+        shown = "; ".join(errs[:3]) + (f" (+{len(errs) - 3} more)" if len(errs) > 3 else "")
+        row["detail"] = f"last run did NOT complete. Errors: {shown or '(none logged)'}"
+    else:
+        return {}
+    if age is not None and age <= max_h:
+        row["fresh"] = True  # fresh but failed: build_message prints the age plainly
+    return row
+
+
 def evaluate() -> dict:
     running = _running_containers()
     stale, skipped, ok = [], [], []
@@ -315,6 +367,13 @@ def evaluate() -> dict:
 
     # The off-site layer is NOT gated on a container running: the NAS sync is a
     # Windows scheduled task, so "no container" must never make it skippable.
+    for subdir, max_h, log_glob, start, marker, doc in _HOST_JOBS:
+        hj = _host_job_status(subdir, max_h, log_glob, start, marker, doc)
+        if hj:
+            stale.append(hj)
+        else:
+            ok.append(subdir)
+
     offsite = _offsite_status()
     if offsite:
         stale.append(offsite)
@@ -327,7 +386,12 @@ def build_message(res: dict) -> str:
     lines = [f"### 🗄️ Backup freshness — **STALE ({len(res['stale'])})**",
              "Newest artifact older than its cadence threshold (container is up but not producing):"]
     for s in res["stale"]:
-        age = "no artifacts ever" if s["age_h"] is None else f"{s['age_h']}h (> {s['max_h']}h)"
+        if s["age_h"] is None:
+            age = "no artifacts ever"
+        elif s.get("fresh"):
+            age = f"{s['age_h']}h old"
+        else:
+            age = f"{s['age_h']}h (> {s['max_h']}h)"
         if s.get("mount"):
             # The wrong-mount class keeps its own line shape: the age is the
             # LEAST informative number on it, and printing it as "(> max)" when
