@@ -33,9 +33,9 @@ function Check($name, $ok, $detail = '') {
 }
 
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($Target, [ref]$null, [ref]$null)
-$want = 'Test-OB1PantryEnabled', 'Get-OB1StartProfiles'
+$want = 'Test-OB1PantryEnabled', 'Get-OB1StartProfiles', 'Start-OB1Stack', 'Reset-OB1Stack', 'Stop-OB1Stack'
 $fns = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $want }, $true)
-Check 'both functions exist in emergency-recovery.ps1' ($fns.Count -eq 2)
+Check 'the five functions exist in emergency-recovery.ps1' ($fns.Count -eq 5)
 foreach ($f in $fns) { . ([scriptblock]::Create($f.Extent.Text)) }
 
 # The same constants the script declares, read from it rather than copied.
@@ -100,6 +100,43 @@ try {
     Check 'env COMPOSE_PROFILES without pantry: no flag' ((Flags) -notmatch 'pantry') (Flags)
     'not json {' | Set-Content '.stack\state.json'
     Check 'unreadable state file: fails closed to off' ((Flags) -notmatch 'pantry') (Flags)
+
+    # ---- BEHAVIOUR: run the real start/reset/stop functions with `docker` stubbed to record argv.
+    # The AST check above cannot see an escape that keeps the right assignment but adds pantry some
+    # other way (a literal `--profile pantry`, `+ $Script:OB1Profiles`, an if/else). This does.
+    function Test-OB1Available { $true }
+    function Write-Log { param($Level, $Message) }
+    function Wait-ForRestartLoops { param($Seconds) return ,@() }
+    function Start-Sleep { param($Seconds) }
+    $global:DockerCalls = New-Object System.Collections.ArrayList
+    function docker { [void]$global:DockerCalls.Add(($args -join ' ')); $global:LASTEXITCODE = 0 }
+    function Run-Recovery {
+        $global:DockerCalls.Clear()
+        Start-OB1Stack; $startCalls = @($global:DockerCalls); $global:DockerCalls.Clear()
+        Reset-OB1Stack; $resetCalls = @($global:DockerCalls); $global:DockerCalls.Clear()
+        Stop-OB1Stack; $stopCalls = @($global:DockerCalls); $global:DockerCalls.Clear()
+        return @{ start = $startCalls; reset = $resetCalls; stop = $stopCalls }
+    }
+    function Ups($calls) { @($calls | Where-Object { $_ -match '(^| )up( |$)' }) }
+    function Downs($calls) { @($calls | Where-Object { $_ -match '(^| )(down|stop)( |$)' }) }
+    foreach ($case in @(
+        @{ name = 'disabled (no state, no env)'; state = $null; env = $null; on = $false },
+        @{ name = 'disabled (live four-profile state)'; state = '{"planes":{"ob1":{"profiles":["idea-refinery","research","wiki","notebook"]}}}'; env = 'COMPOSE_PROFILES=research,wiki'; on = $false },
+        @{ name = 'enabled via state'; state = '{"planes":{"ob1":{"profiles":["research","pantry"]}}}'; env = $null; on = $true },
+        @{ name = 'enabled via OB1/docker/.env'; state = $null; env = 'COMPOSE_PROFILES=research,pantry'; on = $true })) {
+        Remove-Item '.stack\state.json', 'OB1\docker\.env' -ErrorAction SilentlyContinue
+        if ($case.state) { $case.state | Set-Content '.stack\state.json' }
+        if ($case.env) { $case.env | Set-Content 'OB1\docker\.env' }
+        $r = Run-Recovery
+        $ups = @(Ups $r.start) + @(Ups $r.reset)
+        Check "$($case.name): Start and Reset each issue exactly one up" ($ups.Count -eq 2) "($($ups.Count))"
+        $pantryUps = @($ups | Where-Object { $_ -match 'pantry' })
+        if ($case.on) { Check "$($case.name): every up names --profile pantry" ($ups.Count -gt 0 -and $pantryUps.Count -eq $ups.Count) ($ups -join ' | ') }
+        else { Check "$($case.name): NO up names pantry anywhere" ($pantryUps.Count -eq 0) ($pantryUps -join ' | ') }
+        $downs = @(Downs $r.start) + @(Downs $r.reset) + @(Downs $r.stop)
+        $downsNoPantry = @($downs | Where-Object { $_ -notmatch '--profile pantry' })
+        Check "$($case.name): every down/stop names --profile pantry (a running one must go)" ($downs.Count -ge 2 -and $downsNoPantry.Count -eq 0) ($downsNoPantry -join ' | ')
+    }
 }
 finally { Pop-Location; Remove-Item -Recurse -Force $tmp }
 
