@@ -21,7 +21,7 @@ keep every running container starting; the registry is gone, and it is NOT
 expressed here as the same set - `idea-refinery` is `default` and `requires`
 `research`, so `up` passes both, which against the pinned gitlink renders
 <!-- stack:count:ob1:default -->**23** services with `idea-refinery` + `research` (the driver's default)<!-- /stack:count:ob1:default -->, against
-<!-- stack:count:ob1:all -->**30** services with every profile (`idea-refinery`, `research`, `wiki`, `notebook`)<!-- /stack:count:ob1:all -->. `wiki` and `notebook`
+<!-- stack:count:ob1:all -->**31** services with every profile (`idea-refinery`, `research`, `wiki`, `notebook`, `pantry`)<!-- /stack:count:ob1:all -->. `wiki` and `notebook`
 come from `enable research` or `COMPOSE_PROFILES` in `OB1/docker/.env` (see
 `[declared, not rendered]` below).
 It forwards its arguments and exits with the driver's code; it holds no plane
@@ -836,7 +836,7 @@ still drift, so the exemption cannot launder a typo.
 every run until it happened: declare the full profile set once, or `up` starts
 fewer containers than are running. At the pinned gitlink the bare OB1 render is
 <!-- stack:count:ob1:bare -->**20** services with no profile<!-- /stack:count:ob1:bare -->, all four profiles render
-<!-- stack:count:ob1:all -->**30** services with every profile (`idea-refinery`, `research`, `wiki`, `notebook`)<!-- /stack:count:ob1:all -->, and a driver with no ob1
+<!-- stack:count:ob1:all -->**31** services with every profile (`idea-refinery`, `research`, `wiki`, `notebook`, `pantry`)<!-- /stack:count:ob1:all -->, and a driver with no ob1
 entry in its state passes `idea-refinery` + `research` only, which RENDERS
 <!-- stack:count:ob1:default -->**23** services with `idea-refinery` + `research` (the driver's default)<!-- /stack:count:ob1:default -->. Either
 `python scripts/stack/stack.py enable research`, which merges all four into
