@@ -85,6 +85,22 @@ Every backup container, regardless of shape, must have:
 
 ---
 
+## Not a volume: gitignored config and secrets
+
+The sidecars back up VOLUMES. The gitignored FILES the stack cannot run without -
+every plane's `.env`, `secrets/`, `portal/config/authelia/users_database.yml`, OAuth
+token files bind-mounted into containers - are archived nightly, age-encrypted to
+the operator's public key, by `scripts/backup/config_secrets_backup.py` into
+`./backups/config-secrets/` (runbook:
+[config-secrets-backup.md](config-secrets-backup.md)). Its inventory is DERIVED
+(env-file names, secret dirs, every plane's compose bind mounts), so a new plane
+`.env` or a new bind-mounted credential needs no edit; a file the derivation cannot
+see goes into `scripts/backup/config-secrets.toml` as `[[include]]` or, if the stack
+cannot start without it, `[[required]]`. `check-backup-coverage.ps1` fails while any
+such file is not in the newest archive.
+
+---
+
 ## Pattern template (the easy case: hot-tar)
 
 For a new service whose data is "files in a volume / bind mount, no

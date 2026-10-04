@@ -1291,6 +1291,13 @@ $ExpectedBackupRecency = @(
     @{ Dir = 'openbrain-wiki';  MaxAgeHours = 52 }
     @{ Dir = 'openwebui';       MaxAgeHours = 52 }
     @{ Dir = 'tailscale';       MaxAgeHours = 52 }
+    # Not a sidecar: the nightly host task scripts/backup/config_secrets_backup.py
+    # (encrypted .env/secrets/users DB; config-backup, 2026-10-04). No
+    # config-secrets-backup container exists, so Get-BackupSkipReason finds no
+    # stamped line and returns '' - the row is judged on artifact age alone. Why a
+    # run FAILED (missing file, no recipient) is in logs\config-secrets-backup-*.log
+    # and check_backups.py reports it.
+    @{ Dir = 'config-secrets';  MaxAgeHours = 52 }
 )
 # The sidecar's own explanation, read back out of its log. Returns '' when it
 # has not declined, or when the decline has already been superseded by a later

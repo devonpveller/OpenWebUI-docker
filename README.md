@@ -255,6 +255,9 @@ the volume. Besides these manual backups, each stateful store has a backup
 sidecar in its own plane writing to `backups/<service>/` on a schedule;
 intervals, restore steps and the NAS mirror are in
 [`documentation/runbooks/backup-restore-runbook.md`](documentation/runbooks/backup-restore-runbook.md).
+The gitignored config and secrets (every `.env`, `secrets/`, the Authelia users
+database) are archived nightly, encrypted to an age key whose private half stays
+offline: [`documentation/runbooks/config-secrets-backup.md`](documentation/runbooks/config-secrets-backup.md).
 
 Two rules protect a running stack: **never restart `openwebui` alone** under
 the `tailscale` profile (tailscale shares its network namespace; restart
