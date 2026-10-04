@@ -81,6 +81,15 @@ _SYNONYMS = {
 }
 
 
+class _Num(str):
+    """Text of a numeric spreadsheet cell (xlsx int/float): unambiguous, unlike csv text."""
+
+
+_PLAIN_NUMBER = re.compile(r"^(\d+(\.\d+)?|\.\d+)$")
+# "1.000" / "12.500": could be a thousands separator in some locales - ask, do not guess.
+_AMBIGUOUS_THOUSANDS = re.compile(r"^[1-9]\d{0,2}\.\d{3}$")
+
+
 class ServiceError(Exception):
     def __init__(self, status: int, body: Any):
         super().__init__(f"HTTP {status}")
@@ -833,8 +842,12 @@ class Tools:
             return v.date().isoformat() if v.time() == datetime.time(0) else v.isoformat()
         if isinstance(v, datetime.date):
             return v.isoformat()
-        if isinstance(v, float) and v.is_integer():
-            return str(int(v))
+        if isinstance(v, bool):
+            return str(v)
+        if isinstance(v, float) and v.is_integer() and abs(v) < 1e15:
+            return _Num(int(v))
+        if isinstance(v, (int, float)):
+            return _Num(repr(v))
         return str(v).strip()
 
     @staticmethod
@@ -934,23 +947,31 @@ class Tools:
 
     @staticmethod
     def _to_number(text: str) -> Optional[float]:
-        try:
-            return float(text.replace(",", ".")) if "," in text and "." not in text else float(text)
-        except ValueError:
+        """A plain finite non-negative number, or None. Never guesses: "1,000", "1.000"
+        (thousands or decimal?), "1,5", currency, units, nan/inf and negatives are all None.
+        A genuinely numeric spreadsheet cell (_Num) is unambiguous, so "1.125" is accepted there."""
+        t = str(text).strip()
+        if not _PLAIN_NUMBER.match(t):
             return None
+        if not isinstance(text, _Num) and _AMBIGUOUS_THOUSANDS.match(t):
+            return None
+        return float(t)
 
     def _build_rows(self, headers: list, rows: list, mapping: dict) -> tuple:
-        """Map sheet rows to /audit/preview rows. Returns (rows, skipped_row_numbers)."""
+        """Map sheet rows to /audit/preview rows. Returns (rows, skipped_row_numbers, invalid)
+        where invalid lists every quantity/actual cell that is not a plain number."""
         idx = {}
         for i, h in enumerate(headers):
             target = mapping.get(h)
             if target and target in _CANONICAL and target not in idx:
                 idx[target] = i
-        out, skipped = [], []
+        out, skipped, invalid = [], [], []
         for n, r in enumerate(rows, start=2):  # row 1 is the header
             def cell(field):
                 i = idx.get(field)
-                return r[i].strip() if i is not None and i < len(r) else ""
+                if i is None or i >= len(r):
+                    return ""
+                return r[i] if isinstance(r[i], _Num) else r[i].strip()
 
             row = {}
             for field in _ROW_FIELDS + _OPTIONAL_COLUMNS:
@@ -960,7 +981,7 @@ class Tools:
                 if field in _NUMERIC_FIELDS:
                     num = self._to_number(val)
                     if num is None:
-                        row["_bad_quantity"] = val
+                        invalid.append({"row": n, "column": field, "value": val})
                         continue
                     row[field] = int(num) if float(num).is_integer() else num
                 elif field in _LIST_FIELDS:
@@ -976,7 +997,7 @@ class Tools:
                 else:
                     num = self._to_number(actual)
                     if num is None:
-                        row["_bad_quantity"] = actual
+                        invalid.append({"row": n, "column": "actual", "value": actual})
                     else:
                         row["quantity"] = int(num) if float(num).is_integer() else num
             if "name" not in row and "id" not in row:
@@ -984,11 +1005,8 @@ class Tools:
                 continue
             if "name" not in row:
                 row["name"] = ""
-            bad = row.pop("_bad_quantity", None)
-            if bad is not None:
-                row["_unparsed_quantity"] = bad
             out.append(row)
-        return out, skipped
+        return out, skipped, invalid
 
     async def import_pantry(
         self,
@@ -1045,17 +1063,19 @@ class Tools:
                 }
             )
         mp = chosen if chosen is not None else {h: self._norm_header(h) for h in headers}
-        out_rows, skipped = self._build_rows(headers, rows, mp)
+        out_rows, skipped, invalid = self._build_rows(headers, rows, mp)
         if not any("name" in r or "id" in r for r in out_rows):
             return _compact({"ok": False, "error": "invalid", "detail": "no column is mapped to name or id", "proposed_mapping": self._propose_mapping(headers)})
-        unparsed = [r for r in out_rows if "_unparsed_quantity" in r]
-        for r in out_rows:
-            r.pop("_unparsed_quantity", None)
-        if unparsed:
+        if invalid:
             return _compact(
-                {"ok": False, "error": "invalid", "detail": "some quantity cells are not numbers; nothing was sent",
-                 "rows": [{"name": r.get("name"), "id": r.get("id")} for r in unparsed][:20],
-                 "instruction": "Ask the user to fix those cells (or map the column differently)."}
+                {"ok": False, "error": "invalid", "nothing_sent": True,
+                 "detail": "some quantity cells are not plain numbers",
+                 "invalid": invalid[:50], "invalid_count": len(invalid),
+                 "instruction": (
+                     "Nothing was sent. Show the user each row and value, and ask what number they mean "
+                     "(for example 1,000 could be one thousand or one). Never fix a value yourself. "
+                     "After they correct the sheet and attach it again, or tell you the values, call import_pantry again."
+                 )}
             )
         body = {"source": source, "file_name": name, "rows": out_rows}
         try:

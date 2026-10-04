@@ -12,8 +12,8 @@ Full run with openpyxl, in a throwaway container (the production OWUI image alre
 openpyxl + pydantic), no network, labelled:
 
     docker run --rm --network none --label ai-stack.harness.owner=<id> \
-      -v "<repo>/frontend/owui/tools:/t:ro" -e PYTHONDONTWRITEBYTECODE=1 \
-      --entrypoint python openwebui:local -m unittest discover -s /t/tests -v
+      -v "<repo>/frontend/owui:/o:ro" -e PYTHONDONTWRITEBYTECODE=1 \
+      --entrypoint python openwebui:local -m unittest discover -s /o/tools/tests -v
 """
 
 import asyncio
@@ -466,6 +466,26 @@ class Import(Base):
         out = json.loads(run(self.tool.confirm_import("pv1")))
         self.assertEqual(out["error"], "preview_expired")
         self.assertIn("again", out["instruction"])
+
+
+class SkillMatchesTool(unittest.TestCase):
+    def test_write_rule_lists_exactly_the_write_functions(self):
+        import inspect
+        import re
+
+        with open(os.path.join(HERE, "..", "..", "skills", "kitchen-pantry.md"), encoding="utf-8") as fh:
+            rule = next(l for l in fh.read().splitlines() if l.startswith("4. **Show every write back.**"))
+        listed = set(re.findall(r"`([a-z_]+)`", rule.split("(", 1)[1].split(")", 1)[0]))
+        read_only_posts = {"get_guidance", "import_pantry"}  # POST routes that write nothing
+        writers = set()
+        for name, fn in inspect.getmembers(pantry.Tools, inspect.iscoroutinefunction):
+            if name.startswith("_") or name in read_only_posts:
+                continue
+            src = inspect.getsource(fn)
+            if '"POST"' in src or '"PUT"' in src or "self._save_recipe(" in src:
+                writers.add(name)
+        self.assertEqual(listed, writers)
+        self.assertTrue({"log_cooked_meal", "correct_cook", "cook", "set_plan_status", "confirm_import"} <= listed)
 
 
 class Export(Base):
