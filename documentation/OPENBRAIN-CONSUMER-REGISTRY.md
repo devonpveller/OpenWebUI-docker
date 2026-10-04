@@ -36,6 +36,7 @@ reads) unless marked otherwise. Confirm a row before relying on it — services 
 | Harness / sessions (clause-8 seam) | `agent_memories`, recall traces | ops gateway :8062 | ops, enforced by door | |
 | Claude clients (`capture_thought`) | `thoughts` | openbrain-mcp / cloud gateway | cloud gateway forces `share=cloud` | |
 | `openbrain-wiki` (wiki-service) | `wiki_pages` | direct | n/a | **BROKEN since 08-28: `ReferenceError: extractLinks` — pre-existing, unfixed** |
+| `openbrain-pantry` (profile `pantry`, off by default; pantry-wire) | its own `pantry_*` tables, plus `recipes`, `meal_plans`, `shopping_lists` (pantry columns added `ADD COLUMN IF NOT EXISTS`) | direct `deno_postgres` as the **non-superuser `ob_pantry` role** (not `postgres`); cannot read `thoughts` or any other corpus table | none - no corpus table is touched | `init-pantry.sql` adds a `pantry_service_all ... TO ob_pantry USING (true)` policy on those three upstream tables because their RLS is `auth.uid()`-keyed and `auth.uid()` is NULL here; a change that tightens RLS on `recipes`/`meal_plans`/`shopping_lists` must keep that policy or the service sees zero rows. Applied by hand to the live DB (initdb runs only on a fresh volume) |
 | `openbrain-idea-refinery` | `idea_revisions` | PostgREST | dormant — last successful write **2026-08-08** | Not a DFU casualty; was dead before |
 
 ## Readers (consume from Open Brain)

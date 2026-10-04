@@ -2389,7 +2389,8 @@ class HealthSweep:
     # it is in `planes` (None = every one, the pre-scoping behaviour).
     PROBED_PLANES = ("anchor", "inference", "frontend", "search", "coder", "ob1", "agent-org")
 
-    def __init__(self, console: Console, root: Path, capture, http, planes=None, inference_local=None):
+    def __init__(self, console: Console, root: Path, capture, http, planes=None, inference_local=None,
+                 pantry_enabled=None):
         self.console = console
         self.root = root
         self.capture = capture
@@ -2398,6 +2399,9 @@ class HealthSweep:
         # Whether inference runs its `local` profile, as `up` would pass it; None = not known
         # (the probe then runs, as it always did). See inference_serving_depth.
         self.inference_local = inference_local
+        # Whether ob1 runs its `pantry` profile, as `up` would pass it; None = not known
+        # (the probe then looks for the container). See pantry_deployed.
+        self.pantry_enabled = pantry_enabled
         # What upstream_exists() last saw: "exists", "absent" or "unknown" (docker ps failed).
         self.upstream_seen = None
         self.failed = 0
@@ -2571,6 +2575,25 @@ class HealthSweep:
                     "exec", "openbrain-db", "pg_isready", "-U", "postgres", "-d", "openbrain", "-t", "5"
                 ).code == 0,
             )
+            # openbrain-pantry (pantry-wire) publishes NO host port, so the probe is the
+            # in-container /health its compose healthcheck uses: {"ok":true,"db":true},
+            # 503 when its pool is dead. Profile-gated and OFF by default: a host that
+            # never enabled it gets a [skip] line, not a FAIL about a container that is
+            # not meant to exist. The guard fails open (see pantry_deployed).
+            deployed, note = self.pantry_deployed()
+            if deployed:
+                if note:
+                    self.console.line("  [warn] " + note)
+                self.probe(
+                    "OB1: openbrain-pantry /health (in-container, db ok)",
+                    lambda: self.docker(
+                        "exec", "openbrain-pantry", "deno", "eval",
+                        "const r = await fetch('http://127.0.0.1:8000/health'); "
+                        "const j = await r.json(); Deno.exit(r.ok && j.db === true ? 0 : 1)",
+                    ).code == 0,
+                )
+            else:
+                self.console.line("  [skip] OB1: openbrain-pantry /health (no pantry profile in this deployment)")
         if self.on("agent-org"):
             self.probe(
                 "agent-org: mattermost ping",
@@ -2727,6 +2750,29 @@ class HealthSweep:
         )
         return (out.stdout or "").strip() or "<no /models mount on the container>"
 
+    def pantry_deployed(self):
+        """(is openbrain-pantry part of THIS deployment?, a note to print first).
+
+        The SAME fail-open shape as tailscale_deployed, for the `pantry` profile of ob1:
+          * enabled (state file, ob1's own .env, as `up` would pass it) -> probe;
+          * not enabled, but a container NAMED openbrain-pantry exists (running or not) ->
+            probe anyway and say so: a leftover or hand-started one is exactly what the
+            sweep must not stay quiet about;
+          * `docker ps -a` unreadable -> probe anyway and say why;
+          * otherwise it is genuinely not here -> skip.
+        """
+        if self.pantry_enabled:
+            return True, ""
+        found = self.docker("ps", "-a", "--filter", "name=^openbrain-pantry$", "--format", "{{.Names}}")
+        if found.code != 0:
+            return True, ("`docker ps -a` could not be read, so health cannot tell whether "
+                          "openbrain-pantry is deployed - probing it anyway")
+        if any(line.strip() == "openbrain-pantry" for line in found.stdout.splitlines()):
+            return True, ("openbrain-pantry EXISTS but the `pantry` profile is not enabled for ob1 "
+                          f"(`{CLI} enable pantry`, or COMPOSE_PROFILES in "
+                          "OB1/docker/.env) - probing it anyway")
+        return False, ""
+
     def tailscale_deployed(self):
         """(is it part of THIS deployment?, a note to print first).
 
@@ -2875,7 +2921,13 @@ def cmd_health(manifest, state, root, console, capture, http) -> int:
         sources = (set(run_profiles(manifest, state, "inference"))
                    | set(compose_profiles_env(manifest, root, "inference")) | shell)
         local = "local" in sources
-    return HealthSweep(console, root, capture, http, planes, inference_local=local).run()
+    pantry = None
+    if "ob1" in planes:
+        # `pantry` from the state file or ob1's OWN env file - the two sources `up` unions.
+        pantry = "pantry" in (set(run_profiles(manifest, state, "ob1"))
+                              | set(compose_profiles_env(manifest, root, "ob1")))
+    return HealthSweep(console, root, capture, http, planes, inference_local=local,
+                       pantry_enabled=pantry).run()
 
 
 # --------------------------------------------------------------------------
@@ -5457,9 +5509,9 @@ class _CatalogueSweep(HealthSweep):
     condition in the generated text.
     """
 
-    def __init__(self, plane: str, tailscale=True, shell=True, plugins=True):
+    def __init__(self, plane: str, tailscale=True, shell=True, plugins=True, pantry=True):
         super().__init__(Console(io.StringIO()), Path("."), lambda _cmd, _cwd: CommandResult(0, "", ""),
-                         lambda _url, _timeout: HttpResult(200, "{}"), {plane})
+                         lambda _url, _timeout: HttpResult(200, "{}"), {plane}, pantry_enabled=pantry)
         self._tailscale, self._shell, self._plugins = tailscale, shell, plugins
         self.labels: list[str] = []
 
@@ -5471,6 +5523,9 @@ class _CatalogueSweep(HealthSweep):
 
     def tailscale_deployed(self):
         return self._tailscale, ""
+
+    def pantry_deployed(self):
+        return self.pantry_enabled, ""
 
     def owui_plugin_count(self):
         return 1 if self._plugins else 0
@@ -5490,6 +5545,7 @@ _PROBE_CONDITIONS = (
     ("tailscale", "the frontend deploys the `tailscale` profile"),
     ("shell", "PowerShell is on PATH (`powershell` on Windows, `pwsh` elsewhere)"),
     ("plugins", "Open WebUI has at least one plugin deployed"),
+    ("pantry", "the ob1 `pantry` profile is enabled"),
 )
 
 

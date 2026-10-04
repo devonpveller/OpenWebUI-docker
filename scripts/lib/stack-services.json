@@ -86,12 +86,13 @@
       "compose": "docker compose -f OB1/docker/docker-compose.yml",
       "file": "OB1/docker/docker-compose.yml",
       "env_file": null,
-      "note": "env_file is null, as it now is for every project: compose's project directory here is OB1/docker, so it auto-loads OB1/docker/.env (since sl-env-split every plane works this way). PROFILE-GATED since 2026-09-19 (sl-ob1-profiles): a bare `config` or `up` renders only the 20 core + always-on-scheduled services, so any tool reading this file must pass --profile research --profile wiki --profile notebook --profile idea-refinery to see all 30. The rows below carry a `profile` field wherever that applies.",
+      "note": "env_file is null, as it now is for every project: compose's project directory here is OB1/docker, so it auto-loads OB1/docker/.env (since sl-env-split every plane works this way). PROFILE-GATED since 2026-09-19 (sl-ob1-profiles): a bare `config` or `up` renders only the 20 core + always-on-scheduled services, so any tool reading this file must pass --profile research --profile wiki --profile notebook --profile idea-refinery --profile pantry to see all 31 (pantry, added by pantry-wire, is the 31st). The rows below carry a `profile` field wherever that applies.",
       "profiles": [
         "research",
         "wiki",
         "notebook",
-        "idea-refinery"
+        "idea-refinery",
+        "pantry"
       ]
     },
     "agent-org": {
@@ -358,6 +359,13 @@
         "project": "open-brain",
         "critical": false,
         "note": "chain tail. Its enrichment and audio steps reach PROFILED services (RESEARCH_URL -> openbrain-research, ON_BASE -> open_notebook), so a digest chain run without --profile research --profile notebook produces no episode."
+      },
+      {
+        "container": "openbrain-pantry",
+        "profile": "pantry",
+        "project": "open-brain",
+        "critical": false,
+        "note": "household pantry / meal-planner HTTP service (pantry-meal-planner). PROFILE-GATED (`pantry`, opt_in): off until `stack.py enable pantry`. No host port (obnet + ai-stack_llm-net; the OWUI pantry tool reaches it as http://openbrain-pantry:8000 with x-pantry-key), so there is no host_health - its own compose healthcheck (/health, db:true) is what `stack.py health` (guarded probe) and check-openbrain-health.ps1 read. Makes no LLM call. Its tables live in openbrain-db and ride openbrain-db-backup."
       },
       {
         "container": "openbrain-idea-refinery",
