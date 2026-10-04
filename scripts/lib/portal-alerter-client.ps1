@@ -28,6 +28,13 @@
 #     then runs wget with --post-file= (avoiding shell-quoting of the body).
 #   - Captures the HTTP response body, parses it, and only reports success
 #     when the alerter actually returned `{"ok": true, ...}`.
+#
+# What `ok: true` means (pa-channels, 2026-10-04): the alerter sends each alert
+# to every channel it has configured - Telegram, Mattermost, and a Gmail copy -
+# and answers ok when AT LEAST ONE delivered (or the alert was coalesced by the
+# rate limiter, which sends it at minute close). It is no longer "the email went
+# out": with email disabled an alert can be ok via Telegram alone. A non-ok
+# answer means no channel delivered; the host watchdog pages on that too.
 
 if (-not (Get-Variable -Name PortalAlerterContainer -Scope Script -ErrorAction SilentlyContinue)) {
   # Default container name. Override globally before sourcing if needed.
@@ -122,11 +129,13 @@ function Invoke-PortalAlerter {
 function Send-PortalAlert {
   <#
     .SYNOPSIS
-      Dispatch an instant alert to the portal-alerter -> Gmail.
+      Dispatch an instant alert to the portal-alerter -> every configured
+      channel (Telegram / Mattermost / Gmail copy).
     .DESCRIPTION
-      Posts to portal-alerter's /alert endpoint. The alerter rate-limits
-      to ALERT_RATE_LIMIT_PER_MIN (default 20) per rolling minute; excess
-      events are coalesced into a single summary email at minute close.
+      Posts to portal-alerter's /alert endpoint. .Ok is true when at least
+      one channel delivered (see the header). The alerter rate-limits to
+      ALERT_RATE_LIMIT_PER_MIN (default 20) per rolling minute; excess
+      events are coalesced into a single summary at minute close.
     .PARAMETER Severity
       Required. One of: critical, high, medium, low.
     .PARAMETER Event

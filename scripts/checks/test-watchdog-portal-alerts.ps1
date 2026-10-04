@@ -201,6 +201,21 @@ try {
     $r = Invoke-Rule
     Write-Case 'W8' 'torn state file -> true, no throw' (($r -eq $true) -and -not $script:RuleError) "result=$r err=$script:RuleError"
 
+    # W10 - counts past Int32 still page (they used to fail an [int] cast and read as 0)
+    $sbx4 = New-Sandbox
+    . $script:Loader $sbx4
+    $o = New-StateObj
+    $o.channels.telegram.consecutive_failures = 99999999999
+    $o.channels.mattermost.consecutive_failures = 1e30
+    Set-State $sbx4 $o
+    $script:RuleError = $null
+    $r = Invoke-Rule
+    $t = Get-Transport $sbx4
+    $tgPage = @($t.Telegram | Where-Object { $_ -match 'telegram channel failed 99999999999 sends' }).Count
+    $mmPage = @($t.Telegram | Where-Object { $_ -match 'mattermost channel failed 9223372036854775807 sends' }).Count
+    Write-Case 'W10' 'consecutive_failures beyond Int32 pages (Int64); beyond Int64 is clamped and pages' (($r -eq $false) -and $tgPage -eq 1 -and $mmPage -eq 1) "result=$r err=$script:RuleError`n$(@($t.Telegram) -join "`n")"
+    . $script:Loader $sbx
+
     # W9 - the REAL alerter's all-channels-failed state file
     if ($AlerterStateFile) {
         $sbx3 = New-Sandbox
@@ -213,7 +228,7 @@ try {
         . $script:Loader $sbx
     }
 } finally {
-    foreach ($d in @($sbx, $sbx2, $sbx3)) { if ($d -and (Test-Path $d)) { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue } }
+    foreach ($d in @($sbx, $sbx2, $sbx3, $sbx4)) { if ($d -and (Test-Path $d)) { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue } }
 }
 
 Write-Host ""

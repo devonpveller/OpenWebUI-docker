@@ -471,20 +471,88 @@ async function readState(): Promise<DeliveryState> {
   return emptyState();
 }
 
-// Read-modify-write, serialized in this process. Re-reading first keeps a
-// concurrent --selftest (a second process via docker exec) from being erased.
+// Read-modify-write. Serialized in this process (stateChain) AND across
+// processes (a lock file created exclusively beside the state file): the server
+// and a --selftest via docker exec are two writers, and losing the undelivered
+// marker is the failure this file exists to prevent. Each write goes to a
+// UNIQUE tmp name and is renamed over the state file, retried while a reader
+// (the host watchdog, /health) holds it open - Windows refuses the rename then.
 let stateChain: Promise<void> = Promise.resolve();
 let lastWriteError: string | null = null;
+const LOCK_FILE = `${STATE_FILE}.lock`;
+const LOCK_STALE_MS = 10_000;
+const LOCK_WAIT_MS = 20_000;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function acquireStateLock(): Promise<void> {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  while (true) {
+    try {
+      const f = await Deno.open(LOCK_FILE, { createNew: true, write: true });
+      f.close();
+      return;
+    } catch (err) {
+      if (!(err instanceof Deno.errors.AlreadyExists)) throw err;
+    }
+    // A writer that died holding the lock must not block every later write.
+    try {
+      const st = await Deno.stat(LOCK_FILE);
+      if (st.mtime && Date.now() - st.mtime.getTime() > LOCK_STALE_MS) {
+        await Deno.remove(LOCK_FILE).catch(() => {});
+        continue;
+      }
+    } catch {
+      continue; // released between open and stat
+    }
+    if (Date.now() > deadline) throw new Error("delivery-state lock not acquired in time");
+    await sleep(10 + Math.random() * 40);
+  }
+}
+
+// Atomic replace where the OS allows it. On Windows a rename over a file some
+// reader has open fails ("Access is denied"); after a short retry the content
+// is written IN PLACE instead - still under the lock, so no writer can read a
+// torn file, and an outside reader that catches one mid-write just skips that
+// read (the watchdog does). Losing the update is the one outcome not allowed.
+async function replaceWithRetry(tmp: string, target: string, content: string): Promise<void> {
+  for (let i = 0; i < 8; i++) {
+    try {
+      await Deno.rename(tmp, target);
+      return;
+    } catch {
+      await sleep(15 + i * 15);
+    }
+  }
+  await Deno.remove(tmp).catch(() => {});
+  let last: unknown = null;
+  for (let i = 0; i < 20; i++) {
+    try {
+      await Deno.writeTextFile(target, content);
+      return;
+    } catch (err) {
+      last = err;
+      await sleep(25 + i * 10);
+    }
+  }
+  throw last;
+}
 
 function updateState(mutate: (s: DeliveryState) => void): Promise<void> {
   stateChain = stateChain.then(async () => {
-    const s = await readState();
-    mutate(s);
-    s.updated_at = new Date().toISOString();
     try {
-      const tmp = `${STATE_FILE}.tmp`;
-      await Deno.writeTextFile(tmp, JSON.stringify(s, null, 2) + "\n");
-      await Deno.rename(tmp, STATE_FILE);
+      await acquireStateLock();
+      try {
+        const s = await readState();
+        mutate(s);
+        s.updated_at = new Date().toISOString();
+        const tmp = `${STATE_FILE}.${Deno.pid}.${crypto.randomUUID()}.tmp`;
+        const content = JSON.stringify(s, null, 2) + "\n";
+        await Deno.writeTextFile(tmp, content);
+        await replaceWithRetry(tmp, STATE_FILE, content);
+      } finally {
+        await Deno.remove(LOCK_FILE).catch(() => {});
+      }
       lastWriteError = null;
     } catch (err) {
       const msg = errText(err);
@@ -656,11 +724,21 @@ function alertSubject(p: AlertPayload): string {
 }
 
 // The ONLY text Telegram/Mattermost get: severity, event, host label, time.
-// The event name is caller-supplied, so it is reduced to a short identifier.
+// The event name is caller-supplied, so it goes out only if it is SHAPED like an
+// event identifier (config.drift, nas-backup.failure, auth.notification):
+// dotted words of [A-Za-z0-9_-], at most 48 chars, no run of 4+ digits (a code,
+// a token fragment). Anything else - a URL, a path, a sentence, a one-time code -
+// becomes a generic label; the email copy still carries the original.
 const SEVERITIES = new Set(["critical", "high", "medium", "low", "info"]);
+const EVENT_ID_RE = /^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+){0,5}$/;
+const GENERIC_EVENT = "portal.event";
 
-function safeEvent(ev: string): string {
-  return String(ev).replace(/[^A-Za-z0-9._:\/-]/g, "_").slice(0, 64) || "unknown";
+function safeEvent(ev: unknown): string {
+  const s = typeof ev === "string" ? ev.trim() : "";
+  if (s.length === 0 || s.length > 48 || !EVENT_ID_RE.test(s) || /[0-9]{4,}/.test(s)) {
+    return GENERIC_EVENT;
+  }
+  return s;
 }
 
 function safeTime(ts?: string): string {

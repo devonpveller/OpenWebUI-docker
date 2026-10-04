@@ -160,7 +160,7 @@ def free_port() -> int:
 
 class Alerter:
     def __init__(self, src: str, fake_base: str, *, telegram=True, mattermost=True,
-                 oauth: str = "empty") -> None:
+                 oauth: str = "empty", dead_transport: bool = False) -> None:
         self.dir = tempfile.mkdtemp(prefix="pa-alerter-")
         shutil.copy(src, os.path.join(self.dir, "alerter.ts"))
         self.state = os.path.join(self.dir, "state.json")
@@ -193,6 +193,14 @@ class Alerter:
             env["PORTAL_ALERT_MM_TOKEN"] = FAKE_MM_TOKEN
             env["PORTAL_ALERT_MM_CHANNEL_ID"] = FAKE_MM_CHANNEL
             env["PORTAL_ALERT_MM_MENTION"] = "@operator"
+        if dead_transport:
+            # Every channel at a CLOSED port: real transport errors, whose text
+            # (Deno quotes the request URL) carries the Telegram bot token.
+            env["PORTAL_ALERT_TELEGRAM_API"] = "http://127.0.0.1:1"
+            env["PORTAL_ALERT_GOOGLE_TOKEN_URL"] = "http://127.0.0.1:1/token"
+            env["PORTAL_ALERT_GMAIL_SEND_URL"] = "http://127.0.0.1:1/send"
+            if mattermost:
+                env["PORTAL_ALERT_MM_URL"] = "http://127.0.0.1:1"
         self.env = env
         self.log = open(self.log_path, "w", encoding="utf-8")
         self.proc = subprocess.Popen(
@@ -268,6 +276,7 @@ class Alerter:
         except Exception:
             self.proc.kill()
         self.log.close()
+        shutil.rmtree(self.dir, ignore_errors=True)
 
 
 def find_bash() -> str | None:
@@ -523,6 +532,102 @@ def main() -> int:
              and "Gmail send failed" in (em.get("last_error") or "") and s.get("undelivered_since") is None,
              f"state.email={em}")
         all_output.append(a.output())
+    finally:
+        a.stop()
+
+    # ---- C19: a REAL transport error never carries a secret out ----
+    fake.reset()
+    a = Alerter(src, base, oauth="valid", dead_transport=True)
+    try:
+        st, body = a.post({"severity": "critical", "event": "config.drift"})
+        rc, so = a.selftest()
+        _, health = a.get("/health")
+        out = a.output()
+        state_raw = open(a.state, encoding="utf-8").read() if os.path.exists(a.state) else ""
+        texts = [out, body, so, health, state_raw]
+        leaked = no_secrets(*texts)
+        # Non-vacuous: the Telegram error really happened and really quoted its URL
+        # (the redaction marker is the proof), and nothing reached the fake.
+        real_err = "telegram=FAILED" in out and "bot[redacted]" in out and "bot[redacted]" in state_raw
+        case("C19", "transport errors (closed port 127.0.0.1:1): no bot token / MM token / OAuth value in log, response, state or --selftest",
+             st >= 500 and rc != 0 and real_err and not leaked and not fake.calls,
+             f"status={st} selftest rc={rc} real-error-seen={real_err} leaked={leaked}\n"
+             + "\n".join(ln for ln in out.splitlines() if "FAILED" in ln)[:600])
+        all_output += [out, so]
+        all_responses += [body, health]
+        all_states.append(state_raw)
+    finally:
+        a.stop()
+
+    # ---- C20: only identifier-shaped event names reach Telegram/MM ----
+    fake.reset()
+    a = Alerter(src, base, oauth="empty")
+    try:
+        hostile = ["https://auth.example.invalid/reset/SECRETLINK2", "auth.notification_code_918273",
+                   "../../etc/passwd", "two words", "x" * 60, "evt:with:colons", "a/b"]
+        kept = ["config.drift", "nas-backup.failure", "auth.notification"]
+        for ev in hostile + kept:
+            a.post({"severity": "critical", "event": ev})
+        texts = [json.loads(c["body"]).get("text", "") for c in fake.of("telegram")] + \
+            [json.loads(c["body"]).get("message", "") for c in fake.of("mattermost")]
+        joined = "\n".join(texts)
+        bad = [t for t in ("SECRETLINK2", "918273", "://", "/", "etc", "two words", "xxxxxxxxxx", "colons")
+               if t in joined]
+        generic = sum(1 for t in texts if " portal.event on " in t)
+        kept_ok = all(sum(1 for t in texts if f" {k} on " in t) == 2 for k in kept)
+        case("C20", "URL / path / code-bearing / oversized events become 'portal.event'; identifiers pass unchanged",
+             not bad and generic == 2 * len(hostile) and kept_ok,
+             f"forbidden fragments seen: {bad}; generic={generic} (want {2 * len(hostile)}); kept ok={kept_ok}\n"
+             + "\n".join(texts[:len(hostile) + len(kept)]))
+        all_output.append(a.output())
+    finally:
+        a.stop()
+
+    # ---- C21: concurrent writers (server + parallel --selftest processes) lose no update ----
+    fake.reset(telegram="fail", mattermost="fail")
+    a = Alerter(src, base, oauth="empty")
+    try:
+        n_proc, n_http = 6, 6
+        stop_reader = threading.Event()
+
+        def reader() -> None:  # holds the state file open, as the watchdog / /health do
+            while not stop_reader.is_set():
+                try:
+                    with open(a.state, encoding="utf-8") as f:
+                        f.read()
+                        time.sleep(0.005)
+                except OSError:
+                    pass
+
+        rt = threading.Thread(target=reader, daemon=True)
+        rt.start()
+        procs = [subprocess.Popen(
+            ["deno", "run", "--allow-net", "--allow-read", "--allow-write", "--allow-env",
+             "alerter.ts", "--selftest"], cwd=a.dir, env=a.env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for _ in range(n_proc)]
+        posts: list[int] = []
+        pts = [threading.Thread(target=lambda: posts.append(
+            a.post({"severity": "critical", "event": "config.drift"})[0])) for _ in range(n_http)]
+        for t in pts:
+            t.start()
+        outs = [p.communicate(timeout=120)[0] for p in procs]
+        for t in pts:
+            t.join(timeout=120)
+        stop_reader.set()
+        rt.join(timeout=5)
+        s = a.read_state() or {}
+        out = a.output()
+        not_written = sum(o.count("delivery state not written") for o in outs + [out])
+        leftovers = [f for f in os.listdir(a.dir) if f.endswith(".tmp") or f.endswith(".lock")]
+        want = n_proc + n_http
+        case("C21", f"{n_proc} parallel --selftest processes + {n_http} concurrent /alert, a reader holding the file: undelivered_count == {want}, nothing lost",
+             s.get("undelivered_count") == want and not_written == 0 and not leftovers
+             and len(posts) == n_http and all(x >= 500 for x in posts),
+             f"undelivered_count={s.get('undelivered_count')} 'not written' lines={not_written} "
+             f"leftover tmp/lock={leftovers} http={posts}\n"
+             + "\n".join(ln for o in outs + [out] for ln in o.splitlines() if "not written" in ln)[:600])
+        all_output += outs + [out]
+        all_states.append(json.dumps(s))
     finally:
         a.stop()
 

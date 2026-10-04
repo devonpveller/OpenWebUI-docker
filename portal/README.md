@@ -216,9 +216,15 @@ the Authelia notification bridge and the NAS backup script all POST to its
 | Gmail | second copy; the scheduled digest is email-only | the full detail (source IP, username, log line) | `DIGEST_TO` blank, or the OAuth files missing / empty / unparseable / refused by Google |
 
 The sender gets `200 {"ok": true}` if **at least one** channel delivered, so a
-sender's `alerter POST failed` means no channel did. Telegram and Mattermost
+sender's `alerter POST failed` means no channel did. One exception: past
+`ALERT_RATE_LIMIT_PER_MIN` an alert is queued for the minute-close summary and
+answered `200 {"ok": true, "coalesced": true}` before anything is sent; the
+summary's outcome is still recorded for the watchdog. Telegram and Mattermost
 never get source IPs, usernames or the log line: the notification bridge's log
-line carries Authelia's one-time codes and reset links.
+line carries Authelia's one-time codes and reset links. The event name goes out
+only if it is shaped like an identifier (`config.drift`, `nas-backup.failure`:
+dotted `[A-Za-z0-9_-]` words, at most 48 characters, no run of 4+ digits);
+anything else - a URL, a path, a code - is sent as `portal.event`.
 
 **When delivery fails, the host watchdog says so - not the alerter.** Each
 outcome is written to `reports/portal-digest/alerter-delivery-state.json` (the

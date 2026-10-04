@@ -2549,6 +2549,18 @@ function Get-PortalAlertStatePath {
     return (Join-Path $PROJECT_DIR 'reports\portal-digest\alerter-delivery-state.json')
 }
 
+# A count from the container-written file, never trusted to fit an [int]: a
+# value past Int32 used to fail the cast and read as 0 (no page). Non-numbers
+# and negatives are 0; anything past Int64 is clamped to Int64.MaxValue.
+function ConvertTo-AlertCount {
+    param($Value)
+    $d = 0.0
+    try { $d = [double]$Value } catch { return [int64]0 }
+    if ([double]::IsNaN($d) -or $d -le 0) { return [int64]0 }
+    if ($d -ge [double][int64]::MaxValue) { return [int64]::MaxValue }
+    return [int64][math]::Floor($d)
+}
+
 function ConvertTo-SafeAlertToken {
     param([string]$Value, [int]$Max = 64)
     if (-not $Value) { return 'unknown' }
@@ -2578,7 +2590,7 @@ function Test-PortalAlertDelivery {
     if ($state.undelivered_since) {
         $ok = $false
         $count = 0
-        try { $count = [int]$state.undelivered_count } catch { $count = 0 }
+        $count = ConvertTo-AlertCount $state.undelivered_count
         $since = ConvertTo-SafeAlertToken ([string]$state.undelivered_since) 32
         $ev = ConvertTo-SafeAlertToken ([string]$state.last_undelivered_event)
         $msg = "portal-alerter: $count portal alert(s) since $since reached NO channel (last: $ev). Portal alerts are not reaching you - check 'docker logs portal-alerter' and the PORTAL_ALERT_* / Gmail OAuth settings in portal/.env. Clears on the next delivered alert."
@@ -2595,7 +2607,7 @@ function Test-PortalAlertDelivery {
         $fails = 0
         $configured = $false
         if ($ch) {
-            try { $fails = [int]$ch.consecutive_failures } catch { $fails = 0 }
+            $fails = ConvertTo-AlertCount $ch.consecutive_failures
             $configured = ($ch.configured -eq $true)
         }
         if ($configured -and $fails -ge $PortalAlertChannelFailThreshold) {
