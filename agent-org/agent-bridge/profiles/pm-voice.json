@@ -2,6 +2,7 @@
   "profile": "pm-voice",
   "lane": "local",
   "model": "local-large",
+  "tier": "large",
   "system_prompt_ref": "charters/pm-voice.md",
   "temperature": 0.5,
   "tool_access": ["read"],

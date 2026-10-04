@@ -24,6 +24,60 @@ from ..schemas import ProfileSchema
 log = logging.getLogger("agent_bridge.profiles")
 
 
+#: Model tiers (mt-policy, tracker H2). A profile's `tier` names the model SIZE its task kind
+#: deserves; which model ROLE that is per lane is Settings.profile_tier_models_local / _cloud.
+TIERS = ("large", "small")
+
+
+def parse_tier_models(spec: str) -> dict[str, str]:
+    """`"large=local-large,small=local-small"` -> {"large": "local-large", "small": "local-small"}.
+    Raises ValueError on a malformed entry or an unknown tier - a typo here would silently route a
+    role to the wrong model, so it is loud instead."""
+    out: dict[str, str] = {}
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        tier, sep, model = part.partition("=")
+        tier, model = tier.strip(), model.strip()
+        if not sep or not model or tier not in TIERS:
+            raise ValueError(f"bad tier-model entry {part!r} (want <tier>=<model>, tier in {TIERS})")
+        out[tier] = model
+    return out
+
+
+#: The env var behind each lane's spec, so a refusal names the thing an operator edits.
+TIER_MODEL_ENV = {"local": "AO_PROFILE_TIER_MODELS_LOCAL", "cloud": "AO_PROFILE_TIER_MODELS_CLOUD"}
+
+
+def check_tier_models(settings) -> None:
+    """Raise ValueError naming the env var unless BOTH lanes' specs parse and name a model for
+    EVERY tier. tier_drift() calls it first, so a half-written spec ('large=local-large') is one
+    clear refusal rather than a KeyError deep inside whichever profile happened to need `small`."""
+    for lane, env in TIER_MODEL_ENV.items():
+        spec = (settings.profile_tier_models_cloud if lane == "cloud"
+                else settings.profile_tier_models_local)
+        try:
+            models = parse_tier_models(spec)
+        except ValueError as exc:
+            raise ValueError(f"{env}={spec!r}: {exc}") from exc
+        missing = [t for t in TIERS if t not in models]
+        if missing:
+            raise ValueError(f"{env}={spec!r} names no model for tier(s) {', '.join(missing)} "
+                             f"(want e.g. large=<model>,small=<model>)")
+
+
+def tier_model(settings, tier: str, lane: str) -> str:
+    """The model role a profile of `tier` asks for on `lane` ("local" | "cloud" - the EFFECTIVE
+    lane: a cloud profile with the cloud lane disabled routes local, as ModelRouter does)."""
+    spec = (settings.profile_tier_models_cloud if lane == "cloud"
+            else settings.profile_tier_models_local)
+    models = parse_tier_models(spec)
+    if tier not in models:
+        raise ValueError(f"no model configured for tier {tier!r} on the {lane} lane")
+    return models[tier]
+
+
 class ConcurrentProfileChange(Exception):
     """Another request wrote the same profile's next version first (the (name, version) unique
     constraint refused this one); nothing of this request was written."""
@@ -34,6 +88,9 @@ class ProfileRegistry:
         self.db = db
         self.dir = Path(profiles_dir)
         self._cache: dict[str, ProfileSchema] = {}
+        # name -> tier, from the seed FILES on every boot (policy, not a DB column): a tier edit
+        # reaches an existing install at once, while its model still moves only by the intent.
+        self._tiers: dict[str, str] = {}
 
     async def load_from_disk(self) -> None:
         """Seed the DB (and cache) from JSON files. Existing DB rows win on lane
@@ -45,6 +102,8 @@ class ProfileRegistry:
             for f in sorted(self.dir.glob("*.json")):
                 data = json.loads(f.read_text(encoding="utf-8"))
                 ps = ProfileSchema(**data)
+                if ps.tier:
+                    self._tiers[ps.profile] = ps.tier
                 existing = (
                     await s.execute(
                         select(Profile).where(
@@ -82,6 +141,7 @@ class ProfileRegistry:
                 temperature=r.temperature,
                 tool_access=list(r.tool_access or []),
                 caller_key=r.caller_key,
+                tier=self._tiers.get(r.name),
             )
             for r in rows
         }
@@ -93,6 +153,24 @@ class ProfileRegistry:
 
     def all(self) -> dict[str, ProfileSchema]:
         return dict(self._cache)
+
+    def tier_drift(self, settings) -> list[dict]:
+        """Every active profile whose live `model` is not its tier's model role, with the EXACT
+        governed command that would move it (`set profile <name> model <role>`). Read-only: the
+        landing - or the operator - sends the command; this never writes a profile. A profile with
+        no tier is not judged. Raises ValueError (naming the env var) when a tier-model spec is
+        malformed or incomplete - the caller reports drift as unavailable, never 500s the listing."""
+        check_tier_models(settings)
+        out: list[dict] = []
+        for name, p in sorted(self._cache.items()):
+            if not p.tier:
+                continue
+            lane = "cloud" if p.lane == "cloud" and settings.cloud_enabled else "local"
+            want = tier_model(settings, p.tier, lane)
+            if p.model != want:
+                out.append({"profile": name, "tier": p.tier, "lane": lane, "model": p.model,
+                            "expected": want, "command": f"set profile {name} model {want}"})
+        return out
 
     async def set_lane(self, name: str, lane: str, actor: str = "operator") -> None:
         """Flip a role local<->cloud as a new profile version (audited). One field."""

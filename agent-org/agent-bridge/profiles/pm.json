@@ -2,6 +2,7 @@
   "profile": "pm",
   "lane": "local",
   "model": "local-large",
+  "tier": "large",
   "system_prompt_ref": "charters/pm.md",
   "temperature": 0.3,
   "tool_access": ["read", "grep"],

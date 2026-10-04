@@ -1,7 +1,8 @@
 {
   "profile": "worker-default",
   "lane": "local",
-  "model": "local-large",
+  "model": "local-small",
+  "tier": "small",
   "system_prompt_ref": "charters/worker-default.md",
   "temperature": 0.2,
   "tool_access": ["read", "edit", "bash", "grep"],

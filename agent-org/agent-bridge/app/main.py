@@ -222,7 +222,19 @@ def create_app(orch: Orchestrator | None = None) -> FastAPI:
     # ── profiles (Pc.3 lane flip) ──────────────────────────────────────────────
     @app.get("/profiles")
     async def profiles() -> dict:
-        return {"profiles": {k: v.model_dump() for k, v in orch.profiles.all().items()}}
+        # tier_drift (mt-policy): profiles whose live model is off their tier, each with the exact
+        # governed command that would move it. Read-only - nothing here changes a profile.
+        # A malformed AO_PROFILE_TIER_MODELS_* must not take the LISTING down with it (attempt 1:
+        # HTTP 500 where base answered 200): drift is reported unavailable, with the reason, and
+        # logged; the profiles are still listed.
+        body: dict = {"profiles": {k: v.model_dump() for k, v in orch.profiles.all().items()}}
+        try:
+            body["tier_drift"] = orch.profiles.tier_drift(orch.s)
+        except ValueError as exc:
+            log.warning("tier_drift unavailable: %s", exc)
+            body["tier_drift"] = None
+            body["tier_drift_error"] = f"tier_drift unavailable: {exc}"
+        return body
 
     @app.post("/profiles/lane")
     async def set_lane(body: LaneIn) -> dict:
