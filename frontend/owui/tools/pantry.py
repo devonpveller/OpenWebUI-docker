@@ -588,6 +588,24 @@ class Tools:
             return _compact(self._error_result(e))
         return _compact(res)
 
+    async def set_plan_status(
+        self,
+        plan_id: str,
+        status: str,
+        __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
+    ) -> str:
+        """
+        Mark a planned dinner "skipped" (it will not be cooked; this releases its reserved stock) or back to "planned". "cooked" is set only by cook.
+
+        :param plan_id: The plan row id from get_plan / plan_meal.
+        :param status: "skipped" or "planned".
+        :return: JSON with the updated plan row.
+        """
+        return await self._do(
+            "POST", f"/plan/{plan_id}/status", {"status": status},
+            emitter=__event_emitter__, status="Updating plan status",
+        )
+
     async def shopping_list(
         self,
         week_start: str,

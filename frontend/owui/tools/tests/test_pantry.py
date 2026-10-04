@@ -170,7 +170,7 @@ class Loading(unittest.TestCase):
     def test_only_documented_functions_and_routes(self):
         expected = {
             "get_pantry", "update_pantry", "get_guidance", "save_recipe", "save_household_recipe",
-            "cook", "log_cooked_meal", "correct_cook", "plan_meal", "get_plan", "shopping_list",
+            "cook", "log_cooked_meal", "correct_cook", "plan_meal", "get_plan", "set_plan_status", "shopping_list",
             "restock", "record_evaluation", "propose_preferences", "confirm_preferences",
             "manage_household", "export_pantry", "import_pantry", "accuracy_report",
             "confirm_import",
@@ -185,7 +185,7 @@ class Loading(unittest.TestCase):
         import re
         routes = set(re.findall(r'"(/(?:pantry|settings|people|recipes|cook|plan|shopping-list|restock|audit|accuracy|evaluations|preferences|hypotheses|explored|guidance)[^"?]*)"', src))
         routes = {re.sub(r"\{[^}]*\}", "{id}", r) for r in routes}
-        documented = {"/pantry", "/pantry/adjust", "/guidance", "/recipes", "/cook", "/cook/{id}/correct", "/plan", "/shopping-list",
+        documented = {"/pantry", "/pantry/adjust", "/guidance", "/recipes", "/cook", "/cook/{id}/correct", "/plan", "/plan/{id}/status", "/shopping-list",
                       "/restock", "/evaluations", "/preferences", "/preferences/confirm", "/people", "/settings",
                       "/audit/preview", "/audit/commit", "/accuracy"}
         self.assertTrue(routes <= documented, routes - documented)
@@ -268,6 +268,13 @@ class Functions(Base):
         run(self.tool.get_plan(week_start="2026-10-05"))
         r = self.last()
         self.assertEqual((r["method"], r["path"], r["query"]), ("GET", "/plan", "week_start=2026-10-05"))
+
+    def test_set_plan_status(self):
+        run(self.tool.set_plan_status("p7", "skipped"))
+        r = self.last()
+        self.assertEqual((r["method"], r["path"]), ("POST", "/plan/p7/status"))
+        self.assertEqual(r["body"], {"status": "skipped"})
+        self.assertEqual(r["headers"]["x-pantry-key"], "k-test")
 
     def test_shopping_and_restock(self):
         run(self.tool.shopping_list("2026-10-05"))
