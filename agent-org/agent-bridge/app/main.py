@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -18,6 +19,7 @@ from .adapters.chat import FakeChatAdapter
 from .adapters.mattermost import MattermostAdapter
 from .config import get_settings
 from .db import Database
+from .modules.profiles import ConcurrentProfileChange, UnknownProfile
 from .orchestrator import Orchestrator
 from .schemas import Concern, Decision, Trigger
 
@@ -64,7 +66,7 @@ class KillIn(BaseModel):
 
 class LaneIn(BaseModel):
     name: str
-    lane: str
+    lane: Literal["local", "cloud"]   # anything else is a 422 from validation
 
 
 class SuggestionIn(BaseModel):
@@ -238,7 +240,19 @@ def create_app(orch: Orchestrator | None = None) -> FastAPI:
 
     @app.post("/profiles/lane")
     async def set_lane(body: LaneIn) -> dict:
-        await orch.profiles.set_lane(body.name, body.lane)
+        async def refuse(status: int, why: str, outcome: str) -> None:
+            # audited like set_model's refusals (profile_model_refused): who/what/why, nothing written
+            await orch.audit.log("profile_lane_refused", actor="operator", payload={
+                "profile": body.name, "lane": body.lane, "reason": why, "outcome": outcome})
+            raise HTTPException(status, why)
+
+        try:
+            await orch.profiles.set_lane(body.name, body.lane)
+        except UnknownProfile:
+            await refuse(404, f"no active profile called `{body.name}`", "refused")
+        except ConcurrentProfileChange:
+            await refuse(409, f"profile `{body.name}` was changed concurrently by another request; "
+                              f"nothing written by this one - check it and retry.", "conflict")
         return {"profile": orch.profiles.get(body.name).model_dump()}
 
     # ── ground + dry-run, risk-gated (P4.0) ────────────────────────────────────
