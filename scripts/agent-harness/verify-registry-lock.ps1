@@ -17,7 +17,8 @@ param(
     [int]$Runs = 10,
     [int]$Concurrency = 2,
     [string]$ToolkitDir = "",
-    [int]$HolderTimeoutSec = 6
+    [int]$HolderTimeoutSec = 6,
+    [int]$Kills = 15
 )
 $ErrorActionPreference = "Stop"
 if (-not $ToolkitDir) { $ToolkitDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
@@ -159,7 +160,7 @@ try {
             "`$ErrorActionPreference = 'Stop'",
             ". '$lockLib'",
             "`$e = 0",
-            "for (`$i = 0; `$i -lt 150; `$i++) { try { Update-WorktreeRegistry -Registry '$rdReg' -Mutate { param(`$r) `$r[('w' + `$i)] = @{ id = 'w' } } } catch { `$e++ } }",
+            "for (`$i = 0; `$i -lt 150; `$i++) { try { Update-WorktreeRegistry -Registry '$rdReg' -Mutate ({ param(`$r) `$r[('w' + `$i)] = @{ id = 'w' } }.GetNewClosure()) } catch { `$e++ } }",
             "Write-Output ('errors=' + `$e)")
         $rp = Start-Process powershell.exe -ArgumentList @("-NoProfile", "-File", "`"$readerPs1`"") -PassThru -WindowStyle Hidden
         $wpsi = New-Object System.Diagnostics.ProcessStartInfo
@@ -177,6 +178,158 @@ try {
         if (-not $okRw) { $fail++ }
     } else {
         Write-Host "[writer vs tight reader] n/a - this toolkit has no lock.ps1"
+    }
+
+    # --- 2c-2g. helper-level scenarios (need the toolkit's lock.ps1) -------------------
+    if (Test-Path $lockLib) {
+        function Invoke-PsFile([string]$File, [string[]]$FileArgs, [int]$TimeoutMs = 120000) {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "powershell.exe"
+            $psi.Arguments = "-NoProfile -NonInteractive -File `"$File`" " + (($FileArgs | ForEach-Object { "`"$_`"" }) -join " ")
+            $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+            $c = [System.Diagnostics.Process]::Start($psi)
+            $o = $c.StandardOutput.ReadToEndAsync(); $e = $c.StandardError.ReadToEndAsync()
+            if (-not $c.WaitForExit($TimeoutMs)) { $c.Kill() }
+            return [pscustomobject]@{ Out = $o.Result.Trim(); Err = $e.Result.Trim(); Exit = $c.ExitCode }
+        }
+        function New-RegJson([int]$Count, [string]$Tag) {
+            $rows = @{}
+            for ($i = 1; $i -le $Count; $i++) { $rows["$Tag$i"] = @{ id = "$Tag$i"; path = "x" } }
+            return (@{ worktrees = $rows } | ConvertTo-Json -Depth 5)
+        }
+        function Get-RowCount([string]$File) {
+            try { return @((Get-Content -Raw $File | ConvertFrom-Json).worktrees.PSObject.Properties).Count } catch { return -1 }
+        }
+        $updPs1 = Join-Path $root "upd.ps1"
+        Set-Content -Path $updPs1 -Encoding ASCII -Value @(
+            "param([string]`$Reg, [string]`$Id)",
+            "`$ErrorActionPreference = 'Stop'",
+            ". '$lockLib'",
+            "try { Update-WorktreeRegistry -Registry `$Reg -Mutate ({ param(`$r) `$r[`$Id] = @{ id = `$Id; path = 'x' } }.GetNewClosure()); Write-Output 'ok' }",
+            "catch { Write-Output ('ERR ' + `$_.Exception.Message); exit 1 }")
+
+        # 2c. Recovery of a registry stranded by a writer killed between delete and move. The
+        # killed writer leaves NO worktrees.json: finished content in .tmp, older in ~RF*.TMP.
+        $rc = Join-Path $root "rec"; New-Item -ItemType Directory -Force -Path $rc | Out-Null
+        $rcReg = Join-Path $rc "worktrees.json"
+        Set-Content -Path "$rcReg~RF1a2b3c.TMP" -Value (New-RegJson 30 "o") -Encoding ASCII
+        (Get-Item "$rcReg~RF1a2b3c.TMP").LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-5)
+        Set-Content -Path "$rcReg.tmp" -Value (New-RegJson 40 "n") -Encoding ASCII
+        $r1 = Invoke-PsFile $updPs1 @($rcReg, "added")
+        $n1 = Get-RowCount $rcReg
+        $okA = ($r1.Exit -eq 0) -and ($n1 -eq 41)
+        # unusable leftovers: refuse, name the files, destroy nothing, write nothing
+        Remove-Item $rcReg -Force -ErrorAction SilentlyContinue
+        Get-ChildItem $rc -Filter "worktrees.json~RF*.TMP" | Remove-Item -Force
+        Set-Content -Path "$rcReg.tmp" -Value "{ not json" -Encoding ASCII
+        $r2 = Invoke-PsFile $updPs1 @($rcReg, "added")
+        $okB = ($r2.Exit -ne 0) -and ($r2.Out -match "worktrees\.json\.tmp") -and (-not (Test-Path $rcReg)) -and (Test-Path "$rcReg.tmp")
+        # a true first write (no registry, no leftovers): a fresh start is right
+        Remove-Item "$rcReg.tmp" -Force -ErrorAction SilentlyContinue
+        $r3 = Invoke-PsFile $updPs1 @($rcReg, "first")
+        $okC = ($r3.Exit -eq 0) -and ((Get-RowCount $rcReg) -eq 1)
+        Write-Host ("[stranded registry recovery] recovered_rows={0}/41 -> {1}; unusable leftovers refused naming file -> {2}; true first write -> {3}" -f $n1, $(if ($okA) { "OK" } else { "LOST ROWS" }), $(if ($okB) { "OK" } else { "FAIL" }), $(if ($okC) { "OK" } else { "FAIL" }))
+        if (-not ($okA -and $okB -and $okC)) { $fail++ }
+
+        # 2d. Real kills mid-update with a tight reader running (the reader widens the
+        # kill-between-delete-and-move window). After each kill the next update must keep every
+        # row the dead writer had committed (it logs its count after each completed update).
+        $kdir = Join-Path $root "kill"; New-Item -ItemType Directory -Force -Path $kdir | Out-Null
+        $kReg = Join-Path $kdir "worktrees.json"; $kProg = Join-Path $kdir "progress.txt"; $kStop = Join-Path $kdir "stop"
+        $kWriter = Join-Path $root "kwriter.ps1"; $kReader = Join-Path $root "kreader.ps1"
+        Set-Content -Path $kWriter -Encoding ASCII -Value @(
+            "param([string]`$Reg, [string]`$Prog)", ". '$lockLib'", "`$i = 0",
+            "while (`$true) { `$i++; Update-WorktreeRegistry -Registry `$Reg -Mutate ({ param(`$r) `$r[('k' + `$i)] = @{ id = 'k'; path = 'x' } }.GetNewClosure()); Set-Content -Path `$Prog -Value `$i -Encoding ASCII }")
+        Set-Content -Path $kReader -Encoding ASCII -Value @(
+            "param([string]`$Reg, [string]`$Stop)",
+            "while (-not (Test-Path `$Stop)) { try { if (Test-Path `$Reg) { `$null = Get-Content -Raw -Path `$Reg } } catch { } }")
+        $kRd = Start-Process powershell.exe -ArgumentList @("-NoProfile", "-File", "`"$kReader`"", "`"$kReg`"", "`"$kStop`"") -PassThru -WindowStyle Hidden
+        $shrunk = 0; $missingAfterKill = 0
+        for ($k = 1; $k -le $Kills; $k++) {
+            Get-ChildItem $kdir -Filter "worktrees.json*" | Remove-Item -Force -ErrorAction SilentlyContinue
+            Set-Content -Path $kReg -Value (New-RegJson 40 "s") -Encoding ASCII
+            Set-Content -Path $kProg -Value 0 -Encoding ASCII
+            $psiK = New-Object System.Diagnostics.ProcessStartInfo
+            $psiK.FileName = "powershell.exe"; $psiK.Arguments = "-NoProfile -NonInteractive -File `"$kWriter`" `"$kReg`" `"$kProg`""
+            $psiK.UseShellExecute = $false; $psiK.CreateNoWindow = $true
+            $kw = [System.Diagnostics.Process]::Start($psiK)
+            Start-Sleep -Milliseconds (900 + (Get-Random -Maximum 1200))
+            if (-not $kw.HasExited) { try { $kw.Kill() } catch { } }; $null = $kw.WaitForExit(10000)
+            $done = 0; try { $done = [int](Get-Content -Raw $kProg).Trim() } catch { }
+            if (-not (Test-Path $kReg)) { $missingAfterKill++ }
+            $ru = Invoke-PsFile $updPs1 @($kReg, "after$k")
+            $nAfter = Get-RowCount $kReg
+            if (($ru.Exit -ne 0) -or ($nAfter -lt (40 + $done + 1))) {
+                $shrunk++; Write-Host ("  kill {0}: committed>={1} rows, after next update {2} ({3})" -f $k, (40 + $done), $nAfter, $ru.Out) -ForegroundColor Red
+            }
+        }
+        Set-Content -Path $kStop -Value "x" -Encoding ASCII
+        if (-not $kRd.WaitForExit(20000)) { $kRd.Kill() }
+        Write-Host ("[killed writer + reader] kills={0} registry_absent_after_kill={1} runs_that_lost_rows={2}" -f $Kills, $missingAfterKill, $shrunk)
+        if ($shrunk) { $fail++ }
+
+        # 2e. A harness reader (Read-RegistryJson, what queue.ps1 and sync-worktree-env.ps1 use)
+        # rides out a short exclusive holder instead of giving up at once.
+        $he = Join-Path $root "hold"; New-Item -ItemType Directory -Force -Path $he | Out-Null
+        $heReg = Join-Path $he "worktrees.json"
+        Set-Content -Path $heReg -Value (New-RegJson 3 "h") -Encoding ASCII
+        $heHold = Join-Path $root "hold.ps1"; $heRead = Join-Path $root "hread.ps1"
+        Set-Content -Path $heHold -Encoding ASCII -Value @(
+            "param([string]`$Reg)", "`$f = New-Object System.IO.FileStream(`$Reg, 'Open', 'ReadWrite', 'None')", "Start-Sleep -Milliseconds 1500", "`$f.Dispose()")
+        Set-Content -Path $heRead -Encoding ASCII -Value @(
+            "param([string]`$Reg)", ". '$lockLib'", "`$o = Read-RegistryJson -Path `$Reg",
+            "if (`$o -and `$o.worktrees) { Write-Output 'ok' } else { Write-Output 'null' }")
+        $psiH = New-Object System.Diagnostics.ProcessStartInfo
+        $psiH.FileName = "powershell.exe"; $psiH.Arguments = "-NoProfile -NonInteractive -File `"$heHold`" `"$heReg`""
+        $psiH.UseShellExecute = $false; $psiH.CreateNoWindow = $true
+        $hp = [System.Diagnostics.Process]::Start($psiH)
+        for ($i = 0; $i -lt 100; $i++) {
+            try { $t = [System.IO.File]::Open($heReg, 'Open', 'Read', 'ReadWrite'); $t.Dispose(); Start-Sleep -Milliseconds 20 } catch { break }
+        }
+        $rh = Invoke-PsFile $heRead @($heReg)
+        $null = $hp.WaitForExit(10000)
+        $okH = ($rh.Out -eq "ok")
+        Write-Host ("[harness reader vs short exclusive holder] Read-RegistryJson -> {0} -> {1}" -f $rh.Out, $(if ($okH) { "OK" } else { "GAVE UP" }))
+        if (-not $okH) { $fail++ }
+
+        # 2f. The harness reader opens with FileShare.Delete: with the swap retry switched OFF
+        # (swap timeout 0) a writer must still never fail against a tight harness-reader loop.
+        # A reader without FILE_SHARE_DELETE would break the writer's delete-then-move here.
+        $sd = Join-Path $root "sd"; New-Item -ItemType Directory -Force -Path $sd | Out-Null
+        $sdReg = Join-Path $sd "worktrees.json"; $sdStop = Join-Path $sd "stop"
+        Set-Content -Path $sdReg -Value '{"worktrees":{}}' -Encoding ASCII
+        $sdReader = Join-Path $root "sdreader.ps1"; $sdWriter = Join-Path $root "sdwriter.ps1"
+        Set-Content -Path $sdReader -Encoding ASCII -Value @(
+            "param([string]`$Reg, [string]`$Stop)", ". '$lockLib'",
+            "while (-not (Test-Path `$Stop)) { `$null = Read-RegistryJson -Path `$Reg -TimeoutSec 1 }")
+        Set-Content -Path $sdWriter -Encoding ASCII -Value @(
+            "param([string]`$Reg)", ". '$lockLib'", "`$e = 0",
+            "for (`$i = 0; `$i -lt 150; `$i++) { try { Update-WorktreeRegistry -Registry `$Reg -Mutate ({ param(`$r) `$r[('d' + `$i)] = @{ id = 'd' } }.GetNewClosure()) } catch { `$e++ } }",
+            "Write-Output ('errors=' + `$e)")
+        $sdRd = Start-Process powershell.exe -ArgumentList @("-NoProfile", "-File", "`"$sdReader`"", "`"$sdReg`"", "`"$sdStop`"") -PassThru -WindowStyle Hidden
+        $env:AI_STACK_REGISTRY_SWAP_TIMEOUT_SEC = "0"
+        $rsd = Invoke-PsFile $sdWriter @($sdReg) 240000
+        Remove-Item Env:AI_STACK_REGISTRY_SWAP_TIMEOUT_SEC -ErrorAction SilentlyContinue
+        Set-Content -Path $sdStop -Value "x" -Encoding ASCII
+        if (-not $sdRd.WaitForExit(20000)) { $sdRd.Kill() }
+        $nsd = Get-RowCount $sdReg
+        $okSd = ($rsd.Out -match "errors=0") -and ($nsd -eq 150)
+        Write-Host ("[writer (no swap retry) vs harness-reader loop] {0} final_rows={1}/150 -> {2}" -f $rsd.Out, $nsd, $(if ($okSd) { "OK" } else { "READER BLOCKED THE SWAP" }))
+        if (-not $okSd) { $fail++ }
+
+        # 2g. -Mutate cannot bind to the helper's variables: a closure sees the caller's
+        # $n/$dir/$fs/$deadline, and a plain scriptblock is refused.
+        $cl = Join-Path $root "closure.ps1"
+        Set-Content -Path $cl -Encoding ASCII -Value @(
+            "param([string]`$Reg)", ". '$lockLib'", "`$n = 99; `$dir = 'CALLER'; `$fs = 'CALLER'; `$deadline = 'CALLER'",
+            "Update-WorktreeRegistry -Registry `$Reg -Mutate ({ param(`$r) `$r['c'] = @{ n = `$n; dir = `$dir; fs = `$fs; dl = `$deadline } }.GetNewClosure())",
+            "`$plain = 'accepted'; try { Update-WorktreeRegistry -Registry `$Reg -Mutate { param(`$r) } } catch { `$plain = 'refused' }",
+            "`$row = (Get-Content -Raw `$Reg | ConvertFrom-Json).worktrees.c",
+            "Write-Output ('{0}|{1}|{2}|{3}|{4}' -f `$row.n, `$row.dir, `$row.fs, `$row.dl, `$plain)")
+        $rcl = Invoke-PsFile $cl @((Join-Path $root "cl\worktrees.json"))
+        $okCl = ($rcl.Out -eq "99|CALLER|CALLER|CALLER|refused")
+        Write-Host ("[-Mutate scope] {0} -> {1}" -f $rcl.Out, $(if ($okCl) { "OK" } else { "BOUND TO HELPER LOCALS" }))
+        if (-not $okCl) { $fail++ }
     }
 
     # --- 3. killed holder, then live holder ------------------------------------------

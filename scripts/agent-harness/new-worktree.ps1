@@ -211,7 +211,7 @@ $newRow = [ordered]@{
 # Read-modify-write under the shared registry lock (lock.ps1): a concurrent provision or
 # removal can no longer drop this row, nor have its own dropped.
 try {
-    Update-WorktreeRegistry -Registry $Registry -Mutate { param($rows) $rows[$Id] = $newRow }
+    Update-WorktreeRegistry -Registry $Registry -Mutate ({ param($rows) $rows[$Id] = $newRow }.GetNewClosure())
 } catch {
     Fail ("{0}`n       The worktree {1} exists but is NOT registered; re-run after the holder exits (remove-worktree.ps1 -Id {2} first, or add the row by hand)." -f $_.Exception.Message, $Path, $Id)
 }

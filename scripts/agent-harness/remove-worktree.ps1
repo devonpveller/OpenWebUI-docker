@@ -66,7 +66,7 @@ function Read-Registry {
 # ids, so a row another process added since our first read is never lost.
 function Remove-RegistryRows([string[]]$Ids) {
     try {
-        Update-WorktreeRegistry -Registry $Registry -Mutate { param($r) foreach ($i in $Ids) { $r.Remove($i) } }
+        Update-WorktreeRegistry -Registry $Registry -Mutate ({ param($r) foreach ($i in $Ids) { $r.Remove($i) } }.GetNewClosure())
     } catch {
         Fail (("{0}`n       The registry row(s) for {1} were NOT dropped (git and the branch may already be gone). " +
                "Once the holder exits, run: remove-worktree.ps1 -PruneRegistry") -f $_.Exception.Message, ($Ids -join ", "))
