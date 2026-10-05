@@ -30,7 +30,7 @@ from ..schemas import Trigger
 from .audit_sink import AuditSink
 from .governance_gate import GovernanceGate
 from .scheduler import FrozenEffortError, NoCapacityError, Scheduler
-from ..worker.harness import WorkerHarness, WorkResult
+from ..worker.harness import UPSTREAM_MISMATCH, WorkerHarness, WorkResult
 
 log = logging.getLogger("agent_bridge.router")
 
@@ -66,6 +66,40 @@ def _is_worker_unavailable(exc: Exception) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in (409, 502, 503)
     return isinstance(exc, httpx.TransportError)
+
+
+class WorkerModelRefused(httpx.HTTPStatusError):
+    """A worker's daemon refused the turn's model (422 `model refused: ...`). The router has
+    already audited it and posted the actionable message in the effort thread; callers use the
+    type to give the operator the same advice once, not a generic HTTP error (D2). Still an
+    HTTPStatusError, so every existing handler catches it as before."""
+
+    def __init__(self, exc: httpx.HTTPStatusError, *, model: str, role: str, detail: str) -> None:
+        super().__init__(str(exc), request=exc.request, response=exc.response)
+        self.model, self.role, self.detail = model, role, detail
+
+
+def model_refusal_advice(model: str | None, role: str | None, detail: str) -> str:
+    """The one actionable text for a model refusal: what was refused and both ways to fix it."""
+    what = f"refused model `{model}` (profile `{role}`)" if model else "refused the task's model"
+    prof = role or "<profile>"
+    return (f"{what}: {detail[:200]}. Nothing ran. Point the profile at an allowed model "
+            f"(`set profile {prof} model <model>`) or allow it in little-coder's "
+            f"`agent.allowed_models` (then regenerate the worker configs), and say \"re-run it\".")
+
+
+def _model_refusal(exc: Exception) -> str:
+    """The daemon's detail when it refused a task's model (ef-worker-model: 422 `model refused:
+    ...`), else "". An older daemon never answers this way (it ignores the key)."""
+    if not isinstance(exc, httpx.HTTPStatusError) or exc.response.status_code != 422:
+        return ""
+    try:
+        detail = exc.response.json().get("detail")
+    except Exception:  # noqa: BLE001 - non-JSON body
+        return ""
+    return detail if isinstance(detail, str) and detail.startswith("model refused") else ""
+
+
 _SURVEY_PROMPT = (
     "PROJECT SURVEY (READ-ONLY — do not modify, create, or delete any files; do not run tests that "
     "mutate state). In 8–12 terse lines, give a FACTUAL summary of THIS repository so future work "
@@ -96,8 +130,10 @@ class Router:
         chat,  # ChatAdapter
         audit: AuditSink,
         context_builder: ContextBuilder | None = None,
+        profiles=None,  # ProfileRegistry: a wake runs on its role's profile model (ef-worker-model)
     ) -> None:
         self.db = db
+        self.profiles = profiles
         self.s = settings
         self.gate = gate
         self.scheduler = scheduler
@@ -128,6 +164,28 @@ class Router:
         # message to post instead of the generic private-or-unreachable warning. Same wiring style
         # as scheduler.on_release.
         self.on_upstream_fail = None
+        # (repo, upstream) pairs whose upstream_mismatch was already posted (F3): said once per
+        # bridge process, not on every reuse of the same fork; the audit log has every occurrence.
+        self._upstream_mismatch_told: set[tuple[str, str]] = set()
+
+    def worker_turn_model(self, role: str) -> tuple[str | None, str]:
+        """(model, note) for a worker turn dispatched under `role` (ef-worker-model, tracker H3).
+
+        `role` is the profile the call site already resolves (every worker wake and the survey
+        use `worker-default`). The model is sent only when that profile is on the LOCAL lane: a
+        worker is a local little-coder, and its model must be a role behind the local gateway. A
+        cloud-lane profile (out of scope) sends no model, so the worker runs little-coder's own
+        agent.model, as before; `note` says why for the audit."""
+        if self.profiles is None:
+            return None, "no profile registry"
+        try:
+            p = self.profiles.get(role)
+        except KeyError:
+            return None, f"no profile {role!r}"
+        if p.lane != "local":
+            return None, (f"profile {role!r} is on the {p.lane} lane: "
+                          f"workers run little-coder's agent.model")
+        return (p.model or None), f"profile {role!r}"
 
     def invalidate_focus(self, effort_id: str) -> None:
         """Drop every workspace-provenance claim for this effort, so the NEXT focus wipes and
@@ -352,6 +410,7 @@ class Router:
                 raise
 
             quarantined = False
+            model, model_note = self.worker_turn_model(role)
             try:
                 if repo:
                     # WIPE unless this worker's workspace was cloned for THIS EXACT task (same
@@ -425,6 +484,21 @@ class Router:
                                 f"read-scoped token for the parent, or a correct URL). Proceeding on "
                                 f"`origin` only."
                             ),
+                            thread_id=thread_id,
+                        )
+                    if ok and upstream and detail == UPSTREAM_MISMATCH \
+                            and (repo, upstream) not in self._upstream_mismatch_told:
+                        # F3: the remote kept from an earlier focus points at another URL than the
+                        # registry's upstream. Fetch works (the credential went to the remote's own
+                        # URL), but it fetches from THAT URL. Said once; a fresh focus re-points it.
+                        self._upstream_mismatch_told.add((repo, upstream))
+                        await self.chat.post(
+                            channel_id,
+                            f"ℹ️ `{repo}`'s workspace has an `upstream` remote that points somewhere "
+                            f"other than the registered parent (`{upstream}`). `git fetch upstream` "
+                            f"still works but reads the remote's URL. A fresh focus re-creates the "
+                            f"remote from the registry; correct the registry if it is the one that "
+                            f"is wrong.",
                             thread_id=thread_id,
                         )
                     if not ok:
@@ -549,6 +623,9 @@ class Router:
                 if max_repeat:
                     # F31.4 — bridge-side repeat guard for a read-only lens turn (not a daemon flag).
                     extra["max_repeat"] = max_repeat
+                if model:
+                    # ef-worker-model: the turn runs on its profile's model, for this task only.
+                    extra["model"] = model
                 result = await self.harness.wake(
                     inst.base_url, session_id, prompt, on_update=_stream, **extra,
                 )
@@ -569,7 +646,11 @@ class Router:
                     "wake_done",
                     effort_id=effort_id,
                     actor=inst.id,
-                    payload={"status": result.status, "role": role},
+                    # TF1 — what RAN (the daemon's own report on GET /tasks/<id>; None = the daemon
+                    # did not say, e.g. one older than ef-worker-model) beside what was SENT.
+                    payload={"status": result.status, "role": role, "model_sent": model,
+                             "model_ran": getattr(result, "model", None),
+                             "model_from": model_note},
                 )
                 # F31.4 — the bridge-side lens flail-guard stopped a turn stuck repeating one command.
                 if result.status == "flail":
@@ -593,6 +674,21 @@ class Router:
                 await self.scheduler.wake_finished(effort_id)
                 return result
             except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+                refused = _model_refusal(exc) if model else ""
+                if refused:
+                    # The daemon's allowlist does not name the profile's model: a configuration
+                    # mismatch, not a worker fault. Nothing ran. Say what to change, then raise
+                    # (never fall back to another model: that would hide the policy not applying).
+                    await self.audit.log(
+                        "worker_model_refused", effort_id=effort_id, actor=inst.id,
+                        payload={"role": role, "model": model, "detail": refused[:200]},
+                    )
+                    await self.chat.post(
+                        channel_id,
+                        f"⚠️ worker `{inst.id}` " + model_refusal_advice(model, role, refused),
+                        thread_id=thread_id,
+                    )
+                    raise WorkerModelRefused(exc, model=model, role=role, detail=refused) from exc
                 if not _is_worker_unavailable(exc):
                     raise  # a real error (repo/task/other) — not a worker-health problem
                 await self.scheduler.quarantine(
@@ -636,20 +732,37 @@ class Router:
             inst = await self.scheduler.acquire(SURVEY_EFFORT, "worker-default", SURVEY_EFFORT)
         except (FrozenEffortError, NoCapacityError):
             return ""
+        model, _note = self.worker_turn_model("worker-default")
         try:
             ok, _detail, _upstream_ok = await self.harness.set_project(inst.base_url, repo)
             if not ok:  # a non-empty tuple is always truthy — unpack ok explicitly (was a latent bug)
                 return ""
             result = await self.harness.wake(
-                inst.base_url, f"survey-{slugify(repo)}", _SURVEY_PROMPT
+                inst.base_url, f"survey-{slugify(repo)}", _SURVEY_PROMPT,
+                **({"model": model} if model else {}),
             )
             summary = (result.output or "").strip() if result else ""
             await self.audit.log(
                 "project_survey", actor=inst.id,
-                payload={"repo": repo, "ok": bool(result and result.ok), "len": len(summary)},
+                payload={"repo": repo, "ok": bool(result and result.ok), "len": len(summary),
+                         "model_sent": model, "model_ran": getattr(result, "model", None)},
             )
             return summary if (result and result.ok) else ""
         except Exception as exc:  # noqa: BLE001 - survey is advisory; never block intake
+            refused = _model_refusal(exc) if model else ""
+            if refused:
+                # TF3 — the survey degrades to conventions-only either way, but a refusal is a config
+                # mismatch the operator must see in the record, exactly as for a worker wake.
+                await self.audit.log(
+                    "worker_model_refused", effort_id=SURVEY_EFFORT, actor=inst.id,
+                    payload={"role": "worker-default", "model": model, "detail": refused[:200],
+                             "repo": repo, "survey": True},
+                )
+                await self.audit.log(
+                    "project_survey", actor=inst.id,
+                    payload={"repo": repo, "ok": False, "len": 0, "model_sent": model,
+                             "model_ran": None, "refused": True},
+                )
             log.warning("project survey failed for %s: %s", repo, exc)
             return ""
         finally:

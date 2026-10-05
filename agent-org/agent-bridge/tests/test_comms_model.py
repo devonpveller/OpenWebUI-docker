@@ -134,7 +134,9 @@ async def test_activity_stream_batches_successful_commands(db_url):
 
         # A harness that streams several successful commands then one failure.
         class _Chatty(FakeHarness):
-            async def wake(self, base_url, session_id, prompt, *, channel="batch", on_update=None):
+            # **_kw: the router also passes the turn's profile model (ef-worker-model).
+            async def wake(self, base_url, session_id, prompt, *, channel="batch", on_update=None,
+                           **_kw):
                 self.wakes.append({"base_url": base_url, "session_id": session_id, "prompt": prompt})
                 if on_update:
                     for i in range(5):

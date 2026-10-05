@@ -36,6 +36,7 @@ from pydantic import BaseModel
 
 from ..config import get_settings
 from ..modules.model_router import OpenAICompatClient
+from ..modules.profiles import tier_model
 
 CALLER_KEY = "agent-org-p0.5-eval"
 
@@ -260,7 +261,10 @@ async def run(args) -> dict:
     s = get_settings()
     API_BASE = args.api_base or s.local_api_base
     API_KEY = s.local_api_key
-    model = args.model or s.worker_model
+    # The judgement tier's local model role (AO_PROFILE_TIER_MODELS_LOCAL), since the floor decides
+    # whether the LARGE-tier profiles (reviewers, PM) can stay local. Was Settings.worker_model,
+    # removed by ef-worker-model (no running code read it).
+    model = args.model or tier_model(s, "large", "local")
     client = OpenAICompatClient()
 
     print("=" * 72)
@@ -331,7 +335,7 @@ async def run(args) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description="P0.5 capability-floor test (local-large)")
     ap.add_argument("--quick", action="store_true", help="fast smoke (fewer calls)")
-    ap.add_argument("--model", default=None, help="override the model id (default: worker_model)")
+    ap.add_argument("--model", default=None, help="override the model id (default: the local lane's large-tier role)")
     ap.add_argument("--api-base", default=None, help="override the gateway base URL")
     ap.add_argument("--t-instruction", type=float, default=0.80)
     ap.add_argument("--t-structured", type=float, default=0.90)

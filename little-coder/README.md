@@ -39,6 +39,31 @@ little-coder/
 └── tests/                            # pytest suite
 ```
 
+## Task API: the model a task runs on
+
+`POST /tasks` takes an optional `model`. A task without it runs `agent.model` from
+`config/little-coder.config.yaml`, as every caller did before (Open WebUI and the CLI never
+send it). A task with it runs that model for that task only. The config is never changed, so
+the next task without `model` runs `agent.model` again.
+
+The value must be `agent.model` itself or a key of `agent.allowed_models`. The match is
+exact: no prefix, no pattern, no case folding, no trimming. Each key is a gateway model ROLE
+(`local-small`), mapped to the `--model` value the agent gets (`llamacpp/local-small`). The
+config is refused at boot unless every key is a gateway role and every value is
+`llamacpp/<gateway role>`. A gateway role is letters, digits and `. _ : -`, starting with a
+letter or digit. Each value must also be registered in `config/models.json`, where the
+`llamacpp` provider points at the LiteLLM alias, so a per-task model stays a role behind the
+gateway. Anything else is refused
+before a task exists, with `422 model refused: ...`. That includes an empty string and
+anything starting with `-`. With no `allowed_models`, only `agent.model` may be named.
+
+`GET /tasks/<id>` returns `model`: the `--model` value the task ran. The journal's
+`task_started` record carries the same value. The agent-org bridge sends its `worker-default`
+profile's model with every worker turn. See
+[`../agent-org/agent-bridge/profiles/README.md`](../agent-org/agent-bridge/profiles/README.md).
+The pooled workers read generated copies of this config, so after editing `allowed_models`,
+run `python agent-org/scripts/gen-worker-configs.py`.
+
 ## Language note
 
 Upstream little-coder is a **Node.js** CLI built on the `pi` agent framework —
