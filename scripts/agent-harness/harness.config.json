@@ -298,7 +298,7 @@
       "attempt's submitted sha - unknown on attempt 1, and unknown never matches). `tier` is the",
       "result: a tier name, or `item` for the item's own tier (or `default_tier` when it has none).",
       "",
-      "Readers: config.ps1 Resolve-ModelTier and config.py resolve_model_tier, pinned together by",
+      "Reader: config.ps1 Resolve-ModelTier, the only one; tested directly by",
       "test_model_tiers.py. Documented in README.md / MODULE.md, section 'Model tiers'."
     ],
     "tiers": ["large", "small"],

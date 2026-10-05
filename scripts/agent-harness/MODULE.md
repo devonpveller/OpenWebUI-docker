@@ -276,8 +276,9 @@ MODEL (advisory): next role tester, attempt 2 -> tier small [rule retest-small-d
   facts: item tier set on the item; doc-only no; lines changed since the last verdict 3
 ```
 
-Readers: `config.ps1` `Resolve-ModelTier` and `config.py` `resolve_model_tier`, pinned
-together by `test_model_tiers.py`; `verify-model-tiers.ps1` drives `queue.ps1` end to end
+One reader: `config.ps1` `Resolve-ModelTier` (a Python twin, `config.py`
+`resolve_model_tier`, was removed by item ef-one-resolver - one place to change the policy).
+`test_model_tiers.py` asks it every rule directly; `verify-model-tiers.ps1` drives `queue.ps1` end to end
 on hermetic fixtures. agent-org applies the same tiers to its own roles through its
 profiles (`agent-org/agent-bridge/profiles/README.md`, "Tiers").
 

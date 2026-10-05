@@ -443,14 +443,14 @@ function Get-HarnessProfileNames {
 # Which MODEL a role should run on for a given work item: the item's tier (large|small) plus
 # the ordered rules in harness.config.json `model_tiers`, looked up in one of TWO SEPARATE
 # maps - `cloud` (Claude Code subagents) and `local` (agent-org model roles). ADVISORY only:
-# queue.ps1 prints the answer and never blocks on it. Mirrored by config.py
-# resolve_model_tier; test_model_tiers.py asks both the same questions - including
-# non-canonical ones - and requires the same answer or the same refusal.
+# queue.ps1 prints the answer and never blocks on it. This is the ONE resolver (item
+# ef-one-resolver removed the Python twin); test_model_tiers.py asks it every rule, and the
+# non-canonical inputs, directly.
 #
-# THE TWIN CONTRACT, STRUCTURALLY (mt-policy attempt 3). Two attempts each closed one instance
-# of "PowerShell compares strings differently from Python": attempt 1 used -contains (case-
-# INsensitive); attempt 2 used -ceq/-ccontains, which are CULTURE-aware and ignore U+00AD,
-# U+200D and U+0000, and read config KEYS through PowerShell hashtables, which are case-
+# THE STRING-COMPARISON CONTRACT, STRUCTURALLY (mt-policy attempt 3). Two attempts each closed one
+# instance of PowerShell's default string comparison being looser than the policy: attempt 1 used
+# -contains (case-INsensitive); attempt 2 used -ceq/-ccontains, which are CULTURE-aware and ignore
+# U+00AD, U+200D and U+0000, and read config KEYS through PowerShell hashtables, which are case-
 # insensitive ("Cloud" found "cloud"). So, in this section, with no exceptions:
 #   1. every NAME - a tier, a role, a rule key, default_tier, an item tier - must match
 #      ^[a-z][a-z0-9_-]{0,31}$ (ASCII, checked with a regex anchored by \z, no trimming, no
@@ -460,8 +460,8 @@ function Get-HarnessProfileNames {
 #      never by .Contains()/[] with the canonical name, and every key at every level of the block
 #      must be exactly one of the canonical spellings (or start with "_"), else it is refused;
 #   4. numeric bounds are whole numbers in 0..2147483647 - fractions and out-of-range values are
-#      refused (PowerShell reads 99999999999999999999 as a Decimal, Python as an int).
-# Messages are byte-identical to config.py's, which applies the same four rules.
+#      refused (PowerShell reads 99999999999999999999 as a Decimal, not an int).
+# (The messages are pinned word for word by test_model_tiers.py.)
 $script:ModelTierNamePattern = '^[a-z][a-z0-9_-]{0,31}\z'
 $script:ModelTierTopKeys = @("tiers", "default_tier", "doc_only_patterns", "rules", "cloud", "local")
 $script:ModelTierSubstrateKeys = @("substrate", "roles", "trivial")
@@ -475,8 +475,8 @@ $script:ModelTierProblemsFor = $null
 $script:ModelTierProblemsCache = @()
 
 function Get-JsonKindName($v) {
-    # The JSON type of a value as ConvertFrom-Json produced it, named the way config.py's
-    # _json_kind names the json.loads value - so refusal messages are byte-identical.
+    # The JSON type name of a value as ConvertFrom-Json produced it ("array", "object",
+    # "number"...), used in the refusal messages.
     if ($null -eq $v) { return "null" }
     if ($v -is [string]) { return "string" }
     if ($v -is [bool]) { return "boolean" }
@@ -545,7 +545,7 @@ function Add-UnknownKeyProblems($dict, $allowed, [string]$where, [string]$allowe
 
 function Get-ModelTiersProblems {
     # Everything wrong with the model_tiers block, in a fixed order; empty when it is usable.
-    # Mirrors config.py model_tiers_problems() message for message. Cached per loaded config
+    # Cached per loaded config
     # object (the config is itself cached), so a resolve does not re-validate the block.
     $cfg = Get-HarnessConfig
     if ([object]::ReferenceEquals($cfg, $script:ModelTierProblemsFor)) { return @($script:ModelTierProblemsCache) }
