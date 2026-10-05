@@ -563,6 +563,31 @@ class LittleCoderDaemon:
                 upstream_ok = await self._bake_upstream(req, requested)
                 out["upstream"] = req.upstream
                 out["upstream_ok"] = upstream_ok
+            elif req.upstream and req.upstream_token:
+                # The remote survived but its credential may not: the credential store lives in the
+                # executor's HOME (emptied by a recreate or the credential scrub) while the remote
+                # lives in the workspace volume. Re-store upstream's OWN entry (never origin's, no
+                # token in the remote URL, remote not re-added). Without an upstream_token an
+                # existing entry is simply left alone (ef-lc-upstream).
+                res = await asyncio.to_thread(
+                    self.workspace.refresh_upstream_auth, req.upstream_token, req.upstream
+                )
+                # `ok` = stored under the URL the remote ACTUALLY has (not the request's), so the
+                # flag is true only when `git fetch upstream` can use it. A caller whose URL differs
+                # from the remote's still gets the remote's entry; it is told via upstream_mismatch
+                # (the remote is never re-pointed here: that is a clone/switch decision).
+                out["upstream"] = req.upstream
+                out["upstream_reauthed"] = bool(res.ok)
+                if res.ok and res.stdout.strip() == "differs":
+                    out["upstream_mismatch"] = True
+                self.audit.write(
+                    "project_upstream_reauthed",
+                    actor=req.actor,
+                    repo=requested.canonical_url,
+                    upstream=req.upstream,
+                    ok=bool(res.ok),
+                    mismatch=bool(out.get("upstream_mismatch")),
+                )
             return out
         if decision.action is SwitchAction.REJECT:
             raise HTTPException(409, decision.reason)
