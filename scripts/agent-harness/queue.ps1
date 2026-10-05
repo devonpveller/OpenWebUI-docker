@@ -246,8 +246,10 @@ function Normalize-Id([string]$who) {
 function Test-KnownAgent([string]$who) {
     # Advisory only: testers, reviewers and the operator legitimately have no worktree.
     $reg = Join-Path (Get-SharedStateDir) "worktrees.json"
-    if (-not (Test-Path $reg)) { return $true }
-    try { $rows = (Get-Content -Raw -Path $reg | ConvertFrom-Json).worktrees } catch { return $true }
+    # Read-RegistryJson (lock.ps1) retries briefly on a locked or half-swapped file; null = absent/unreadable.
+    $regObj = Read-RegistryJson -Path $reg
+    if ($null -eq $regObj) { return $true }
+    $rows = $regObj.worktrees
     if (-not $rows) { return $true }
     # A registry with NO ROWS is 'cannot check', exactly like a missing one - and the two
     # lines above only catch the missing and the null spellings. The empty one is what
@@ -713,8 +715,9 @@ function Get-ComposeServices([string[]]$Lines) {
 
 function Get-WorktreeRegistry {
     $reg = Join-Path (Get-SharedStateDir) "worktrees.json"
-    if (-not (Test-Path $reg)) { return $null }
-    try { return (Get-Content -Raw -Path $reg | ConvertFrom-Json).worktrees } catch { return $null }
+    $regObj = Read-RegistryJson -Path $reg
+    if ($null -eq $regObj) { return $null }
+    return $regObj.worktrees
 }
 
 $script:RepoAnchors = $null

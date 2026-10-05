@@ -198,20 +198,7 @@ if ($crlf.Count) {
 
 # --- registry ---------------------------------------------------------------------
 if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Force -Path $StateDir | Out-Null }
-$reg = @{ worktrees = @{} }
-if (Test-Path $Registry) {
-    try {
-        $parsed = Get-Content -Raw -Path $Registry | ConvertFrom-Json
-        $reg = @{ worktrees = @{} }
-        if ($parsed.worktrees) {
-            foreach ($p in $parsed.worktrees.PSObject.Properties) { $reg.worktrees[$p.Name] = $p.Value }
-        }
-    } catch {
-        Write-Host "  WARNING: registry unreadable, starting a fresh one (old file kept as .bad)" -ForegroundColor Yellow
-        Copy-Item $Registry "$Registry.bad" -Force
-    }
-}
-$reg.worktrees[$Id] = [ordered]@{
+$newRow = [ordered]@{
     id         = $Id
     path       = $Path
     branch     = $Branch
@@ -221,9 +208,13 @@ $reg.worktrees[$Id] = [ordered]@{
     thread     = $Thread
     created    = [int64][System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 }
-$tmp = "$Registry.tmp"
-($reg | ConvertTo-Json -Depth 6) | Set-Content -Path $tmp -Encoding ASCII
-Move-Item -Path $tmp -Destination $Registry -Force
+# Read-modify-write under the shared registry lock (lock.ps1): a concurrent provision or
+# removal can no longer drop this row, nor have its own dropped.
+try {
+    Update-WorktreeRegistry -Registry $Registry -Mutate ({ param($rows) $rows[$Id] = $newRow }.GetNewClosure())
+} catch {
+    Fail ("{0}`n       The worktree {1} exists but is NOT registered; re-run after the holder exits (remove-worktree.ps1 -Id {2} first, or add the row by hand)." -f $_.Exception.Message, $Path, $Id)
+}
 
 # --- merge-target warnings, raised NOW rather than 40 minutes later ----------------
 # Both of these are invisible until the agent is holding the merge lease, which is the

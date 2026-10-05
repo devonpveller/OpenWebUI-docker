@@ -45,7 +45,8 @@ if ($Path) {
     $targets += [pscustomobject]@{ id = "(ad-hoc)"; path = $Path }
 } elseif ($All -or $Id) {
     if (-not (Test-Path $Registry)) { Say "No registry at $Registry - nothing to sync." "Yellow"; exit 0 }
-    $reg = Get-Content -Raw -Path $Registry | ConvertFrom-Json
+    $reg = Read-RegistryJson -Path $Registry
+    if ($null -eq $reg) { Write-Host "ERROR: registry $Registry is unreadable" -ForegroundColor Red; exit 1 }
     foreach ($p in $reg.worktrees.PSObject.Properties) {
         if ($Id -and $p.Name -ne $Id) { continue }
         $targets += [pscustomobject]@{ id = $p.Name; path = $p.Value.path }
