@@ -246,8 +246,15 @@ try {
         $kRd = Start-Process powershell.exe -ArgumentList @("-NoProfile", "-File", "`"$kReader`"", "`"$kReg`"", "`"$kStop`"") -PassThru -WindowStyle Hidden
         $shrunk = 0; $missingAfterKill = 0
         for ($k = 1; $k -le $Kills; $k++) {
-            Get-ChildItem $kdir -Filter "worktrees.json*" | Remove-Item -Force -ErrorAction SilentlyContinue
-            Set-Content -Path $kReg -Value (New-RegJson 40 "s") -Encoding ASCII
+            # The scenario's own tight reader holds the registry open without FILE_SHARE_DELETE, so
+            # the reset can fail for a moment: retry it rather than die (or silently keep old state).
+            for ($rt = 0; $rt -lt 400; $rt++) {
+                try {
+                    Get-ChildItem $kdir -Filter "worktrees.json*" | Remove-Item -Force -ErrorAction Stop
+                    Set-Content -Path $kReg -Value (New-RegJson 40 "s") -Encoding ASCII -ErrorAction Stop
+                    break
+                } catch { Start-Sleep -Milliseconds 25 }
+            }
             Set-Content -Path $kProg -Value 0 -Encoding ASCII
             $psiK = New-Object System.Diagnostics.ProcessStartInfo
             $psiK.FileName = "powershell.exe"; $psiK.Arguments = "-NoProfile -NonInteractive -File `"$kWriter`" `"$kReg`" `"$kProg`""
@@ -330,6 +337,93 @@ try {
         $okCl = ($rcl.Out -eq "99|CALLER|CALLER|CALLER|refused")
         Write-Host ("[-Mutate scope] {0} -> {1}" -f $rcl.Out, $(if ($okCl) { "OK" } else { "BOUND TO HELPER LOCALS" }))
         if (-not $okCl) { $fail++ }
+
+        # 2h. Leftover handling, hand-built states (deterministic).
+        $lf = Join-Path $root "left"; New-Item -ItemType Directory -Force -Path $lf | Out-Null
+        $lfReg = Join-Path $lf "worktrees.json"
+        function Reset-Left { Get-ChildItem $lf -Force | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue }
+        # (a) a NEWER leftover that does not parse is skipped in favour of an older good one: the
+        # warning names the skipped file and its bytes are kept (a rollback is never silent).
+        Reset-Left
+        Set-Content -Path "$lfReg~RF9a9a9a.TMP" -Value (New-RegJson 5 "g") -Encoding ASCII
+        (Get-Item "$lfReg~RF9a9a9a.TMP").LastWriteTimeUtc = [DateTime]::UtcNow.AddDays(-3)
+        Set-Content -Path "$lfReg.tmp" -Value '{ "worktrees": { "x": ' -Encoding ASCII
+        $ra = Invoke-PsFile $updPs1 @($lfReg, "added")
+        $keptBad = @(Get-ChildItem $lf -Filter "worktrees.json.tmp.bad-*").Count
+        $okA2 = ($ra.Exit -eq 0) -and ((Get-RowCount $lfReg) -eq 6) -and ($ra.Out -match "skipped") -and ($ra.Out -match "worktrees\.json\.tmp\.bad-") -and ($keptBad -eq 1)
+        Write-Host ("[rollback visible] rows={0}/6 warn_names_skipped={1} skipped_bytes_kept={2} -> {3}" -f (Get-RowCount $lfReg), ($ra.Out -match "skipped"), $keptBad, $(if ($okA2) { "OK" } else { "FAIL" }))
+        if (-not $okA2) { $fail++ }
+        # (b) parseable JSON of the wrong shape is not a registry: refused when absent (nothing
+        # written), set aside + fresh registry with NO junk rows when present.
+        $shapes = @('{"worktrees":"a string"}', '{"worktrees":[1,2,3]}', '{"worktrees":42}', '{"worktrees":null}', '{"worktrees":{"a":"notobj"}}', '[1,2]')
+        $badShape = 0
+        foreach ($sh in $shapes) {
+            Reset-Left
+            Set-Content -Path "$lfReg.tmp" -Value $sh -Encoding ASCII
+            $rb = Invoke-PsFile $updPs1 @($lfReg, "added")
+            if (-not (($rb.Exit -ne 0) -and (-not (Test-Path $lfReg)))) { $badShape++; Write-Host ("  absent+leftover {0}: not refused" -f $sh) -ForegroundColor Red }
+            Reset-Left
+            Set-Content -Path $lfReg -Value $sh -Encoding ASCII
+            $rb = Invoke-PsFile $updPs1 @($lfReg, "added")
+            $badFiles = @(Get-ChildItem $lf -Filter "worktrees.json.bad-*").Count
+            if (-not (($rb.Exit -eq 0) -and ((Get-RowCount $lfReg) -eq 1) -and ($badFiles -eq 1))) { $badShape++; Write-Host ("  present {0}: rows={1} bad_files={2}" -f $sh, (Get-RowCount $lfReg), $badFiles) -ForegroundColor Red }
+        }
+        Write-Host ("[wrong-shape registry] cases={0} mishandled={1}" -f ($shapes.Count * 2), $badShape)
+        if ($badShape) { $fail++ }
+        # (c) an unreadable present registry is set aside under a timestamped name and a second
+        # incident never overwrites the first one's copy.
+        Reset-Left
+        Set-Content -Path $lfReg -Value "first { corrupt" -Encoding ASCII
+        $null = Invoke-PsFile $updPs1 @($lfReg, "one")
+        Set-Content -Path $lfReg -Value "second { corrupt" -Encoding ASCII
+        $null = Invoke-PsFile $updPs1 @($lfReg, "two")
+        $bads = @(Get-ChildItem $lf -Filter "worktrees.json.bad-*")
+        $contents = @($bads | ForEach-Object { (Get-Content -Raw $_.FullName).Trim() })
+        $okC2 = ($bads.Count -eq 2) -and ($contents -contains "first { corrupt") -and ($contents -contains "second { corrupt")
+        Write-Host ("[set-aside copies] files={0} both_incidents_kept={1} -> {2}" -f $bads.Count, (($contents -contains "first { corrupt") -and ($contents -contains "second { corrupt")), $(if ($okC2) { "OK" } else { "FAIL" }))
+        if (-not $okC2) { $fail++ }
+        # (d) ~RF leftovers of THIS registry beside a present registry are cleaned after a good
+        # swap; another file's ~RF is left alone.
+        Reset-Left
+        Set-Content -Path $lfReg -Value (New-RegJson 3 "p") -Encoding ASCII
+        Set-Content -Path "$lfReg~RF111111.TMP" -Value (New-RegJson 9 "z") -Encoding ASCII
+        Set-Content -Path "$lfReg~RF222222.TMP" -Value "garbage" -Encoding ASCII
+        Set-Content -Path (Join-Path $lf "other.json~RF333333.TMP") -Value "keep me" -Encoding ASCII
+        $rd = Invoke-PsFile $updPs1 @($lfReg, "added")
+        $okD = ($rd.Exit -eq 0) -and ((Get-RowCount $lfReg) -eq 4) -and (-not (Test-Path "$lfReg~RF111111.TMP")) -and (-not (Test-Path "$lfReg~RF222222.TMP")) -and (Test-Path (Join-Path $lf "other.json~RF333333.TMP"))
+        Write-Host ("[~RF cleanup] rows={0}/4 own_cleaned={1} other_left={2} -> {3}" -f (Get-RowCount $lfReg), ((-not (Test-Path "$lfReg~RF111111.TMP")) -and (-not (Test-Path "$lfReg~RF222222.TMP"))), (Test-Path (Join-Path $lf "other.json~RF333333.TMP")), $(if ($okD) { "OK" } else { "FAIL" }))
+        if (-not $okD) { $fail++ }
+
+        # 2i. Double fault: a writer killed mid-swap left NO registry (rows only in .tmp), then the
+        # NEXT writer is killed the moment it first touches that .tmp (truncated, or moved away).
+        # The rows must still be recoverable by the writer after that.
+        $dfDir = Join-Path $root "dfault"; New-Item -ItemType Directory -Force -Path $dfDir | Out-Null
+        $dfReg = Join-Path $dfDir "worktrees.json"
+        $dfRows = 12000; $dfTries = 3; $dfLost = 0; $dfKilled = 0
+        $big = @{}
+        for ($i = 1; $i -le $dfRows; $i++) { $big["row$i"] = @{ id = "row$i"; path = ("C:\very\long\path\" + ("q" * 200) + $i); branch = "work/row$i" } }
+        $bigJson = (@{ worktrees = $big } | ConvertTo-Json -Depth 5)
+        for ($t = 1; $t -le $dfTries; $t++) {
+            Get-ChildItem $dfDir -Force | Remove-Item -Force -ErrorAction SilentlyContinue
+            Set-Content -Path "$dfReg.tmp" -Value $bigJson -Encoding ASCII
+            $len0 = (Get-Item "$dfReg.tmp").Length
+            $psiD = New-Object System.Diagnostics.ProcessStartInfo
+            $psiD.FileName = "powershell.exe"; $psiD.Arguments = "-NoProfile -NonInteractive -File `"$updPs1`" `"$dfReg`" `"B$t`""
+            $psiD.UseShellExecute = $false; $psiD.CreateNoWindow = $true
+            $dw = [System.Diagnostics.Process]::Start($psiD)
+            $fi = New-Object System.IO.FileInfo("$dfReg.tmp")
+            $swd = [Diagnostics.Stopwatch]::StartNew()
+            while (-not $dw.HasExited -and $swd.Elapsed.TotalSeconds -lt 120) {
+                $fi.Refresh()
+                if ((-not $fi.Exists) -or ($fi.Length -lt $len0)) { if (-not $dw.HasExited) { try { $dw.Kill(); $dfKilled++ } catch { } }; break }
+            }
+            $null = $dw.WaitForExit(10000)
+            $rn = Invoke-PsFile $updPs1 @($dfReg, "C$t") 240000
+            $got = Get-RowCount $dfReg
+            if (($rn.Exit -ne 0) -or ($got -lt $dfRows)) { $dfLost++; Write-Host ("  try {0}: next writer exit={1} rows={2} (expected >= {3}) {4}" -f $t, $rn.Exit, $got, $dfRows, $rn.Out.Substring(0, [Math]::Min(100, $rn.Out.Length))) -ForegroundColor Red }
+        }
+        Write-Host ("[double fault] tries={0} killed_mid_recovery={1} tries_that_lost_rows={2}" -f $dfTries, $dfKilled, $dfLost)
+        if ($dfLost) { $fail++ }
     }
 
     # --- 3. killed holder, then live holder ------------------------------------------

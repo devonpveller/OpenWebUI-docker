@@ -103,11 +103,28 @@ function Read-RegistryJson {
     }
 }
 
+# A registry is an object whose `worktrees` is an object of row objects. Anything else (a string,
+# an array, a number, null, rows that are not objects) is NOT a registry: writing into it would
+# produce junk rows, so callers refuse or set it aside instead.
+function Test-RegistryShape {
+    param($Parsed)
+    if (-not $Parsed -or -not ($Parsed.PSObject.Properties.Name -contains "worktrees")) { return $false }
+    $wtlW = $Parsed.worktrees
+    if (-not ($wtlW -is [System.Management.Automation.PSCustomObject])) { return $false }
+    foreach ($wtlP in $wtlW.PSObject.Properties) {
+        if (-not ($wtlP.Value -is [System.Management.Automation.PSCustomObject])) { return $false }
+    }
+    return $true
+}
+
 # When worktrees.json is absent under the lock, the rows may be stranded by a writer that was
 # killed between the delete and the move: finished content in worktrees.json.tmp (or, from an
-# older toolkit, worktrees.json~RF*.TMP). Returns @{ rows; from } from the newest candidate that
-# parses AND has the registry shape, $null when there is no candidate at all (a true first
-# write), and throws, naming the files, when candidates exist but none is usable.
+# older toolkit, worktrees.json~RF*.TMP). Picks the newest leftover that parses AND has the
+# registry shape. Returns @{ from; count; skipped } (skipped = newer leftovers that were
+# unusable, renamed to <name>.bad-<stamp> so a rollback is visible and the bytes are kept),
+# $null when there is no leftover at all (a true first write), and throws, naming the files,
+# when leftovers exist but none is usable. It does NOT write or truncate anything it reads from:
+# the caller moves the chosen file into place first.
 function Get-RegistryRecovery {
     param([Parameter(Mandatory)][string]$Registry)
     $wtlDir = Split-Path -Parent $Registry
@@ -116,17 +133,23 @@ function Get-RegistryRecovery {
     if (Test-Path "$Registry.tmp") { $wtlCands += Get-Item "$Registry.tmp" }
     if (Test-Path $wtlDir) { $wtlCands += @(Get-ChildItem -Path $wtlDir -Filter ($wtlLeaf + "~RF*.TMP") -ErrorAction SilentlyContinue) }
     if (-not $wtlCands.Count) { return $null }
+    $wtlBadNew = @()
     foreach ($wtlC in @($wtlCands | Sort-Object LastWriteTimeUtc -Descending)) {
         try {
             $wtlO = [System.IO.File]::ReadAllText($wtlC.FullName) | ConvertFrom-Json
-            if ($wtlO -and ($wtlO.PSObject.Properties.Name -contains "worktrees")) {
-                $wtlR = @{}
-                if ($wtlO.worktrees) { foreach ($wtlP in $wtlO.worktrees.PSObject.Properties) { $wtlR[$wtlP.Name] = $wtlP.Value } }
-                return @{ rows = $wtlR; from = $wtlC.FullName }
+            if (Test-RegistryShape $wtlO) {
+                $wtlSkipped = @()
+                $wtlStamp = (Get-Date).ToString("yyyyMMddHHmmssfff")
+                foreach ($wtlB in $wtlBadNew) {
+                    try { Rename-Item -Path $wtlB -NewName ((Split-Path -Leaf $wtlB) + ".bad-" + $wtlStamp) -ErrorAction Stop; $wtlSkipped += ($wtlB + ".bad-" + $wtlStamp) }
+                    catch { $wtlSkipped += $wtlB }
+                }
+                return @{ from = $wtlC.FullName; count = @($wtlO.worktrees.PSObject.Properties).Count; skipped = $wtlSkipped }
             }
         } catch { }
+        $wtlBadNew += $wtlC.FullName
     }
-    throw ("'{0}' is absent and none of its leftovers can be read as a registry ({1}). Not starting a fresh registry over them: inspect those files, put a good copy at '{0}' (or delete them if the registry really is empty), then retry." -f $Registry, (($wtlCands | ForEach-Object { $_.FullName }) -join ", "))
+    throw ("'{0}' is absent and none of its leftovers can be read as a registry ({1}). Not starting a fresh registry over them: inspect those files, put a good copy at '{0}' (or delete them if the registry really is empty), then retry." -f $Registry, ($wtlBadNew -join ", "))
 }
 
 # Locked read-modify-write of worktrees.json. $Mutate receives the rows hashtable (id -> row),
@@ -142,26 +165,33 @@ function Update-WorktreeRegistry {
     )
     if (-not $Mutate.Module) { throw "Update-WorktreeRegistry: -Mutate must be a closure ({ ... }.GetNewClosure()) so it cannot bind to this helper's variables." }
     Invoke-WithFileLock -LockPath "$Registry.lock" -Action {
+        if (-not (Test-Path $Registry)) {
+            # Absent: recover. The chosen leftover is MOVED into place first (a rename onto an
+            # absent name), so the rows are durable under their real name before anything is
+            # rewritten; the normal update below then runs on a present registry. Rewriting the
+            # leftover in place instead would truncate the only copy.
+            $wtlRec = Get-RegistryRecovery -Registry $Registry
+            if ($wtlRec) {
+                Move-RegistryIntoPlace -Tmp $wtlRec.from -Dest $Registry
+                $wtlMsg = "  WARN: worktrees.json was absent (a writer was killed mid-swap); recovered {0} row(s) from {1}" -f $wtlRec.count, $wtlRec.from
+                if ($wtlRec.skipped.Count) { $wtlMsg += "; NEWER unusable leftover(s) skipped (kept): " + ($wtlRec.skipped -join ", ") }
+                Write-Host $wtlMsg -ForegroundColor Yellow
+            }
+        }
         $wtlRows = @{}
         if (Test-Path $Registry) {
             $wtlParsed = Read-RegistryJson -Path $Registry
-            if ($null -ne $wtlParsed) {
-                if ($wtlParsed.worktrees) {
-                    foreach ($wtlP in $wtlParsed.worktrees.PSObject.Properties) { $wtlRows[$wtlP.Name] = $wtlP.Value }
-                }
+            if (Test-RegistryShape $wtlParsed) {
+                foreach ($wtlP in $wtlParsed.worktrees.PSObject.Properties) { $wtlRows[$wtlP.Name] = $wtlP.Value }
             } else {
-                # Present but unreadable (corrupt, or held exclusively for > 3 s). Set it aside
-                # FIRST; only if that works is a fresh registry started. If it cannot be set
-                # aside nothing is overwritten and the writer stops.
-                try { Copy-Item $Registry "$Registry.bad" -Force -ErrorAction Stop }
+                # Present but unreadable (corrupt, wrong shape, or held exclusively for > 3 s).
+                # Set it aside under a timestamped name FIRST (an earlier .bad is never
+                # overwritten); only if that works is a fresh registry started. If it cannot be
+                # set aside nothing is overwritten and the writer stops.
+                $wtlBad = "$Registry.bad-" + (Get-Date).ToString("yyyyMMddHHmmssfff")
+                try { Copy-Item $Registry $wtlBad -ErrorAction Stop }
                 catch { throw ("registry '{0}' is unreadable and could not be set aside ({1}); left untouched, the row was NOT written." -f $Registry, $_.Exception.Message) }
-                Write-Host "  WARNING: registry unreadable, started a fresh one (old file kept as worktrees.json.bad)" -ForegroundColor Yellow
-            }
-        } else {
-            $wtlRec = Get-RegistryRecovery -Registry $Registry
-            if ($wtlRec) {
-                $wtlRows = $wtlRec.rows
-                Write-Host ("  WARN: worktrees.json was absent (a writer was killed mid-swap); recovered {0} row(s) from {1}" -f $wtlRows.Count, $wtlRec.from) -ForegroundColor Yellow
+                Write-Host ("  WARNING: registry unreadable, started a fresh one (old file kept as {0})" -f $wtlBad) -ForegroundColor Yellow
             }
         }
         & $Mutate $wtlRows
