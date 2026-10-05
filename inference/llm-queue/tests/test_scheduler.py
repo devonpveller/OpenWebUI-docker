@@ -147,3 +147,60 @@ async def test_t_updates_from_completions(make_queue, make_waiter):
     w.started_monotonic = _t.monotonic() - 2.0
     await mq.release(w, record_duration=True)
     assert 1.5 < mq.avg_t < 2.5  # T now reflects the measured completion
+
+
+# ---- lq-estimate: a free slot means zero projected wait (design §8b) --------
+
+
+async def test_free_slot_admits_regardless_of_avg_t(make_queue, make_waiter):
+    # 2026-10-04 live repro: P=2, one request running, nobody waiting, avg_T=143s,
+    # owui-chat budget 30s. A slot is free, so the new request must be admitted.
+    mq = make_queue(slots=2, max_in_flight=2, enforce_budget=True, t_initial_s=143.0)
+    await mq.enqueue(make_waiter(acceptable=600))  # running (1 of 2 slots)
+    assert mq.estimate_wait(rank=2) == 0.0
+    w = make_waiter(acceptable=30)
+    await mq.enqueue(w)  # must NOT raise queue_over_budget
+    assert w.dispatched
+
+
+async def test_estimate_zero_until_all_slots_taken(make_queue, make_waiter):
+    mq = make_queue(slots=3, max_in_flight=3, t_initial_s=10.0)
+    assert mq.estimate_wait(rank=2) == 0.0
+    for _ in range(2):
+        await mq.enqueue(make_waiter())
+        assert mq.estimate_wait(rank=2) == 0.0
+    await mq.enqueue(make_waiter())  # 3rd slot taken -> next arrival waits one wave
+    assert mq.estimate_wait(rank=2) == 10.0
+
+
+async def test_estimate_grows_with_waiters_when_saturated(make_queue, make_waiter):
+    mq = make_queue(slots=2, max_in_flight=2, t_initial_s=10.0)
+    for _ in range(2):
+        await mq.enqueue(make_waiter())  # both slots running
+    seen = []
+    for _ in range(6):
+        seen.append(mq.estimate_wait(rank=2))
+        await mq.enqueue(make_waiter())  # one more waiter
+    # N waiters ahead, P=2: ceil((2+N-2+1)/2)*10 -> 10,10,20,20,30,30
+    assert seen == [10.0, 10.0, 20.0, 20.0, 30.0, 30.0]
+    assert all(b >= a for a, b in zip(seen, seen[1:], strict=False))
+
+
+async def test_lower_priority_waiters_do_not_count_ahead(make_queue, make_waiter):
+    mq = make_queue(slots=1, max_in_flight=1, t_initial_s=10.0)
+    await mq.enqueue(make_waiter(rank=2))  # running
+    for _ in range(5):
+        await mq.enqueue(make_waiter(rank=3))  # low-priority waiters
+    # A rank-0 arrival is only behind the running request (P=1 -> one wave).
+    assert mq.estimate_wait(rank=0) == 10.0
+    # A rank-3 arrival is behind running + 5 equal-rank waiters.
+    assert mq.estimate_wait(rank=3) == 60.0
+
+
+async def test_single_slot_estimate_unchanged(make_queue, make_waiter):
+    mq = make_queue(slots=1, max_in_flight=1, t_initial_s=60.0)
+    assert mq.estimate_wait(rank=2) == 0.0
+    await mq.enqueue(make_waiter())  # running
+    assert mq.estimate_wait(rank=2) == 60.0
+    await mq.enqueue(make_waiter())  # 1 waiting
+    assert mq.estimate_wait(rank=2) == 120.0
