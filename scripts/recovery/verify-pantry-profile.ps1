@@ -19,10 +19,28 @@
     and one STATIC case: the teardown/status list $Script:OB1Profiles DOES name pantry
     (a running one must be torn down), while no `up` site uses it directly.
 
+    STATIC DOCKER-ESCAPE REFUSAL (harness-gaps). The behavioural layer replaces `docker` with
+    a function that records argv. That stub intercepts ONLY a command whose name resolves to
+    the bare `docker`; every other way to reach the daemon would run for REAL during
+    verification. So before anything else the five functions are walked as an AST and the
+    verifier REFUSES (non-zero, one file:line per offender, behavioural layer never reached):
+      `& docker.exe ...` or any path ending in docker(.exe); `& 'docker'` / `& "docker"` / `. docker`
+      `& $var` / `& (expr)` (dynamic: cannot be shown not to be docker)
+      Start-Process / start / saps naming docker; cmd / powershell / pwsh / bash / sh / wsl naming docker
+      Invoke-Expression / iex that names docker or is not a plain literal
+      [Diagnostics.Process]::Start, ProcessStartInfo, New-Object ...Process
+    The only form allowed is the bare `docker ...` command the stub intercepts. Comments are
+    not in the AST, so a comment mentioning docker.exe is not an offender. As defence in depth
+    the verifier also points DOCKER_HOST at a dead endpoint for its own process.
+
+    -MutantDrill: build a scratch copy of the target per escape form (plus a comment control),
+    run this verifier against each, and require non-zero with the offending line named - and
+    the unmutated target to stay green. Touches no container.
+
     Exit code = number of failed cases.
 #>
 [CmdletBinding()]
-param([string]$Target = '')
+param([string]$Target = '', [switch]$MutantDrill)
 
 $ErrorActionPreference = 'Stop'
 if (-not $Target) { $Target = Join-Path $PSScriptRoot 'emergency-recovery.ps1' }
@@ -34,7 +52,115 @@ function Check($name, $ok, $detail = '') {
 
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($Target, [ref]$null, [ref]$null)
 $want = 'Test-OB1PantryEnabled', 'Get-OB1StartProfiles', 'Start-OB1Stack', 'Reset-OB1Stack', 'Stop-OB1Stack'
+
+# ---- STATIC: no docker invocation the stub cannot intercept -----------------------------------
+function Get-DockerEscapes($ast, [string[]]$Fns, [string]$File) {
+    $out = New-Object System.Collections.ArrayList
+    $leaf = Split-Path -Leaf $File
+    function Add-Esc($node, $fn, $why) { [void]$out.Add(("{0}:{1}: in {2}: {3}  [{4}]" -f $leaf, $node.Extent.StartLineNumber, $fn, $why, ($node.Extent.Text -replace '\s+', ' ').Trim())) }
+    foreach ($fn in $Fns) {
+        $def = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fn }, $true)
+        if (-not $def) { continue }
+        foreach ($c in @($def.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))) {
+            $name = $c.GetCommandName()
+            $text = $c.Extent.Text
+            $hasOp = ($c.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Unknown)
+            if ($null -eq $name) {
+                if ($hasOp) { Add-Esc $c $fn 'dynamic invocation (& $x / & (...)) - cannot be shown to be the stubbed docker' }
+                continue
+            }
+            $leafName = ($name -split '[\\/]')[-1]
+            if ($name -match '(?i)(^|[\\/])docker(\.exe)?$') {
+                if ($hasOp) { Add-Esc $c $fn "docker behind an invocation operator ($($c.InvocationOperator)) - not the bare command the stub intercepts" }
+                elseif ($name -ne 'docker') { Add-Esc $c $fn "'$name' is not the bare name 'docker' - the stub does not shadow it" }
+                continue
+            }
+            if ($hasOp) { Add-Esc $c $fn "invocation operator on '$name'"; continue }
+            switch -Regex ($leafName) {
+                '(?i)^(Start-Process|start|saps)$' { if ($text -match '(?i)docker') { Add-Esc $c $fn 'Start-Process naming docker' } }
+                '(?i)^(cmd|powershell|pwsh|bash|sh|wsl)(\.exe)?$' { if ($text -match '(?i)docker') { Add-Esc $c $fn "$leafName shell-out naming docker" } }
+                '(?i)^(Invoke-Expression|iex)$' {
+                    $args2 = @($c.CommandElements | Select-Object -Skip 1)
+                    $plain = ($args2.Count -ge 1) -and (@($args2 | Where-Object { $_ -isnot [System.Management.Automation.Language.StringConstantExpressionAst] }).Count -eq 0)
+                    if (($text -match '(?i)docker') -or -not $plain) { Add-Esc $c $fn 'Invoke-Expression naming docker or not a plain literal' }
+                }
+                '(?i)^New-Object$' { if ($text -match '(?i)Diagnostics\.Process|ProcessStartInfo') { Add-Esc $c $fn 'New-Object of a Process' } }
+                '(?i)^(Invoke-Command|icm|Start-Job|Start-ThreadJob|Invoke-WmiMethod|Invoke-CimMethod)$' { if ($text -match '(?i)docker') { Add-Esc $c $fn "$leafName naming docker" } }
+            }
+        }
+        foreach ($m in @($def.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -or $n -is [System.Management.Automation.Language.TypeExpressionAst] }, $true))) {
+            if ($m.Extent.Text -match '(?i)Diagnostics\.Process|ProcessStartInfo|\[Process\]') { Add-Esc $m $fn 'System.Diagnostics.Process (starts a native process the stub cannot see)' }
+        }
+    }
+    return @($out | Select-Object -Unique)
+}
+
+if ($MutantDrill) {
+    $self = $MyInvocation.MyCommand.Path
+    $src = [System.IO.File]::ReadAllText($Target)
+    $upLine = 'docker compose -f $Script:OB1Compose @prof up -d'
+    $stopLine = 'docker compose -f $Script:OB1Compose @prof stop'
+    $downLine = 'docker compose -f $Script:OB1Compose @prof down'
+    $cases = @(
+        @{ n = 'control: a comment naming docker.exe (stays GREEN)'; fn = 'Start-OB1Stack'; from = $upLine; to = ('# & docker.exe compose is not code' + "`n        " + $upLine); red = $false },
+        @{ n = '& docker.exe compose'; fn = 'Start-OB1Stack'; from = $upLine; to = '& docker.exe compose -f $Script:OB1Compose @prof up -d'; red = $true },
+        @{ n = "& 'docker' compose"; fn = 'Start-OB1Stack'; from = $upLine; to = "& 'docker' compose -f `$Script:OB1Compose @prof up -d"; red = $true },
+        @{ n = '& "docker" compose'; fn = 'Reset-OB1Stack'; from = $downLine; to = '& "docker" compose -f $Script:OB1Compose @prof down'; red = $true },
+        @{ n = '& $d compose (dynamic, $d = docker)'; fn = 'Stop-OB1Stack'; from = $stopLine; to = ('$d = ' + "'docker'" + '; & $d compose -f $Script:OB1Compose @prof stop'); red = $true },
+        @{ n = '& C:\...\docker.exe (full path)'; fn = 'Stop-OB1Stack'; from = $stopLine; to = "& 'C:\Program Files\Docker\Docker\resources\bin\docker.exe' compose stop"; red = $true },
+        @{ n = 'Start-Process docker'; fn = 'Start-OB1Stack'; from = $upLine; to = "Start-Process docker -ArgumentList 'compose up -d' -Wait"; red = $true },
+        @{ n = 'Start-Process -FilePath docker.exe'; fn = 'Reset-OB1Stack'; from = $downLine; to = "Start-Process -FilePath 'docker.exe' -ArgumentList 'compose down'"; red = $true },
+        @{ n = 'cmd /c docker'; fn = 'Start-OB1Stack'; from = $upLine; to = 'cmd /c docker compose up -d'; red = $true },
+        @{ n = "Invoke-Expression 'docker ...'"; fn = 'Stop-OB1Stack'; from = $stopLine; to = "Invoke-Expression 'docker compose stop'"; red = $true },
+        @{ n = 'iex $variable'; fn = 'Stop-OB1Stack'; from = $stopLine; to = '$cmdline = "docker compose stop"; iex $cmdline'; red = $true },
+        @{ n = '[Diagnostics.Process]::Start'; fn = 'Start-OB1Stack'; from = $upLine; to = "[Diagnostics.Process]::Start('docker', 'compose up -d') | Out-Null"; red = $true },
+        @{ n = '[System.Diagnostics.Process]::Start'; fn = 'Reset-OB1Stack'; from = $downLine; to = "[System.Diagnostics.Process]::Start('docker.exe', 'ps') | Out-Null"; red = $true })
+    $bad = 0
+    $dir = Join-Path ([System.IO.Path]::GetTempPath()) ('pantry-mut-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    try {
+        $srcAst = [System.Management.Automation.Language.Parser]::ParseInput($src, [ref]$null, [ref]$null)
+        foreach ($k in $cases) {
+            $def = $srcAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $k.fn }, $true)
+            $body = $def.Extent.Text
+            $i = $body.IndexOf($k.from)
+            if ($i -lt 0) { Write-Host ("  [FAIL] drill setup: '{0}' not found in {1}" -f $k.from, $k.fn); $bad++; continue }
+            $mut = $src.Substring(0, $def.Extent.StartOffset) + $body.Substring(0, $i) + $k.to + $body.Substring($i + $k.from.Length) + $src.Substring($def.Extent.EndOffset)
+            $f = Join-Path $dir 'emergency-recovery.ps1'
+            [System.IO.File]::WriteAllText($f, $mut, (New-Object System.Text.UTF8Encoding($false)))
+            $o = & powershell -NoProfile -ExecutionPolicy Bypass -File $self -Target $f 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            if ($k.red) {
+                $named = [regex]::IsMatch($o, 'emergency-recovery\.ps1:\d+: in ' + [regex]::Escape($k.fn))
+                $ok = ($code -ne 0) -and $named -and ($o -notmatch 'Start and Reset each issue')
+                Write-Host ("  [{0}] mutant {1} -> exit {2}{3}" -f $(if ($ok) { 'OK' } else { 'FAIL' }), $k.n, $code, $(if ($named) { ' (file:line named, behavioural layer not reached)' } else { ' (NO file:line)' }))
+            } else {
+                $ok = ($code -eq 0)
+                Write-Host ("  [{0}] {1} -> exit {2}" -f $(if ($ok) { 'OK' } else { 'FAIL' }), $k.n, $code)
+            }
+            if (-not $ok) { $bad++ }
+        }
+    } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+    $o = & powershell -NoProfile -ExecutionPolicy Bypass -File $self -Target $Target 2>&1 | Out-String
+    $ok = ($LASTEXITCODE -eq 0)
+    Write-Host ("  [{0}] the unmutated target stays green -> exit {1}" -f $(if ($ok) { 'OK' } else { 'FAIL' }), $LASTEXITCODE)
+    if (-not $ok) { $bad++ }
+    Write-Host ''
+    if ($bad -eq 0) { Write-Host 'ALL MUTANT CASES BEHAVED' } else { Write-Host "$bad mutant case(s) FAILED" }
+    exit $bad
+}
+
+$escapes = @(Get-DockerEscapes $ast $want $Target)
+if ($escapes.Count -gt 0) {
+    Write-Host 'REFUSED: docker invocation form(s) the verifier cannot intercept - running the behavioural layer would reach the REAL daemon:'
+    foreach ($e in $escapes) { Write-Host ("  [FAIL] {0}" -f $e) }
+    Write-Host 'Use the bare `docker ...` command (the only form the stub shadows), or extend this verifier.'
+    exit $escapes.Count
+}
+# Defence in depth: whatever slips past the static layer finds no daemon to talk to.
+$env:DOCKER_HOST = 'tcp://127.0.0.1:1'
 $fns = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $want }, $true)
+Check 'no docker invocation form the stub cannot intercept (static, AST)' ($escapes.Count -eq 0)
 Check 'the five functions exist in emergency-recovery.ps1' ($fns.Count -eq 5)
 foreach ($f in $fns) { . ([scriptblock]::Create($f.Extent.Text)) }
 
