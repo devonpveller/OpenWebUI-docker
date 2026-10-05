@@ -1202,6 +1202,52 @@ Check "D12: the re-included file (thingsrc/main.txt) still derives image:thing" 
 $x = Merge-DeployBranch $f12d "qd12g" "work/di-ign"
 Check "D12: a change to the .dockerignore itself derives image:thing" `
     (($x.r.code -eq 0) -and ((@($x.it.deploy_pending) -join ",") -eq "image:thing")) ("exit=" + $x.r.code + " pending=" + (@($x.it.deploy_pending) -join ","))
+# COMPOSE FRAGMENTS (harness-gaps). A plane may keep its services in `<plane>/compose/*.yml`
+# (inference/compose/queue.yml declares llm-queue:local, context ../llm-queue); those names do
+# not match docker-compose*.yml, so merge 93d9b09 (llm-queue's scheduler.py) derived NO surface.
+# Fixture: a fragment declaring a :local service (context relative to the FRAGMENT's dir) and a
+# fragment whose only service has no :local image. Three merges: the 93d9b09 shape (source under
+# the fragment's context -> image:llmq), a doc-only change (nothing), a context change under the
+# fragment with no :local image (nothing). The `-Merged` path is the real one the harness runs.
+$f12f = New-DeployFixture "d12f"
+Push-Location $f12f.repo
+try {
+    New-Item -ItemType Directory -Force -Path (Join-Path $f12f.repo "pl\compose"), (Join-Path $f12f.repo "pl\llmq\src"), (Join-Path $f12f.repo "pl\ext") | Out-Null
+    Set-Content -Path (Join-Path $f12f.repo "pl\compose\queue.yml") -Encoding ascii -Value @(
+        "x-hardening: &hardening",
+        "  security_opt:",
+        "    - no-new-privileges:true",
+        "",
+        "services:",
+        "  llmq:",
+        "    build:",
+        "      context: ../llmq",
+        "      dockerfile: Dockerfile",
+        "    image: llmq:local")
+    Set-Content -Path (Join-Path $f12f.repo "pl\compose\upstream.yml") -Encoding ascii -Value @(
+        "services:",
+        "  ext:",
+        "    build:",
+        "      context: ../ext",
+        "    image: ghcr.io/example/ext:2.0")
+    Set-Content -Path (Join-Path $f12f.repo "pl\llmq\Dockerfile") -Encoding ascii -Value @("FROM scratch", "COPY src/ /app/")
+    Set-Content -Path (Join-Path $f12f.repo "pl\llmq\src\sched.py") -Encoding ascii -Value "v1"
+    Set-Content -Path (Join-Path $f12f.repo "pl\ext\e.txt") -Encoding ascii -Value "v1"
+    Invoke-Git add pl | Out-Null
+    Invoke-Git commit -q -m "line: a plane with compose/ fragments" | Out-Null
+} finally { Pop-Location }
+New-DeployBranch $f12f "work/fr-src" @{ "pl/llmq/src/sched.py" = "v2" }
+New-DeployBranch $f12f "work/fr-doc" @{ "pl/NOTES.md" = "a note"; "pl/compose/README.md" = "not a yml" }
+New-DeployBranch $f12f "work/fr-ext" @{ "pl/ext/e.txt" = "v2" }
+$x = Merge-DeployBranch $f12f "qd12s" "work/fr-src"
+Check "D12: a change under the build context of a service declared in a compose/ FRAGMENT (the 93d9b09 shape) derives image:llmq" `
+    (($x.r.code -eq 0) -and ((@($x.it.deploy_pending) -join ",") -eq "image:llmq")) ("exit=" + $x.r.code + " pending=" + (@($x.it.deploy_pending) -join ","))
+$x = Merge-DeployBranch $f12f "qd12t" "work/fr-doc"
+Check "D12: a docs-only change beside the fragments derives NO surface" `
+    (($x.r.code -eq 0) -and (@($x.it.deploy_pending).Count -eq 0)) ("exit=" + $x.r.code + " pending=" + (@($x.it.deploy_pending) -join ","))
+$x = Merge-DeployBranch $f12f "qd12u" "work/fr-ext"
+Check "D12: a change under a fragment service that has NO :local image derives NO surface" `
+    (($x.r.code -eq 0) -and (@($x.it.deploy_pending).Count -eq 0)) ("exit=" + $x.r.code + " pending=" + (@($x.it.deploy_pending) -join ","))
 # A merge that ships nothing derives an EMPTY list and no flag.
 $f12b = New-Fixture "d12b"
 $ev = Join-Path $Root "d12b-evidence.md"

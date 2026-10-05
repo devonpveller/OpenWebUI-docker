@@ -1006,7 +1006,11 @@ function Get-DeploySurfaces($item, [string]$Sha) {
     }
     # (3) a :local-tagged service of this repository whose build context changed
     $tree = @(Invoke-GitCapture @("ls-tree", "-r", "--name-only", $Sha) | ForEach-Object { ([string]$_).Trim() })
-    $composeFiles = @($tree | Where-Object { $_ -match '(^|/)(docker-)?compose[^/]*\.ya?ml$' -and $_ -notmatch '^scripts/archive/' })
+    # A plane may split its services into fragments under a `compose/` directory (inference/compose/
+    # queue.yml declares llm-queue:local); those names do not match docker-compose*.yml, so the rule
+    # never saw them (harness-gaps: merge 93d9b09 changed llm-queue's source and derived no surface).
+    # A fragment's build context is resolved against the fragment's own directory, like a compose file's.
+    $composeFiles = @($tree | Where-Object { ($_ -match '(^|/)(docker-)?compose[^/]*\.ya?ml$' -or $_ -match '(^|/)compose/[^/]+\.ya?ml$') -and $_ -notmatch '^scripts/archive/' })
     foreach ($cf in $composeFiles) {
         $text = @(Invoke-GitCapture @("show", "$Sha`:$cf"))
         if ($LASTEXITCODE -ne 0) { continue }
