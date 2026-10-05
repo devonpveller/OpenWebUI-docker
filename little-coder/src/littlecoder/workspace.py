@@ -336,6 +336,42 @@ class WorkspaceManager:
         return self.ot.execute(cmd, cwd=self.workspace_path,
                                env=self._token_env(deploy_token), timeout=60)
 
+    def refresh_upstream_auth(
+        self, token: str | None, requested_url: str | None = None
+    ) -> ExecResult:
+        """Re-store the credential of a fork's PRIVATE `upstream` WITHOUT touching the remote
+        (ef-lc-upstream). The store lives in the executor's HOME, which a recreate (or the landing
+        scrub) empties, while the `upstream` remote lives in the workspace volume and survives - so
+        a NOOP re-focus finds the remote present yet unauthenticated.
+
+        The entry is stored under the URL the remote ACTUALLY has (`git remote get-url upstream`,
+        userinfo stripped), never the caller's: `credential.useHttpPath` keys on the exact path, so an
+        entry under a URL no remote uses authenticates nothing. `ok` therefore means "stored for the
+        remote's own URL"; no remote -> not ok. When `requested_url` is given, stdout is `same` or
+        `differs` (the remote's URL, normalised for a trailing `.git`/`/`, against the caller's) and
+        never the URL itself (a legacy remote can still carry userinfo). The remote is never added or
+        changed and no token reaches a URL, argv or log. No token: a no-op, so an entry stored earlier
+        is never erased."""
+        if not token:
+            return ExecResult("(no upstream token)", 0, "", "", "done", "local")
+        g = shlex.quote(self.real_git)
+        q = shlex.quote
+        norm = r"sed -E 's#(\.git)?/*$##'"
+        url_word = '"$url"'
+        cmd = (
+            f"cd {q(self.workspace_path)} && "
+            f"url=$({g} remote get-url upstream | sed -E '{_SED_STRIP_USERINFO}') && "
+            f"[ -n \"$url\" ] && {_cred_config(g)} && {_cred_store(g, url_word)}"
+        )
+        if requested_url:
+            cmd += (
+                f" && if [ \"$(printf '%s' \"$url\" | {norm})\" = "
+                f"\"$(printf '%s' {q(requested_url)} | {norm})\" ]; "
+                f"then echo same; else echo differs; fi"
+            )
+        return self.ot.execute(cmd, cwd=self.workspace_path, env=self._token_env(token),
+                               timeout=60)
+
     def add_upstream_remote(
         self, upstream_url: str, token: str | None = None
     ) -> ExecResult:

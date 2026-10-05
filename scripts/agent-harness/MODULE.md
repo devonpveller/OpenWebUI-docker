@@ -224,9 +224,8 @@ broken block prints `MODEL (advisory): unavailable - <why>` and the command carr
   subagents (`opus` large, `sonnet` small), `local` is agent-org's model roles
   (`local-large` / `local-small`). `haiku` is `cloud.trivial` - lookups and evidence copying
   only, never a pipeline role.
-- **The whole block is validated before any rule is evaluated** (`Get-ModelTiersProblems`
-  / `model_tiers_problems`). These are refused rather than ignored, rounded or trimmed, even
-  when an earlier rule would have matched first:
+- **The whole block is validated before any rule is evaluated** (`Get-ModelTiersProblems`). These are refused rather than ignored, rounded or trimmed,
+  even when an earlier rule would have matched first:
   - a key at ANY level that is not exactly a canonical spelling (`_`-prefixed notes
     excepted): `Cloud`, `Rules`, `Roles`, a role-map tier `Large`, a role `Tester`, a rule
     key `Role` or `max_attemp`;
@@ -276,8 +275,9 @@ MODEL (advisory): next role tester, attempt 2 -> tier small [rule retest-small-d
   facts: item tier set on the item; doc-only no; lines changed since the last verdict 3
 ```
 
-Readers: `config.ps1` `Resolve-ModelTier` and `config.py` `resolve_model_tier`, pinned
-together by `test_model_tiers.py`; `verify-model-tiers.ps1` drives `queue.ps1` end to end
+One reader: `config.ps1` `Resolve-ModelTier` (a Python twin, `config.py`
+`resolve_model_tier`, was removed by item ef-one-resolver - one place to change the policy).
+`test_model_tiers.py` asks it every rule directly; `verify-model-tiers.ps1` drives `queue.ps1` end to end
 on hermetic fixtures. agent-org applies the same tiers to its own roles through its
 profiles (`agent-org/agent-bridge/profiles/README.md`, "Tiers").
 

@@ -270,8 +270,10 @@ class Settings(BaseSettings):
     # nothing to this gateway; we only consume it. NEVER probe model health (C5).
     local_api_base: str = "http://llama-cpp:8080/v1"
     local_api_key: str = "agent-org"       # any non-empty string (permissive gateway)
-    worker_model: str = "local-large"
-    judge_model: str = "local-large"       # same role = zero swap thrash (OD-10)
+    # There is no worker_model / judge_model setting (removed by ef-worker-model, H2's F2: no
+    # running code read them). The model of every role, workers included, is its PROFILE's
+    # `model` (profiles/*.json seed; the DB owns the live value; `set profile <name> model <role>`).
+    # A worker turn sends worker-default's model to little-coder with the task.
     # The CHAT models a profile may be pointed at through the governed `set profile <name> model
     # <model>` intent, per effective lane (model-roles). The gateway's /models listing says only
     # that a name is registered, not that it chats - `local-embed` is registered too - so the

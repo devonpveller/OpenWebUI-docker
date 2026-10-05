@@ -151,6 +151,12 @@ whenever `little-coder/config/` changes):
 python agent-org/scripts/gen-worker-configs.py
 ```
 
+Each worker turn runs on the `worker-default` profile's model, which the bridge sends with
+the task. That model must be listed in the config's `agent.allowed_models`, or the worker
+refuses the turn. See
+[`agent-bridge/profiles/README.md`](agent-bridge/profiles/README.md) and
+[`../little-coder/README.md`](../little-coder/README.md#task-api-the-model-a-task-runs-on).
+
 `enable --plane agent-org` leaves the pool off. Start it by hand:
 
 ```bash

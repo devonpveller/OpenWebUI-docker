@@ -19,6 +19,13 @@ inference:
 agent:
   command: [little-coder]
   model: llamacpp/local-large
+  # Per-task model (ef-worker-model): the gateway model ROLES a POST /tasks caller (the agent-org
+  # bridge, sending its profile's model) may name, each mapped to the exact --model the agent gets.
+  # Exact match only. A task that names none runs `model` above. Every value must be registered in
+  # models.json. Regenerate the worker configs after editing (agent-org/scripts/gen-worker-configs.py).
+  allowed_models:
+    local-large: llamacpp/local-large
+    local-small: llamacpp/local-small
   prompt_mode: arg
   # --mode json streams structured events (thinking / tool calls / answer
   # deltas) so the OWUI surface can show the process live.

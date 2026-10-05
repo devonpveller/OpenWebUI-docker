@@ -33,7 +33,7 @@ log = logging.getLogger("agent_bridge.worker")
 
 class WorkResult:
     def __init__(self, status: str, task_id: str, output: str = "",
-                 commands: list[str] | None = None) -> None:
+                 commands: list[str] | None = None, model: str | None = None) -> None:
         self.status = status          # done | abandoned | rejected | error
         self.task_id = task_id
         self.output = output
@@ -44,6 +44,10 @@ class WorkResult:
         # including one that said "28 tests" moments after a command printed 31. Each was true by
         # luck; the org had no way to know that.
         self.commands: list[str] = commands or []
+        # ef-worker-model TF1 — the model the daemon says the task RAN (`model` on GET /tasks/<id>,
+        # e.g. "llamacpp/local-small"). None = the daemon did not report one (older than
+        # ef-worker-model, or the task was never read back): UNKNOWN, never the model that was sent.
+        self.model: str | None = model
 
     @property
     def ok(self) -> bool:
@@ -88,6 +92,36 @@ def _flail_key(cmd: str) -> str:
     return _TEMP_PATH_RE.sub("<tmp>", cmd)
 
 
+def _ran_model(task: dict) -> str | None:
+    """The model a daemon task view says ran (TF1), or None when it reports none (an older daemon)."""
+    m = task.get("model") if isinstance(task, dict) else None
+    return m if isinstance(m, str) and m else None
+
+
+#: `set_project`'s success `detail` when the daemon reports `upstream_mismatch` (F3).
+UPSTREAM_MISMATCH = "upstream_mismatch"
+
+
+def _upstream_status(d: dict) -> tuple[bool, bool]:
+    """(usable, mismatch) for a fork's `upstream` from a successful /project response (F3).
+
+    The daemon reports the remote in one of three ways:
+      - `upstream_ok`: it baked the remote (a clone, a switch, or a NOOP whose remote was missing);
+      - `upstream_reauthed` (+ `upstream_mismatch`): a NOOP whose remote was already there, and it
+        re-stored the remote's credential (ef-lc-upstream). False = that re-store failed, so a
+        private parent's fetch will fail: a real failure;
+      - neither, on a NOOP: the remote was already there and nothing needed doing (no
+        upstream_token, or a daemon older than ef-lc-upstream). Usable: reading this as a failed
+        bake was the spurious "didn't bake" warning on every same-effort reuse of a fork.
+    Neither on a clone or a switch is not a shape the daemon produces: treated as a failed bake."""
+    if "upstream_ok" in d:
+        return bool(d["upstream_ok"]), False
+    if "upstream_reauthed" in d:
+        ok = bool(d["upstream_reauthed"])
+        return ok, ok and bool(d.get("upstream_mismatch"))
+    return d.get("action") == "noop", False
+
+
 # little-coder's daemon validates `channel` against a fixed trigger-surface enum
 # (batch/cli/owui/validation) — it is NOT the chat channel. The bridge is an automated
 # trigger, so it uses "batch".
@@ -99,13 +133,17 @@ class WorkerHarness(Protocol):
         self, base_url: str, session_id: str, prompt: str, *,
         channel: str = LC_TRIGGER_CHANNEL, on_update: OnUpdate | None = None,
         plan_only: bool = False, flail_guard: bool = False, max_repeat: int = 0,
+        model: str | None = None,
     ) -> WorkResult:
         """Resume a session and run one turn to completion; return the result. `on_update`
         streams the worker's commands + answer to the bus as it works (observability).
         `plan_only` runs the turn with edit/write tools EXCLUDED (headless plan mode) —
         the worker can explore and reply with a plan but cannot change a file.
         `flail_guard` arms the daemon's read-without-edit watchdog on this turn: a flailing
-        turn is killed with a FLAIL-GUARD answer marker instead of burning the timeout."""
+        turn is killed with a FLAIL-GUARD answer marker instead of burning the timeout.
+        `model` (ef-worker-model) is the model role this turn runs on: the dispatching profile's
+        model. The daemon runs it for this task only, or refuses it (422) when its allowlist does
+        not name it; None = the daemon's own agent.model."""
         ...
 
     async def set_project(
@@ -118,10 +156,13 @@ class WorkerHarness(Protocol):
         `upstream_token`) bakes a fork's read-only parent remote after the clone. Returns
         (ok, detail, upstream_ok):
           - ok/detail: clone success + the daemon's clone error (e.g. "clone failed (exit 128)") so a
-            clone failure is surfaced as a clear CLONE problem, not a phantom worker failure.
-          - upstream_ok: whether the fork's `upstream` remote baked (None when no upstream was
+            clone failure is surfaced as a clear CLONE problem, not a phantom worker failure. On
+            success `detail` is "" or UPSTREAM_MISMATCH (the workspace's `upstream` remote points at
+            another URL than the one requested; its credential was stored for the remote's URL).
+          - upstream_ok: whether the fork's `upstream` remote is usable (None when no upstream was
             requested). A clone can succeed while the upstream bake fails (unreachable parent) — that
-            must be surfaced, not silently swallowed, or `git fetch upstream` fails mid-task."""
+            must be surfaced, not silently swallowed, or `git fetch upstream` fails mid-task. A
+            NOOP re-focus whose remote was already there is usable (F3: not a failed bake)."""
         ...
 
     async def current_focus(self, base_url: str) -> str | None:
@@ -179,6 +220,7 @@ class LittleCoderHarness:
         self, base_url: str, session_id: str, prompt: str, *,
         channel: str = LC_TRIGGER_CHANNEL, on_update: OnUpdate | None = None,
         plan_only: bool = False, flail_guard: bool = False, max_repeat: int = 0,
+        model: str | None = None,
     ) -> WorkResult:
         """`max_repeat` (F31.4) — a BRIDGE-SIDE flail-guard for READ-ONLY turns (the lens sweep).
         The daemon's `flail_guard` keys on read-*without-edit*, so it can't police a lens, which
@@ -200,6 +242,10 @@ class LittleCoderHarness:
                 body["plan_only"] = True
             if flail_guard:
                 body["flail_guard"] = True
+            if model:
+                # Same rule as plan_only: sent only when set. A daemon older than ef-worker-model
+                # ignores the key and runs its agent.model, exactly as before this change.
+                body["model"] = model
             r = await c.post("/tasks", json=body)
             r.raise_for_status()
             task_id = r.json()["task_id"]
@@ -208,12 +254,14 @@ class LittleCoderHarness:
             # the worker runs to the bus as it happens (observability — governance §5/§7).
             seen = 0
             waited = 0.0
+            ran: str | None = None   # TF1 — the model the daemon reports for this task
             last_cmd: str | None = None   # F31.4 — consecutive-repeat tracking for the lens flail-guard
             repeat = 0
             while waited < self.poll_timeout:
                 await asyncio.sleep(self.poll_interval)
                 waited += self.poll_interval
                 s = (await c.get(f"/tasks/{task_id}")).json()
+                ran = _ran_model(s)
                 activity = s.get("activity") or []
                 if len(activity) > seen:
                     for item in activity[seen:]:
@@ -239,7 +287,7 @@ class LittleCoderHarness:
                                 return WorkResult(
                                     "flail", task_id,
                                     s.get("answer") or s.get("result", "") or "",
-                                    commands=_command_texts(activity))
+                                    commands=_command_texts(activity), model=_ran_model(s))
                     seen = len(activity)
                 status = s.get("status", "")
                 # Terminal = anything not still in-flight (done/abandoned/rejected/cancelled/…).
@@ -251,8 +299,8 @@ class LittleCoderHarness:
                         except Exception:  # noqa: BLE001
                             pass
                     return WorkResult(status, task_id, answer,
-                                      commands=_command_texts(activity))
-            return WorkResult("error", task_id, "poll timeout")
+                                      commands=_command_texts(activity), model=_ran_model(s))
+            return WorkResult("error", task_id, "poll timeout", model=ran)
 
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
@@ -279,15 +327,16 @@ class LittleCoderHarness:
         async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=1800.0) as c:
             r = await c.post("/project", json=body)
             if r.status_code < 400:
-                # Clone succeeded. The daemon reports `upstream_ok` in the body ONLY when it
-                # attempted a bake (fork case); None when no upstream was requested → nothing to warn.
+                # Clone succeeded. None when no upstream was requested → nothing to warn.
                 upstream_ok: bool | None = None
+                note = ""
                 if upstream:
                     try:
-                        upstream_ok = bool(r.json().get("upstream_ok"))
+                        upstream_ok, mismatch = _upstream_status(r.json())
                     except Exception:  # noqa: BLE001 - non-JSON body → treat as bake-unknown/failed
-                        upstream_ok = False
-                return True, "", upstream_ok
+                        upstream_ok, mismatch = False, False
+                    note = UPSTREAM_MISMATCH if mismatch else ""
+                return True, note, upstream_ok
             detail = ""
             try:
                 detail = (r.json().get("detail") or "")
@@ -416,6 +465,10 @@ class FakeHarness:
         # Set True to simulate a clone that SUCCEEDS but whose fork `upstream` bake FAILS (an
         # unreachable/private parent) → set_project returns (True, "", False) so the bridge warns.
         self.upstream_fails = False
+        # Set True to simulate a NOOP re-focus whose existing `upstream` remote points at another
+        # URL than the one requested (the daemon's `upstream_mismatch`, F3): set_project returns
+        # (True, UPSTREAM_MISMATCH, True).
+        self.upstream_mismatch = False
         # Submodules added via add_submodule: list of (base_url, url, path). `submodule_fails` (an
         # error string) simulates a failed submodule add.
         self.submodules: list[tuple[str, str, str]] = []
@@ -440,10 +493,12 @@ class FakeHarness:
         self, base_url: str, session_id: str, prompt: str, *,
         channel: str = LC_TRIGGER_CHANNEL, on_update: OnUpdate | None = None,
         plan_only: bool = False, flail_guard: bool = False, max_repeat: int = 0,
+        model: str | None = None,
     ) -> WorkResult:
         self.wakes.append(
             {"base_url": base_url, "session_id": session_id, "prompt": prompt,
-             "plan_only": plan_only, "flail_guard": flail_guard, "max_repeat": max_repeat}
+             "plan_only": plan_only, "flail_guard": flail_guard, "max_repeat": max_repeat,
+             "model": model}
         )
         if base_url in self.busy_urls:
             req = httpx.Request("POST", base_url.rstrip("/") + "/tasks")
@@ -475,8 +530,10 @@ class FakeHarness:
                 await on_update("command", {"command": cmd, "ok": True})
             await on_update("answer", {"status": self.result_status,
                                        "answer": self.answer_text or "ok"})
+        # Like a daemon that runs what it is sent: reports the sent model, or None (agent.model,
+        # which a fake does not know) when none was sent.
         return WorkResult(self.result_status, task_id=f"fake-{len(self.wakes)}", output=out,
-                          commands=cmds)
+                          commands=cmds, model=model)
 
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
@@ -499,6 +556,8 @@ class FakeHarness:
             if upstream_token:
                 self.upstream_tokens[base_url] = upstream_token
             upstream_ok = not self.upstream_fails  # clone ok, but the bake may have failed
+            if upstream_ok and self.upstream_mismatch:
+                return True, UPSTREAM_MISMATCH, True
         return True, "", upstream_ok
 
     async def current_focus(self, base_url: str) -> str | None:

@@ -4,6 +4,13 @@
       "additionalProperties": false,
       "description": "The upstream little-coder CLI invocation (design \u00a73.1).\n\nINTEGRATION POINT: little-coder is a Node.js CLI on the `pi` framework;\nthe exact flags and how the task prompt is delivered are pinned to the\nupstream version when the agent image is built. `command` is the base\nargv; the daemon appends `--model` and the prompt per `prompt_mode`.",
       "properties": {
+        "allowed_models": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Allowed Models",
+          "type": "object"
+        },
         "command": {
           "items": {
             "type": "string"

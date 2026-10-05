@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 CONFIG_SCHEMA_VERSION = 1
 
@@ -46,6 +47,15 @@ class InferenceConfig(_Strict):
     embedding_model: str = "local-embed"
 
 
+# A gateway model ROLE (a LiteLLM `model_name`, e.g. `local-small`, `local-small:nothink`): starts
+# with a letter or digit (so never a flag), then letters, digits and . _ : - only (no `/`, so never
+# another provider or an upstream path; no whitespace, no shell or control characters).
+_GATEWAY_ROLE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*")
+# The pi provider whose baseUrl is the LiteLLM alias (config/models.json). An allowed per-task
+# model is always `<this>/<gateway role>`, the same shape as agent.model (ef-worker-model TF4).
+GATEWAY_PROVIDER = "llamacpp"
+
+
 class AgentConfig(_Strict):
     """The upstream little-coder CLI invocation (design §3.1).
 
@@ -56,6 +66,13 @@ class AgentConfig(_Strict):
 
     command: list[str] = Field(default_factory=lambda: ["little-coder"])
     model: str = "llamacpp/local-large"
+    # Per-task model (ef-worker-model): the names a POST /tasks caller may send as `model`, each
+    # mapped to the exact `--model` value the agent gets for that task. Keys are the gateway's
+    # model ROLES (what an agent-org profile names, e.g. `local-small`); values are pi's
+    # provider-qualified ids, which models.json must register. Matching is EXACT (no prefix, no
+    # pattern). Empty = a caller may name only `model` itself, so an unconfigured daemon behaves
+    # as before. A task without `model` always runs `model`.
+    allowed_models: dict[str, str] = Field(default_factory=dict)
     prompt_mode: Literal["stdin", "arg"] = "stdin"
     extra_args: list[str] = Field(default_factory=list)
     # Session-per-trigger continuity (design §3.1 follow-up). Each
@@ -81,6 +98,47 @@ class AgentConfig(_Strict):
             "batch": "batch-default",
         }
     )
+
+    @field_validator("allowed_models")
+    @classmethod
+    def _allowed_models_are_safe(cls, v: dict[str, str]) -> dict[str, str]:
+        # Each value becomes one argv element after `--model`. A bad entry fails the boot rather
+        # than reaching a command line: no empty name, nothing that could read as a flag. And the
+        # routing posture is enforced here, not only by a repo test (TF4): every name is a gateway
+        # role, and every value is that provider's `llamacpp/<gateway role>`, so a per-task model
+        # can only be a role behind the LiteLLM alias, never another provider or an upstream.
+        for name, target in v.items():
+            if not _GATEWAY_ROLE_RE.fullmatch(name):
+                raise ValueError(
+                    f"agent.allowed_models name {name!r} is not a gateway model role "
+                    f"(letters, digits and . _ : -; must not start with '-')"
+                )
+            provider, sep, role = target.partition("/")
+            if provider != GATEWAY_PROVIDER or not sep or not _GATEWAY_ROLE_RE.fullmatch(role):
+                raise ValueError(
+                    f"agent.allowed_models model {target!r} (for {name!r}) is not "
+                    f"`{GATEWAY_PROVIDER}/<gateway role>`"
+                )
+        return v
+
+    def resolve_model(self, requested: str | None) -> str:
+        """The `--model` value for a task that asked for `requested` (None = not asked: `model`).
+        Raises ValueError for an empty name, a name starting with '-', or a name that is neither
+        `model` nor a key of `allowed_models` (exact match only)."""
+        if requested is None:
+            return self.model
+        if not requested:
+            raise ValueError("model must not be empty")
+        if requested.startswith("-"):
+            raise ValueError("model must not start with '-'")
+        if requested in self.allowed_models:
+            return self.allowed_models[requested]
+        if requested == self.model:
+            return self.model
+        allowed = sorted({self.model, *self.allowed_models})
+        raise ValueError(
+            f"model {requested[:80]!r} is not allowed here (allowed: {', '.join(allowed)})"
+        )
 
 
 class WorkspaceConfig(_Strict):

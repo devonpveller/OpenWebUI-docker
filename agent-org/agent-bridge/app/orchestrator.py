@@ -79,7 +79,9 @@ from .modules.profiles import ConcurrentProfileChange, ProfileRegistry
 from .modules.project_context import ProjectContext
 from .modules.projects import ProjectRegistry
 from .modules.roles import RoleAuthority
-from .modules.router import Router, slugify
+from .modules.router import (
+    Router, WorkerModelRefused, _model_refusal, model_refusal_advice, slugify,
+)
 from .modules.scheduler import NoCapacityError, Scheduler
 from .modules.scope_ledger import ScopeLedger
 from .modules.stop_gates import StopGates
@@ -990,7 +992,7 @@ class Orchestrator:
         )
         self.router = Router(
             db, settings, self.gate, self.scheduler, self.harness, chat, self.audit,
-            context_builder=self.charters.build_context,
+            context_builder=self.charters.build_context, profiles=self.profiles,
         )
         # Stage-1 anchor: a cached read-only repo survey feeds the readiness gate (P3.8) so it
         # reasons from the real codebase instead of guessing. Only surveys when a repo is focused.
@@ -1260,7 +1262,35 @@ class Orchestrator:
         # The watchdog already gave up here (bounded-recovery cap) and asked for a re-run —
         # re-recovering it would be the exact loop the escalation exists to stop.
         "stall_escalated",
+        # (A model refusal - ef-worker-model TF2 - is NOT listed here: `_model_refusal_unresolved`
+        # decides it by dispatch order, so a later event can neither hide it nor pin it forever.)
     })
+
+    async def _model_refusal_unresolved(self, eid: str) -> bool:
+        """TF2 / D1 — the effort's LATEST DISPATCH was refused for its model. Then it awaits the
+        operator (allow the model in little-coder's config, or `set profile ... model ...`, then
+        "re-run it"); re-running it on a timer is refused identically, so the stall watchdog leaves
+        it alone.
+
+        "Latest dispatch" = the newest `worker_acquire` (scheduler.acquire logs it for every
+        dispatch BEFORE the worker is called, so the refused dispatch's own acquire precedes its
+        refusal). The refusal counts only while it is newer than every acquire: the moment ANY
+        later dispatch starts - the operator's re-run, whatever then happens to it (a 500, a
+        clone failure, a bridge restart mid-turn) - the effort is the watchdog's again. Comparing
+        against `wake_done` instead pinned such an effort forever (D1: wake_done is written only
+        when a turn returns).
+
+        Ordered by the append-only event id, not the timestamp: ids are assigned in write order,
+        so equal or skewed clocks cannot flip the answer."""
+        async with self.db.session_factory() as s:
+            def _newest(kind: str):
+                return (select(func.max(Event.id))
+                        .where(Event.effort_id == eid, Event.kind == kind))
+            refused = (await s.execute(_newest("worker_model_refused"))).scalar_one_or_none()
+            if refused is None:
+                return False
+            started = (await s.execute(_newest("worker_acquire"))).scalar_one_or_none()
+        return started is None or started < refused
 
     def _awaiting_operator_decision(self, eid: str) -> bool:
         """P24 — is this effort awaiting a HUMAN decision (the authoritative gate check the old
@@ -2383,6 +2413,11 @@ class Orchestrator:
                 # work-deviation stays frozen for the human.
                 await self._maybe_auto_recover_infra_freeze(eid, mgmt)
                 continue                                    # (real concerns stay put — needs a decision)
+            # TF2 / D1 — the latest dispatch was refused for its model: awaiting the operator's config
+            # change, re-running it is futile. AFTER the frozen branch (a freeze's own recovery is
+            # never pre-empted) and decided by dispatch order (see _model_refusal_unresolved).
+            if await self._model_refusal_unresolved(eid):
+                continue
             last = await self._last_event(eid)
             if last is None:
                 continue
@@ -5341,6 +5376,13 @@ class Orchestrator:
                     "repo; reassign it to a project or archive it")
         if "409" in s:
             return "the worker was busy (409 — a task was already in flight); re-engage it to retry"
+        # D2 — a model refusal is a config mismatch with a known fix: say it (before the generic
+        # "timeout"/"connect" text matching, which a refusal detail could accidentally contain).
+        if isinstance(exc, WorkerModelRefused):
+            return "the worker " + model_refusal_advice(exc.model, exc.role, exc.detail)
+        refused = _model_refusal(exc)
+        if refused:
+            return "the worker " + model_refusal_advice(None, None, refused)
         if "connect" in low or "timeout" in low or "connecterror" in low:
             return "the worker was unreachable (connection/timeout) — it may be restarting; retry it"
         return f"delegation error — {s[:160]}"
@@ -6956,9 +6998,12 @@ class Orchestrator:
         except Exception as exc:  # noqa: BLE001
             log.exception("delegate failed for %s: %s", effort_id, exc)
             friendly = self._friendly_dispatch_error(exc)
-            await self.comms.post(
-                Intent.worker_activity, f"⚠️ {friendly}", effort_id=effort_id,
-            )
+            if not isinstance(exc, WorkerModelRefused):
+                # D2: a model refusal already has its actionable post in the effort thread (the
+                # router's); a second, generic one there would only repeat it.
+                await self.comms.post(
+                    Intent.worker_activity, f"⚠️ {friendly}", effort_id=effort_id,
+                )
             # Surface UP to the operator's conversation too — a worker failure must NEVER hide only
             # in the effort thread while the operator waits (the 'error never reached me' bug).
             await self.comms.post(
