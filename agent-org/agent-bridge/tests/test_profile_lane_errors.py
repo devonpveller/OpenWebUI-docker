@@ -34,7 +34,7 @@ async def _app(db_url):
 
 
 def _client(app):
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t")
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://t")
 
 
 async def _rows(orch, name):
@@ -109,25 +109,63 @@ async def test_two_concurrent_lane_flips_one_wins_one_409(db_url):
     await orch.db.dispose()
 
 
-async def test_a_lane_flip_racing_set_model_one_wins_the_lane_side_never_500s(db_url):
+async def test_a_lane_flip_losing_to_set_model_is_409_the_model_write_stands(db_url):
+    """Deterministic: set_model commits while the lane flip is between its read and its commit."""
+    orch, app = await _app(db_url)
+    async with app.router.lifespan_context(app):
+        real_db = orch.profiles.db
+
+        class _Db:
+            def __getattr__(self, k):
+                return getattr(real_db, k)
+
+            def session_factory(self):
+                cm = real_db.session_factory()
+
+                class _Cm:
+                    async def __aenter__(inner):
+                        sess = await cm.__aenter__()
+                        real = sess.commit
+
+                        async def commit():
+                            if not getattr(_Db, "done", False):
+                                _Db.done = True           # the first commit is the lane flip's
+                                orch.profiles.db = real_db
+                                await orch.profiles.set_model(
+                                    "pm", "local-small", registered={"local-small"})
+                            return await real()
+
+                        sess.commit = commit
+                        return sess
+
+                    async def __aexit__(inner, *a):
+                        return await cm.__aexit__(*a)
+
+                return _Cm()
+
+        orch.profiles.db = _Db()
+        async with _client(app) as c:
+            r = await c.post("/profiles/lane", json={"name": "pm", "lane": "cloud"})
+        assert r.status_code == 409, r.status_code
+        rows = await _rows(orch, "pm")
+        assert [(x.version, x.active, x.lane, x.model) for x in rows] == [
+            (1, False, "local", rows[0].model), (2, True, "local", "local-small")]
+        _assert_one_active_and_cache_matches(orch, rows, "pm")
+        ev = await _refused(orch)
+        assert len(ev) == 1 and ev[0].payload["outcome"] == "conflict"
+    await orch.db.dispose()
+
+
+async def test_set_model_losing_to_a_lane_flip_is_still_a_clean_conflict(db_url):
     orch, app = await _app(db_url)
     async with app.router.lifespan_context(app):
         orch.profiles.db = _CommitBarrier(orch.profiles.db)
         async with _client(app) as c:
-            lane_call = c.post("/profiles/lane", json={"name": "pm", "lane": "cloud"})
-            model_call = orch.profiles.set_model("pm", "local-small", registered={"local-small"})
-            lane_res, model_res = await asyncio.gather(lane_call, model_call, return_exceptions=True)
-        assert not isinstance(lane_res, BaseException)
-        assert lane_res.status_code in (200, 409)
+            lane_res, model_res = await asyncio.gather(
+                c.post("/profiles/lane", json={"name": "pm", "lane": "cloud"}),
+                orch.profiles.set_model("pm", "local-small", registered={"local-small"}),
+                return_exceptions=True)
+        assert not isinstance(lane_res, BaseException) and lane_res.status_code in (200, 409)
         rows = await _rows(orch, "pm")
         assert [x.version for x in rows] == [1, 2]
         _assert_one_active_and_cache_matches(orch, rows, "pm")
-        if lane_res.status_code == 409:
-            assert not isinstance(model_res, BaseException)   # the model write won
-            assert rows[-1].model == "local-small" and rows[-1].lane == "local"
-            ev = await _refused(orch)
-            assert len(ev) == 1 and ev[0].payload["outcome"] == "conflict"
-        else:
-            assert isinstance(model_res, Exception)            # model side refused, lane won
-            assert rows[-1].lane == "cloud"
-    await orch.db.dispose()
