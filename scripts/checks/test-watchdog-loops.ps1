@@ -863,7 +863,23 @@ function Invoke-PureCases {
         @{ T = "redis-cli -a $fpw ping: NOAUTH";                               Gone = @($fpw);   Keep = @('redis-cli -a', 'ping: NOAUTH') },
         @{ T = "sshpass -p $fpw ssh host failed";                              Gone = @($fpw);   Keep = @('ssh host failed') },
         @{ T = "<password>$fpw</password> invalid";                            Gone = @($fpw);   Keep = @('<password>', 'invalid') },
-        @{ T = "Cookie: session=$fpw$fpw";                                     Gone = @($fpw);   Keep = @('Cookie:') }
+        @{ T = "Cookie: session=$fpw$fpw";                                     Gone = @($fpw);   Keep = @('Cookie:') },
+        @{ T = "Set-Cookie: sid=$fpw$fpw; Path=/";                             Gone = @($fpw);   Keep = @('Set-Cookie:') },
+        # attempt 4 (tester D1b): a path-looking value is a secret unless the KEY is a credentials key
+        @{ T = "password:/$fpw rejected";                                      Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "password: ~$fpw rejected";                                     Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "password: `"/$fpw`" rejected";                                 Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "{`"password`":`"/$fpw`"} rejected";                            Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "{`"token`": `"~$fpw`"} rejected";                              Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "secret: ./$fpw rejected";                                      Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "passphrase=/etc/$fpw rejected";                                Gone = @($fpw);   Keep = @('rejected') },
+        # camelCase pass keys, a quoted Oracle string, a one-segment ODBC PWD, a long numeric curl password
+        @{ T = "dbPass=$fpw failed";                                           Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "PASS=$fpw failed";                                             Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "DbPass=$fq failed";                                            Gone = @($fq);    Keep = @('failed') },
+        @{ T = "sqlplus `"app/$fpw@orcl`" failed";                             Gone = @($fpw);   Keep = @('sqlplus', 'failed') },
+        @{ T = "UID=sa;PWD=/$fpw;";                                            Gone = @($fpw);   Keep = @('UID=sa') },
+        @{ T = "curl -u 1000:98765432 http://x/ failed";                       Gone = @('98765432'); Keep = @('http://x/ failed') }
     )
     $bad34 = @()
     foreach ($row in $rows) {
@@ -1055,7 +1071,7 @@ $plain = @(
         @{ C = $cases; P = $plain }
     }
     # By design masked (documented): sha256 digests / 64-hex ids, 50-char model names, a user-only URL.
-    $plainSkip = @('sha256:', 'No such container: 3f9a', 'Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL-00001-of-00002', 'http://user@example.com')
+    $plainSkip = @('sha256:3f9a1c2b7d4e5f60', 'No such container: 3f9a1c2b7d4e5f603f9a', 'Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL-00001-of-00002', 'http://user@example.com')
     $permN = 0
     foreach ($set in @($permA, $permB)) {
         foreach ($c in $set.C) {
@@ -1077,6 +1093,15 @@ $plain = @(
                # today's model names (inference/): all well under the 40-character threshold
                'model Qwen3.6-35B-A3B-Q4_K_M.gguf failed to load', 'model Qwen3.6-27B-Q4_K_M.gguf and Qwen3.8-27B-Q4_K_M.gguf',
                'embed bge-m3-f16.gguf ready', 'routing local-large:nothink to qwen36-27b',
+               # attempt 4: a credentials KEY holding a real path stays readable, bare or quoted, any separator
+               'credentials: /etc/app/credentials.json: no such file or directory', 'credentials: "/etc/app/credentials.json" not found',
+               'GOOGLE_APPLICATION_CREDENTIALS=/etc/app/sa.json not found', 'credentials: ./sa.json missing', 'credentials: ~/.config/app/c.json missing',
+               # go test / pytest output is not a password
+               '--- PASS: TestRequestProcessorFactory (0.01s)', 'PASS: test_x1', 'PASS: TestHandlers2 (0.5s)',
+               # one-segment ODBC PWD is a password (credential row), a directory is not; docker/chown ids; refs
+               'PWD=C:\Data\work\app', 'PWD=/app/src/x', 'chown 1000:1000 /data', 'curl -u 1000:1000 http://x/',
+               'reg/app@sha256:abc123 pulled', 'pkg/x@1.2 installed', 'react@18.2.0',
+               'password=false', 'token=null', 'secret=none', 'pass=nil', 'password=NONE',
                # attempt 3: the over-scrub rows - image tags, ports, exit codes, error texts, paths, flags
                'bypass=true', 'compass=north', 'tests_passed=12', 'pass=true', 'password=true', 'OLDPWD=/home/app/src', 'PWD=/home/app/src',
                'icons/logo@2x.png missing', 'docker run -u 1000:1000 img', 'ORA-01017: invalid username/password; logon denied',

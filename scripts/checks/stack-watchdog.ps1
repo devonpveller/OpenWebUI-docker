@@ -2232,7 +2232,7 @@ function Hide-CredentialShapes {
         $t = [regex]::Replace($t, '(?<![A-Za-z0-9_.:/@\[\-])[A-Za-z0-9._\-]{1,64}:[^\s:@/]{1,128}@(?=tcp\(|unix\(|[A-Za-z0-9][A-Za-z0-9.\-]{0,62}(?::[0-9]{1,5})?(?:[/\s)?,;]|$))', ($m + '@'))
         #    Oracle: user/pw@//host:1521/SVC, user/pw@host:1521/SVC, user/pw@alias (an alias is a single
         #    label starting with a letter, so 'icons/logo@2x.png' and 'pkg/x@1.2' are left alone).
-        $t = [regex]::Replace($t, '(?<![A-Za-z0-9_.:/@\[\-])[A-Za-z][A-Za-z0-9_$#]{0,29}/[^\s/@:]{1,128}@(?=//[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9.\-]{0,62}:[0-9]{1,5}(?:[/\s)?,;]|$)|[A-Za-z][A-Za-z0-9_\-]{0,30}(?:[\s)?,;]|$))', ($m + '@'))
+        $t = [regex]::Replace($t, '(?<![A-Za-z0-9_.:/@\[\-])[A-Za-z][A-Za-z0-9_$#]{0,29}/[^\s/@:]{1,128}@(?=//[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9.\-]{0,62}:[0-9]{1,5}(?:[/\s)?,;"'']|$)|[A-Za-z][A-Za-z0-9_\-]{0,30}(?:[\s)?,;"'']|$))', ($m + '@'))
         # 2. Authorization header values: whatever follows Bearer/Basic/Token.
         $t = [regex]::Replace($t, '(?i)(\b(?:proxy-)?authorization\b["'']?\s{0,3}[:=]\s{0,3}["'']?(?:bearer|basic|token|digest)\s{1,4})[^\s"'',;]{1,2048}', ('${1}' + $m))
         #    A bare Bearer/Basic value: credential-shaped (a digit, 20+, interior
@@ -2268,7 +2268,7 @@ function Hide-CredentialShapes {
         $curlU = [System.Text.RegularExpressions.MatchEvaluator]{
             param($x)
             # docker run -u 1000:1000 is uid:gid, not user:password
-            if (($x.Groups[2].Value -match '^[0-9]+$') -and ($x.Groups[3].Value -match '^[0-9]+$')) { return $x.Value }
+            if (($x.Groups[2].Value -match '^[0-9]+$') -and ($x.Groups[3].Value -match '^[0-9]{1,6}$')) { return $x.Value }
             return $x.Groups[1].Value + $x.Groups[2].Value + ':[redacted]'
         }
         $t = [regex]::Replace($t, '((?<!\S)(?:--user=|--user[ \t]+|-u[ \t]*))([^\s:=\-][^\s:=]{0,127}):(\S{1,256})', $curlU)
@@ -2288,14 +2288,19 @@ function Hide-CredentialShapes {
             $key = $x.Groups[1].Value
             if ($bare.StartsWith('[redacted')) { return $x.Value }
             if ($bare -imatch '^(?:true|false|null|none|nil)$') { return $x.Value }
-            # 'pass' is a secret only as its own word (pass=, DB_PASS=, DBPASS=), never inside bypass/compass.
+            # 'pass' is a secret only as a KEY: pass, Pass=, *_pass, *.pass, camelCase dbPass/DbPass, DBPASS=, or a
+            # bare PASS with '='. Never inside bypass/compass, and never an upper-case PASS: followed by a test name
+            # (Go "--- PASS: TestX", pytest "PASS: test_x1").
             if (($key -imatch 'pass$') -and ($key -inotmatch '(?:password|passwd|passphrase)$') -and
-                -not (($key -imatch '^pass$') -or ($key -imatch '[_.\-]pass$') -or ($key -cmatch '^[A-Z0-9]{2,}PASS$'))) { return $x.Value }
+                -not (($key -ceq 'pass') -or (($key -ceq 'Pass') -and ($sep -match '=')) -or (($key -ceq 'PASS') -and ($sep -match '=')) -or
+                      ($key -imatch '[_.\-]pass$') -or ($key -cmatch '[a-z0-9]Pass$') -or ($key -cmatch '^[A-Z0-9]{2,}PASS$'))) { return $x.Value }
             # ODBC PWD= is a password; PWD=/some/dir (the shell's working directory) is not.
             if (($key -imatch 'pwd$') -and ($bare -match '^(?:/[^/;\s]*/|[A-Za-z]:\\)')) { return $x.Value }
-            # After ':' a path is a location ("credentials: /etc/app/credentials.json: no such file");
-            # after '=' it is a value (password=/Xy..., token=~Xy... are secrets).
-            if (($sep -notmatch '=') -and ($bare -match '^(?:/|\./|\.\./|~|[A-Za-z]:\\)')) { return $x.Value }
+            # The ONLY path exemption: a key whose last word is credential(s) ("credentials: /etc/app/credentials.json:
+            # no such file") holding a real path shape - a leading '/' plus another '/', '~/', a drive letter with
+            # '\', or a filename with an extension. Separator and quoting do not matter. A password / token / secret
+            # value that merely starts with '/' or '~' (password:/Xy.., "token": "~Xy..") is a secret.
+            if (($key -imatch '(?:^|[_.\-])credentials?$') -and ($bare -match '^(?:/[^/\s]*/|~/|[A-Za-z]:\\)|^[^\s/\\]+\.[A-Za-z0-9]{1,6}:?$|^(?:\./|\.\./)')) { return $x.Value }
             if ($sep -notmatch '=') {
                 $mixed = ($bare -match '\d') -and ($bare -match '[A-Za-z]') -and ($bare.Length -ge 6)
                 if (-not (($val -ne $bare) -or ($bare.Length -ge 16) -or $mixed)) { return $x.Value }
