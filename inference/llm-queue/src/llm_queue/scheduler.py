@@ -112,11 +112,20 @@ class ModelQueue:
         return len(self._heap) + len(self._running)
 
     def _estimate_wait_locked(self, rank: int) -> float:
-        """Projected wait for a NEW request of ``rank`` (design §8b):
-        ceil(position_ahead / P) * T, where position_ahead = everything running
-        plus every waiter with higher-or-equal priority."""
+        """Projected wait for a NEW request of ``rank`` (design §8b, wave model).
+
+        ``ahead`` = everything running plus every waiter with higher-or-equal
+        priority. While ``ahead < P`` a slot is free for the arrival, so the wait
+        is 0. Otherwise the arrival needs ``ahead - P + 1`` completions before a
+        slot opens for it, and slots free in waves of P every T seconds:
+        ``ceil((ahead - P + 1) / P) * T``. (The old ``ceil(ahead / P) * T``
+        charged a full T even with a free slot, so a single overlapping request
+        was refused as over-budget on an idle model.) For P=1 this is unchanged.
+        """
         ahead = len(self._running) + sum(1 for (r, _s, _i) in self._heap if r <= rank)
-        return math.ceil(ahead / self._slots) * self._t.value
+        if ahead < self._slots:
+            return 0.0
+        return math.ceil((ahead - self._slots + 1) / self._slots) * self._t.value
 
     def estimate_wait(self, rank: int) -> float:
         # Read-only estimate for the pre-flight /queue/estimate endpoint. The
