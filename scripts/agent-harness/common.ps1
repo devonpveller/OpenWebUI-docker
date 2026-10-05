@@ -6,6 +6,7 @@
 #   config.ps1    settings - files + environment -> values (knows nothing else)
 #   git-io.ps1    facts    - how to talk to git, and repository topology (no policy)
 #   resolve.ps1   policy   - where shared state lives, which branch is the work line
+#   lock.ps1      mutex    - one exclusive file lock + locked registry read/write helpers (no policy)
 #
 # The dependency points one way (policy -> facts + settings), so the git adapter can be exercised
 # without the policy, and the policy can be redirected with environment variables without

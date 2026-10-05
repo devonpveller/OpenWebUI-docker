@@ -140,6 +140,45 @@ try {
     Write-Host ("[new+remove race] runs={0} runs_with_wrong_rows={1}" -f $Runs, $lost2)
     if ($lost2) { $fail++ }
 
+    # --- 2b. writer vs a tight reader loop ----------------------------------------------
+    # A reader that holds worktrees.json open (Get-Content shares no DELETE) used to make the
+    # writer's delete-then-move swap fail, losing the update. One writer does 150 locked
+    # updates while a reader hammers the file; every update must land. Drives the helper in
+    # the toolkit under test, so a toolkit without lock.ps1 has nothing to run here.
+    $lockLib = Join-Path $ToolkitDir "lock.ps1"
+    if (Test-Path $lockLib) {
+        $rdReg = Join-Path $root "rw\worktrees.json"
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $rdReg) | Out-Null
+        Set-Content -Path $rdReg -Value '{"worktrees":{}}' -Encoding ASCII
+        $stopFile = Join-Path $root "rw\stop"
+        $readerPs1 = Join-Path $root "rw-reader.ps1"
+        $writerPs1 = Join-Path $root "rw-writer.ps1"
+        Set-Content -Path $readerPs1 -Encoding ASCII -Value @(
+            "while (-not (Test-Path '$stopFile')) { try { if (Test-Path '$rdReg') { `$null = Get-Content -Raw -Path '$rdReg' } } catch { } }")
+        Set-Content -Path $writerPs1 -Encoding ASCII -Value @(
+            "`$ErrorActionPreference = 'Stop'",
+            ". '$lockLib'",
+            "`$e = 0",
+            "for (`$i = 0; `$i -lt 150; `$i++) { try { Update-WorktreeRegistry -Registry '$rdReg' -Mutate { param(`$r) `$r[('w' + `$i)] = @{ id = 'w' } } } catch { `$e++ } }",
+            "Write-Output ('errors=' + `$e)")
+        $rp = Start-Process powershell.exe -ArgumentList @("-NoProfile", "-File", "`"$readerPs1`"") -PassThru -WindowStyle Hidden
+        $wpsi = New-Object System.Diagnostics.ProcessStartInfo
+        $wpsi.FileName = "powershell.exe"; $wpsi.Arguments = "-NoProfile -File `"$writerPs1`""
+        $wpsi.UseShellExecute = $false; $wpsi.RedirectStandardOutput = $true; $wpsi.RedirectStandardError = $true
+        $wp = [System.Diagnostics.Process]::Start($wpsi)
+        $wOut = $wp.StandardOutput.ReadToEndAsync(); $null = $wp.StandardError.ReadToEndAsync()
+        if (-not $wp.WaitForExit(240000)) { $wp.Kill() }
+        Set-Content -Path $stopFile -Value "x" -Encoding ASCII
+        if (-not $rp.WaitForExit(20000)) { $rp.Kill() }
+        $rowsNow = 0
+        try { $rowsNow = @((Get-Content -Raw $rdReg | ConvertFrom-Json).worktrees.PSObject.Properties).Count } catch { }
+        $okRw = ($wOut.Result -match "errors=0") -and ($rowsNow -eq 150)
+        Write-Host ("[writer vs tight reader] 150 updates: {0} final_rows={1}/150 -> {2}" -f $wOut.Result.Trim(), $rowsNow, $(if ($okRw) { "OK" } else { "LOST UPDATES" }))
+        if (-not $okRw) { $fail++ }
+    } else {
+        Write-Host "[writer vs tight reader] n/a - this toolkit has no lock.ps1"
+    }
+
     # --- 3. killed holder, then live holder ------------------------------------------
     if (Test-Path $registry) { Remove-Item $registry -Force }
     $lockPath = "$registry.lock"

@@ -96,7 +96,7 @@ copy of this toolkit inside a worktree got its own private, gitignored lock dir,
 two agents could each be told `ACQUIRED` for `merge` and exclude nobody. Found by the
 first soak run. Overrides: `AI_STACK_WORKTREE_STATE`, `AI_STACK_LEASE_DIR`.
 
-Every write of `worktrees.json` (`new-worktree.ps1`, `remove-worktree.ps1`) is a read-modify-write under one exclusive file lock (`worktrees.json.lock`, `Update-WorktreeRegistry` in `lock.ps1`, included by `common.ps1`): bounded wait (`AI_STACK_REGISTRY_LOCK_TIMEOUT_SEC`, default 30 s), the error names the lock, and a killed holder frees it automatically. Race test: `verify-registry-lock.ps1` (scratch repo under `%TEMP%`; `-ToolkitDir` points it at an older toolkit copy).
+Every write of `worktrees.json` (`new-worktree.ps1`, `remove-worktree.ps1`) is a read-modify-write under one exclusive file lock (`worktrees.json.lock`, `Update-WorktreeRegistry` in `lock.ps1`, included by `common.ps1`): bounded wait (`AI_STACK_REGISTRY_LOCK_TIMEOUT_SEC`, default 30 s), the error names the lock, and a killed holder frees it automatically. The new file is swapped in with `File.Replace` plus a bounded retry, and the readers (`Read-RegistryJson`) retry briefly on a locked or half-swapped file. Race test: `verify-registry-lock.ps1` (scratch repo under `%TEMP%`; `-ToolkitDir` points it at an older toolkit copy).
 
 **The work line** - the branch agents branch from and land on - resolves as
 explicit `-Base` > `AI_STACK_WORK_LINE` > the main checkout's current branch >

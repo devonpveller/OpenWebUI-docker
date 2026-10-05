@@ -54,7 +54,8 @@ function Invoke-GitQuiet {
 function Read-Registry {
     if (-not (Test-Path $Registry)) { return @{} }
     $out = @{}
-    $parsed = Get-Content -Raw -Path $Registry | ConvertFrom-Json
+    $parsed = Read-RegistryJson -Path $Registry
+    if ($null -eq $parsed) { return $out }
     if ($parsed.worktrees) {
         foreach ($p in $parsed.worktrees.PSObject.Properties) { $out[$p.Name] = $p.Value }
     }
@@ -64,7 +65,12 @@ function Read-Registry {
 # Locked read-modify-write (lock.ps1): re-reads the file under the lock and drops only these
 # ids, so a row another process added since our first read is never lost.
 function Remove-RegistryRows([string[]]$Ids) {
-    Update-WorktreeRegistry -Registry $Registry -Mutate { param($r) foreach ($i in $Ids) { $r.Remove($i) } }
+    try {
+        Update-WorktreeRegistry -Registry $Registry -Mutate { param($r) foreach ($i in $Ids) { $r.Remove($i) } }
+    } catch {
+        Fail (("{0}`n       The registry row(s) for {1} were NOT dropped (git and the branch may already be gone). " +
+               "Once the holder exits, run: remove-worktree.ps1 -PruneRegistry") -f $_.Exception.Message, ($Ids -join ", "))
+    }
 }
 
 $rows = Read-Registry

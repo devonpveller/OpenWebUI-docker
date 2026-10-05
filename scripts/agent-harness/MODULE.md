@@ -46,7 +46,7 @@ Everything else in here is internal and may change without notice.
 | `quadrant/` | the runner x target comparison - its own submodule with its own boundary, see [quadrant/MODULE.md](quadrant/MODULE.md). One of the TWO places that actually run a resolved runner - `dispatch.ps1` is the other, and `adapters.py` here calls the same docker-exec transport. Everything else in the module only resolves one. |
 
 Internal: `common.ps1` (composition root), `git-io.ps1` (git facts), `resolve.ps1`
-(policy), `config.ps1` (settings), `anchor.ps1` (the anchor's shape and validation),
+(policy), `config.ps1` (settings), `lock.ps1` (the exclusive lock and the locked, retrying registry read/write), `anchor.ps1` (the anchor's shape and validation),
 `gate-audit.ps1` (the gate ledger and the definition of a complete audit trail).
 
 The dependency direction is one-way and deliberate:
