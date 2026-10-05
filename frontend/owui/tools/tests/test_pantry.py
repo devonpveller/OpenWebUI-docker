@@ -355,6 +355,7 @@ STRING_ARRAYS = {
     ("save_household_recipe", "instructions"),
     ("save_household_recipe", "tags"),
     ("restock", "except_items"),
+    ("restock", "bought"),
     ("confirm_preferences", "ids"),
     ("confirm_preferences", "reject"),
     ("manage_household", "allergies"),
@@ -458,7 +459,7 @@ class ToolSchema(unittest.TestCase):
 
         known = OBJECT_ARRAYS | OBJECTS | STRING_ARRAYS
         # not model-visible (OWUI-injected) or documented as a JSON string / union
-        skip = {("import_pantry", "mapping"), ("restock", "bought")}
+        skip = {("import_pantry", "mapping")}
         for fn in pantry.Tools.__dict__:
             if fn.startswith("_") or not inspect.iscoroutinefunction(getattr(pantry.Tools, fn)):
                 continue
@@ -525,6 +526,25 @@ class StringElementRows(Base):
             out = json.loads(run(c()))
             self.assertEqual(out["error"], "invalid_row")
         self.assertEqual(self.svc.requests, [])
+
+    def test_restock_bought_forms(self):
+        for given, want in [(None, "all"), ("all", "all"), (["milk", "eggs"], ["milk", "eggs"]),
+                            ('["milk"]', ["milk"]), (" ALL ", "all")]:
+            run(self.tool.restock("L1", bought=given))
+            self.assertEqual(self.last()["body"]["bought"], want, repr(given))
+
+    def test_restock_bought_default_is_all(self):
+        run(self.tool.restock("L1"))
+        self.assertEqual(self.last()["body"]["bought"], "all")
+
+    def test_restock_bought_comma_string_is_invalid_and_sends_nothing(self):
+        n = len(self.svc.requests)
+        for bad in ("milk, eggs", "milk", "", '{"a":1}', ["ok", 3]):
+            out = json.loads(run(self.tool.restock("L1", bought=bad)))
+            self.assertFalse(out["ok"], repr(bad))
+            self.assertEqual(out["error"], "invalid", repr(bad))
+            self.assertIn("bought", out["detail"])
+        self.assertEqual(len(self.svc.requests), n)
 
     def test_string_lists_untouched(self):
         run(self.tool.save_recipe(name="r", servings=2, ingredients=[{"name": "x"}], instructions=["a", "b"], tags=["t"]))

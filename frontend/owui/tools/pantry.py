@@ -695,7 +695,7 @@ class Tools:
     async def restock(
         self,
         list_id: str,
-        bought: Any = "all",
+        bought: Optional[list[str]] = None,
         except_items: Optional[list] = None,
         substitutions: Optional[list[dict]] = None,
         actual: Optional[list[dict]] = None,
@@ -705,12 +705,21 @@ class Tools:
         Record what was ACTUALLY bought for a shopping list. Unbought items carry over. The result lists planned meals whose shortfalls changed; propose a revision for each.
 
         :param list_id: The shopping list id.
-        :param bought: "all" or a list of item names/ids that were bought.
+        :param bought: Item names/ids that were bought. Omit it when EVERYTHING on the list was bought (the same as "all").
         :param except_items: Names/ids NOT bought (use with bought="all").
         :param substitutions: List of {for, name, quantity, unit} for swapped items.
         :param actual: List of {name or id, quantity, unit} when the pack size differs from the list.
         :return: JSON with restocked, carried_over and affected_plans.
         """
+        b = _coerce(bought)
+        if b is None or (isinstance(b, str) and b.strip().lower() == "all"):
+            b = "all"
+        elif not (isinstance(b, list) and all(isinstance(x, str) for x in b)):
+            return _compact(
+                {"ok": False, "error": "invalid", "nothing_sent": True,
+                 "detail": f"bought must be omitted (everything) or a list of item names/ids, got {_compact(bought)}",
+                 "instruction": "Nothing was sent. Pass bought as a list of names, or omit it if everything was bought."}
+            )
         try:
             subs = _rows(substitutions, "substitutions")
             act = _rows(actual, "actual")
@@ -722,7 +731,7 @@ class Tools:
             _clean(
                 {
                     "list_id": list_id,
-                    "bought": _coerce(bought),
+                    "bought": b,
                     "except": _coerce(except_items),
                     "substitutions": subs,
                     "actual": act,
