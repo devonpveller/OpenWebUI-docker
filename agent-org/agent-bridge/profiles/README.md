@@ -81,10 +81,12 @@ the project survey run under `worker-default`. little-coder runs that model for 
 It must be a key of `agent.allowed_models` in `little-coder/config/little-coder.config.yaml`
 (exact match). Otherwise the daemon refuses the task with a 422. The bridge then posts
 "refused model" in the effort thread and audits `worker_model_refused`. Nothing runs, and the
-bridge never falls back to another model. The stall watchdog treats a refused effort as
-awaiting the operator: it does not re-run it until a turn has run again, typically after you
-fix the config or the profile and say "re-run it". A refused project survey is audited the same
-way.
+bridge never falls back to another model. The operator gets one actionable message: the
+effort thread gets the refusal, and your conversation gets the same advice, not a raw HTTP error.
+While the effort's latest dispatch is the refused one, the stall watchdog leaves it alone.
+Re-running it on a timer would only be refused again. Once any later dispatch starts (you fixed
+the config or the profile and said "re-run it"), the watchdog covers the effort again,
+whatever happens to that dispatch. A refused project survey is audited the same way.
 
 `wake_done` and `project_survey` audit two fields:
 - `model_sent`: what the bridge sent;

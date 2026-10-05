@@ -68,6 +68,26 @@ def _is_worker_unavailable(exc: Exception) -> bool:
     return isinstance(exc, httpx.TransportError)
 
 
+class WorkerModelRefused(httpx.HTTPStatusError):
+    """A worker's daemon refused the turn's model (422 `model refused: ...`). The router has
+    already audited it and posted the actionable message in the effort thread; callers use the
+    type to give the operator the same advice once, not a generic HTTP error (D2). Still an
+    HTTPStatusError, so every existing handler catches it as before."""
+
+    def __init__(self, exc: httpx.HTTPStatusError, *, model: str, role: str, detail: str) -> None:
+        super().__init__(str(exc), request=exc.request, response=exc.response)
+        self.model, self.role, self.detail = model, role, detail
+
+
+def model_refusal_advice(model: str | None, role: str | None, detail: str) -> str:
+    """The one actionable text for a model refusal: what was refused and both ways to fix it."""
+    what = f"refused model `{model}` (profile `{role}`)" if model else "refused the task's model"
+    prof = role or "<profile>"
+    return (f"{what}: {detail[:200]}. Nothing ran. Point the profile at an allowed model "
+            f"(`set profile {prof} model <model>`) or allow it in little-coder's "
+            f"`agent.allowed_models` (then regenerate the worker configs), and say \"re-run it\".")
+
+
 def _model_refusal(exc: Exception) -> str:
     """The daemon's detail when it refused a task's model (ef-worker-model: 422 `model refused:
     ...`), else "". An older daemon never answers this way (it ignores the key)."""
@@ -665,12 +685,10 @@ class Router:
                     )
                     await self.chat.post(
                         channel_id,
-                        f"⚠️ worker `{inst.id}` refused model `{model}` (profile `{role}`): "
-                        f"{refused[:200]}. Nothing ran. Point the profile at an allowed model "
-                        f"(`set profile {role} model <model>`) or allow it in little-coder's "
-                        f"`agent.allowed_models`.",
+                        f"⚠️ worker `{inst.id}` " + model_refusal_advice(model, role, refused),
                         thread_id=thread_id,
                     )
+                    raise WorkerModelRefused(exc, model=model, role=role, detail=refused) from exc
                 if not _is_worker_unavailable(exc):
                     raise  # a real error (repo/task/other) — not a worker-health problem
                 await self.scheduler.quarantine(

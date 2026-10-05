@@ -66,7 +66,10 @@ class StubDaemon:
             req = (_NewTrigger if knows_model else _OldTrigger)(**body)
             if knows_model and req.model is not None and req.model not in allowed:
                 raise HTTPException(422, f"model refused: model {req.model!r} is not allowed here")
-            ran = getattr(req, "model", None) or "agent.model"
+            # Like the real daemon: the task view reports the pi id it ran (`llamacpp/<role>`),
+            # never the request's key, so a test can tell a read-back from an echo (attempt 3).
+            sent = getattr(req, "model", None)
+            ran = f"llamacpp/{sent}" if sent else "llamacpp/agent-default"
             self.ran.append(ran)
             tid = f"t{len(self.tasks) + 1}"
             self.tasks[tid] = {"task_id": tid, "status": "done", "answer": "ok", "activity": []}
@@ -146,7 +149,7 @@ async def test_a_worker_wake_sends_the_worker_default_profile_model(db_url, stub
         assert stub.task_bodies[-1]["model"] == "local-large"
         done = await _events(db, "wake_done")
         assert [p["model_sent"] for p in done] == ["local-small", "local-large"]
-        assert [p["model_ran"] for p in done] == ["local-small", "local-large"]
+        assert [p["model_ran"] for p in done] == ["llamacpp/local-small", "llamacpp/local-large"]
     finally:
         await db.dispose()
 
@@ -170,7 +173,7 @@ async def test_an_older_daemon_that_ignores_model_still_runs_the_turn(db_url, mo
         result = await _wake(orch, eid, chan, root)
         assert result.ok and result.status == "done"
         assert old.task_bodies[-1]["model"] == "local-small"      # sent, and ignored
-        assert old.ran == ["agent.model"]                         # the old daemon ran its own
+        assert old.ran == ["llamacpp/agent-default"]              # the old daemon ran its own
     finally:
         await db.dispose()
 
@@ -204,7 +207,7 @@ async def test_a_cloud_lane_worker_profile_sends_no_model(db_url, stub):
         assert "model" not in stub.task_bodies[-1]
         (done,) = await _events(db, "wake_done")
         assert done["model_sent"] is None and "cloud lane" in done["model_from"]
-        assert done["model_ran"] == "agent.model"       # the stub's report of its own default
+        assert done["model_ran"] == "llamacpp/agent-default"   # the stub's report of its default
     finally:
         await db.dispose()
 
@@ -354,9 +357,9 @@ async def test_wake_done_records_the_model_that_ran_beside_the_model_sent(db_url
     try:
         eid, chan, root = await orch.router.open_effort("ran")
         result = await _wake(orch, eid, chan, root)
-        assert result.model == "local-small"          # the stub reports what it ran
+        assert result.model == "llamacpp/local-small"   # the daemon's report, not the sent key
         (done,) = await _events(db, "wake_done")
-        assert done["model_sent"] == "local-small" and done["model_ran"] == "local-small"
+        assert done["model_sent"] == "local-small" and done["model_ran"] == "llamacpp/local-small"
     finally:
         await db.dispose()
 
@@ -458,6 +461,351 @@ async def test_a_good_project_survey_audits_the_model(db_url, stub):
     try:
         await orch.router.survey_project(REPO)
         (survey,) = await _events(db, "project_survey")
-        assert survey["model_sent"] == "local-small" and survey["model_ran"] == "local-small"
+        assert survey["model_sent"] == "local-small"
+        assert survey["model_ran"] == "llamacpp/local-small"     # read back, not copied from sent
+    finally:
+        await db.dispose()
+
+
+# ── attempt 3: D1 (a refusal never pins an effort that was re-run), D2 (one actionable message),
+#    and the tester's pins. Daemon doubles adapted from the attempt-2 tester's probe_tf2.py. ─────
+
+class _Down:
+    """A daemon whose /tasks answers a NON-model error (default 500)."""
+
+    def __init__(self, code: int = 500, detail: str = "boom") -> None:
+        app = FastAPI()
+        self.posts = 0
+
+        @app.post("/tasks")
+        async def post_task() -> dict:
+            self.posts += 1
+            raise HTTPException(code, detail)
+
+        @app.post("/project")
+        async def project() -> dict:
+            return {"action": "clone", "focus": REPO}
+
+        self.app = app
+
+
+class _Hang:
+    """A daemon that accepts the task and reports it running forever; optional repeating activity."""
+
+    def __init__(self, *, activity: list | None = None, model="llamacpp/local-large") -> None:
+        app = FastAPI()
+        self.posts = 0
+
+        @app.post("/tasks")
+        async def post_task() -> dict:
+            self.posts += 1
+            return {"task_id": "h1", "status": "queued"}
+
+        @app.get("/tasks/{tid}")
+        async def get_task(tid: str) -> dict:
+            v = {"task_id": tid, "status": "running", "activity": activity or []}
+            if model is not None:
+                v["model"] = model
+            return v
+
+        @app.post("/tasks/{tid}/cancel")
+        async def cancel(tid: str) -> dict:
+            return {"ok": True}
+
+        self.app = app
+
+
+class _CloneFails:
+    """A daemon whose /project refuses the clone (the router's clone_failed early return)."""
+
+    def __init__(self) -> None:
+        app = FastAPI()
+        self.tasks = 0
+
+        @app.post("/project")
+        async def project() -> dict:
+            raise HTTPException(502, "clone failed (exit 128): fatal: repository not found")
+
+        @app.post("/tasks")
+        async def post_task() -> dict:
+            self.tasks += 1
+            return {"task_id": "never", "status": "queued"}
+
+        self.app = app
+
+
+class _Switch:
+    """One ASGI app forwarding to whichever daemon is current (swap daemons mid-test)."""
+
+    def __init__(self, d) -> None:
+        self.cur = d
+
+        async def app(scope, receive, send):
+            await self.cur.app(scope, receive, send)
+        self.app = app
+
+
+async def _backdate(db, eid, hours=2):
+    """Shift every event of the effort back by `hours`, preserving their order."""
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import update
+    async with db.session_factory() as s:
+        rows = (await s.execute(select(Event.id, Event.ts).where(Event.effort_id == eid))).all()
+        for rid, ts in rows:
+            new = (datetime.fromisoformat(ts) - timedelta(hours=hours)).isoformat()
+            await s.execute(update(Event).where(Event.id == rid).values(ts=new))
+        await s.commit()
+
+
+async def _flatten(db, eid, hours=2):
+    """Give every event of the effort ONE identical timestamp (the equal-clock boundary)."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import update
+    old = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    async with db.session_factory() as s:
+        await s.execute(update(Event).where(Event.effort_id == eid).values(ts=old))
+        await s.commit()
+
+
+async def _refuse_then_fix(orch, monkeypatch, name):
+    """A dispatch refused for its model, then the operator's fix (profile -> an allowed model)."""
+    sw = _Switch(StubDaemon(allowed=("local-large",)))
+    _route_harness_to(monkeypatch, sw)
+    eid, chan, root = await orch.router.open_effort(name)
+    with pytest.raises(httpx.HTTPStatusError):
+        await _wake(orch, eid, chan, root)
+    assert await orch._model_refusal_unresolved(eid)
+    await orch.profiles.set_model("worker-default", "local-large",
+                                  registered={"local-large", "local-small"})
+    return sw, eid, chan, root
+
+
+async def _swept_recoveries(orch, db, eid) -> int:
+    await _backdate(db, eid)
+    orch._delegating.discard(eid)
+    await orch._sweep_stalled_efforts()
+    return (await orch._event_count(eid, "stall_recovered")
+            + await orch._event_count(eid, "stall_escalated"))
+
+
+async def test_d1_a_re_run_that_gets_a_non_model_500_is_watched_again(db_url, monkeypatch):
+    orch, chat, db = await _orch(db_url)
+    try:
+        sw, eid, chan, root = await _refuse_then_fix(orch, monkeypatch, "d1-500")
+        down = sw.cur = _Down(500)
+        with pytest.raises(httpx.HTTPStatusError):
+            await _wake(orch, eid, chan, root)
+        assert down.posts == 1                               # the re-run WAS dispatched
+        assert not await orch._model_refusal_unresolved(eid)
+        assert await _swept_recoveries(orch, db, eid) == 1
+    finally:
+        await db.dispose()
+
+
+async def test_d1_a_re_run_lost_mid_turn_is_watched_again(db_url, monkeypatch):
+    """A bridge restart / dead coroutine mid-turn: the dispatch started, no wake_done ever lands."""
+    import asyncio
+
+    orch, chat, db = await _orch(db_url)
+    try:
+        sw, eid, chan, root = await _refuse_then_fix(orch, monkeypatch, "d1-lost")
+        hang = sw.cur = _Hang()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(_wake(orch, eid, chan, root), timeout=0.3)
+        assert hang.posts == 1 and await _events(db, "wake_done") == []
+        assert not await orch._model_refusal_unresolved(eid)
+        assert await _swept_recoveries(orch, db, eid) == 1
+    finally:
+        await db.dispose()
+
+
+async def test_d1_a_re_run_whose_clone_fails_is_watched_again(db_url, monkeypatch):
+    orch, chat, db = await _orch(db_url)
+    try:
+        sw, eid, chan, root = await _refuse_then_fix(orch, monkeypatch, "d1-clone")
+        cf = sw.cur = _CloneFails()
+        r = await orch.router.wake(eid, role="worker-default", thread_id=root, channel_id=chan,
+                                   session_id=eid, instruction="x", repo=REPO)
+        assert r.status == "clone_failed" and cf.tasks == 0   # the early return: no /tasks at all
+        assert not await orch._model_refusal_unresolved(eid)
+        assert await _swept_recoveries(orch, db, eid) == 1
+    finally:
+        await db.dispose()
+
+
+async def test_d1_a_frozen_effort_after_a_refusal_still_gets_its_freeze_recovery(db_url, monkeypatch):
+    """The guard sits after the frozen branch: a freeze's own auto-recovery is never pre-empted."""
+    from sqlalchemy import update
+
+    from app.models import Effort
+
+    strict = StubDaemon(allowed=("local-large",))
+    _route_harness_to(monkeypatch, strict)
+    orch, chat, db = await _orch(db_url)
+    try:
+        eid, chan, root = await orch.router.open_effort("d1-frozen")
+        with pytest.raises(httpx.HTTPStatusError):
+            await _wake(orch, eid, chan, root)
+        async with db.session_factory() as s:
+            await s.execute(update(Effort).where(Effort.id == eid).values(state="frozen"))
+            await s.commit()
+        seen = []
+
+        async def _record(e, mgmt):
+            seen.append(e)
+        monkeypatch.setattr(orch, "_maybe_auto_recover_infra_freeze", _record)
+        await _backdate(db, eid)
+        await orch._sweep_stalled_efforts()
+        assert seen == [eid]
+    finally:
+        await db.dispose()
+
+
+async def test_d1_repeated_refusals_with_no_later_dispatch_stay_with_the_operator(db_url, monkeypatch):
+    """TF2 kept: every dispatch refused, nothing else started - never re-run, never escalated."""
+    strict = StubDaemon(allowed=("local-large",))
+    _route_harness_to(monkeypatch, strict)
+    orch, chat, db = await _orch(db_url)
+    try:
+        eid, chan, root = await orch.router.open_effort("d1-multi")
+        for _ in range(3):
+            with pytest.raises(httpx.HTTPStatusError):
+                await _wake(orch, eid, chan, root)
+        await _backdate(db, eid)
+        for _ in range(3):
+            await orch._sweep_stalled_efforts()
+        assert await orch._event_count(eid, "stall_recovered") == 0
+        assert await orch._event_count(eid, "stall_escalated") == 0
+        assert len(strict.task_bodies) == 3
+    finally:
+        await db.dispose()
+
+
+async def test_d1_equal_timestamps_are_ordered_by_write_order(db_url, monkeypatch):
+    """Boundary, decided: order is the append-only event id, so an identical clock reading cannot
+    flip the answer either way. Refusal last -> unresolved; a later dispatch -> resolved."""
+    strict = StubDaemon(allowed=("local-large",))
+    sw = _Switch(strict)
+    _route_harness_to(monkeypatch, sw)
+    orch, chat, db = await _orch(db_url)
+    try:
+        eid, chan, root = await orch.router.open_effort("d1-eq")
+        with pytest.raises(httpx.HTTPStatusError):
+            await _wake(orch, eid, chan, root)
+        await _flatten(db, eid)
+        assert await orch._model_refusal_unresolved(eid)          # refused, nothing after
+        await orch.profiles.set_model("worker-default", "local-large",
+                                      registered={"local-large", "local-small"})
+        sw.cur = _Down(500)
+        with pytest.raises(httpx.HTTPStatusError):
+            await _wake(orch, eid, chan, root)
+        await _flatten(db, eid)
+        assert not await orch._model_refusal_unresolved(eid)      # a later dispatch started
+    finally:
+        await db.dispose()
+
+
+async def test_d2_the_delegate_path_gives_one_actionable_message(db_url, monkeypatch):
+    """D2: the effort thread gets the router's actionable refusal only (no generic HTTP error
+    post), and the operator's conversation gets the same advice, not a raw 422."""
+    strict = StubDaemon(allowed=("local-large",))
+    _route_harness_to(monkeypatch, strict)
+    orch, chat, db = await _orch(db_url)
+    try:
+        eid, chan, root = await orch.router.open_effort("d2")
+        await orch.delegate(eid, chan, root, "edit one file")
+        msgs = [p["message"] for p in chat.posted]
+        assert not any("delegation error" in m or "Client error" in m for m in msgs), msgs
+        in_thread = [p["message"] for p in chat.posted
+                     if p.get("thread_id") == root and "refused model" in p["message"]]
+        assert len(in_thread) == 1
+        up = [m for m in msgs if "couldn't run" in m]
+        assert len(up) == 1
+        assert "refused model `local-small`" in up[0] and "set profile worker-default model" in up[0]
+        assert "agent.allowed_models" in up[0]
+    finally:
+        await db.dispose()
+
+
+def test_d2_a_raw_model_refusal_reads_as_actionable():
+    req = httpx.Request("POST", "http://w1:8090/tasks")
+    resp = httpx.Response(422, json={"detail": "model refused: model 'x' is not allowed here"},
+                          request=req)
+    exc = httpx.HTTPStatusError("422", request=req, response=resp)
+    text = Orchestrator._friendly_dispatch_error(exc)
+    assert text.startswith("the worker refused the task's model: model refused")
+    assert "agent.allowed_models" in text and "set profile" in text
+    other = httpx.HTTPStatusError("422", request=req, response=httpx.Response(
+        422, json={"detail": "empty prompt"}, request=req))
+    assert Orchestrator._friendly_dispatch_error(other).startswith("delegation error")
+
+
+# ── the attempt-2 tester's pins ─────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("view_model, expect", [
+    (None, None), ("", None), (5, None), (["x"], None), ({"a": 1}, None),
+    ("llamacpp/local-large", "llamacpp/local-large"),
+])
+async def test_pin_model_ran_is_only_a_non_empty_string_from_the_daemon_view(
+        db_url, monkeypatch, view_model, expect):
+    app = FastAPI()
+
+    @app.post("/tasks")
+    async def post_task() -> dict:
+        return {"task_id": "x1", "status": "queued"}
+
+    @app.get("/tasks/{tid}")
+    async def get_task(tid: str) -> dict:
+        v = {"task_id": tid, "status": "done", "answer": "ok", "activity": []}
+        if view_model is not None:
+            v["model"] = view_model
+        return v
+
+    _route_harness_to(monkeypatch, type("D", (), {"app": app})())
+    orch, chat, db = await _orch(db_url)
+    try:
+        eid, chan, root = await orch.router.open_effort("pin-ran")
+        r = await _wake(orch, eid, chan, root)
+        (done,) = await _events(db, "wake_done")
+        assert done["model_sent"] == "local-small"
+        assert r.model == expect and done["model_ran"] == expect
+    finally:
+        await db.dispose()
+
+
+async def test_pin_a_poll_timeout_keeps_the_model_the_daemon_reported(db_url, monkeypatch):
+    _route_harness_to(monkeypatch, _Hang(model="llamacpp/local-small"))
+    orch, chat, db = await _orch(db_url)
+    orch.harness.poll_timeout, orch.harness.poll_interval = 0.05, 0.01
+    try:
+        eid, chan, root = await orch.router.open_effort("pin-timeout")
+        r = await _wake(orch, eid, chan, root)
+        assert r.status == "error" and r.model == "llamacpp/local-small"
+        (done,) = await _events(db, "wake_done")
+        assert done["model_ran"] == "llamacpp/local-small"
+    finally:
+        await db.dispose()
+
+
+def test_pin_the_flail_path_keeps_the_model_the_daemon_reported(monkeypatch):
+    import asyncio
+
+    act = [{"command": "cat a", "ok": True}] * 4
+    _route_harness_to(monkeypatch, _Hang(activity=act, model="llamacpp/local-small"))
+    r = asyncio.run(LittleCoderHarness(poll_interval_s=0.0, poll_timeout_s=5.0).wake(
+        W1, "s", "p", max_repeat=3, model="local-small"))
+    assert r.status == "flail" and r.model == "llamacpp/local-small"
+
+
+@pytest.mark.parametrize("code, detail", [(422, "empty prompt"), (500, "boom"),
+                                          (422, "model is fine")])
+async def test_pin_a_non_model_survey_error_is_not_a_refusal(db_url, monkeypatch, code, detail):
+    _route_harness_to(monkeypatch, _Down(code, detail))
+    orch, chat, db = await _orch(db_url)
+    try:
+        assert await orch.router.survey_project(REPO) == ""
+        assert await _events(db, "worker_model_refused") == []
     finally:
         await db.dispose()
