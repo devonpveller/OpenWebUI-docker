@@ -93,7 +93,7 @@ $mutants = [ordered]@{
     'scrub-cli-flag'         = @('$t = [regex]::Replace($t, ''(?i)((?<!\S)--[a-z0-9\-]{0,30}', '$null = [regex]::Replace($t, ''(?i)((?<!\S)--[a-z0-9\-]{0,30}', 'P34')
     'scrub-mysql-p'          = @('$t = [regex]::Replace($t, ''(\bmysql(?:dump|admin)?', '$null = [regex]::Replace($t, ''(\bmysql(?:dump|admin)?', 'P34')
     'scrub-docker-login'     = @('$t = [regex]::Replace($t, ''(?i)(\b(?:docker|podman|helm)', '$null = [regex]::Replace($t, ''(?i)(\b(?:docker|podman|helm)', 'P34')
-    'scrub-curl-u'           = @('$t = [regex]::Replace($t, ''((?<!\S)(?:-u|--user)', '$null = [regex]::Replace($t, ''((?<!\S)(?:-u|--user)', 'P34')
+    'scrub-curl-u'           = @('$t = [regex]::Replace($t, ''((?<!\S)(?:--user=|--user', '$null = [regex]::Replace($t, ''((?<!\S)(?:--user=|--user', 'P34')
     'scrub-slack'            = @('$t = [regex]::Replace($t, ''(?i)(hooks\.slack\.com', '$null = [regex]::Replace($t, ''(?i)(hooks\.slack\.com', 'P34')
     'scrub-discord'          = @('$t = [regex]::Replace($t, ''(?i)(discord', '$null = [regex]::Replace($t, ''(?i)(discord', 'P34')
     'scrub-pem-rsa-only'     = @('''-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----.*''', ('''-----BEGIN RSA PRIVATE ' + 'KEY-----.*'''), 'P34')
