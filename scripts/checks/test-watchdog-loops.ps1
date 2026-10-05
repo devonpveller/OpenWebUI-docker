@@ -244,7 +244,7 @@ function Invoke-PureCases {
     $missing = @($need | Where-Object { -not (Get-Command $_ -CommandType Function -ErrorAction SilentlyContinue) })
     if ($missing.Count -gt 0) {
         foreach ($id in 'P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8', 'P9', 'P10', 'P11', 'P12', 'P13', 'P14', 'P15',
-                        'P16', 'P17', 'P18', 'P19', 'P20', 'P21', 'P22', 'P23', 'P24', 'P25', 'P26', 'P27', 'P28', 'P29') {
+                        'P16', 'P17', 'P18', 'P19', 'P20', 'P21', 'P22', 'P23', 'P24', 'P25', 'P26', 'P27', 'P28', 'P29', 'P30', 'P31', 'P32', 'P33', 'P34', 'P35') {
             Write-Case $id 'container-loop detection' $false ("the watchdog under test defines none of: " + ($missing -join ', '))
         }
         return
@@ -576,7 +576,8 @@ function Invoke-PureCases {
     # P22 (attempt-4 X1): docker-unreadable FLAPPING - the batched and the
     # per-container inspect time out on alternate passes, 12 passes 10 min
     # apart. Its all-clear keeps the 1h throttle and the 6h cooldown, so this
-    # is ONE alert and at most one all-clear, not a pair every other pass.
+    # is ONE alert and ONE all-clear, not a pair every other pass. Exactly one
+    # (ef-watchdog): "at most one" also passed when no all-clear was ever sent.
     $u1 = @{ Name = '/u1'; Id = 'u1'; RestartCount = 0; State = @{ Status = 'running'; StartedAt = (& $iso 300) }
              HostConfig = @{ NetworkMode = 'bridge'; RestartPolicy = @{ Name = 'no'; MaximumRetryCount = 0 } } } | ConvertTo-Json -Compress -Depth 5
     $DockerProbeTimeoutSeconds = 8
@@ -596,8 +597,8 @@ function Invoke-PureCases {
     $tt = Get-Transport $sbx
     $p22a = Measure-Alerts $tt 'docker cannot describe 1 container\(s\) within 8s'
     $p22r = @($tt.Telegram | Where-Object { $_ -match 'RESOLVED ai-stack: docker can describe' }).Count
-    Write-Case 'P22' 'docker-unreadable flapping every other pass for 2h: one alert, at most one all-clear' `
-        (($p22a -eq 'tg=1 mm=1') -and ($p22r -le 1)) "12 passes, alternate inspect timeouts: alerts $p22a; RESOLVED $p22r"
+    Write-Case 'P22' 'docker-unreadable flapping every other pass for 2h: one alert and ONE all-clear (not none, not a pair per flap)' `
+        (($p22a -eq 'tg=1 mm=1') -and ($p22r -eq 1)) "12 passes, alternate inspect timeouts: alerts $p22a; RESOLVED $p22r"
     # Leave the key clean for P6.
     Get-ChildItem (Join-Path $sbx 'logs') -Force -File | Where-Object { $_.Name -like '*docker-unreadable' } | Remove-Item -Force
 
@@ -698,6 +699,169 @@ function Invoke-PureCases {
         (($p27page -eq 365) -and ($p27early -lt 0) -and ($p27clear -ge 575) -and ($p27clear -le 595) -and ($p27re -eq 585) -and ($p27clear2 -eq 645)) `
         ("paged at $p27page (expected 365); first all-clear at $p27clear, $(if ($p27clear -ge 0) { $p27clear - 357 } else { '-' }) min up (bar 210; " +
          "expected 575-595); relapse paged at $p27re (expected 585); relapse cleared at $p27clear2 (expected 645, 61 min up)")
+
+
+    # P31 (ef-watchdog): the ClearedAt clamp's OLD-restart guard. A ClearedAt a
+    # year ahead is clamped to NOW (P26 shows later restarts still page); the
+    # other half is that it must not bring the OLD restarts back: six restarts
+    # an hour ago, no new one, a ClearedAt a year ahead -> nothing to page. An
+    # UNREADABLE ClearedAt is 0 and does count them (errs toward an extra page).
+    $e31 = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - 3600
+    $st = Get-Content $statePath -Raw | ConvertFrom-Json
+    $st | Add-Member -NotePropertyName 'p31-old' -NotePropertyValue ([pscustomobject]@{
+        Count = 6; Id = 'p31o'; Streak = 0; Accum = 0; Missed = 0; Hist = @(1..6 | ForEach-Object { "${e31}:1" })
+        ClearedAt = ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + 365 * 86400) }) -Force
+    $st | Add-Member -NotePropertyName 'p31-unreadable' -NotePropertyValue ([pscustomobject]@{
+        Count = 6; Id = 'p31u'; Streak = 0; Accum = 0; Missed = 0; Hist = @(1..6 | ForEach-Object { "${e31}:1" })
+        ClearedAt = 'not-a-number' }) -Force
+    ($st | ConvertTo-Json -Depth 5) | Out-File $statePath -Encoding utf8 -Force
+    Test-ContainerRestartLoops -Facts @((& $fact 'cfwd-healthy' 'p31-old' 'p31o' 6 'running' (& $iso 5) ''),
+                                        (& $fact 'cfwd-healthy' 'p31-unreadable' 'p31u' 6 'running' (& $iso 5) '')) | Out-Null
+    $p31o = & $said "container 'p31-old'"
+    $p31u = & $said "container 'p31-unreadable' is CRASH-LOOPING: 6 restart\(s\) in the last"
+    Write-Case 'P31' 'a ClearedAt a year ahead is clamped to now and does not bring older restarts back; an unreadable one does count them' `
+        (($p31o -eq 0) -and ($p31u -eq 1)) `
+        "6 restarts an hour ago, no new one: future ClearedAt -> messages $p31o (expected 0); unreadable ClearedAt -> slow-loop pages $p31u (expected 1)"
+
+    # P32 (ef-watchdog): LastObs is carried across a pass that did not see the
+    # container, so the gap over that pass still reaches MaxGap. Restart seen at
+    # minute 10, a pass without it at 20, the next restart seen at minute 130:
+    # the gap is 120 minutes. Read from the state file the watchdog wrote.
+    $t0 = [datetime]::SpecifyKind([datetime]'2034-01-01T00:00:00', 'Utc')
+    $t0s = $t0.ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
+    $seq32 = @(@(0, 0), @(10, 1), @(20, -1), @(130, 2))
+    foreach ($s32 in $seq32) {
+        $script:SimNow = $t0.AddMinutes($s32[0]); $WatchdogClock = { $script:SimNow }
+        if ($s32[1] -lt 0) {
+            Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p32-other' 'p32x' 0 'running' $t0s '') | Out-Null
+        } else {
+            Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p32-obs' 'p32' $s32[1] 'running' $t0s '') | Out-Null
+        }
+    }
+    $WatchdogClock = $null
+    $st32 = (Get-Content $statePath -Raw | ConvertFrom-Json).'p32-obs'
+    $wantObs = [int64]([datetimeoffset]$t0.AddMinutes(130)).ToUnixTimeSeconds()
+    Write-Case 'P32' 'LastObs is carried across a pass that missed the container, so the 120-minute gap reaches MaxGap' `
+        (($null -ne $st32) -and ([double]$st32.MaxGap -eq 120) -and ([int64]$st32.LastObs -eq $wantObs)) `
+        "restart seen at 10 and 130, a pass without it at 20: state MaxGap=$($st32.MaxGap) (expected 120), LastObs=$($st32.LastObs) (expected $wantObs)"
+
+    # P33 (ef-watchdog): a MaxGap that is not a finite number (a hand edit:
+    # "NaN", "Infinity") is UNREADABLE, so the default bar (60 min) applies and
+    # a paged container can clear. Choice recorded in findings: NaN made every
+    # settle comparison false, so such a container could never clear.
+    $st = Get-Content $statePath -Raw | ConvertFrom-Json
+    foreach ($nm in @(@('p33-nan', 'NaN'), @('p33-inf', 'Infinity'))) {
+        $st | Add-Member -NotePropertyName $nm[0] -NotePropertyValue ([pscustomobject]@{
+            Count = 7; Id = $nm[0]; Streak = 0; Accum = 0; Missed = 0; Hist = @(); ClearedAt = 0; LastObs = 0; MaxGap = $nm[1] }) -Force
+        foreach ($sf in @(".loop-alert-crashloop-$($nm[0])", ".tg-state-crashloop-$($nm[0])")) {
+            'x' | Out-File (Join-Path $sbx "logs\$sf") -Encoding ascii -Force }
+    }
+    ($st | ConvertTo-Json -Depth 5) | Out-File $statePath -Encoding utf8 -Force
+    Test-ContainerRestartLoops -Facts @((& $fact 'cfwd-healthy' 'p33-nan' 'p33-nan' 7 'running' (& $iso 61) ''),
+                                        (& $fact 'cfwd-healthy' 'p33-inf' 'p33-inf' 7 'running' (& $iso 61) '')) | Out-Null
+    $p33n = & $said "RESOLVED ai-stack: container 'p33-nan'"
+    $p33i = & $said "RESOLVED ai-stack: container 'p33-inf'"
+    $after33 = Get-Content $statePath -Raw | ConvertFrom-Json
+    $gaps33 = "$($after33.'p33-nan'.MaxGap)/$($after33.'p33-inf'.MaxGap)"
+    Write-Case 'P33' 'a non-finite MaxGap (NaN, Infinity) is read as unreadable: the default bar applies and the container clears' `
+        (($p33n -eq 1) -and ($p33i -eq 1) -and ($gaps33 -eq '0/0')) `
+        "paged containers up 61 min with MaxGap NaN / Infinity: RESOLVED $p33n / $p33i (expected 1 / 1); MaxGap written back $gaps33 (expected 0/0)"
+
+    # P34 (ef-watchdog): the credential-shape scrub. Fakes are ASSEMBLED FROM
+    # PARTS so no secret-shaped literal is committed (push protection). Each row:
+    # the text, fragments that must be gone, fragments that must survive.
+    $fpw = 's3' + 'cret' + '-Pw9'
+    $fgh = 'gh' + 'p_' + ('A1b2C3d4E5' * 4)
+    $fsk = 'sk' + '-ant-' + ('x9Y8z7W6' * 3)
+    $fts = 'ts' + 'key-auth-' + 'k1234567890abc' + 'DEF-ZYX98765'
+    $faws = 'AK' + 'IA' + 'IOSFODNN7' + 'EXAMPLE'
+    $fjwt = 'ey' + 'Jhbgcixxxx.ey' + 'Jzdwixxxxx.sig' + 'natu' + 're99'
+    $ftg = '1234567890' + ':' + ('A1b2C3d4E5' * 3) + 'A1b2C'
+    $fbear = 'abc123' + 'def456' + 'ghi789'
+    $fpem = '-----BEGIN ' + 'RSA PRIVATE KEY----- MIIEowIBAAKCAQEA1'
+    $fq = 'hun' + 'ter2'
+    $fweak = 'Abc123' + 'Def456' + 'Ghi789'     # 18 characters: only the bare-key rule can take it
+    $fopq = '9f8e7d6c' * 6                       # 48 hex characters under no key: only the opaque-run rule
+    if (-not (Get-Command Hide-CredentialShapes -CommandType Function -ErrorAction SilentlyContinue)) {
+        Write-Case 'P34' 'Hide-CredentialShapes masks credential shapes and keeps ordinary error text' $false 'the watchdog under test defines no Hide-CredentialShapes'
+    } else {
+    $rows = @(
+        @{ T = "dial tcp: postgres://app:$fpw@db.internal:5432/app failed";   Gone = @($fpw);   Keep = @('postgres://', 'db.internal:5432/app failed') },
+        @{ T = "connect failed: host=db user=app password=$fpw dbname=x";      Gone = @($fpw);   Keep = @('host=db', 'dbname=x') },
+        @{ T = "Server=x;Password=$fpw;Database=y";                            Gone = @($fpw);   Keep = @('Server=x', 'Database=y') },
+        @{ T = "401 Authorization: Bearer $fbear";                             Gone = @($fbear); Keep = @('401', 'Bearer') },
+        @{ T = "clone failed using $fgh";                                      Gone = @($fgh);   Keep = @('clone failed') },
+        @{ T = "$fsk rejected by the gateway";                                 Gone = @($fsk);   Keep = @('rejected by the gateway') },
+        @{ T = "TS_AUTHKEY=$fts not accepted";                                 Gone = @($fts);   Keep = @('not accepted') },
+        @{ T = "aws $faws denied";                                             Gone = @($faws);  Keep = @('denied') },
+        @{ T = "bad jwt $fjwt expired";                                        Gone = @($fjwt);  Keep = @('expired') },
+        @{ T = "bot$ftg rejected";                                             Gone = @($ftg);   Keep = @('rejected') },
+        @{ T = "API_TOKEN=$fq invalid";                                        Gone = @($fq);    Keep = @('invalid') },
+        @{ T = "{`"password`":`"$fq`",`"user`":`"app`"}";                      Gone = @($fq);    Keep = @('user') },
+        @{ T = "bad key $fpem";                                                Gone = @('MIIEow'); Keep = @('bad key') },
+        @{ T = "AccountKey=$fweak was refused";                                Gone = @($fweak); Keep = @('was refused') },
+        @{ T = "image digest $fopq mismatch";                                  Gone = @($fopq);  Keep = @('mismatch') }
+    )
+    $bad34 = @()
+    foreach ($row in $rows) {
+        $o = Hide-CredentialShapes $row.T
+        foreach ($g in $row.Gone) { if ($o.Contains($g)) { $bad34 += "leaked '$g' in: $o" } }
+        foreach ($k in $row.Keep) { if (-not $o.Contains($k)) { $bad34 += "lost '$k' in: $o" } }
+    }
+    # Meaning survives: ordinary error text comes back byte for byte.
+    $plain = @('invalid key', 'invalid key: expected 32 bytes', 'FATAL: password authentication failed for user app',
+               'token: expired', 'max_tokens=100 exceeded', 'PRIMARY_KEY=id duplicate', 'basic configuration validation failed',
+               'tailscale: node key has expired', 'exit status 1')
+    foreach ($pl in $plain) { $o = Hide-CredentialShapes $pl; if ($o -cne $pl) { $bad34 += "changed plain text '$pl' -> '$o'" } }
+    $o = Hide-CredentialShapes "token: $fq"; if ($o.Contains($fq)) { $bad34 += "token: value leaked: $o" }
+    # Hostile input stays fast and bounded.
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    # Fails CLOSED: when the scrub throws, the text is withheld, never sent raw.
+    $WatchdogFailScrub = $true
+    $closed = Hide-CredentialShapes "token=$fq"
+    $WatchdogFailScrub = $false
+    if ($closed.Contains($fq) -or $closed -notmatch 'withheld') { $bad34 += "scrub failure did not fail closed: '$closed'" }
+    $big = Hide-CredentialShapes (('http://' + ('x' * 100000)) + (' a:=' * 20000))
+    $sw.Stop()
+    if ($big.Length -gt 4100) { $bad34 += "output not bounded: $($big.Length)" }
+    if ($sw.Elapsed.TotalSeconds -gt 5) { $bad34 += "slow on hostile input: $([math]::Round($sw.Elapsed.TotalSeconds,1))s" }
+    Write-Case 'P34' 'Hide-CredentialShapes masks URL/DSN userinfo, Bearer, key=value, vendor tokens, JWT, PEM and keeps ordinary error text' `
+        ($bad34.Count -eq 0) ("$($rows.Count) credential rows, $($plain.Count) plain rows, hostile input in $([math]::Round($sw.Elapsed.TotalSeconds,2))s" +
+                              $(if ($bad34) { "`n" + ($bad34 -join "`n") } else { '' }))
+
+    }
+
+    # P35 (ef-watchdog): END TO END. A crash-looping container whose last log
+    # line carries a DSN and a token: the page that reaches BOTH transports (and
+    # the local log) is scrubbed and still names the container and the error.
+    $leak = "fatal: cannot connect to postgres://app:$fpw@db.internal:5432/app (token=$fgh)"
+    # A token that STRADDLES the 280-character cut: scrubbed before the cut it is
+    # masked whole; cut first, only an unrecognisable stub of it would be left.
+    $leakCut = 'error: ' + ('w ' * 131) + $fgh + ' end'
+    & {
+        function Invoke-BoundedDocker { param([string[]]$DockerArgs, [int]$TimeoutSeconds = 0)
+            $script:BoundedFailureReason = ''; $script:BoundedFailureLines = @()
+            return , @("starting up", $(if ($DockerArgs[-1] -eq 'p35-cut') { $leakCut } else { $leak })) }
+        Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p35-leaky' 'p35' 0 'running' (& $iso 1) ''),
+                                          (& $fact 'cfwd-healthy' 'p35-cut' 'p35c' 0 'running' (& $iso 1) '') | Out-Null
+        Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p35-leaky' 'p35' 10 'running' (& $iso 1) ''),
+                                          (& $fact 'cfwd-healthy' 'p35-cut' 'p35c' 10 'running' (& $iso 1) '') | Out-Null
+    }
+    $t35 = Get-Transport $sbx
+    $page35 = @(@($t35.Telegram) + @($t35.Mattermost) | Where-Object { $_ -match "container 'p35-leaky' is CRASH-LOOPING" })
+    $logTxt35 = Get-Content (Join-Path $sbx 'logs\tailscale-health.log') -Raw
+    $leaked35 = @(@($page35) + @($logTxt35) | Where-Object { $_ -match [regex]::Escape($fpw) -or $_ -match [regex]::Escape($fgh) }).Count
+    $pageCut = @(@($t35.Telegram) + @($t35.Mattermost) | Where-Object { $_ -match "container 'p35-cut' is CRASH-LOOPING" })
+    $cutOk = ($pageCut.Count -eq 2) -and (@($pageCut | Where-Object { $_ -match 'ghp_|A1b2C3' -or $_ -notmatch '\[redacted\]' }).Count -eq 0)
+    $named35 = @($page35 | Where-Object { $_ -match 'cannot connect to postgres://' -and $_ -match 'db\.internal:5432/app' }).Count
+    # The choke point: Send-LoopAlert scrubs whatever message it is handed.
+    $null = Send-LoopAlert -Key 'p35-direct' -Message "x postgres://u:$fpw@h/db and Bearer $fbear"
+    $t35b = Get-Transport $sbx
+    $direct35 = @(@($t35b.Telegram) + @($t35b.Mattermost) | Where-Object { $_ -match 'x postgres://' })
+    $leakedD35 = @($direct35 | Where-Object { $_ -match [regex]::Escape($fpw) -or $_ -match [regex]::Escape($fbear) }).Count
+    Write-Case 'P35' 'a fault line carrying a DSN and a token goes to Telegram, Mattermost and the log scrubbed, still naming the error' `
+        (($page35.Count -eq 2) -and $cutOk -and ($leaked35 -eq 0) -and ($named35 -eq 2) -and ($direct35.Count -eq 2) -and ($leakedD35 -eq 0)) `
+        "page on $($page35.Count) transport(s) (expected 2); messages/log still holding a fake: $leaked35; error text kept on $named35 of 2; token straddling the 280 cut masked on $($pageCut.Count) transport(s): $cutOk; Send-LoopAlert direct: $($direct35.Count) sent, $leakedD35 leaking"
 
     # P29 (attempt-4 F9): the premature all-clear, measured. 42 continuous slow
     # loops on a simulated clock (fixed 20/70 and 40/70; exponential gaps with
@@ -880,6 +1044,29 @@ public static class CfwdHang__SFX__ { public static int Main(string[] a) {
     Write-Case 'P19' 'a job the child could not be assigned to is closed (not leaked) and the fallback is logged' `
         (($ok19 -eq 40) -and (($h1 - $h0) -lt 20) -and ($logged19 -ge 40)) `
         "40 calls with assignment failing: $ok19 answered; process handle count $h0 -> $h1 (a leak adds one per call); fallback logged $logged19 time(s)"
+
+
+    # P30 (ef-watchdog): CreateJobObject returning 0 (test seam). The failure is
+    # remembered for the run (the job type is not retried per call) and logged
+    # ONCE as a WARN; every call still answers through the taskkill fallback.
+    # The two mutants: forget the failure (every call logs and retries), and
+    # drop the WARN.
+    $logPath30 = Join-Path $sbx 'logs\tailscale-health.log'
+    $w30a = if (Test-Path $logPath30) { @(Select-String -Path $logPath30 -Pattern 'CreateJobObject failed').Count } else { 0 }
+    $script:WatchdogJobUnavailable = $false
+    $WatchdogFailJobCreate = $true
+    $ok30 = 0
+    for ($i = 0; $i -lt 4; $i++) {
+        $r30 = Invoke-BoundedDocker -DockerArgs @('ps') -TimeoutSeconds 3
+        if ($r30 -and ($r30 -join '') -match 'cfwd-hang') { $ok30++ }
+    }
+    $WatchdogFailJobCreate = $false
+    $flag30 = [bool]$script:WatchdogJobUnavailable
+    $script:WatchdogJobUnavailable = $false
+    $w30 = @(Select-String -Path $logPath30 -Pattern 'CreateJobObject failed').Count - $w30a
+    Write-Case 'P30' 'CreateJobObject returning 0 marks the job unavailable for the run and logs one WARN; every call still answers' `
+        (($ok30 -eq 4) -and $flag30 -and ($w30 -eq 1)) `
+        "4 calls with CreateJobObject failing: $ok30 answered (expected 4); unavailable flag set: $flag30 (expected True); WARN lines: $w30 (expected 1)"
 
     # P20 (W-8): the job - and so the Add-Type compile - exists BEFORE the
     # child starts. Run in a FRESH process, where the first bounded call pays

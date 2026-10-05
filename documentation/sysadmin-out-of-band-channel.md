@@ -29,7 +29,7 @@ disk-bloat memories.
 | Mattermost (our normal channel) | **Docker container** (agent-org) | ❌ DOWN |
 | `notify-mattermost.sh` alerts | POST to MM container :8065 | ❌ silent |
 | Compaction task (`compact-vhdx.ps1`) | Host, elevated Scheduled Task | ✅ runs, self-drives Docker back |
-| `stack-watchdog.ps1` watchdog | Host Scheduled Task (60s) | ✅ runs (see Layer 2) |
+| `stack-watchdog.ps1` watchdog | Host Scheduled Task (every 10 min, `PT10M`) | ✅ runs (see Layer 2) |
 | Host **Tailscale** (your remote access) | Host daemon, **unattended mode** | ✅ UP — you can still RDP/SSH to the box |
 | claude-sessions bridge / sysadmin bridge / **Telegram listener** | Host Scheduled Tasks (48291/48292/48293) | ✅ processes alive |
 | **Telegram** (out-of-band channel) | Host HTTPS → api.telegram.org | ✅ UP both directions |
@@ -104,6 +104,46 @@ Behaviour: Telegram first (Docker-independent), Mattermost mirrored best-effort;
 re-alerts hourly while the fault persists; sends a RESOLVED ping and re-arms once
 it clears. **Not** catastrophe tier, deliberately: stale backups, search gateway,
 Open Notebook, little-coder - those stay in the log and Mattermost.
+
+**Container-loop pages - catastrophe path, but with no repair (added 2026-09-29).**
+The watchdog also counts EVERY container, not only the listed ones, and pages
+through the same Telegram + Mattermost path. These keys are not "after a repair
+failed": the watchdog attempts no repair at all, because a restart loop is usually
+a credential or config fault and restarting again hides the evidence. The page
+says what to look at; the fix is yours. Each page carries the container's last
+fault line from `docker logs`, with credential-shaped text masked before it
+leaves the host (URL/DSN userinfo, `password=`/`token=` values, Bearer values,
+vendor token prefixes, private-key blocks).
+
+| Key | Fires when |
+|---|---|
+| `crashloop-<name>` | the container (unbounded restart policy) keeps restarting: 3+ restarts over consecutive 10-minute passes, or 6+ in 6 h (a slow loop) |
+| `netns-<name>` | a container that joins another's network namespace is stranded: its owner is not running, started after it, or no longer exists |
+| `docker-unreadable` | docker cannot describe some container within the probe bound, so the census could not judge it |
+
+Per key, a page repeats at most every 6 h (a cooldown, applied to Mattermost too).
+`docker-unreadable`'s RESOLVED keeps the 1 h Telegram throttle (the 2026-09-16
+anti-flap rule), so a daemon that answers every other pass pages once, not in
+pairs. To run only this check from the
+host, supervised and between two scheduled passes (it writes the same state file
+and CAN send real alerts): `powershell -NoProfile -File scripts\checks\stack-watchdog.ps1 -Mode loops`
+(exit 0 nothing found, 1 a finding, 2 the engine did not answer).
+
+**The all-clear bar (RESOLVED).** A paged crash loop is declared over only once
+it has *settled*: stopped, or running for at least the settle time with no new
+restart. The settle time is `max(60 min, min(6 h, 3 x MaxGap))`, where MaxGap is
+the largest gap between two passes that saw restarts, over the loop's life since
+its last all-clear. So a fixed fast loop clears 60 minutes after it is fixed -
+**only if no restart was seen in the 6 hours before it began**; if one was (even
+one), that gap raises the bar and the RESOLVED arrives up to about 6 h after the
+last crash (measured: ~368 min instead of ~68). A `netns-<name>` key clears only
+once both containers have been up 60 min; `docker-unreadable` clears on the first
+readable pass. **Known residual (accepted, not tuned):** a *slow* loop can still
+get a premature RESOLVED between two of its own crashes (measured on held-out
+simulated loops: RESOLVED was the latest word 2.9% of loop time) and is paged
+again within roughly 2-4.5 h; a `docker-unreadable` relapse inside 6 h of its
+first page is not re-paged; a netns pair flapping at a period over about 60 min
+pages ALERT + RESOLVED each cycle.
 
 Two structural fixes shipped with it, both of which had been masking faults:
 - **No more fatal early returns.** A failed repair used to `return $false` and

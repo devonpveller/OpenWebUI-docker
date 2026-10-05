@@ -1431,7 +1431,7 @@ function Test-BackupRecency {
 # (plain HTTPS to the Telegram Bot API). Unlike notify-mattermost.sh (which posts
 # to the Mattermost *container* on :8065), this still lands when Docker is down --
 # the whole point of the out-of-band channel. Throttled per-key via a logs sentinel
-# so a persistent fault doesn't spam every 60s cycle. Best-effort; never throws.
+# so a persistent fault doesn't spam every 10-minute cycle (the task is PT10M). Best-effort; never throws.
 function Send-TelegramAlert {
     [CmdletBinding()]
     param(
@@ -1814,7 +1814,15 @@ $SlowLoopThreshold = 6
 # where MaxGap is the largest gap between two passes that saw restarts, over
 # the loop's whole life since its last all-clear (gaps longer than the window
 # are not part of a loop and are ignored). A FIXED FAST loop has gaps of one
-# pass, so it clears after the 60-minute floor. A SLOW loop's own gaps set its
+# pass, so it clears after the 60-minute floor - BUT ONLY IF NO RESTART WAS SEEN
+# IN THE 6 HOURS BEFORE IT BEGAN: such a restart, even one, makes the gap up to
+# it part of MaxGap (gaps up to 6 h count), and the bar rises toward the 6 h cap
+# (about 368 min after the last crash instead of 68; tester A1, operator decision
+# 2026-09-29). Known residual, accepted: a slow loop can still get a premature
+# all-clear (RESOLVED) between two of its own crashes, and is paged again
+# after 6 new restarts. A MaxGap that is not a finite number (a hand edit) is
+# read as unreadable, so it is 0 and the default bar applies.
+# A SLOW loop's own gaps set its
 # bar, so it is not "resolved" between two of its own crashes - a flat hour did
 # that about 2.5 times per loop-day in the attempt-4 tester's 40 simulated
 # loops. The cap keeps a genuinely fixed slow loop's all-clear within about
@@ -1882,6 +1890,8 @@ function ConvertTo-ProcessArgument {
 $WatchdogUseJobObject = $true
 # Test seam only: behave as if AssignProcessToJobObject failed.
 $WatchdogFailJobAssign = $false
+# Test seam only: behave as if CreateJobObject returned 0.
+$WatchdogFailJobCreate = $false
 function New-WatchdogJob {
     [CmdletBinding()]
     param()
@@ -1918,7 +1928,7 @@ public static class AiStackWatchdogJob {
 }
 "@
         }
-        $j = [AiStackWatchdogJob]::Create()
+        $j = if ($WatchdogFailJobCreate) { [IntPtr]::Zero } else { [AiStackWatchdogJob]::Create() }
         if ($j -eq [IntPtr]::Zero) {
             $script:WatchdogJobUnavailable = $true
             Write-LogEntry "CreateJobObject failed - bounded calls fall back to taskkill /T for the rest of this run" "WARN"
@@ -2172,6 +2182,73 @@ function Get-ContainerRuntimeFacts {
     }
 }
 
+# Credential-shape scrub for any container-written text that leaves the host
+# (Telegram = api.telegram.org, the Mattermost mirror). A crash-looping service
+# often logs the very credential it was refused with. This masks the SHAPES,
+# keeping the surrounding words, so "invalid key" and "password authentication
+# failed" still read. Shapes: userinfo in a URL or DSN (scheme://user:pw@host),
+# Bearer/Basic values, key=value and key: value pairs whose key names a secret
+# (password, token, secret, api key, dsn ...), vendor token prefixes (sk-,
+# ghp_, github_pat_, xox*-, AKIA, tskey-, hf_ ...), JWTs, Telegram bot tokens,
+# PEM private-key blocks, and any 40+ character opaque run holding both a letter
+# and a digit. House redactors considered (efwd findings): little-coder's
+# sanitize.py and notify_mattermost_mirror.py are Python and sized for
+# arbitrary multi-line text; the watchdog is PowerShell, runs when Python or the
+# venv may be the broken thing, and handles one short line, so this is a compact
+# port of the same shapes, not a call into them. Every pattern is bounded or
+# anchored so a hostile line cannot make it slow. Fails CLOSED: if the scrub
+# throws, the text is withheld, never sent raw.
+# Test seam only: make the scrub throw, to prove it fails closed.
+$WatchdogFailScrub = $false
+function Hide-CredentialShapes {
+    [CmdletBinding()]
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    try {
+        if ($WatchdogFailScrub) { throw 'simulated scrub failure' }
+        $m = '[redacted]'
+        $t = $Text
+        if ($t.Length -gt 4000) { $t = $t.Substring(0, 4000) }
+        # 1. userinfo in scheme://user:pw@host (URLs, DSNs). The password may
+        #    hold an '@', so it runs to the LAST '@' before the first '/'.
+        $t = [regex]::Replace($t, '(?i)\b([a-z][a-z0-9+.\-]{0,31}://)[^\s/]{1,256}@', ('${1}' + $m + '@'))
+        # 2. Bearer / Basic values (a long or digit-bearing run, so prose such
+        #    as "basic configuration" is left alone).
+        $t = [regex]::Replace($t, '(?i)\b(bearer|basic)\s+(?:(?=[A-Za-z0-9._~+/=\-]*\d)[A-Za-z0-9._~+/=\-]{8,512}|[A-Za-z0-9._~+/=\-]{20,512})', ('${1} ' + $m))
+        # 3. Vendor token prefixes, JWTs, Telegram bot tokens.
+        $t = [regex]::Replace($t, '(?<![A-Za-z0-9_\-])(?:sk-(?:ant-|proj-)?[A-Za-z0-9_\-]{16,256}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{10,256}|xox[abeprs]-[A-Za-z0-9\-]{10,256}|xapp-[A-Za-z0-9\-]{10,256}|hf_[A-Za-z0-9]{20,256}|tskey-(?:auth-|api-|client-)?[A-Za-z0-9_\-]{10,256}|AIza[0-9A-Za-z_\-]{30,256}|glpat-[A-Za-z0-9_\-]{20,256}|npm_[A-Za-z0-9]{30,256}|github_pat_[A-Za-z0-9_]{20,256}|gh[pousr]_[A-Za-z0-9]{20,256}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_\-]{5,512}\.eyJ[A-Za-z0-9_\-]{5,512}\.[A-Za-z0-9_\-]{5,512})', $m)
+        $t = [regex]::Replace($t, '(?<![0-9])[0-9]{8,10}:[A-Za-z0-9_\-]{35}(?![A-Za-z0-9_\-])', $m)
+        # 4. PEM private-key block: from the BEGIN marker to the end of the text.
+        $t = [regex]::Replace($t, '-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----.*', ($m + ' (private key)'))
+        # 5. key=value / key: value whose key NAMES a secret. After '=' any
+        #    value goes; after ':' only a value that looks like one (a digit in
+        #    it, 16+ characters, or quoted), so "token: expired" survives.
+        $strong = [System.Text.RegularExpressions.MatchEvaluator]{
+            param($x)
+            $val = $x.Groups[4].Value
+            $bare = $val.Trim('"', "'")
+            $sep = $x.Groups[3].Value
+            if ($bare.StartsWith('[redacted')) { return $x.Value }
+            if ($sep -notmatch '=' -and $bare.Length -lt 16 -and $bare -notmatch '\d' -and $val -eq $bare) { return $x.Value }
+            return $x.Groups[1].Value + $x.Groups[2].Value + $sep + '[redacted]'
+        }
+        $t = [regex]::Replace($t, '(?i)(?<![A-Za-z0-9])([A-Za-z0-9_.\-]{0,40}?(?:password|passwd|passphrase|secret|token|api[_\-]?key|auth[_\-]?key|access[_\-]?key|private[_\-]?key|credentials?|dsn))(["'']?)(\s{0,3}[:=]\s{0,3})("(?:[^"\\]|\\.){1,512}"|''[^'']{1,512}''|[^\s"'',;&]{1,512})', $strong)
+        #    A bare "key" or "auth" is a secret only when '=' is followed by a
+        #    key-shaped value (PRIMARY_KEY=id is not).
+        $weak = [System.Text.RegularExpressions.MatchEvaluator]{
+            param($x)
+            if ($x.Groups[4].Value -notmatch '\d') { return $x.Value }
+            return $x.Groups[1].Value + $x.Groups[2].Value + $x.Groups[3].Value + '[redacted]'
+        }
+        $t = [regex]::Replace($t, '(?i)(?<![A-Za-z0-9])([A-Za-z0-9_.\-]{0,40}?(?:key|auth))(["'']?)(\s{0,3}=\s{0,3})([A-Za-z0-9+/=_.\-]{16,512})', $weak)
+        # 6. Any other long opaque run with both a letter and a digit.
+        $t = [regex]::Replace($t, '(?<![A-Za-z0-9_\-])(?=[A-Za-z0-9_\-]*[0-9])(?=[A-Za-z0-9_\-]*[A-Za-z])[A-Za-z0-9_\-]{40,512}(?![A-Za-z0-9_\-])', $m)
+        return $t
+    } catch {
+        return '(text withheld: the credential scrub failed)'
+    }
+}
+
 # The most useful line of a container's recent log, for the alert: "restarting
 # a lot" alone sends the operator to a terminal. Bounded like everything else -
 # this is the one call made while an incident is already in progress.
@@ -2180,7 +2257,7 @@ function Get-ContainerFaultLine {
     param([Parameter(Mandatory)][string]$Name)
     try {
         $raw = Invoke-BoundedDocker -DockerArgs @('logs', '--tail', '60', $Name) -TimeoutSeconds $DockerLogsTimeoutSeconds
-        if ($null -eq $raw) { return "(log unavailable: docker logs $script:BoundedFailureReason)" }
+        if ($null -eq $raw) { return (Hide-CredentialShapes "(log unavailable: docker logs $script:BoundedFailureReason)") }
         $lines = @($raw | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() })
         if ($lines.Count -eq 0) { return "(no log output)" }
         $pattern = '(?i)(error|fail|invalid|denied|refused|unable|cannot|fatal|panic|exit status|unauthori)'
@@ -2189,10 +2266,12 @@ function Get-ContainerFaultLine {
             if ($lines[$i] -match $pattern) { $pick = $lines[$i]; break }
         }
         # Collapse FIRST, then measure the collapsed string.
-        $collapsed = $pick.Trim() -replace '\s+', ' '
+        # Scrub BEFORE cutting to 280, so a token straddling the cut is masked
+        # whole rather than left as an unrecognisable stub.
+        $collapsed = Hide-CredentialShapes ($pick.Trim() -replace '\s+', ' ')
         return $collapsed.Substring(0, [Math]::Min(280, $collapsed.Length))
     } catch {
-        return "(log unavailable: $($_.Exception.Message))"
+        return (Hide-CredentialShapes "(log unavailable: $($_.Exception.Message))")
     }
 }
 
@@ -2224,7 +2303,9 @@ function Send-LoopAlert {
             }
         }
     } catch { }
-    Send-CatastropheAlert -Key $Key -Message $Message
+    # Defence in depth: whatever a caller built from container output (a fault
+    # line, a docker error text) passes the scrub on its way off the host.
+    Send-CatastropheAlert -Key $Key -Message (Hide-CredentialShapes $Message)
     try { (Get-Date -Format o) | Out-File $sentinel -Encoding ascii -Force } catch { }
     return $true
 }
@@ -2318,8 +2399,11 @@ function Test-ContainerRestartLoops {
             # The settle bar's inputs: when a pass last saw restarts, and the
             # largest gap between two such passes (minutes).
             if (-not [int64]::TryParse([string]$p.LastObs, [ref]$lastObs) -or $lastObs -gt ($nowEpoch + 300)) { $lastObs = 0 }
+            # NaN and Infinity parse as doubles but are not a gap: NaN would make
+            # every settle comparison false, so the container could never clear.
+            # Non-finite is unreadable, like any other bad value (efwd-nan).
             if (-not [double]::TryParse([string]$p.MaxGap, [Globalization.NumberStyles]::Float, [cultureinfo]::InvariantCulture, [ref]$maxGapMin) -or
-                $maxGapMin -lt 0) { $maxGapMin = 0.0 }
+                [double]::IsNaN($maxGapMin) -or [double]::IsInfinity($maxGapMin) -or $maxGapMin -lt 0) { $maxGapMin = 0.0 }
             $prevCount = 0; $prevStreak = 0; $prevAccum = 0
             $okCount = [int]::TryParse([string]$p.Count, [ref]$prevCount)
             [void][int]::TryParse([string]$p.Streak, [ref]$prevStreak)
