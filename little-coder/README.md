@@ -48,9 +48,12 @@ the next task without `model` runs `agent.model` again.
 
 The value must be `agent.model` itself or a key of `agent.allowed_models`. The match is
 exact: no prefix, no pattern, no case folding, no trimming. Each key is a gateway model ROLE
-(`local-small`), mapped to the `--model` value the agent gets (`llamacpp/local-small`). That
-value must be registered in `config/models.json`, where the `llamacpp` provider points at the
-LiteLLM alias, so a per-task model stays a role behind the gateway. Anything else is refused
+(`local-small`), mapped to the `--model` value the agent gets (`llamacpp/local-small`). The
+config is refused at boot unless every key is a gateway role and every value is
+`llamacpp/<gateway role>`. A gateway role is letters, digits and `. _ : -`, starting with a
+letter or digit. Each value must also be registered in `config/models.json`, where the
+`llamacpp` provider points at the LiteLLM alias, so a per-task model stays a role behind the
+gateway. Anything else is refused
 before a task exists, with `422 model refused: ...`. That includes an empty string and
 anything starting with `-`. With no `allowed_models`, only `agent.model` may be named.
 

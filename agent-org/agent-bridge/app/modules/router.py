@@ -626,7 +626,10 @@ class Router:
                     "wake_done",
                     effort_id=effort_id,
                     actor=inst.id,
-                    payload={"status": result.status, "role": role, "model": model,
+                    # TF1 — what RAN (the daemon's own report on GET /tasks/<id>; None = the daemon
+                    # did not say, e.g. one older than ef-worker-model) beside what was SENT.
+                    payload={"status": result.status, "role": role, "model_sent": model,
+                             "model_ran": getattr(result, "model", None),
                              "model_from": model_note},
                 )
                 # F31.4 — the bridge-side lens flail-guard stopped a turn stuck repeating one command.
@@ -711,11 +714,11 @@ class Router:
             inst = await self.scheduler.acquire(SURVEY_EFFORT, "worker-default", SURVEY_EFFORT)
         except (FrozenEffortError, NoCapacityError):
             return ""
+        model, _note = self.worker_turn_model("worker-default")
         try:
             ok, _detail, _upstream_ok = await self.harness.set_project(inst.base_url, repo)
             if not ok:  # a non-empty tuple is always truthy — unpack ok explicitly (was a latent bug)
                 return ""
-            model, _note = self.worker_turn_model("worker-default")
             result = await self.harness.wake(
                 inst.base_url, f"survey-{slugify(repo)}", _SURVEY_PROMPT,
                 **({"model": model} if model else {}),
@@ -723,10 +726,25 @@ class Router:
             summary = (result.output or "").strip() if result else ""
             await self.audit.log(
                 "project_survey", actor=inst.id,
-                payload={"repo": repo, "ok": bool(result and result.ok), "len": len(summary)},
+                payload={"repo": repo, "ok": bool(result and result.ok), "len": len(summary),
+                         "model_sent": model, "model_ran": getattr(result, "model", None)},
             )
             return summary if (result and result.ok) else ""
         except Exception as exc:  # noqa: BLE001 - survey is advisory; never block intake
+            refused = _model_refusal(exc) if model else ""
+            if refused:
+                # TF3 — the survey degrades to conventions-only either way, but a refusal is a config
+                # mismatch the operator must see in the record, exactly as for a worker wake.
+                await self.audit.log(
+                    "worker_model_refused", effort_id=SURVEY_EFFORT, actor=inst.id,
+                    payload={"role": "worker-default", "model": model, "detail": refused[:200],
+                             "repo": repo, "survey": True},
+                )
+                await self.audit.log(
+                    "project_survey", actor=inst.id,
+                    payload={"repo": repo, "ok": False, "len": 0, "model_sent": model,
+                             "model_ran": None, "refused": True},
+                )
             log.warning("project survey failed for %s: %s", repo, exc)
             return ""
         finally:

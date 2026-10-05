@@ -1260,7 +1260,28 @@ class Orchestrator:
         # The watchdog already gave up here (bounded-recovery cap) and asked for a re-run —
         # re-recovering it would be the exact loop the escalation exists to stop.
         "stall_escalated",
+        # ef-worker-model TF2: a worker refused the profile's model (not in little-coder's
+        # agent.allowed_models). Deterministic: every re-run is refused the same way until a human
+        # changes the config or the profile; the refusal post already says which and how.
+        # (`_model_refusal_unresolved` also covers it when later events land after the refusal.)
+        "worker_model_refused",
     })
+
+    async def _model_refusal_unresolved(self, eid: str) -> bool:
+        """TF2 — the effort's newest dispatch was REFUSED for its model (`worker_model_refused`) and
+        no turn has run since (no later `wake_done`). It awaits the operator (allow the model in
+        little-coder's config, or `set profile ... model ...`, then "re-run it"); re-running it
+        is refused identically, so the stall watchdog must leave it alone. Event-time based, so
+        the release/cleanup events a refused dispatch logs after the refusal do not hide it."""
+        async with self.db.session_factory() as s:
+            def _newest(kind: str):
+                return (select(Event.ts).where(Event.effort_id == eid, Event.kind == kind)
+                        .order_by(Event.ts.desc()).limit(1))
+            refused = (await s.execute(_newest("worker_model_refused"))).scalar_one_or_none()
+            if refused is None:
+                return False
+            ran = (await s.execute(_newest("wake_done"))).scalar_one_or_none()
+        return ran is None or ran < refused
 
     def _awaiting_operator_decision(self, eid: str) -> bool:
         """P24 — is this effort awaiting a HUMAN decision (the authoritative gate check the old
@@ -2375,6 +2396,9 @@ class Orchestrator:
             # an effort holding a pending operator decision (a drafted plan, a held merge) is awaiting
             # `approve`/`merge`, and no timeout may re-engage it (§4.5).
             if self._awaiting_operator_decision(eid):
+                continue
+            # TF2 — a model refusal awaits the operator's config change; re-running it is futile.
+            if await self._model_refusal_unresolved(eid):
                 continue
             if e.get("state") == "frozen":
                 # A freeze on an ENVIRONMENT/WORKSPACE symptom (not a real code deviation) is

@@ -81,7 +81,16 @@ the project survey run under `worker-default`. little-coder runs that model for 
 It must be a key of `agent.allowed_models` in `little-coder/config/little-coder.config.yaml`
 (exact match). Otherwise the daemon refuses the task with a 422. The bridge then posts
 "refused model" in the effort thread and audits `worker_model_refused`. Nothing runs, and the
-bridge never falls back to another model. `wake_done` audits the model each turn was sent.
+bridge never falls back to another model. The stall watchdog treats a refused effort as
+awaiting the operator: it does not re-run it until a turn has run again, typically after you
+fix the config or the profile and say "re-run it". A refused project survey is audited the same
+way.
+
+`wake_done` and `project_survey` audit two fields:
+- `model_sent`: what the bridge sent;
+- `model_ran`: what the daemon reports the task ran, read back from `GET /tasks/<id>`, e.g.
+  `llamacpp/local-small`. `null` means the daemon did not say (one older than this change), so
+  what ran is unknown.
 
 The model is sent only when the profile is on the `local` lane. A cloud-lane worker profile is
 out of scope: the bridge sends no model, so the worker runs little-coder's `agent.model` as

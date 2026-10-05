@@ -169,12 +169,28 @@ def test_the_agent_refuses_a_flag_shaped_model_that_bypassed_enqueue():
     {"local-small": ""},
     {"local small": "llamacpp/local-small"},
     {"local-small": "llamacpp/local-small; rm -rf /"},
+    # TF4 (attempt 2): a value must be `llamacpp/<gateway role>`, a name a gateway role
+    {"local-small": "openai/local-small"},          # another provider
+    {"local-small": "local-small"},                 # no provider
+    {"local-small": "llamacpp/"},                   # no role
+    {"local-small": "llamacpp/a/b"},                # a path, not a role
+    {"local-small": "llamacpp/-x"},                 # flag-shaped role
+    {"local-small": "LLAMACPP/local-small"},        # the provider is matched exactly
+    {"a/b": "llamacpp/local-small"},                # a name with a provider part
 ])
 def test_a_flag_shaped_or_malformed_allowlist_entry_fails_the_boot(tmp_path, entry):
     p = tmp_path / "c.yaml"
     p.write_text(yaml.safe_dump({"agent": {"allowed_models": entry}}), encoding="utf-8")
     with pytest.raises(ConfigError):
         load_config(p)
+
+
+def test_gateway_role_entries_load(tmp_path):
+    """TF4: the shape the committed config uses still boots (incl. a `:` variant role)."""
+    p = tmp_path / "c.yaml"
+    entry = {"local-small": "llamacpp/local-small", "local-small:nothink": "llamacpp/local-small:nothink"}
+    p.write_text(yaml.safe_dump({"agent": {"allowed_models": entry}}), encoding="utf-8")
+    assert load_config(p).agent.allowed_models == entry
 
 
 # --- the committed config: every allowed model is registered with pi and is a gateway role --------

@@ -47,9 +47,13 @@ class InferenceConfig(_Strict):
     embedding_model: str = "local-embed"
 
 
-# A model id as the agent's `--model` takes it: starts with a letter or digit (so never a flag),
-# then letters, digits and . _ : / - only (no whitespace, no shell or control characters).
-_MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*")
+# A gateway model ROLE (a LiteLLM `model_name`, e.g. `local-small`, `local-small:nothink`): starts
+# with a letter or digit (so never a flag), then letters, digits and . _ : - only (no `/`, so never
+# another provider or an upstream path; no whitespace, no shell or control characters).
+_GATEWAY_ROLE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*")
+# The pi provider whose baseUrl is the LiteLLM alias (config/models.json). An allowed per-task
+# model is always `<this>/<gateway role>`, the same shape as agent.model (ef-worker-model TF4).
+GATEWAY_PROVIDER = "llamacpp"
 
 
 class AgentConfig(_Strict):
@@ -99,14 +103,22 @@ class AgentConfig(_Strict):
     @classmethod
     def _allowed_models_are_safe(cls, v: dict[str, str]) -> dict[str, str]:
         # Each value becomes one argv element after `--model`. A bad entry fails the boot rather
-        # than reaching a command line: no empty name, nothing that could read as a flag.
+        # than reaching a command line: no empty name, nothing that could read as a flag. And the
+        # routing posture is enforced here, not only by a repo test (TF4): every name is a gateway
+        # role, and every value is that provider's `llamacpp/<gateway role>`, so a per-task model
+        # can only be a role behind the LiteLLM alias, never another provider or an upstream.
         for name, target in v.items():
-            for what, s in (("name", name), ("model", target)):
-                if not _MODEL_ID_RE.fullmatch(s):
-                    raise ValueError(
-                        f"agent.allowed_models {what} {s!r} is not a model id "
-                        f"(letters, digits and . _ : / -; must not start with '-')"
-                    )
+            if not _GATEWAY_ROLE_RE.fullmatch(name):
+                raise ValueError(
+                    f"agent.allowed_models name {name!r} is not a gateway model role "
+                    f"(letters, digits and . _ : -; must not start with '-')"
+                )
+            provider, sep, role = target.partition("/")
+            if provider != GATEWAY_PROVIDER or not sep or not _GATEWAY_ROLE_RE.fullmatch(role):
+                raise ValueError(
+                    f"agent.allowed_models model {target!r} (for {name!r}) is not "
+                    f"`{GATEWAY_PROVIDER}/<gateway role>`"
+                )
         return v
 
     def resolve_model(self, requested: str | None) -> str:

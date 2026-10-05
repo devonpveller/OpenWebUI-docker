@@ -55,6 +55,7 @@ class StubDaemon:
         self.task_bodies: list[dict] = []
         self.project_bodies: list[dict] = []
         self.tasks: dict[str, dict] = {}
+        self.ran: list[str] = []          # what each task ran (stub-internal truth)
         self.project_reply: dict = {"action": "clone", "focus": REPO}
         app = FastAPI()
 
@@ -66,9 +67,11 @@ class StubDaemon:
             if knows_model and req.model is not None and req.model not in allowed:
                 raise HTTPException(422, f"model refused: model {req.model!r} is not allowed here")
             ran = getattr(req, "model", None) or "agent.model"
+            self.ran.append(ran)
             tid = f"t{len(self.tasks) + 1}"
-            self.tasks[tid] = {"task_id": tid, "status": "done", "answer": "ok", "activity": [],
-                               "model": ran}
+            self.tasks[tid] = {"task_id": tid, "status": "done", "answer": "ok", "activity": []}
+            if knows_model:   # the task view of a daemon older than ef-worker-model has no `model`
+                self.tasks[tid]["model"] = ran
             return {"task_id": tid, "status": "queued"}
 
         @app.get("/tasks/{tid}")
@@ -142,7 +145,8 @@ async def test_a_worker_wake_sends_the_worker_default_profile_model(db_url, stub
         await _wake(orch, eid, chan, root)
         assert stub.task_bodies[-1]["model"] == "local-large"
         done = await _events(db, "wake_done")
-        assert [p["model"] for p in done] == ["local-small", "local-large"]
+        assert [p["model_sent"] for p in done] == ["local-small", "local-large"]
+        assert [p["model_ran"] for p in done] == ["local-small", "local-large"]
     finally:
         await db.dispose()
 
@@ -166,7 +170,7 @@ async def test_an_older_daemon_that_ignores_model_still_runs_the_turn(db_url, mo
         result = await _wake(orch, eid, chan, root)
         assert result.ok and result.status == "done"
         assert old.task_bodies[-1]["model"] == "local-small"      # sent, and ignored
-        assert old.tasks["t1"]["model"] == "agent.model"          # the old daemon ran its own
+        assert old.ran == ["agent.model"]                         # the old daemon ran its own
     finally:
         await db.dispose()
 
@@ -199,7 +203,8 @@ async def test_a_cloud_lane_worker_profile_sends_no_model(db_url, stub):
         await _wake(orch, eid, chan, root)
         assert "model" not in stub.task_bodies[-1]
         (done,) = await _events(db, "wake_done")
-        assert done["model"] is None and "cloud lane" in done["model_from"]
+        assert done["model_sent"] is None and "cloud lane" in done["model_from"]
+        assert done["model_ran"] == "agent.model"       # the stub's report of its own default
     finally:
         await db.dispose()
 
@@ -339,3 +344,120 @@ def test_the_dead_worker_and_judge_model_settings_are_removed(monkeypatch):
     src = Path(capability_floor.__file__).read_text(encoding="utf-8")
     assert 'tier_model(s, "large", "local")' in src and "args.model or s.worker_model" not in src
     assert tier_model(s, "large", "local") == "local-large"
+
+
+# ── attempt 2: TF1 (what RAN), TF2 (refusal awaits the operator), TF3 (survey refusal audited) ──
+
+async def test_wake_done_records_the_model_that_ran_beside_the_model_sent(db_url, stub):
+    """TF1: the audit's `model_ran` is the daemon's own report on GET /tasks/<id>."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        eid, chan, root = await orch.router.open_effort("ran")
+        result = await _wake(orch, eid, chan, root)
+        assert result.model == "local-small"          # the stub reports what it ran
+        (done,) = await _events(db, "wake_done")
+        assert done["model_sent"] == "local-small" and done["model_ran"] == "local-small"
+    finally:
+        await db.dispose()
+
+
+async def test_an_old_daemon_turn_records_the_model_that_ran_as_unknown(db_url, monkeypatch):
+    """TF1: an older daemon reports no model: `model_ran` is None (unknown), never the sent value."""
+    old = StubDaemon(knows_model=False)
+    _route_harness_to(monkeypatch, old)
+    orch, chat, db = await _orch(db_url)
+    try:
+        eid, chan, root = await orch.router.open_effort("old-ran")
+        result = await _wake(orch, eid, chan, root)
+        assert "model" not in old.tasks["t1"]                     # the old task view
+        assert result.ok and result.model is None
+        (done,) = await _events(db, "wake_done")
+        assert done["model_sent"] == "local-small" and done["model_ran"] is None
+    finally:
+        await db.dispose()
+
+
+async def test_a_model_refusal_is_not_re_run_by_the_stall_watchdog(db_url, monkeypatch):
+    """TF2: a refused model needs a human config change. The stall watchdog must treat the effort
+    as awaiting the operator: no re-engage, no generic 'I have NOT identified the cause'
+    escalation, and the refusal post stays the one message."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import update
+
+    strict = StubDaemon(allowed=("local-large",))
+    _route_harness_to(monkeypatch, strict)
+    orch, chat, db = await _orch(db_url)
+    try:
+        eid, chan, root = await orch.router.open_effort("refused-stall")
+        with pytest.raises(httpx.HTTPStatusError):
+            await _wake(orch, eid, chan, root)
+        old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        async with db.session_factory() as s:            # everything happened 2 h ago
+            await s.execute(update(Event).where(Event.effort_id == eid).values(ts=old))
+            await s.commit()
+        for _ in range(3):                                 # three sweeps: past the recovery cap
+            await orch._sweep_stalled_efforts()
+        assert await orch._event_count(eid, "stall_recovered") == 0
+        assert await orch._event_count(eid, "stall_escalated") == 0
+        assert len(strict.task_bodies) == 1                # never re-dispatched
+        refusals = [p for p in chat.posted if "refused model" in p["message"]]
+        assert len(refusals) == 1
+        assert not any("NOT identified the cause" in p["message"] for p in chat.posted)
+    finally:
+        await db.dispose()
+
+
+async def test_a_turn_that_runs_after_a_refusal_is_watched_again(db_url, monkeypatch):
+    """TF2 boundary: once the operator fixes the config and a turn runs (wake_done after the
+    refusal), the effort is no longer awaiting the operator: a later silence is a stall again."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import update
+
+    strict = StubDaemon(allowed=("local-large",))
+    _route_harness_to(monkeypatch, strict)
+    orch, chat, db = await _orch(db_url)
+    try:
+        eid, chan, root = await orch.router.open_effort("refused-then-fixed")
+        with pytest.raises(httpx.HTTPStatusError):
+            await _wake(orch, eid, chan, root)
+        assert await orch._model_refusal_unresolved(eid)
+        await orch.profiles.set_model("worker-default", "local-large",
+                                      registered={"local-large", "local-small"})
+        assert (await _wake(orch, eid, chan, root)).ok
+        assert not await orch._model_refusal_unresolved(eid)
+        old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        async with db.session_factory() as s:
+            await s.execute(update(Event).where(Event.effort_id == eid).values(ts=old))
+            await s.commit()
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count(eid, "stall_recovered") == 1
+    finally:
+        await db.dispose()
+
+
+async def test_a_refused_project_survey_is_audited(db_url, monkeypatch):
+    """TF3: the survey degrades to "" as before, but the refusal is in the audit record and the
+    project_survey audit says which model was sent."""
+    strict = StubDaemon(allowed=("local-large",))
+    _route_harness_to(monkeypatch, strict)
+    orch, chat, db = await _orch(db_url)
+    try:
+        assert await orch.router.survey_project(REPO) == ""
+        (refusal,) = await _events(db, "worker_model_refused")
+        assert refusal["model"] == "local-small" and refusal["survey"] is True
+        (survey,) = await _events(db, "project_survey")
+        assert survey["model_sent"] == "local-small" and survey["ok"] is False
+    finally:
+        await db.dispose()
+
+
+async def test_a_good_project_survey_audits_the_model(db_url, stub):
+    orch, chat, db = await _orch(db_url)
+    try:
+        await orch.router.survey_project(REPO)
+        (survey,) = await _events(db, "project_survey")
+        assert survey["model_sent"] == "local-small" and survey["model_ran"] == "local-small"
+    finally:
+        await db.dispose()

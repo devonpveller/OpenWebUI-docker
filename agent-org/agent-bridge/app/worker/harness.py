@@ -33,7 +33,7 @@ log = logging.getLogger("agent_bridge.worker")
 
 class WorkResult:
     def __init__(self, status: str, task_id: str, output: str = "",
-                 commands: list[str] | None = None) -> None:
+                 commands: list[str] | None = None, model: str | None = None) -> None:
         self.status = status          # done | abandoned | rejected | error
         self.task_id = task_id
         self.output = output
@@ -44,6 +44,10 @@ class WorkResult:
         # including one that said "28 tests" moments after a command printed 31. Each was true by
         # luck; the org had no way to know that.
         self.commands: list[str] = commands or []
+        # ef-worker-model TF1 — the model the daemon says the task RAN (`model` on GET /tasks/<id>,
+        # e.g. "llamacpp/local-small"). None = the daemon did not report one (older than
+        # ef-worker-model, or the task was never read back): UNKNOWN, never the model that was sent.
+        self.model: str | None = model
 
     @property
     def ok(self) -> bool:
@@ -86,6 +90,12 @@ def _flail_key(cmd: str) -> str:
     numbers — so a genuinely varied sweep (different subcommands, flags, ids) is never false-flailed;
     requiring `max_repeat` (=6) CONSECUTIVE normalised-identical commands keeps the bar high on top."""
     return _TEMP_PATH_RE.sub("<tmp>", cmd)
+
+
+def _ran_model(task: dict) -> str | None:
+    """The model a daemon task view says ran (TF1), or None when it reports none (an older daemon)."""
+    m = task.get("model") if isinstance(task, dict) else None
+    return m if isinstance(m, str) and m else None
 
 
 #: `set_project`'s success `detail` when the daemon reports `upstream_mismatch` (F3).
@@ -244,12 +254,14 @@ class LittleCoderHarness:
             # the worker runs to the bus as it happens (observability — governance §5/§7).
             seen = 0
             waited = 0.0
+            ran: str | None = None   # TF1 — the model the daemon reports for this task
             last_cmd: str | None = None   # F31.4 — consecutive-repeat tracking for the lens flail-guard
             repeat = 0
             while waited < self.poll_timeout:
                 await asyncio.sleep(self.poll_interval)
                 waited += self.poll_interval
                 s = (await c.get(f"/tasks/{task_id}")).json()
+                ran = _ran_model(s)
                 activity = s.get("activity") or []
                 if len(activity) > seen:
                     for item in activity[seen:]:
@@ -275,7 +287,7 @@ class LittleCoderHarness:
                                 return WorkResult(
                                     "flail", task_id,
                                     s.get("answer") or s.get("result", "") or "",
-                                    commands=_command_texts(activity))
+                                    commands=_command_texts(activity), model=_ran_model(s))
                     seen = len(activity)
                 status = s.get("status", "")
                 # Terminal = anything not still in-flight (done/abandoned/rejected/cancelled/…).
@@ -287,8 +299,8 @@ class LittleCoderHarness:
                         except Exception:  # noqa: BLE001
                             pass
                     return WorkResult(status, task_id, answer,
-                                      commands=_command_texts(activity))
-            return WorkResult("error", task_id, "poll timeout")
+                                      commands=_command_texts(activity), model=_ran_model(s))
+            return WorkResult("error", task_id, "poll timeout", model=ran)
 
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
@@ -518,8 +530,10 @@ class FakeHarness:
                 await on_update("command", {"command": cmd, "ok": True})
             await on_update("answer", {"status": self.result_status,
                                        "answer": self.answer_text or "ok"})
+        # Like a daemon that runs what it is sent: reports the sent model, or None (agent.model,
+        # which a fake does not know) when none was sent.
         return WorkResult(self.result_status, task_id=f"fake-{len(self.wakes)}", output=out,
-                          commands=cmds)
+                          commands=cmds, model=model)
 
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
