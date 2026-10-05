@@ -110,10 +110,16 @@ The watchdog also counts EVERY container, not only the listed ones, and pages
 through the same Telegram + Mattermost path. These keys are not "after a repair
 failed": the watchdog attempts no repair at all, because a restart loop is usually
 a credential or config fault and restarting again hides the evidence. The page
-says what to look at; the fix is yours. Each page carries the container's last
-fault line from `docker logs`, with credential-shaped text masked before it
-leaves the host (URL/DSN userinfo, `password=`/`token=` values, Bearer values,
-vendor token prefixes, private-key blocks).
+says what to look at; the fix is yours. The `crashloop-<name>` page, and the
+`netns-<name>` pages for an owner that is not running or restarted after its
+joiner, carry the container's last fault line from `docker logs`. The
+`docker-unreadable` page and the `netns-<name>` "owner no longer exists" page
+carry none (docker could not be asked). Every page text is credential-scrubbed
+before it is logged or leaves the host: URL and DSN userinfo (also the
+scheme-less `user:pw@tcp(host)/db` form), `password=`/`token=` values, Bearer
+and Basic values, `--password <pw>` style flags, vendor token prefixes, webhook
+secrets, base64 secret blobs and private-key blocks. A secret written as plain
+prose with no shape is not detected.
 
 | Key | Fires when |
 |---|---|
@@ -138,7 +144,8 @@ its last all-clear. So a fixed fast loop clears 60 minutes after it is fixed -
 one), that gap raises the bar and the RESOLVED arrives up to about 6 h after the
 last crash (measured: ~368 min instead of ~68). A `netns-<name>` key clears only
 once both containers have been up 60 min; `docker-unreadable` clears on the first
-readable pass. **Known residual (accepted, not tuned):** a *slow* loop can still
+pass whose batched inspect succeeds (a pass that had to read the containers one
+by one does not clear it). **Known residual (accepted, not tuned):** a *slow* loop can still
 get a premature RESOLVED between two of its own crashes (measured on held-out
 simulated loops: RESOLVED was the latest word 2.9% of loop time) and is paged
 again within roughly 2-4.5 h; a `docker-unreadable` relapse inside 6 h of its

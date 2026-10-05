@@ -2183,21 +2183,33 @@ function Get-ContainerRuntimeFacts {
 }
 
 # Credential-shape scrub for any container-written text that leaves the host
-# (Telegram = api.telegram.org, the Mattermost mirror). A crash-looping service
-# often logs the very credential it was refused with. This masks the SHAPES,
-# keeping the surrounding words, so "invalid key" and "password authentication
-# failed" still read. Shapes: userinfo in a URL or DSN (scheme://user:pw@host),
-# Bearer/Basic values, key=value and key: value pairs whose key names a secret
-# (password, token, secret, api key, dsn ...), vendor token prefixes (sk-,
-# ghp_, github_pat_, xox*-, AKIA, tskey-, hf_ ...), JWTs, Telegram bot tokens,
-# PEM private-key blocks, and any 40+ character opaque run holding both a letter
-# and a digit. House redactors considered (efwd findings): little-coder's
-# sanitize.py and notify_mattermost_mirror.py are Python and sized for
-# arbitrary multi-line text; the watchdog is PowerShell, runs when Python or the
-# venv may be the broken thing, and handles one short line, so this is a compact
-# port of the same shapes, not a call into them. Every pattern is bounded or
-# anchored so a hostile line cannot make it slow. Fails CLOSED: if the scrub
-# throws, the text is withheld, never sent raw.
+# (Telegram = api.telegram.org, the Mattermost mirror) or reaches the log. A
+# crash-looping service often logs the very credential it was refused with.
+# This masks the SHAPES, keeping the surrounding words, so "invalid key" and
+# "password authentication failed" still read. Shapes: userinfo in a URL (also
+# with a '/' or '@' in the password) and the scheme-less DSN forms
+# (user:pw@tcp(host:3306)/db, user:pw@host:5432); Authorization header values
+# (Bearer/Basic/Token, any length) and bare Bearer/Basic values that look like
+# credentials; key=value and key: value pairs whose key names a secret
+# (password, token, secret, api key, dsn ...) with unquoted values running past
+# ';' and ',' unless the next key starts; CLI flags (--password <pw>,
+# --token <t>, mysql -p<pw>, docker login -p <pw>, curl -u user:pw); vendor
+# token prefixes (sk-, ghp_, github_pat_, xox*-, AKIA, tskey-, hf_ ...), JWTs,
+# Telegram bot tokens, Slack/Discord webhook secrets; PEM private-key blocks;
+# padded base64 (32+ chars), base64-looking blobs holding + or / with all of
+# upper/lower/digit (a bare AWS secret key), and any 40+ character opaque run
+# holding a letter and a digit. DELIBERATELY NOT masked: a path under a secret-
+# named key ("credentials: /etc/app/credentials.json: no such file"), a number
+# after ':' ("Secret: 3 keys rotated"), a short letters-only value after ':'
+# (prose), a secret in prose with no shape, and the old 40-character threshold
+# for model/file names is unchanged (today's are 18-24 characters). House
+# redactors considered (efwd findings): little-coder's sanitize.py and
+# notify_mattermost_mirror.py are Python and sized for arbitrary multi-line
+# text; the watchdog is PowerShell, runs when Python or the venv may be the
+# broken thing, and handles one short line, so this is a compact port of the
+# same shapes, not a call into them. Every pattern is bounded or anchored so a
+# hostile line cannot make it slow. Fails CLOSED: if the scrub throws, the text
+# is withheld, never sent raw.
 # Test seam only: make the scrub throw, to prove it fails closed.
 $WatchdogFailScrub = $false
 function Hide-CredentialShapes {
@@ -2210,29 +2222,59 @@ function Hide-CredentialShapes {
         $t = $Text
         if ($t.Length -gt 4000) { $t = $t.Substring(0, 4000) }
         # 1. userinfo in scheme://user:pw@host (URLs, DSNs). The password may
-        #    hold an '@', so it runs to the LAST '@' before the first '/'.
+        #    hold an '@', so it runs to the LAST '@' before the first '/' ...
         $t = [regex]::Replace($t, '(?i)\b([a-z][a-z0-9+.\-]{0,31}://)[^\s/]{1,256}@', ('${1}' + $m + '@'))
-        # 2. Bearer / Basic values (a long or digit-bearing run, so prose such
-        #    as "basic configuration" is left alone).
-        $t = [regex]::Replace($t, '(?i)\b(bearer|basic)\s+(?:(?=[A-Za-z0-9._~+/=\-]*\d)[A-Za-z0-9._~+/=\-]{8,512}|[A-Za-z0-9._~+/=\-]{20,512})', ('${1} ' + $m))
-        # 3. Vendor token prefixes, JWTs, Telegram bot tokens.
+        #    ... or hold a raw '/' (user:pw with a slash, up to the last '@').
+        $t = [regex]::Replace($t, '(?i)\b([a-z][a-z0-9+.\-]{0,31}://)[^\s/@:]{0,128}:[^\s@]{1,256}@(?=[A-Za-z0-9\[(])', ('${1}' + $m + '@'))
+        #    Scheme-less: user:pw@tcp(host:3306)/db, user:pw@host:5432.
+        $t = [regex]::Replace($t, '(?<![A-Za-z0-9_.:/@\[\-])[A-Za-z0-9._\-]{1,64}:[^\s:@/]{1,128}@(?=tcp\(|unix\(|[A-Za-z0-9][A-Za-z0-9.\-]{0,62}(?::[0-9]{1,5})?(?:[/\s)?,;]|$))', ($m + '@'))
+        # 2. Authorization header values: whatever follows Bearer/Basic/Token.
+        $t = [regex]::Replace($t, '(?i)(\b(?:proxy-)?authorization\b["'']?\s{0,3}[:=]\s{0,3}["'']?(?:bearer|basic|token|digest)\s{1,4})[^\s"'',;]{1,2048}', ('${1}' + $m))
+        #    A bare Bearer/Basic value: credential-shaped (a digit, 20+, interior
+        #    capitals among lowercase, or + / =) - prose ("basic configuration",
+        #    "Basic Authentication") is left alone.
+        $bare = [System.Text.RegularExpressions.MatchEvaluator]{
+            param($x)
+            $v = $x.Groups[2].Value
+            $inner = $v.Substring(1)
+            $shaped = ($v -match '\d') -or ($v.Length -ge 20) -or ($v -match '[+/=]') -or (($inner -cmatch '[A-Z]') -and ($inner -cmatch '[a-z]'))
+            if (-not $shaped) { return $x.Value }
+            return $x.Groups[1].Value + ' [redacted]'
+        }
+        $t = [regex]::Replace($t, '(?i)\b(bearer|basic)\s+([A-Za-z0-9._~+/=\-]{8,512})', $bare)
+        # 3. Vendor token prefixes, JWTs, Telegram bot tokens, webhook secrets.
         $t = [regex]::Replace($t, '(?<![A-Za-z0-9_\-])(?:sk-(?:ant-|proj-)?[A-Za-z0-9_\-]{16,256}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{10,256}|xox[abeprs]-[A-Za-z0-9\-]{10,256}|xapp-[A-Za-z0-9\-]{10,256}|hf_[A-Za-z0-9]{20,256}|tskey-(?:auth-|api-|client-)?[A-Za-z0-9_\-]{10,256}|AIza[0-9A-Za-z_\-]{30,256}|glpat-[A-Za-z0-9_\-]{20,256}|npm_[A-Za-z0-9]{30,256}|github_pat_[A-Za-z0-9_]{20,256}|gh[pousr]_[A-Za-z0-9]{20,256}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_\-]{5,512}\.eyJ[A-Za-z0-9_\-]{5,512}\.[A-Za-z0-9_\-]{5,512})', $m)
         $t = [regex]::Replace($t, '(?<![0-9])[0-9]{8,10}:[A-Za-z0-9_\-]{35}(?![A-Za-z0-9_\-])', $m)
+        $t = [regex]::Replace($t, '(?i)(hooks\.slack\.com/services/)[A-Za-z0-9/_\-]{8,256}', ('${1}' + $m))
+        $t = [regex]::Replace($t, '(?i)(discord(?:app)?\.com/api/webhooks/)[0-9]{5,25}/[A-Za-z0-9_\-]{20,256}', ('${1}' + $m))
         # 4. PEM private-key block: from the BEGIN marker to the end of the text.
         $t = [regex]::Replace($t, '-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----.*', ($m + ' (private key)'))
-        # 5. key=value / key: value whose key NAMES a secret. After '=' any
-        #    value goes; after ':' only a value that looks like one (a digit in
-        #    it, 16+ characters, or quoted), so "token: expired" survives.
+        # 5. CLI flags: --password <pw> (the '=' form is key=value below),
+        #    mysql -p<pw>, docker/podman/helm login -p <pw>, curl -u user:pw.
+        $t = [regex]::Replace($t, '(?i)((?<!\S)--[a-z0-9\-]{0,30}(?:password|passwd|passphrase|secret|token|api-?key)[ \t]+)(?!-)(\S{1,256})', ('${1}' + $m))
+        $t = [regex]::Replace($t, '(\bmysql(?:dump|admin)?\b[^\n]{0,200}?[ \t]-p)(\S{1,256})', ('${1}' + $m))
+        $t = [regex]::Replace($t, '(?i)(\b(?:docker|podman|helm)[ \t]+(?:registry[ \t]+)?login\b[^\n]{0,200}?[ \t]-p[ \t]+)(\S{1,256})', ('${1}' + $m))
+        $t = [regex]::Replace($t, '((?<!\S)(?:-u|--user)[ \t]+[^\s:]{1,128}:)(\S{1,256})', ('${1}' + $m))
+        # 6. key=value / key: value whose key NAMES a secret. After '=' any
+        #    value goes; after ':' only a value that looks like one (quoted,
+        #    16+ characters, or letters mixed with a digit), so "token: expired"
+        #    and "Secret: 3 keys rotated" survive. A path is a location, not a
+        #    secret. An unquoted value runs past ';' and ',' (a password may
+        #    hold them) unless what follows looks like the next key ("; Db=").
         $strong = [System.Text.RegularExpressions.MatchEvaluator]{
             param($x)
             $val = $x.Groups[4].Value
             $bare = $val.Trim('"', "'")
             $sep = $x.Groups[3].Value
             if ($bare.StartsWith('[redacted')) { return $x.Value }
-            if ($sep -notmatch '=' -and $bare.Length -lt 16 -and $bare -notmatch '\d' -and $val -eq $bare) { return $x.Value }
+            if ($bare -match '^(?:/|\./|\.\./|~|[A-Za-z]:\\)') { return $x.Value }
+            if ($sep -notmatch '=') {
+                $mixed = ($bare -match '\d') -and ($bare -match '[A-Za-z]') -and ($bare.Length -ge 6)
+                if (-not (($val -ne $bare) -or ($bare.Length -ge 16) -or $mixed)) { return $x.Value }
+            }
             return $x.Groups[1].Value + $x.Groups[2].Value + $sep + '[redacted]'
         }
-        $t = [regex]::Replace($t, '(?i)(?<![A-Za-z0-9])([A-Za-z0-9_.\-]{0,40}?(?:password|passwd|passphrase|secret|token|api[_\-]?key|auth[_\-]?key|access[_\-]?key|private[_\-]?key|credentials?|dsn))(["'']?)(\s{0,3}[:=]\s{0,3})("(?:[^"\\]|\\.){1,512}"|''[^'']{1,512}''|[^\s"'',;&]{1,512})', $strong)
+        $t = [regex]::Replace($t, '(?i)(?<![A-Za-z0-9])([A-Za-z0-9_.\-]{0,40}?(?:password|passwd|passphrase|secret|token|api[_\-]?key|auth[_\-]?key|access[_\-]?key|private[_\-]?key|credentials?|dsn))(["'']?)(\s{0,3}[:=]\s{0,3})("(?:[^"\\]|\\.){1,512}"|''[^'']{1,512}''|(?:[^\s"'',;&]|[;,](?!\s*[A-Za-z_][A-Za-z0-9_.\- ]{0,30}\s*[=:])){1,512})', $strong)
         #    A bare "key" or "auth" is a secret only when '=' is followed by a
         #    key-shaped value (PRIMARY_KEY=id is not).
         $weak = [System.Text.RegularExpressions.MatchEvaluator]{
@@ -2241,7 +2283,21 @@ function Hide-CredentialShapes {
             return $x.Groups[1].Value + $x.Groups[2].Value + $x.Groups[3].Value + '[redacted]'
         }
         $t = [regex]::Replace($t, '(?i)(?<![A-Za-z0-9])([A-Za-z0-9_.\-]{0,40}?(?:key|auth))(["'']?)(\s{0,3}=\s{0,3})([A-Za-z0-9+/=_.\-]{16,512})', $weak)
-        # 6. Any other long opaque run with both a letter and a digit.
+        # 7. Opaque material under no key. Padded base64 (32+ characters); a
+        #    base64-looking run holding '+' or a few '/' with upper, lower and a
+        #    digit (a bare AWS secret key; a path has more slashes, or none of
+        #    the three classes); any other 40+ run of [A-Za-z0-9_-] holding a
+        #    letter and a digit (unchanged threshold: model names stay readable).
+        $t = [regex]::Replace($t, '(?<![A-Za-z0-9+/=_\-])[A-Za-z0-9+/]{32,512}={1,2}(?![A-Za-z0-9+/=])', $m)
+        $blob = [System.Text.RegularExpressions.MatchEvaluator]{
+            param($x)
+            $v = $x.Value
+            $slashes = $v.Length - $v.Replace('/', '').Length
+            $mixed = ($v -cmatch '[A-Z]') -and ($v -cmatch '[a-z]') -and ($v -match '\d')
+            if ($mixed -and (($v.Contains('+')) -or ($slashes -ge 1 -and $slashes -le 3 -and -not $v.StartsWith('/')))) { return '[redacted]' }
+            return $v
+        }
+        $t = [regex]::Replace($t, '(?<![A-Za-z0-9+/=_\-])[A-Za-z0-9+/]{40,512}(?![A-Za-z0-9+/=_\-])', $blob)
         $t = [regex]::Replace($t, '(?<![A-Za-z0-9_\-])(?=[A-Za-z0-9_\-]*[0-9])(?=[A-Za-z0-9_\-]*[A-Za-z])[A-Za-z0-9_\-]{40,512}(?![A-Za-z0-9_\-])', $m)
         return $t
     } catch {
@@ -2294,6 +2350,10 @@ function Send-LoopAlert {
         [Parameter(Mandatory)][string]$Key,
         [Parameter(Mandatory)][string]$Message
     )
+    # Defence in depth, FIRST: whatever a caller built from container output (a
+    # fault line, a docker error text) is scrubbed before it reaches the log or
+    # either transport - the cooldown line below logs the message too.
+    $Message = Hide-CredentialShapes $Message
     $sentinel = Join-Path $PROJECT_DIR "logs\.loop-alert-$Key"
     try {
         if (Test-Path $sentinel) {
@@ -2303,9 +2363,7 @@ function Send-LoopAlert {
             }
         }
     } catch { }
-    # Defence in depth: whatever a caller built from container output (a fault
-    # line, a docker error text) passes the scrub on its way off the host.
-    Send-CatastropheAlert -Key $Key -Message (Hide-CredentialShapes $Message)
+    Send-CatastropheAlert -Key $Key -Message $Message
     try { (Get-Date -Format o) | Out-File $sentinel -Encoding ascii -Force } catch { }
     return $true
 }
@@ -2331,6 +2389,19 @@ function Resolve-LoopAlert {
     }
     Write-LogEntry "LOOP [$Key] cleared: $Message" "SUCCESS"
     return $true
+}
+
+# A stored MaxGap (minutes) as a number: NaN and Infinity parse as doubles but
+# are not a gap - NaN would make every settle comparison false, so the container
+# could never clear. Non-finite, negative or unparseable is unreadable = 0 (the
+# default bar applies). Used on read AND when a missed pass carries the value
+# forward, so a bad value does not sit in the state file.
+function ConvertTo-GapMinutes {
+    param($Value)
+    $v = 0.0
+    if (-not [double]::TryParse([string]$Value, [Globalization.NumberStyles]::Float, [cultureinfo]::InvariantCulture, [ref]$v) -or
+        [double]::IsNaN($v) -or [double]::IsInfinity($v) -or $v -lt 0) { return 0.0 }
+    return $v
 }
 
 # Crash loops by RESTART-COUNT DELTA between passes, never the absolute count:
@@ -2399,11 +2470,7 @@ function Test-ContainerRestartLoops {
             # The settle bar's inputs: when a pass last saw restarts, and the
             # largest gap between two such passes (minutes).
             if (-not [int64]::TryParse([string]$p.LastObs, [ref]$lastObs) -or $lastObs -gt ($nowEpoch + 300)) { $lastObs = 0 }
-            # NaN and Infinity parse as doubles but are not a gap: NaN would make
-            # every settle comparison false, so the container could never clear.
-            # Non-finite is unreadable, like any other bad value (efwd-nan).
-            if (-not [double]::TryParse([string]$p.MaxGap, [Globalization.NumberStyles]::Float, [cultureinfo]::InvariantCulture, [ref]$maxGapMin) -or
-                [double]::IsNaN($maxGapMin) -or [double]::IsInfinity($maxGapMin) -or $maxGapMin -lt 0) { $maxGapMin = 0.0 }
+            $maxGapMin = ConvertTo-GapMinutes $p.MaxGap
             $prevCount = 0; $prevStreak = 0; $prevAccum = 0
             $okCount = [int]::TryParse([string]$p.Count, [ref]$prevCount)
             [void][int]::TryParse([string]$p.Streak, [ref]$prevStreak)
@@ -2484,7 +2551,7 @@ function Test-ContainerRestartLoops {
             Hist   = @($prev[$k].Hist)
             ClearedAt = $prev[$k].ClearedAt
             LastObs = $prev[$k].LastObs
-            MaxGap = $prev[$k].MaxGap
+            MaxGap = (ConvertTo-GapMinutes $prev[$k].MaxGap)
             Missed = $missed + 1
         }
     }

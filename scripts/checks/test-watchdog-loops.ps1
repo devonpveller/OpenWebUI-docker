@@ -763,9 +763,16 @@ function Invoke-PureCases {
     $p33i = & $said "RESOLVED ai-stack: container 'p33-inf'"
     $after33 = Get-Content $statePath -Raw | ConvertFrom-Json
     $gaps33 = "$($after33.'p33-nan'.MaxGap)/$($after33.'p33-inf'.MaxGap)"
+    $st = Get-Content $statePath -Raw | ConvertFrom-Json
+    $st | Add-Member -NotePropertyName 'p33-carry' -NotePropertyValue ([pscustomobject]@{
+        Count = 7; Id = 'p33c'; Streak = 0; Accum = 0; Missed = 0; Hist = @(); ClearedAt = 0; LastObs = 0; MaxGap = 'NaN' }) -Force
+    ($st | ConvertTo-Json -Depth 5) | Out-File $statePath -Encoding utf8 -Force
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p33-other' 'p33x' 0 'running' (& $iso 5) '') | Out-Null
+    $carried33 = (Get-Content $statePath -Raw | ConvertFrom-Json).'p33-carry'
+    $carryOk33 = ($null -ne $carried33) -and ([double]$carried33.MaxGap -eq 0) -and ((Get-Content $statePath -Raw) -cnotmatch 'NaN')
     Write-Case 'P33' 'a non-finite MaxGap (NaN, Infinity) is read as unreadable: the default bar applies and the container clears' `
-        (($p33n -eq 1) -and ($p33i -eq 1) -and ($gaps33 -eq '0/0')) `
-        "paged containers up 61 min with MaxGap NaN / Infinity: RESOLVED $p33n / $p33i (expected 1 / 1); MaxGap written back $gaps33 (expected 0/0)"
+        (($p33n -eq 1) -and ($p33i -eq 1) -and ($gaps33 -eq '0/0') -and $carryOk33) `
+        "paged containers up 61 min with MaxGap NaN / Infinity: RESOLVED $p33n / $p33i (expected 1 / 1); MaxGap written back $gaps33 (expected 0/0); NaN carried across a missed pass is cleaned: $carryOk33"
 
     # P34 (ef-watchdog): the credential-shape scrub. Fakes are ASSEMBLED FROM
     # PARTS so no secret-shaped literal is committed (push protection). Each row:
@@ -782,6 +789,13 @@ function Invoke-PureCases {
     $fq = 'hun' + 'ter2'
     $fweak = 'Abc123' + 'Def456' + 'Ghi789'     # 18 characters: only the bare-key rule can take it
     $fopq = '9f8e7d6c' * 6                       # 48 hex characters under no key: only the opaque-run rule
+    $fbasic = 'dXNlcjpw' + 'YXNz'                # base64 of user:pass - 12 letters, no digit
+    $faws = 'wJalrXUtnFEMI/K7MDENG/' + 'bPxRfiCY' + 'EXAMPLEKEY'   # 40 chars with '/', under no key
+    $fblob = ('Qm9v+YmFy' + 'L3F1dXhh') * 3      # 51 base64 chars holding + and /
+    $fpad = ('dGhpcyBp' * 5) + '=='              # padded base64
+    $fslack = 'Wxyz' + '1234' + $fq
+    $fdisc = 'Ab1' * 8
+    $pemHdr = { param($kind) '-----BEGIN ' + $kind + 'PRIVATE ' + 'KEY-----' }   # assembled: no key-header literal in the tree
     if (-not (Get-Command Hide-CredentialShapes -CommandType Function -ErrorAction SilentlyContinue)) {
         Write-Case 'P34' 'Hide-CredentialShapes masks credential shapes and keeps ordinary error text' $false 'the watchdog under test defines no Hide-CredentialShapes'
     } else {
@@ -800,7 +814,32 @@ function Invoke-PureCases {
         @{ T = "{`"password`":`"$fq`",`"user`":`"app`"}";                      Gone = @($fq);    Keep = @('user') },
         @{ T = "bad key $fpem";                                                Gone = @('MIIEow'); Keep = @('bad key') },
         @{ T = "AccountKey=$fweak was refused";                                Gone = @($fweak); Keep = @('was refused') },
-        @{ T = "image digest $fopq mismatch";                                  Gone = @($fopq);  Keep = @('mismatch') }
+        @{ T = "image digest $fopq mismatch";                                  Gone = @($fopq);  Keep = @('mismatch') },
+        # attempt-2 (tester L1-L9): shapes the anchor names that got through
+        @{ T = "Access denied using DSN app:$fpw@tcp(db:3306)/app";            Gone = @($fpw);   Keep = @('Access denied', 'tcp(db:3306)/app') },
+        @{ T = "cannot connect to app:$fpw@db.internal:5432";                   Gone = @($fpw);   Keep = @('cannot connect', 'db.internal:5432') },
+        @{ T = "cannot connect to app:$fpw@db:5432";                           Gone = @($fpw);   Keep = @('db:5432') },
+        @{ T = "Authorization: Basic $fbasic";                                 Gone = @($fbasic); Keep = @('Authorization: Basic') },
+        @{ T = "Authorization: Basic abc";                                     Gone = @('abc');  Keep = @('Authorization: Basic') },
+        @{ T = "sent Basic $fbasic now";                                       Gone = @($fbasic); Keep = @('sent Basic', 'now') },
+        @{ T = "postgres://app:p4/ss$fpw@db:5432/app";                         Gone = @($fpw, 'p4/ss'); Keep = @('db:5432/app') },
+        @{ T = "postgres://app:p4@ss$fpw@db:5432/app";                         Gone = @($fpw, 'p4@ss'); Keep = @('db:5432/app') },
+        @{ T = "run --password $fpw failed";                                   Gone = @($fpw);   Keep = @('run --password', 'failed') },
+        @{ T = "run --api-key $fpw failed";                                    Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "mysql -h db -u root -p$fpw -e x";                              Gone = @($fpw);   Keep = @('mysql -h db -u root -p', '-e x') },
+        @{ T = "docker login -u a -p $fpw reg.example";                        Gone = @($fpw);   Keep = @('reg.example') },
+        @{ T = "curl -u admin:$fpw https://x.example";                         Gone = @($fpw);   Keep = @('https://x.example') },
+        @{ T = "password=ab;$fpw";                                             Gone = @($fpw);   Keep = @('password=') },
+        @{ T = "password=ab,$fpw";                                             Gone = @($fpw);   Keep = @('password=') },
+        @{ T = "key $faws end";                                                Gone = @($faws);  Keep = @('key', 'end') },
+        @{ T = "blob $fblob end";                                              Gone = @($fblob); Keep = @('blob', 'end') },
+        @{ T = "padded $fpad end";                                             Gone = @($fpad);  Keep = @('padded', 'end') },
+        @{ T = "post https://hooks.slack.com/services/T0123ABCD/B0456EFGH/$fslack failed"; Gone = @($fslack); Keep = @('hooks.slack.com/services/', 'failed') },
+        @{ T = "post https://discord.com/api/webhooks/123456789012345678/$fdisc failed";  Gone = @($fdisc);  Keep = @('failed') },
+        @{ T = "bad key $(& $pemHdr 'OPENSSH ') b3BlbnNzaC1r";                 Gone = @('b3BlbnNz'); Keep = @('bad key') },
+        @{ T = "bad key $(& $pemHdr 'EC ') MHcCAQEEIB";                        Gone = @('MHcCAQ');   Keep = @('bad key') },
+        @{ T = "bad key $(& $pemHdr 'ENCRYPTED ') MIIFHDBO";                   Gone = @('MIIFHD');   Keep = @('bad key') },
+        @{ T = "bad key $(& $pemHdr '') MIIEvQIBAD";                           Gone = @('MIIEvQ');   Keep = @('bad key') }
     )
     $bad34 = @()
     foreach ($row in $rows) {
@@ -811,7 +850,14 @@ function Invoke-PureCases {
     # Meaning survives: ordinary error text comes back byte for byte.
     $plain = @('invalid key', 'invalid key: expected 32 bytes', 'FATAL: password authentication failed for user app',
                'token: expired', 'max_tokens=100 exceeded', 'PRIMARY_KEY=id duplicate', 'basic configuration validation failed',
-               'tailscale: node key has expired', 'exit status 1')
+               'tailscale: node key has expired', 'exit status 1',
+               # attempt-2 over-scrub guards: the useful part of the error stays
+               'credentials: /etc/app/credentials.json: no such file or directory', 'Secret: 3 keys rotated, 0 failed',
+               'open /run/secrets/db_password: no such file', 'basic configuration validation failed', 'Basic Authentication failed',
+               'dial tcp 10.0.0.1:5432: connect: connection refused',
+               # today's model names (inference/): all well under the 40-character threshold
+               'model Qwen3.6-35B-A3B-Q4_K_M.gguf failed to load', 'model Qwen3.6-27B-Q4_K_M.gguf and Qwen3.8-27B-Q4_K_M.gguf',
+               'embed bge-m3-f16.gguf ready', 'routing local-large:nothink to qwen36-27b')
     foreach ($pl in $plain) { $o = Hide-CredentialShapes $pl; if ($o -cne $pl) { $bad34 += "changed plain text '$pl' -> '$o'" } }
     $o = Hide-CredentialShapes "token: $fq"; if ($o.Contains($fq)) { $bad34 += "token: value leaked: $o" }
     # Hostile input stays fast and bounded.
@@ -858,10 +904,15 @@ function Invoke-PureCases {
     $null = Send-LoopAlert -Key 'p35-direct' -Message "x postgres://u:$fpw@h/db and Bearer $fbear"
     $t35b = Get-Transport $sbx
     $direct35 = @(@($t35b.Telegram) + @($t35b.Mattermost) | Where-Object { $_ -match 'x postgres://' })
+    # Second send of the same key lands in the cooldown branch, which LOGS the message.
+    $null = Send-LoopAlert -Key 'p35-direct' -Message "x postgres://u:$fpw@h/db again"
+    $logCool35 = Get-Content (Join-Path $sbx 'logs\tailscale-health.log') -Raw
+    $logLeak35 = ($logCool35 -match [regex]::Escape($fpw)) -or ($logCool35 -match [regex]::Escape($fbear))
+    $logSeen35 = $logCool35 -match 'still firing; not re-paged inside'
     $leakedD35 = @($direct35 | Where-Object { $_ -match [regex]::Escape($fpw) -or $_ -match [regex]::Escape($fbear) }).Count
     Write-Case 'P35' 'a fault line carrying a DSN and a token goes to Telegram, Mattermost and the log scrubbed, still naming the error' `
-        (($page35.Count -eq 2) -and $cutOk -and ($leaked35 -eq 0) -and ($named35 -eq 2) -and ($direct35.Count -eq 2) -and ($leakedD35 -eq 0)) `
-        "page on $($page35.Count) transport(s) (expected 2); messages/log still holding a fake: $leaked35; error text kept on $named35 of 2; token straddling the 280 cut masked on $($pageCut.Count) transport(s): $cutOk; Send-LoopAlert direct: $($direct35.Count) sent, $leakedD35 leaking"
+        (($page35.Count -eq 2) -and $cutOk -and ($leaked35 -eq 0) -and ($named35 -eq 2) -and ($direct35.Count -eq 2) -and ($leakedD35 -eq 0) -and $logSeen35 -and (-not $logLeak35)) `
+        "page on $($page35.Count) transport(s) (expected 2); messages/log still holding a fake: $leaked35; error text kept on $named35 of 2; token straddling the 280 cut masked on $($pageCut.Count) transport(s): $cutOk; Send-LoopAlert direct: $($direct35.Count) sent, $leakedD35 leaking; cooldown WARN line logged: $logSeen35, leaking the fake: $logLeak35"
 
     # P29 (attempt-4 F9): the premature all-clear, measured. 42 continuous slow
     # loops on a simulated clock (fixed 20/70 and 40/70; exponential gaps with
