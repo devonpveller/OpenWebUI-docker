@@ -2202,7 +2202,9 @@ function Get-ContainerRuntimeFacts {
 # named key ("credentials: /etc/app/credentials.json: no such file"), a number
 # after ':' ("Secret: 3 keys rotated"), a short letters-only value after ':'
 # (prose), a secret in prose with no shape, and the old 40-character threshold
-# for model/file names is unchanged (today's are 18-24 characters). House
+# for model/file names is unchanged (today's are 18-24 characters). The full
+# covered / not-covered list is in documentation/sysadmin-out-of-band-channel.md
+# (Layer 4); the permanent regression table is case P34 of test-watchdog-loops.ps1. House
 # redactors considered (efwd findings): little-coder's sanitize.py and
 # notify_mattermost_mirror.py are Python and sized for arbitrary multi-line
 # text; the watchdog is PowerShell, runs when Python or the venv may be the
@@ -2228,6 +2230,9 @@ function Hide-CredentialShapes {
         $t = [regex]::Replace($t, '(?i)\b([a-z][a-z0-9+.\-]{0,31}://)[^\s/@:]{0,128}:[^\s@]{1,256}@(?=[A-Za-z0-9\[(])', ('${1}' + $m + '@'))
         #    Scheme-less: user:pw@tcp(host:3306)/db, user:pw@host:5432.
         $t = [regex]::Replace($t, '(?<![A-Za-z0-9_.:/@\[\-])[A-Za-z0-9._\-]{1,64}:[^\s:@/]{1,128}@(?=tcp\(|unix\(|[A-Za-z0-9][A-Za-z0-9.\-]{0,62}(?::[0-9]{1,5})?(?:[/\s)?,;]|$))', ($m + '@'))
+        #    Oracle: user/pw@//host:1521/SVC, user/pw@host:1521/SVC, user/pw@alias (an alias is a single
+        #    label starting with a letter, so 'icons/logo@2x.png' and 'pkg/x@1.2' are left alone).
+        $t = [regex]::Replace($t, '(?<![A-Za-z0-9_.:/@\[\-])[A-Za-z][A-Za-z0-9_$#]{0,29}/[^\s/@:]{1,128}@(?=//[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9.\-]{0,62}:[0-9]{1,5}(?:[/\s)?,;]|$)|[A-Za-z][A-Za-z0-9_\-]{0,30}(?:[\s)?,;]|$))', ($m + '@'))
         # 2. Authorization header values: whatever follows Bearer/Basic/Token.
         $t = [regex]::Replace($t, '(?i)(\b(?:proxy-)?authorization\b["'']?\s{0,3}[:=]\s{0,3}["'']?(?:bearer|basic|token|digest)\s{1,4})[^\s"'',;]{1,2048}', ('${1}' + $m))
         #    A bare Bearer/Basic value: credential-shaped (a digit, 20+, interior
@@ -2247,6 +2252,12 @@ function Hide-CredentialShapes {
         $t = [regex]::Replace($t, '(?<![0-9])[0-9]{8,10}:[A-Za-z0-9_\-]{35}(?![A-Za-z0-9_\-])', $m)
         $t = [regex]::Replace($t, '(?i)(hooks\.slack\.com/services/)[A-Za-z0-9/_\-]{8,256}', ('${1}' + $m))
         $t = [regex]::Replace($t, '(?i)(discord(?:app)?\.com/api/webhooks/)[0-9]{5,25}/[A-Za-z0-9_\-]{20,256}', ('${1}' + $m))
+        #    Cheap, shaped extras: docker config {"auth":"<b64>"}, an Azure SAS sig=, an XML/HTML
+        #    secret tag, and Cookie / Set-Cookie header values (whole value).
+        $t = [regex]::Replace($t, '(?i)("auth"\s{0,3}:\s{0,3}")[A-Za-z0-9+/=]{8,2048}(")', ('${1}' + $m + '${2}'))
+        $t = [regex]::Replace($t, '([?&]sig=)[^&\s"''<>]{6,512}', ('${1}' + $m))
+        $t = [regex]::Replace($t, '(?i)(<(?:password|passwd|passphrase|secret|token|api-?key)>)[^<]{1,512}(</)', ('${1}' + $m + '${2}'))
+        $t = [regex]::Replace($t, '(?i)(\b(?:set-)?cookie\s{0,3}:\s{0,3})[^\r\n]{1,1024}', ('${1}' + $m))
         # 4. PEM private-key block: from the BEGIN marker to the end of the text.
         $t = [regex]::Replace($t, '-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----.*', ($m + ' (private key)'))
         # 5. CLI flags: --password <pw> (the '=' form is key=value below),
@@ -2254,7 +2265,15 @@ function Hide-CredentialShapes {
         $t = [regex]::Replace($t, '(?i)((?<!\S)--[a-z0-9\-]{0,30}(?:password|passwd|passphrase|secret|token|api-?key)[ \t]+)(?!-)(\S{1,256})', ('${1}' + $m))
         $t = [regex]::Replace($t, '(\bmysql(?:dump|admin)?\b[^\n]{0,200}?[ \t]-p)(\S{1,256})', ('${1}' + $m))
         $t = [regex]::Replace($t, '(?i)(\b(?:docker|podman|helm)[ \t]+(?:registry[ \t]+)?login\b[^\n]{0,200}?[ \t]-p[ \t]+)(\S{1,256})', ('${1}' + $m))
-        $t = [regex]::Replace($t, '((?<!\S)(?:-u|--user)[ \t]+[^\s:]{1,128}:)(\S{1,256})', ('${1}' + $m))
+        $curlU = [System.Text.RegularExpressions.MatchEvaluator]{
+            param($x)
+            # docker run -u 1000:1000 is uid:gid, not user:password
+            if (($x.Groups[2].Value -match '^[0-9]+$') -and ($x.Groups[3].Value -match '^[0-9]+$')) { return $x.Value }
+            return $x.Groups[1].Value + $x.Groups[2].Value + ':[redacted]'
+        }
+        $t = [regex]::Replace($t, '((?<!\S)(?:--user=|--user[ \t]+|-u[ \t]*))([^\s:=\-][^\s:=]{0,127}):(\S{1,256})', $curlU)
+        $t = [regex]::Replace($t, '(\bredis-cli\b[^\n]{0,200}?[ \t]-a[ \t]+)(\S{1,256})', ('${1}' + $m))
+        $t = [regex]::Replace($t, '(?i)(\bsshpass[ \t]+(?:-e[ \t]+)?-p[ \t]*)(\S{1,256})', ('${1}' + $m))
         # 6. key=value / key: value whose key NAMES a secret. After '=' any
         #    value goes; after ':' only a value that looks like one (quoted,
         #    16+ characters, or letters mixed with a digit), so "token: expired"
@@ -2266,15 +2285,24 @@ function Hide-CredentialShapes {
             $val = $x.Groups[4].Value
             $bare = $val.Trim('"', "'")
             $sep = $x.Groups[3].Value
+            $key = $x.Groups[1].Value
             if ($bare.StartsWith('[redacted')) { return $x.Value }
-            if ($bare -match '^(?:/|\./|\.\./|~|[A-Za-z]:\\)') { return $x.Value }
+            if ($bare -imatch '^(?:true|false|null|none|nil)$') { return $x.Value }
+            # 'pass' is a secret only as its own word (pass=, DB_PASS=, DBPASS=), never inside bypass/compass.
+            if (($key -imatch 'pass$') -and ($key -inotmatch '(?:password|passwd|passphrase)$') -and
+                -not (($key -imatch '^pass$') -or ($key -imatch '[_.\-]pass$') -or ($key -cmatch '^[A-Z0-9]{2,}PASS$'))) { return $x.Value }
+            # ODBC PWD= is a password; PWD=/some/dir (the shell's working directory) is not.
+            if (($key -imatch 'pwd$') -and ($bare -match '^(?:/[^/;\s]*/|[A-Za-z]:\\)')) { return $x.Value }
+            # After ':' a path is a location ("credentials: /etc/app/credentials.json: no such file");
+            # after '=' it is a value (password=/Xy..., token=~Xy... are secrets).
+            if (($sep -notmatch '=') -and ($bare -match '^(?:/|\./|\.\./|~|[A-Za-z]:\\)')) { return $x.Value }
             if ($sep -notmatch '=') {
                 $mixed = ($bare -match '\d') -and ($bare -match '[A-Za-z]') -and ($bare.Length -ge 6)
                 if (-not (($val -ne $bare) -or ($bare.Length -ge 16) -or $mixed)) { return $x.Value }
             }
             return $x.Groups[1].Value + $x.Groups[2].Value + $sep + '[redacted]'
         }
-        $t = [regex]::Replace($t, '(?i)(?<![A-Za-z0-9])([A-Za-z0-9_.\-]{0,40}?(?:password|passwd|passphrase|secret|token|api[_\-]?key|auth[_\-]?key|access[_\-]?key|private[_\-]?key|credentials?|dsn))(["'']?)(\s{0,3}[:=]\s{0,3})("(?:[^"\\]|\\.){1,512}"|''[^'']{1,512}''|(?:[^\s"'',;&]|[;,](?!\s*[A-Za-z_][A-Za-z0-9_.\- ]{0,30}\s*[=:])){1,512})', $strong)
+        $t = [regex]::Replace($t, '(?i)(?<![A-Za-z0-9])([A-Za-z0-9_.\-]{0,40}?(?:password|passwd|passphrase|pwd|pass|secret|token|api[_\-]?key|auth[_\-]?key|access[_\-]?key|private[_\-]?key|credentials?|dsn))(["'']?)(\s{0,3}[:=]\s{0,3})("(?:[^"\\]|\\.){1,512}"|''[^'']{1,512}''|(?:[^\s"'',;&]|[;,](?!\s*[A-Za-z_][A-Za-z0-9_.\- ]{0,30}\s*[=:])){1,512})', $strong)
         #    A bare "key" or "auth" is a secret only when '=' is followed by a
         #    key-shaped value (PRIMARY_KEY=id is not).
         $weak = [System.Text.RegularExpressions.MatchEvaluator]{

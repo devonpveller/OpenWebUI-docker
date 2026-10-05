@@ -795,6 +795,8 @@ function Invoke-PureCases {
     $fpad = ('dGhpcyBp' * 5) + '=='              # padded base64
     $fslack = 'Wxyz' + '1234' + $fq
     $fdisc = 'Ab1' * 8
+    $fauth = 'dXNlcjpw' + 'YXNzd29yZA=='         # base64 of user:password (docker config auth)
+    $fsig = 'r6' + 'Mk%2Fq8' + 'Zp%2BtW3' + 'vLx%3D'   # Azure SAS signature
     $pemHdr = { param($kind) '-----BEGIN ' + $kind + 'PRIVATE ' + 'KEY-----' }   # assembled: no key-header literal in the tree
     if (-not (Get-Command Hide-CredentialShapes -CommandType Function -ErrorAction SilentlyContinue)) {
         Write-Case 'P34' 'Hide-CredentialShapes masks credential shapes and keeps ordinary error text' $false 'the watchdog under test defines no Hide-CredentialShapes'
@@ -839,13 +841,230 @@ function Invoke-PureCases {
         @{ T = "bad key $(& $pemHdr 'OPENSSH ') b3BlbnNzaC1r";                 Gone = @('b3BlbnNz'); Keep = @('bad key') },
         @{ T = "bad key $(& $pemHdr 'EC ') MHcCAQEEIB";                        Gone = @('MHcCAQ');   Keep = @('bad key') },
         @{ T = "bad key $(& $pemHdr 'ENCRYPTED ') MIIFHDBO";                   Gone = @('MIIFHD');   Keep = @('bad key') },
-        @{ T = "bad key $(& $pemHdr '') MIIEvQIBAD";                           Gone = @('MIIEvQ');   Keep = @('bad key') }
+        @{ T = "bad key $(& $pemHdr '') MIIEvQIBAD";                           Gone = @('MIIEvQ');   Keep = @('bad key') },
+        # attempt 3 (tester D1-D5, N6-N10)
+        @{ T = "password=/$fpw failed";                                        Gone = @($fpw);   Keep = @('password=', 'failed') },
+        @{ T = "token=~$fpw failed";                                           Gone = @($fpw);   Keep = @('token=', 'failed') },
+        @{ T = "password=./$fpw failed";                                       Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "DRIVER={ODBC Driver 18};SERVER=db;UID=sa;PWD=$fpw;";           Gone = @($fpw);   Keep = @('SERVER=db', 'UID=sa') },
+        @{ T = "connection string Uid=app;Pwd=$fq; rejected";                  Gone = @($fq);    Keep = @('Uid=app', 'rejected') },
+        @{ T = "ORA-12154: could not resolve scott/$fpw@db:1521/ORCL";         Gone = @($fpw);   Keep = @('ORA-12154', 'db:1521/ORCL') },
+        @{ T = "sqlplus app/$fpw@//db.internal:1521/XEPDB1 failed";            Gone = @($fpw);   Keep = @('sqlplus', 'db.internal:1521/XEPDB1 failed') },
+        @{ T = "connect app/$fpw@orcl";                                        Gone = @($fpw);   Keep = @('connect', 'orcl') },
+        @{ T = "login user=app pass=$fpw failed";                              Gone = @($fpw);   Keep = @('user=app', 'failed') },
+        @{ T = "env DB_PASS=$fpw not accepted";                                Gone = @($fpw);   Keep = @('not accepted') },
+        @{ T = "MYSQL_PASS=$fq";                                               Gone = @($fq);    Keep = @('MYSQL_PASS=') },
+        @{ T = "DBPASS=$fpw";                                                  Gone = @($fpw);   Keep = @('DBPASS=') },
+        @{ T = "curl --user=admin:$fpw http://x/ failed";                      Gone = @($fpw);   Keep = @('http://x/ failed') },
+        @{ T = "curl -uadmin:$fpw http://x/ failed";                           Gone = @($fpw);   Keep = @('http://x/ failed') },
+        @{ T = "curl -u admin:$fpw http://x/ failed";                          Gone = @($fpw);   Keep = @('http://x/ failed') },
+        @{ T = "docker config {`"auths`":{`"r.example`":{`"auth`":`"$fauth`"}}} rejected"; Gone = @($fauth); Keep = @('r.example', 'rejected') },
+        @{ T = "403 https://acct.blob.core.windows.net/c/b?sv=2022&sp=r&sig=$fsig";       Gone = @($fsig);  Keep = @('acct.blob.core.windows.net', 'sp=r') },
+        @{ T = "redis-cli -a $fpw ping: NOAUTH";                               Gone = @($fpw);   Keep = @('redis-cli -a', 'ping: NOAUTH') },
+        @{ T = "sshpass -p $fpw ssh host failed";                              Gone = @($fpw);   Keep = @('ssh host failed') },
+        @{ T = "<password>$fpw</password> invalid";                            Gone = @($fpw);   Keep = @('<password>', 'invalid') },
+        @{ T = "Cookie: session=$fpw$fpw";                                     Gone = @($fpw);   Keep = @('Cookie:') }
     )
     $bad34 = @()
     foreach ($row in $rows) {
         $o = Hide-CredentialShapes $row.T
         foreach ($g in $row.Gone) { if ($o.Contains($g)) { $bad34 += "leaked '$g' in: $o" } }
         foreach ($k in $row.Keep) { if (-not $o.Contains($k)) { $bad34 += "lost '$k' in: $o" } }
+    }
+    # --- PERMANENT REGRESSION TABLE (attempt 3). Every shape any test round has masked, and the plain text
+    # it must leave alone. A later rule change that reopens one fails HERE, by name. Shapes that are NOT
+    # masked on purpose (prose, a short letters-only value after ':', a multi-line PEM body, AUTH/redis
+    # replies, plain digests) are listed in $permSkip and in the docs, not hidden.
+    $permSkip = @('password: letters short', 'password is prose', 'yaml secret colon', 'api-key header', 'PEM multi-line body', 'AUTH cmd')
+    $permA = & {
+# fakes assembled from parts
+$pw   = 's3' + 'cret-Pw9'
+$pwl  = 'hun' + 'terpass'                 # letters only, 10
+$pws  = 'p4' + '/ss' + 'Wd'               # contains a slash
+$gh   = 'gh' + 'p_' + ('A1b2C3d4E5' * 4)
+$sk   = 's' + 'k-proj-' + ('Zq9' * 10)
+$xox  = 'xo' + 'xb-' + '1234567890-' + ('abcDEF' * 3)
+$akia = 'AK' + 'IA' + 'ABCDEFGHIJKLMNOP'
+$awss = ('wJalrXUtnFEMI/K7MDENG/bPxRfiCY' + 'EXAMPLEKEY')   # 40, has slashes
+$tg   = '1234' + '56789:' + 'AAH' + ('x9Y' * 10) + 'ab'  # 35 after colon
+$jwt  = 'ey' + 'JhbGciOiJIUzI1NiJ9.' + 'ey' + 'JzdWIiOiIxMjM0In0.' + 'SflKxwRJSMeKKF2QT4fwpM'
+$b64  = 'q8' + '3vEjZx+Lk/0pW7nYt' + 'R2sUa+/mQ1cB9dHe4fG6' + '=='  # base64 with + / =
+$basic= 'dXNl' + 'cjpwYXNz'               # "user:pass", no digit, 12 chars
+$strp = 'sk' + '_live_' + ('4eC39HqLyjWDarjtT1zdp7dc' )
+$whk  = 'T00000000/B00000000/' + 'XXXXXXXX' + 'XXXXXXXXXXXXXXXX'
+$hex48= ('a1b2c3d4' * 6)
+$pemb = 'MIIEvQIBADAN' + 'BgkqhkiG9w0BAQEFAASC'
+$cases = @(
+  @{ n='libpq kv';           t="connection failed: host=db port=5432 user=app password=$pw dbname=app"; s=@($pw) }
+  @{ n='libpq kv quoted';    t="host=db user=app password='$pw' sslmode=disable: connection refused"; s=@($pw) }
+  @{ n='redis url';          t="Error: connect ECONNREFUSED redis://:$pw@redis:6379/0"; s=@($pw) }
+  @{ n='amqp url';           t="amqp://guest:$pw@rabbit:5672/ connection refused"; s=@($pw) }
+  @{ n='mongodb+srv';        t="MongoServerError: bad auth mongodb+srv://u:$pw@c0.cluster.example.com/db"; s=@($pw) }
+  @{ n='jdbc';               t="jdbc:postgresql://app:$pw@db:5432/app failed"; s=@($pw) }
+  @{ n='url pw with slash';  t="dial: postgres://app:$pws@db:5432/app failed"; s=@($pws,'ss' + 'Wd@db') }
+  @{ n='url no path, then prose @'; t="failed postgres://app:$pw@db:5432 retry"; s=@($pw) }
+  @{ n='go mysql DSN no scheme'; t="Error 1045: Access denied using DSN app:$pw@tcp(db:3306)/app"; s=@($pw) }
+  @{ n='userinfo no scheme';  t="cannot connect to app:$pw@db.internal:5432"; s=@($pw) }
+  @{ n='Authorization Basic short'; t="401 Unauthorized: Authorization: Basic $basic"; s=@($basic) }
+  @{ n='Bearer short letters'; t="401 invalid Authorization: Bearer abcdefghijklmnop"; s=@('abcdefghijklmnop') }
+  @{ n='Bearer jwt';         t="rejected Bearer $jwt (expired)"; s=@($jwt) }
+  @{ n='--password=';        t="mysqld: [ERROR] invalid option --password=$pw"; s=@($pw) }
+  @{ n='--password space';   t="error: unknown flag --password $pw"; s=@($pw) }
+  @{ n='-p<pw> mysql';       t="mysql -uroot -p$pw failed: Access denied"; s=@($pw) }
+  @{ n='PGPASSWORD env';     t="env PGPASSWORD=$pwl psql failed"; s=@($pwl) }
+  @{ n='password: letters short'; t="error: config password: $pwl rejected"; s=@($pwl) }
+  @{ n='password is prose';  t="the password is $pwl"; s=@($pwl) }
+  @{ n='json api_key';       t='{"level":"error","api_key":"' + $pwl + '","msg":"denied"}'; s=@($pwl) }
+  @{ n='json password spaced'; t='{"password" : "' + $pw + '"}'; s=@($pw) }
+  @{ n='json token unquoted num'; t='{"token": 12345678901234567890}'; s=@('12345678901234567890') }
+  @{ n='yaml secret colon';  t="secret_key: $pwl"; s=@($pwl) }
+  @{ n='api-key header';     t="X-Api-Key: $pwl rejected"; s=@($pwl) }
+  @{ n='x-auth-token';       t="X-Auth-Token=$pwl invalid"; s=@($pwl) }
+  @{ n='kv value with semicolon'; t="password=ab;$pwl failed"; s=@($pwl) }
+  @{ n='kv value with comma'; t="password=ab,$pwl failed"; s=@($pwl) }
+  @{ n='kv quoted w/ space'; t="password = `"$pw x`" failed"; s=@($pw) }
+  @{ n='github pat';         t="git fetch failed with $gh."; s=@($gh) }
+  @{ n='openai sk-proj';     t="(`"$sk`") Incorrect API key"; s=@($sk) }
+  @{ n='slack xoxb';         t="slack: invalid_auth $xox"; s=@($xox) }
+  @{ n='AKIA';               t="InvalidAccessKeyId: $akia"; s=@($akia) }
+  @{ n='aws secret bare';    t="SignatureDoesNotMatch for $awss"; s=@($awss,'EXAMPLEKEY') }
+  @{ n='aws_secret_access_key'; t="aws_secret_access_key=$awss"; s=@($awss,'EXAMPLEKEY') }
+  @{ n='telegram in url';    t="POST https://api.telegram.org/bot$tg/sendMessage 401"; s=@($tg) }
+  @{ n='telegram bare';      t="bad token $tg."; s=@($tg) }
+  @{ n='jwt bare';           t="jwt malformed: $jwt"; s=@($jwt) }
+  @{ n='base64 blob bare';   t="decrypt failed for $b64"; s=@($b64, 'R2sUa') }
+  @{ n='stripe sk_live';     t="StripeAuthenticationError $strp"; s=@($strp) }
+  @{ n='slack webhook url';  t="POST https://hooks.slack.com/services/$whk 404"; s=@('XXXXXXXXXXXXXXXXXXXXXXXX') }
+  @{ n='hex48 bare';         t="key mismatch $hex48"; s=@($hex48) }
+  @{ n='PEM header inline';  t="load: $(& $pemHdr 'RSA ') $pemb"; s=@($pemb) }
+  @{ n='PEM multi-line body';t="load:`n$(& $pemHdr '')`n$pemb" + "+/abc`n-----END PRIVATE KEY-----"; s=@($pemb) }
+  @{ n='secret after `( `';  t="(token=$pw)"; s=@($pw) }
+  @{ n='kv secret= then [';  t="token=[$pwl]"; s=@($pwl) }
+  @{ n='tskey';              t="tailscale: invalid key " + 'ts' + 'key-auth-' + 'kAbc123CNTRL-' + ('Q' * 20); s=@('kAbc123CNTRL') }
+)
+$plain = @(
+  'FATAL: password authentication failed for user "app"',
+  'invalid key: expected 32 bytes',
+  'open /run/secrets/db_password: no such file or directory',
+  'credentials: /etc/app/credentials.json: no such file or directory',
+  'error loading model /models/Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL-00001-of-00002.gguf',
+  'failed to load model Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL-00001-of-00002',
+  'container ai-stack-openbrain-chunk-worker-1 exited with code 137',
+  'Error response from daemon: No such container: 3f9a1c2b7d4e',
+  'Secret: 3 keys rotated, 0 failed',
+  'token: expired',
+  'max_tokens=100 exceeded',
+  'ERROR: relation "auth_tokens" does not exist at character 15',
+  'secret_ref=vault/kv/data/app not found',
+  'authentication failed: key=id duplicate',
+  'tokenizer.json: 32000 tokens loaded; error at line 3',
+  'listen tcp 0.0.0.0:8080: bind: address already in use',
+  'http://user@example.com/x unreachable',
+  'Traceback: File "/app/src/openbrain_gateway/server_handlers_v2_extended.py", line 99'
+)
+
+        @{ C = $cases; P = $plain }
+    }
+    $permB = & {
+# all fakes assembled from parts
+$pw   = 'Zq' + '7wLx' + 'Pm2'          # mixed, 9 chars
+$pwl  = 'hun' + 'ter' + 'pass'         # letters only
+$hex  = ('9f8e' + '7d6c') * 4          # 32 hex
+$ghp  = 'gh' + 'p_' + ('Kq3Lm9Zx2W' * 4)
+$glp  = 'gl' + 'pat-' + ('aB3dE6gH9jK2mN5pQ8sT' )
+$tg35 = '12345' + '6789:' + 'AA' + ('Hb3Xk' * 6) + 'Qw9'    # 2+30+3 = 35
+$acct = ('Eby8vdM02xNOcqFl' + 'qUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsu' + 'Fq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==')  # 88-char Azure-like
+$sig  = 'r6' + 'Mk%2Fq8' + 'Zp%2BtW3' + 'vLx%3D'
+$npm  = 'np' + 'm_' + ('Ab1Cd2Ef3G' * 4)
+$npmx = ('a1b2c3d4' + '-e5f6-' + '7a8b-9c0d-' + 'e1f2a3b4c5d6')  # uuid-style legacy npm token
+$b64u = 'dXNl' + 'cjpw' + 'YXNz' + 'd29yZA=='   # 20 chars padded, "user:password"
+$enc  = 'p%40' + 'ss%2F' + 'w0rd'
+$sha  = ('3f9a1c2b7d4e5f60' * 4)               # 64 hex
+$long = 'Zx9' + ('qW3eR5tY7u' * 4)            # 43 mixed
+
+$cases = @(
+  @{ n='sqlserver Password=';      t="Login failed: Server=tcp:db,1433;Database=app;User Id=sa;Password=$pw;Encrypt=True"; s=@($pw) }
+  @{ n='sqlserver Password= space value'; t="Server=db;User ID=sa;Password=$pwl;TrustServerCertificate=true"; s=@($pwl) }
+  @{ n='ODBC PWD=';                t="[ODBC Driver 18] Login failed: DRIVER={ODBC Driver 18};SERVER=db;UID=sa;PWD=$pw;"; s=@($pw) }
+  @{ n='ODBC Pwd= letters';        t="connection string Uid=app;Pwd=$pwl; rejected"; s=@($pwl) }
+  @{ n='oracle user/pass@host';    t="ORA-12154: could not resolve scott/$pw@db:1521/ORCL"; s=@($pw) }
+  @{ n='oracle sqlplus';           t="sqlplus app/$pwl@//db.internal:1521/XEPDB1 failed"; s=@($pwl) }
+  @{ n='oracle easy connect';      t="connect app/$pw@orcl"; s=@($pw) }
+  @{ n='curl -u';                  t="curl -u admin:$pwl http://x/ failed 401"; s=@($pwl) }
+  @{ n='curl -u quoted';           t="curl -s -u 'admin:$pw' http://x/"; s=@($pw) }
+  @{ n='curl -uUSER:PW no space';  t="curl -uadmin:$pw http://x/"; s=@($pw) }
+  @{ n='curl --user=';             t="curl --user=admin:$pw http://x/"; s=@($pw) }
+  @{ n='git url token user';       t="fatal: Authentication failed for 'https://$ghp@github.com/o/r.git/'"; s=@($ghp) }
+  @{ n='git url hex token user';   t="fatal: unable to access 'https://$hex@git.example.com/o/r.git/': 403"; s=@($hex) }
+  @{ n='git url oauth2:glpat';     t="remote: HTTP Basic: Access denied https://oauth2:$glp@gitlab.com/o/r.git"; s=@($glp) }
+  @{ n='docker registry url user'; t="Error response from daemon: Get `"https://$pwl@registry.example.com/v2/`": unauthorized"; s=@($pwl) }
+  @{ n='docker config auth json';  t='{"auths":{"registry.example.com":{"auth":"' + $b64u + '"}}} rejected'; s=@($b64u) }
+  @{ n='Azure AccountKey';         t="DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=$acct;EndpointSuffix=core.windows.net"; s=@($acct.Substring(10,20)) }
+  @{ n='Azure SharedAccessKey';    t="Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=Root;SharedAccessKey=$pw$pw"; s=@($pw) }
+  @{ n='Azure SAS sig=';           t="403 AuthenticationFailed https://acct.blob.core.windows.net/c/b?sv=2022-11-02&se=2026&sp=r&sig=$sig"; s=@($sig, 'Zp%2BtW3') }
+  @{ n='npm _authToken';           t="npm ERR! //registry.npmjs.org/:_authToken=$npmx"; s=@($npmx) }
+  @{ n='npm npm_ token';           t="npm ERR! 401 token $npm"; s=@($npm) }
+  @{ n='DB_PASS env';              t="env DB_PASS=$pw not accepted"; s=@($pw) }
+  @{ n='MYSQL_PASS env';           t="MYSQL_PASS=$pwl"; s=@($pwl) }
+  @{ n='pass= bare';               t="login user=app pass=$pw failed"; s=@($pw) }
+  @{ n='password double-quoted';   t="password=`"$pw`" rejected"; s=@($pw) }
+  @{ n='password in brackets';     t="password=[$pw] rejected"; s=@($pw) }
+  @{ n='password in parens';       t="password=($pw) rejected"; s=@($pw) }
+  @{ n='password in braces';       t="password={$pw} rejected"; s=@($pw) }
+  @{ n='password <angle>';         t="password=<$pw> rejected"; s=@($pw) }
+  @{ n='xml password tag';         t="<password>$pw</password> invalid"; s=@($pw) }
+  @{ n='yaml password quoted';     t="password: '$pwl'"; s=@($pwl) }
+  @{ n='password starts with /';   t="password=/$pw$pw failed"; s=@($pw) }
+  @{ n='token starts with ~';      t="token=~$pw failed"; s=@($pw) }
+  @{ n='url-encoded pw in url';    t="postgres://app:$enc@db:5432/app refused"; s=@($enc, 'w0rd') }
+  @{ n='url-encoded pw kv';        t="password=$enc failed"; s=@($enc, 'w0rd') }
+  @{ n='access_token query';       t="GET /api?access_token=$pw$pw&x=1 401"; s=@($pw) }
+  @{ n='telegram 35 bare';         t="bad token $tg35."; s=@($tg35.Substring(12)) }
+  @{ n='telegram 35 url';          t="POST https://api.telegram.org/bot$tg35/getMe 401"; s=@($tg35.Substring(12)) }
+  @{ n='redis-cli -a';             t="redis-cli -a $pw ping: NOAUTH"; s=@($pw) }
+  @{ n='AUTH cmd';                 t="ERR AUTH $pw failed: WRONGPASS"; s=@($pw) }
+  @{ n='sshpass -p';               t="sshpass -p $pw ssh host failed"; s=@($pw) }
+  @{ n='Cookie session';           t="Cookie: session=$pw$pw$pw rejected"; s=@($pw) }
+  @{ n='X-Vault-Token';            t="X-Vault-Token: hvs.$long denied"; s=@($long) }
+  @{ n='-e MYSQL_ROOT_PASSWORD';   t="docker run -e MYSQL_ROOT_PASSWORD=$pwl mysql failed"; s=@($pwl) }
+  @{ n='Basic in WWW-Authenticate'; t="authorization=Basic $b64u"; s=@($b64u) }
+)
+$plain = @(
+  'pull access denied for myapp:1.2.3, repository does not exist',
+  "Error response from daemon: manifest for ghcr.io/org/app@sha256:$sha not found",
+  "nginx:1.25@sha256:$sha digest mismatch",
+  "No such container: $sha",
+  'ORA-01017: invalid username/password; logon denied',
+  'Login failed for user ''sa''. Reason: Password did not match',
+  'container openbrain-gateway exited with code 137 (OOMKilled)',
+  'image ghcr.io/open-webui/open-webui:v0.11.0 not found',
+  'qwen36-27b failed to load: /models/Qwen3.6-35B-A3B-Q4_K_M.gguf',
+  'open C:\Data\Docker\wsl\data\ext4.vhdx: access denied',
+  'listen tcp 127.0.0.1:5432: bind: address already in use',
+  'pid=12345 exit status 1',
+  'ssh: git@github.com: Permission denied (publickey)',
+  'error at 2026-10-05T10:30:00Z: timeout after 30s',
+  'max_retries=5 exceeded, retry_after: 60',
+  'HTTP 401: token expired, re-authenticate',
+  'tokens=4096 > n_ctx=2048',
+  'error: key not found: OPENAI_API_KEY',
+  'invalid api_key format',
+  'connection to db:5432 refused (user=app, database=app)'
+)
+
+        @{ C = $cases; P = $plain }
+    }
+    # By design masked (documented): sha256 digests / 64-hex ids, 50-char model names, a user-only URL.
+    $plainSkip = @('sha256:', 'No such container: 3f9a', 'Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL-00001-of-00002', 'http://user@example.com')
+    $permN = 0
+    foreach ($set in @($permA, $permB)) {
+        foreach ($c in $set.C) {
+            if ($permSkip -contains $c.n) { continue }
+            $permN++
+            $o = Hide-CredentialShapes $c.t
+            foreach ($g in $c.s) { if ($o.Contains($g)) { $bad34 += "perm [$($c.n)] leaked a fake in: $o" } }
+        }
+        foreach ($pl in $set.P) { if ($plainSkip | Where-Object { $pl.Contains($_) }) { continue }; $permN++; $o = Hide-CredentialShapes $pl; if ($o -cne $pl) { $bad34 += "perm plain text changed: '$pl' -> '$o'" } }
     }
     # Meaning survives: ordinary error text comes back byte for byte.
     $plain = @('invalid key', 'invalid key: expected 32 bytes', 'FATAL: password authentication failed for user app',
@@ -857,7 +1076,12 @@ function Invoke-PureCases {
                'dial tcp 10.0.0.1:5432: connect: connection refused',
                # today's model names (inference/): all well under the 40-character threshold
                'model Qwen3.6-35B-A3B-Q4_K_M.gguf failed to load', 'model Qwen3.6-27B-Q4_K_M.gguf and Qwen3.8-27B-Q4_K_M.gguf',
-               'embed bge-m3-f16.gguf ready', 'routing local-large:nothink to qwen36-27b')
+               'embed bge-m3-f16.gguf ready', 'routing local-large:nothink to qwen36-27b',
+               # attempt 3: the over-scrub rows - image tags, ports, exit codes, error texts, paths, flags
+               'bypass=true', 'compass=north', 'tests_passed=12', 'pass=true', 'password=true', 'OLDPWD=/home/app/src', 'PWD=/home/app/src',
+               'icons/logo@2x.png missing', 'docker run -u 1000:1000 img', 'ORA-01017: invalid username/password; logon denied',
+               'pull access denied for myapp:1.2.3, repository does not exist', 'container x exited with code 137 (OOMKilled)',
+               'image ghcr.io/open-webui/open-webui:v0.11.0 not found', 'listen tcp 127.0.0.1:5432: bind: address already in use')
     foreach ($pl in $plain) { $o = Hide-CredentialShapes $pl; if ($o -cne $pl) { $bad34 += "changed plain text '$pl' -> '$o'" } }
     $o = Hide-CredentialShapes "token: $fq"; if ($o.Contains($fq)) { $bad34 += "token: value leaked: $o" }
     # Hostile input stays fast and bounded.
@@ -872,7 +1096,7 @@ function Invoke-PureCases {
     if ($big.Length -gt 4100) { $bad34 += "output not bounded: $($big.Length)" }
     if ($sw.Elapsed.TotalSeconds -gt 5) { $bad34 += "slow on hostile input: $([math]::Round($sw.Elapsed.TotalSeconds,1))s" }
     Write-Case 'P34' 'Hide-CredentialShapes masks URL/DSN userinfo, Bearer, key=value, vendor tokens, JWT, PEM and keeps ordinary error text' `
-        ($bad34.Count -eq 0) ("$($rows.Count) credential rows, $($plain.Count) plain rows, hostile input in $([math]::Round($sw.Elapsed.TotalSeconds,2))s" +
+        ($bad34.Count -eq 0) ("$($rows.Count) credential rows, $($plain.Count) plain rows, $permN permanent-table rows, hostile input in $([math]::Round($sw.Elapsed.TotalSeconds,2))s" +
                               $(if ($bad34) { "`n" + ($bad34 -join "`n") } else { '' }))
 
     }

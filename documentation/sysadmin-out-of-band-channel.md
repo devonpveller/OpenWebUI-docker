@@ -115,11 +115,45 @@ says what to look at; the fix is yours. The `crashloop-<name>` page, and the
 joiner, carry the container's last fault line from `docker logs`. The
 `docker-unreadable` page and the `netns-<name>` "owner no longer exists" page
 carry none (docker could not be asked). Every page text is credential-scrubbed
-before it is logged or leaves the host: URL and DSN userinfo (also the
-scheme-less `user:pw@tcp(host)/db` form), `password=`/`token=` values, Bearer
-and Basic values, `--password <pw>` style flags, vendor token prefixes, webhook
-secrets, base64 secret blobs and private-key blocks. A secret written as plain
-prose with no shape is not detected.
+before it is logged or leaves the host (`Hide-CredentialShapes` in
+`stack-watchdog.ps1`; its permanent regression table is case P34 of
+`scripts/checks/test-watchdog-loops.ps1`). The scrub masks the SHAPE and keeps
+the words around it, so `invalid key` and `password authentication failed`
+still read.
+
+**Covered shape families.** URL and DSN userinfo (`scheme://user:pw@host`, a
+password holding `/` or `@`, the scheme-less `user:pw@tcp(host:3306)/db` and
+`user:pw@host:5432`, Oracle `user/pw@//host:1521/SVC` and `user/pw@alias`);
+`Authorization:` header values (Bearer, Basic, Token); `key=value` and
+`key: value` for secret-named keys (password, passwd, passphrase, `pwd` as in
+ODBC `PWD=`, `pass` / `DB_PASS`, secret, token, api key, auth key, access key,
+private key, credentials, dsn), including quoted, bracketed and URL-encoded
+values and values that hold `;` or `,`; CLI flags (`--password <pw>`,
+`--token <t>`, mysql `-p<pw>`, `docker login -p`, `curl -u` / `-uUSER:PW` /
+`--user=`, `redis-cli -a`, `sshpass -p`); vendor tokens (sk-, ghp_, github_pat_,
+xox*-, AKIA, tskey-, hf_, glpat-, npm_, hvs., AIza), JWTs, Telegram bot tokens,
+Slack and Discord webhook secrets; docker config `"auth":"..."`, Azure SAS
+`sig=`, `<password>..</password>` tags, `Cookie:` / `Set-Cookie:` values (to the
+end of the line); PEM private-key blocks; padded base64, base64 blobs holding
+`+` or a few `/`, and any 40+ character run of letters, digits, `_` or `-`
+holding a letter and a digit.
+
+**Deliberately NOT covered (a stated limit, not a surprise).** A secret written
+as plain prose with no shape ("the password is hunter2"); a short letters-only
+value after `:` (`secret_key: abcdefgh`, `X-Api-Key: abcdefgh`); a number after
+`:` (`password: 123456`; with `=` it is masked); a bare Bearer of letters only
+with no `Authorization:` header; redis `AUTH <pw>` replies; PEM body lines after
+the header (the fault line is one collapsed line, so this does not arise there);
+Telegram-style tokens that are not 35 characters after the colon. **Masked even
+though they are not secrets (over-scrub, accepted):** sha256 digests and 64-hex
+container ids, any 40+ character model or file name with a letter and a digit
+(today's are 18-28 characters and are untouched), a 40+ character relative code
+path with one to three `/`, mixed case and a digit (for example
+`internal/Handlers2/RequestProcessorFactoryImpl`), `PWD=/app` (a shell working
+directory with a single path segment), a user-only URL (`http://user@host/`),
+`from:bob@example.com`, and `pkg/name@alias`-shaped text. A path is kept only
+after `:` (`credentials: /etc/app/credentials.json: no such file`); after `=` it
+is a value (`password=/Xy..` is masked).
 
 | Key | Fires when |
 |---|---|
