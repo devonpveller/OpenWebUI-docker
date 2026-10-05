@@ -228,19 +228,29 @@ def test_a_configured_default_tier_is_used_for_an_item_with_no_tier(tmp_path):
 # Roles and tiers that are not exactly a canonical name must be REFUSED - no strip, no case
 # folding, no Unicode normalisation (mt-policy attempts 1-3: -contains was case-insensitive,
 # -ceq ignored U+00AD / U+200D / U+0000). One refusal per input, never a quiet answer.
-SH, ZWJ, ZWSP, NBSP = "­", "‍", "​", " "
+SH, ZWJ, ZWSP, NBSP = "\u00ad", "\u200d", "\u200b", "\u00a0"
 BAD_TIERS = ["medium", "Large", "SMALL", "LARGE", " small", "small ", "\tsmall", "small\n", "small\x1f",
-             NBSP + "small", "small ", " ", "s" + SH + "mall", "sma" + ZWJ + "ll",
-             "sm" + ZWSP + "all", "small\u0000", "ѕmall", "lаrge", "largé",
+             NBSP + "small", "small\u2003", " ", "s" + SH + "mall", "sma" + ZWJ + "ll",
+             "sm" + ZWSP + "all", "small\u0000", "\u0455mall", "l\u0430rge", "larg\u00e9",
              "large" + SH, "1", "1.0", "item", "small" * 2000, "x" * 100000]
 BAD_ROLES = ["worker", "Tester", "REVIEWER", "Developer", "test" + SH + "er", "revie" + ZWJ + "wer",
              " tester", "tester ", "developer\u0000", "1", "d" * 50000, ""]
 
 
-def test_a_non_canonical_item_tier_is_refused_naming_the_known_tiers(tmp_path):
-    cases = [("developer", t, 1, None, None) for t in BAD_TIERS]
-    for got, t in zip(_resolve_batch(cases, tmp_path), BAD_TIERS):
-        assert got.get("err", "").startswith(f"unknown tier '{t}' - known tiers: large, small"), (t[:40], got)
+# Every rule path an unknown item tier can travel: the tier must be refused BEFORE any rule
+# is evaluated, not only where the `item` tier is substituted (a mutant that validated it only
+# inside the substitution passed the developer-only version of this test).
+TIER_PATHS = [("reviewer", 1, None, None), ("reviewer", 3, False, 2), ("tester", 1, False, None),
+              ("tester", 1, None, None), ("tester", 2, False, 3), ("tester", 2, True, 500),
+              ("tester", 2, False, 81), ("developer", 1, True, None), ("developer", 1, False, None),
+              ("developer", 1, None, None), ("developer", 2, None, None)]
+
+
+def test_a_non_canonical_item_tier_is_refused_on_every_rule_path(tmp_path):
+    cases = [(role, t, a, d, dl) for t in BAD_TIERS for role, a, d, dl in TIER_PATHS]
+    got = _resolve_batch(cases, tmp_path)
+    for (role, t, a, d, dl), g in zip(cases, got):
+        assert g.get("err", "").startswith(f"unknown tier '{t}' - known tiers: large, small"),             (role, t[:40], a, d, dl, g)
 
 
 def test_a_non_canonical_role_is_refused_naming_the_known_roles(tmp_path):
@@ -259,11 +269,12 @@ def test_attempt_and_delta_boundaries_are_as_stated(tmp_path):
     """max_delta_lines 80 is inclusive; min_attempt 2 is inclusive; attempts below 1 are
     still 'at most attempt 1' for the first-round rule."""
     cases = [("tester", "large", a, False, d) for a, d in
-             [(1, 80), (2, 80), (2, 81), (1, 0), (0, None), (-1, None), (2**31 - 1, 80), (2, 2**40)]]
+             [(1, 80), (2, 80), (2, 81), (1, 0), (0, None), (-1, None), (-5, 3), (2**31 - 1, 80), (2, 2**40)]]
     got = [(g["tier"], g["rule"]) for g in _resolve_batch(cases, tmp_path)]
     assert got == [("large", "first-adversarial-round"), ("small", "retest-small-diff"),
                    ("large", "item-tier"), ("large", "first-adversarial-round"),
                    ("large", "first-adversarial-round"), ("large", "first-adversarial-round"),
+                   ("large", "first-adversarial-round"),
                    ("small", "retest-small-diff"), ("large", "item-tier")]
 
 
@@ -313,7 +324,7 @@ def test_a_valid_or_blank_tier_is_accepted(tier):
 
 # attempt 3: no strip, no normalisation - padding, control and ignorable characters are refused.
 @pytest.mark.parametrize("tier", ["medium", "Large", "SMALL", "opus", "   ", " small", "small\x1f",
-                                  "\x1csmall", "sm­all", "sma‍ll", "small\u0000"])
+                                  "\x1csmall", "sm\u00adall", "sma\u200dll", "small\u0000"])
 def test_an_invalid_tier_is_refused_naming_the_allowed_values(tier):
     found = anchor_schema.problems(dict(VALID_B, tier=tier))
     assert len(found) == 1
@@ -372,12 +383,14 @@ PLANTED = [
      "model_tiers.local.roles.small has an unknown key 'Tester' - keys: developer, tester, reviewer"),
     ("key-rule-Role", lambda c: c["model_tiers"]["rules"][2].__setitem__("Role", c["model_tiers"]["rules"][2].pop("role")),
      "model_tiers rule 'retest-small-diff' has an unknown key 'Role'"),
-    ("rule-tier-softhyphen", lambda c: c["model_tiers"]["rules"][1].update(tier="sm­all"),
-     "model_tiers rule 'doc-only' names unknown tier 'sm­all'"),
-    ("rule-role-softhyphen", lambda c: c["model_tiers"]["rules"][2].update(role="test­er"),
-     "model_tiers rule 'retest-small-diff' names unknown role 'test­er'"),
-    ("default-tier-softhyphen", lambda c: c["model_tiers"].update(default_tier="large­"),
-     "model_tiers.default_tier 'large­' is not one of the tiers: large, small"),
+    ("rule-tier-softhyphen", lambda c: c["model_tiers"]["rules"][1].update(tier="sm\u00adall"),
+     "model_tiers rule 'doc-only' names unknown tier 'sm\u00adall'"),
+    ("rule-role-softhyphen", lambda c: c["model_tiers"]["rules"][2].update(role="test\u00ader"),
+     "model_tiers rule 'retest-small-diff' names unknown role 'test\u00ader'"),
+    ("default-tier-softhyphen", lambda c: c["model_tiers"].update(default_tier="large\u00ad"),
+     "model_tiers.default_tier 'large\u00ad' is not one of the tiers: large, small"),
+    ("tiers-entry-newline", lambda c: c["model_tiers"].update(tiers=["large", "small\n"]),
+     "model_tiers.tiers entry 'small\n' is not a name"),
     ("tiers-entry-nul", lambda c: c["model_tiers"].update(tiers=["large", "small\u0000"]),
      "model_tiers.tiers entry 'small\u0000' is not a name"),
     ("min-attempt-bigint", lambda c: c["model_tiers"]["rules"][2].update(min_attempt=99999999999999999999),

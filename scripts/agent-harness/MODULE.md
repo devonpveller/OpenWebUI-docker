@@ -224,9 +224,8 @@ broken block prints `MODEL (advisory): unavailable - <why>` and the command carr
   subagents (`opus` large, `sonnet` small), `local` is agent-org's model roles
   (`local-large` / `local-small`). `haiku` is `cloud.trivial` - lookups and evidence copying
   only, never a pipeline role.
-- **The whole block is validated before any rule is evaluated** (`Get-ModelTiersProblems`
-  / `model_tiers_problems`). These are refused rather than ignored, rounded or trimmed, even
-  when an earlier rule would have matched first:
+- **The whole block is validated before any rule is evaluated** (`Get-ModelTiersProblems`). These are refused rather than ignored, rounded or trimmed,
+  even when an earlier rule would have matched first:
   - a key at ANY level that is not exactly a canonical spelling (`_`-prefixed notes
     excepted): `Cloud`, `Rules`, `Roles`, a role-map tier `Large`, a role `Tester`, a rule
     key `Role` or `max_attemp`;
