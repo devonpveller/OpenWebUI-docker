@@ -20,6 +20,7 @@ from app.models import Event, Profile
 from app.modules.model_router import FakeModelClient
 from app.orchestrator import Orchestrator
 from app.worker.harness import FakeHarness
+from app.modules.profiles import ConcurrentProfileChange, ProfileRegistry
 from test_profile_model_intent import ROOT, _CommitBarrier
 
 
@@ -31,6 +32,38 @@ async def _app(db_url):
     orch = Orchestrator(settings, Database(db_url), FakeChatAdapter(),
                         model_client=FakeModelClient(), harness=FakeHarness())
     return orch, create_app(orch)
+
+
+class _HookDb:
+    """Wraps a Database so the FIRST profile commit first awaits `hook()` (a competing write)."""
+
+    def __init__(self, db, hook):
+        self._db, self._hook, self._done = db, hook, False
+
+    def __getattr__(self, k):
+        return getattr(self._db, k)
+
+    def session_factory(self):
+        cm, outer = self._db.session_factory(), self
+
+        class _Cm:
+            async def __aenter__(inner):
+                sess = await cm.__aenter__()
+                real = sess.commit
+
+                async def commit():
+                    if not outer._done:
+                        outer._done = True
+                        await outer._hook()
+                    return await real()
+
+                sess.commit = commit
+                return sess
+
+            async def __aexit__(inner, *a):
+                return await cm.__aexit__(*a)
+
+        return _Cm()
 
 
 def _client(app):
@@ -157,15 +190,70 @@ async def test_a_lane_flip_losing_to_set_model_is_409_the_model_write_stands(db_
 
 
 async def test_set_model_losing_to_a_lane_flip_is_still_a_clean_conflict(db_url):
+    """Deterministic (same at base and tip): a lane flip commits while set_model is between its
+    read and its commit, so set_model - not the lane side - is the loser."""
     orch, app = await _app(db_url)
     async with app.router.lifespan_context(app):
-        orch.profiles.db = _CommitBarrier(orch.profiles.db)
-        async with _client(app) as c:
-            lane_res, model_res = await asyncio.gather(
-                c.post("/profiles/lane", json={"name": "pm", "lane": "cloud"}),
-                orch.profiles.set_model("pm", "local-small", registered={"local-small"}),
-                return_exceptions=True)
-        assert not isinstance(lane_res, BaseException) and lane_res.status_code in (200, 409)
+        real_db = orch.profiles.db
+        other = ProfileRegistry(real_db, str(orch.profiles.dir))
+        orch.profiles.db = _HookDb(real_db, lambda: other.set_lane("pm", "cloud"))
+        try:
+            await orch.profiles.set_model("pm", "local-small", registered={"local-small"})
+            raise AssertionError("set_model should have lost")
+        except ConcurrentProfileChange:
+            pass
+        orch.profiles.db = real_db
         rows = await _rows(orch, "pm")
-        assert [x.version for x in rows] == [1, 2]
+        assert [(x.version, x.active, x.lane) for x in rows] == [(1, False, "local"), (2, True, "cloud")]
+        await orch.profiles.refresh()
         _assert_one_active_and_cache_matches(orch, rows, "pm")
+    await orch.db.dispose()
+
+
+async def test_loser_refreshes_cache_when_the_winner_is_another_registry(db_url):
+    """Cross-process winner: only the loser's own refresh can bring its cache in line with the DB."""
+    orch, app = await _app(db_url)
+    async with app.router.lifespan_context(app):
+        real_db = orch.profiles.db
+        other = ProfileRegistry(real_db, str(orch.profiles.dir))
+        orch.profiles.db = _HookDb(
+            real_db, lambda: other.set_model("pm", "local-small", registered={"local-small"}))
+        async with _client(app) as c:
+            r = await c.post("/profiles/lane", json={"name": "pm", "lane": "cloud"})
+        orch.profiles.db = real_db
+        assert r.status_code == 409
+        rows = await _rows(orch, "pm")
+        _assert_one_active_and_cache_matches(orch, rows, "pm")
+        assert orch.profiles.get("pm").model == "local-small"
+    await orch.db.dispose()
+
+
+async def test_direct_set_lane_with_a_bad_lane_raises_valueerror_and_writes_nothing(db_url):
+    orch, app = await _app(db_url)
+    async with app.router.lifespan_context(app):
+        for bad in ("moon", "", "Cloud"):
+            try:
+                await orch.profiles.set_lane("pm", bad)
+                raise AssertionError("no ValueError")
+            except ValueError:
+                pass
+        assert [x.version for x in await _rows(orch, "pm")] == [1]
+    await orch.db.dispose()
+
+
+async def test_a_keyerror_after_the_commit_is_not_a_404(db_url):
+    """The write succeeded (v2 exists); a KeyError from the later refresh must not read as 'unknown
+    profile'. Only UnknownProfile maps to 404."""
+    orch, app = await _app(db_url)
+    async with app.router.lifespan_context(app):
+        async def boom():
+            raise KeyError("stray")
+
+        orch.profiles.refresh = boom
+        async with _client(app) as c:
+            r = await c.post("/profiles/lane", json={"name": "pm", "lane": "cloud"})
+        assert r.status_code != 404
+        rows = await _rows(orch, "pm")
+        assert [(x.version, x.active, x.lane) for x in rows] == [(1, False, "local"), (2, True, "cloud")]
+        assert not await _refused(orch)
+    await orch.db.dispose()
