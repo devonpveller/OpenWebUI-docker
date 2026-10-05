@@ -563,6 +563,24 @@ class LittleCoderDaemon:
                 upstream_ok = await self._bake_upstream(req, requested)
                 out["upstream"] = req.upstream
                 out["upstream_ok"] = upstream_ok
+            elif req.upstream and req.upstream_token:
+                # The remote survived but its credential may not: the credential store lives in the
+                # executor's HOME (emptied by a recreate or the credential scrub) while the remote
+                # lives in the workspace volume. Re-store upstream's OWN entry (never origin's, no
+                # token in the remote URL, remote not re-added). Without an upstream_token an
+                # existing entry is simply left alone (ef-lc-upstream).
+                res = await asyncio.to_thread(
+                    self.workspace.refresh_upstream_auth, req.upstream, req.upstream_token
+                )
+                out["upstream"] = req.upstream
+                out["upstream_reauthed"] = bool(res.ok)
+                self.audit.write(
+                    "project_upstream_reauthed",
+                    actor=req.actor,
+                    repo=requested.canonical_url,
+                    upstream=req.upstream,
+                    ok=bool(res.ok),
+                )
             return out
         if decision.action is SwitchAction.REJECT:
             raise HTTPException(409, decision.reason)

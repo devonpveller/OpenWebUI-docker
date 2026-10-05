@@ -336,6 +336,21 @@ class WorkspaceManager:
         return self.ot.execute(cmd, cwd=self.workspace_path,
                                env=self._token_env(deploy_token), timeout=60)
 
+    def refresh_upstream_auth(self, upstream_url: str, token: str | None) -> ExecResult:
+        """Re-store the credential of a fork's PRIVATE `upstream` WITHOUT touching the remote
+        (ef-lc-upstream). The store lives in the executor's HOME, which a recreate (or the landing
+        scrub) empties, while the `upstream` remote lives in the workspace volume and survives - so
+        a NOOP re-focus finds the remote present yet unauthenticated. This stores `token` under the
+        upstream URL's own entry (`credential.useHttpPath` keys on the path, so origin's entry is
+        never replaced) and nothing else: no `remote add`/`set-url`, the remote URL stays token-free.
+        Without a token it is a no-op that cannot erase an entry stored earlier."""
+        if not token:
+            return ExecResult("(no upstream token)", 0, "", "", "done", "local")
+        g = shlex.quote(self.real_git)
+        cmd = f"{_cred_config(g)} && {_cred_store(g, shlex.quote(upstream_url))}"
+        return self.ot.execute(cmd, cwd=self.workspace_path, env=self._token_env(token),
+                               timeout=60)
+
     def add_upstream_remote(
         self, upstream_url: str, token: str | None = None
     ) -> ExecResult:
