@@ -14,3 +14,4 @@
 
 . (Join-Path $PSScriptRoot "config.ps1")
 . (Join-Path $PSScriptRoot "resolve.ps1")
+. (Join-Path $PSScriptRoot "lock.ps1")
