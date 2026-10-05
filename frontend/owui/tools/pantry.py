@@ -114,6 +114,54 @@ def _coerce(value: Any) -> Any:
     return value
 
 
+class InvalidRow(Exception):
+    """A string element of a row-list parameter that is not one JSON object."""
+
+    def __init__(self, param: str, index: int, value: Any):
+        super().__init__(f"{param}[{index}]")
+        self.param = param
+        self.index = index
+        self.value = value
+
+    def result(self) -> dict:
+        shown = self.value if isinstance(self.value, str) else _compact(self.value)
+        if len(shown) > 200:
+            shown = shown[:200] + "..."
+        return {
+            "ok": False,
+            "error": "invalid_row",
+            "nothing_sent": True,
+            "detail": f"{self.param}[{self.index}] is not a JSON object: {shown!r}",
+            "instruction": (
+                "Nothing was sent. Every row must be an object like {\"name\": ..., ...}. "
+                "Rebuild that row from what the user said (ask if unclear) and call again; do not guess."
+            ),
+        }
+
+
+def _rows(value: Any, param: str) -> Any:
+    """A list-of-objects argument. Accepts the whole list as a JSON string, and string
+    ELEMENTS that each hold one JSON object (local models send those). An element that
+    is not an object raises InvalidRow - nothing is guessed and nothing is sent."""
+    value = _coerce(value)
+    if not isinstance(value, list):
+        return value
+    out = []
+    for i, el in enumerate(value):
+        if isinstance(el, str):
+            try:
+                parsed = json.loads(el.strip())
+            except ValueError:
+                raise InvalidRow(param, i, el)
+            if not isinstance(parsed, dict):
+                raise InvalidRow(param, i, el)
+            el = parsed
+        elif not isinstance(el, dict):
+            raise InvalidRow(param, i, el)
+        out.append(el)
+    return out
+
+
 def _clean(d: dict) -> dict:
     return {k: v for k, v in d.items() if v is not None}
 
@@ -306,7 +354,7 @@ class Tools:
 
     async def update_pantry(
         self,
-        items: list,
+        items: list[dict],
         reason: str = "manual",
         __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
     ) -> str:
@@ -318,10 +366,14 @@ class Tools:
         :param reason: "manual" for stock entry, "correct" to fix a wrong number.
         :return: JSON with applied, created, unmatched and unconvertible lines.
         """
+        try:
+            rows = _rows(items, "items")
+        except InvalidRow as e:
+            return _compact(e.result())
         return await self._do(
             "POST",
             "/pantry/adjust",
-            {"reason": reason, "items": _coerce(items)},
+            {"reason": reason, "items": rows},
             emitter=__event_emitter__,
             status="Updating pantry",
         )
@@ -356,6 +408,10 @@ class Tools:
 
     async def _save_recipe(self, source: str, rotation, **kw) -> str:
         emitter = kw.pop("emitter", None)
+        try:
+            ingredients = _rows(kw.get("ingredients"), "ingredients")
+        except InvalidRow as e:
+            return _compact(e.result())
         body = _clean(
             {
                 "id": kw.get("recipe_id"),
@@ -363,7 +419,7 @@ class Tools:
                 "theme": kw.get("theme"),
                 "cuisine": kw.get("cuisine"),
                 "servings": kw.get("servings"),
-                "ingredients": _coerce(kw.get("ingredients")),
+                "ingredients": ingredients,
                 "instructions": _coerce(kw.get("instructions")),
                 "tags": _coerce(kw.get("tags")),
                 "source": source,
@@ -379,7 +435,7 @@ class Tools:
         self,
         name: str,
         servings: float,
-        ingredients: list,
+        ingredients: list[dict],
         instructions: list,
         theme: Optional[str] = None,
         cuisine: Optional[str] = None,
@@ -418,7 +474,7 @@ class Tools:
         self,
         name: str,
         servings: float,
-        ingredients: list,
+        ingredients: list[dict],
         instructions: list,
         rotation: bool = False,
         cuisine: Optional[str] = None,
@@ -518,7 +574,7 @@ class Tools:
     async def correct_cook(
         self,
         cook_event_id: str,
-        adjustments: Optional[list] = None,
+        adjustments: Optional[list[dict]] = None,
         undo: bool = False,
         __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
     ) -> str:
@@ -530,7 +586,11 @@ class Tools:
         :param undo: True to reverse the whole cook exactly.
         :return: JSON with the corrected deductions.
         """
-        body = {"undo": True} if undo else {"adjustments": _coerce(adjustments) or []}
+        try:
+            rows = None if undo else _rows(adjustments, "adjustments")
+        except InvalidRow as e:
+            return _compact(e.result())
+        body = {"undo": True} if undo else {"adjustments": rows or []}
         return await self._do(
             "POST", f"/cook/{cook_event_id}/correct", body,
             emitter=__event_emitter__, status="Correcting cook",
@@ -637,8 +697,8 @@ class Tools:
         list_id: str,
         bought: Any = "all",
         except_items: Optional[list] = None,
-        substitutions: Optional[list] = None,
-        actual: Optional[list] = None,
+        substitutions: Optional[list[dict]] = None,
+        actual: Optional[list[dict]] = None,
         __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
     ) -> str:
         """
@@ -651,6 +711,11 @@ class Tools:
         :param actual: List of {name or id, quantity, unit} when the pack size differs from the list.
         :return: JSON with restocked, carried_over and affected_plans.
         """
+        try:
+            subs = _rows(substitutions, "substitutions")
+            act = _rows(actual, "actual")
+        except InvalidRow as e:
+            return _compact(e.result())
         return await self._do(
             "POST",
             "/restock",
@@ -659,8 +724,8 @@ class Tools:
                     "list_id": list_id,
                     "bought": _coerce(bought),
                     "except": _coerce(except_items),
-                    "substitutions": _coerce(substitutions),
-                    "actual": _coerce(actual),
+                    "substitutions": subs,
+                    "actual": act,
                 }
             ),
             emitter=__event_emitter__,
@@ -679,7 +744,7 @@ class Tools:
         change: Optional[str] = None,
         curiosity_q: Optional[str] = None,
         curiosity_a: Optional[str] = None,
-        exposures: Optional[list] = None,
+        exposures: Optional[list[dict]] = None,
         __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
     ) -> str:
         """
@@ -696,6 +761,10 @@ class Tools:
         :param exposures: List of {person_id, subject, reaction ("refused"/"tolerated"/"liked")} - used for the child.
         :return: JSON with the evaluation and exposures.
         """
+        try:
+            expo = _rows(exposures, "exposures")
+        except InvalidRow as e:
+            return _compact(e.result())
         return await self._do(
             "POST",
             "/evaluations",
@@ -709,7 +778,7 @@ class Tools:
                     "change": change,
                     "curiosity_q": curiosity_q,
                     "curiosity_a": curiosity_a,
-                    "exposures": _coerce(exposures),
+                    "exposures": expo,
                 }
             ),
             emitter=__event_emitter__,
@@ -718,7 +787,7 @@ class Tools:
 
     async def propose_preferences(
         self,
-        statements: list,
+        statements: list[dict],
         __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
     ) -> str:
         """
@@ -727,8 +796,12 @@ class Tools:
         :param statements: List of {statement, strength ("hard"/"contextual"/"soft"), subject, context, reason, scope ("recipe"/"theme"/"always"), who ("adult"/"child"/"all"), evidence}.
         :return: JSON with the proposed rows and their ids.
         """
+        try:
+            rows = _rows(statements, "statements")
+        except InvalidRow as e:
+            return _compact(e.result())
         return await self._do(
-            "POST", "/preferences", {"statements": _coerce(statements)},
+            "POST", "/preferences", {"statements": rows},
             emitter=__event_emitter__, status="Proposing preferences",
         )
 
