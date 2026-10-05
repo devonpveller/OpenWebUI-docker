@@ -225,7 +225,8 @@ def test_noop_refocus_with_upstream_token_restores_a_scrubbed_upstream_credentia
     # no token anywhere it must not be: remote URLs, the audit journal, the response
     urls = _remote_urls(rig)
     assert UPSTREAM_TOK not in urls and ORIGIN_TOK not in urls and "x-access-token" not in urls
-    assert "DISABLED-fork-parent-is-fetch-only" in urls         # the remote was not re-added/unfenced
+    assert "DISABLED-fork-parent-is-fetch-only" in urls         # the fence is intact (NOT proof the remote
+    # was left alone: re-adding re-fences too; test_reauth_runs_no_remote_command_... pins that)
     blob = "\n".join(d.audit.lines) + json.dumps(out)
     assert not any(t in blob for t in TOKENS)
     assert any("project_upstream_reauthed" in ln for ln in d.audit.lines)
@@ -258,3 +259,139 @@ def test_noop_with_a_rotated_upstream_token_replaces_only_the_upstream_entry(rig
         assert rotated not in _remote_urls(rig)
     finally:
         ACCEPTED["parent/"] = UPSTREAM_TOK
+
+
+# --- ef-lc-upstream attempt 2: F1 (store under the remote's own URL) and the pinned probes -------
+
+class RecOT(LocalOT):
+    """Records every command, stdout and stderr the executor sees."""
+
+    def __init__(self, inner):
+        super().__init__(inner.base_env)
+        self.seen = []
+
+    def execute(self, command, cwd=None, env=None, timeout=None):
+        r = super().execute(command, cwd=cwd, env=env, timeout=timeout)
+        self.seen.append(command + "\n" + r.stdout + "\n" + r.stderr)
+        return r
+
+
+def _entries(rig):
+    return [ln for ln in (rig.home / ".lc-git-credentials").read_text().splitlines() if ln.strip()]
+
+
+def _refocus_url(d, up, **kw):
+    return asyncio.run(d.switch_project(ProjectRequest(repo=GITHUB_WIDGET, upstream=up, **kw)))
+
+
+def test_f1_a_request_url_that_differs_from_the_remote_stores_under_the_remotes_url(rig):
+    """F1: the caller names parent/other while the remote is parent/widget. The credential must be
+    stored for the URL the remote HAS, so `upstream_reauthed` is true only when fetch really works;
+    the remote is not re-pointed and the mismatch is reported."""
+    d, wm, ot = _focused_fork(rig)
+    _recreate(rig)
+    remote_before = _remote_urls(rig)
+    out = _refocus_url(d, rig.base + "/parent/other", token=ORIGIN_TOK, upstream_token=UPSTREAM_TOK)
+    assert _fetch_upstream(ot, rig).ok                          # base of F1: reported true, fetch failed
+    assert out["upstream_reauthed"] is True
+    assert out["upstream_mismatch"] is True
+    assert _remote_urls(rig) == remote_before                   # the remote was not changed
+    assert any(ln.endswith("/parent/widget") for ln in _entries(rig))
+    assert not any("/parent/other" in ln for ln in _entries(rig))
+    blob = "\n".join(d.audit.lines) + json.dumps(out)
+    assert not any(t in blob for t in TOKENS)
+
+
+def test_f1_a_dot_git_variant_is_the_same_repo_and_not_a_mismatch(rig):
+    d, wm, ot = _focused_fork(rig)
+    _recreate(rig)
+    out = _refocus_url(d, rig.upstream + ".git", token=ORIGIN_TOK, upstream_token=UPSTREAM_TOK)
+    assert _fetch_upstream(ot, rig).ok
+    assert out["upstream_reauthed"] is True and "upstream_mismatch" not in out
+
+
+def test_f1_a_legacy_remote_url_with_userinfo_never_reaches_the_store_or_output(rig):
+    d, wm, ot = _focused_fork(rig)
+    _recreate(rig)
+    legacy = rig.upstream.replace("http://", f"http://x-access-token:{UPSTREAM_TOK}@", 1)
+    _git("remote", "set-url", "upstream", legacy, cwd=rig.ws, env=rig.env)
+    out = _refocus(d, rig, token=ORIGIN_TOK, upstream_token=UPSTREAM_TOK)
+    assert out["upstream_reauthed"] is True
+    mine = [ln for ln in _entries(rig) if ln.endswith("/parent/widget")]
+    assert len(mine) == 1 and mine[0].count("@") == 1           # one clean entry, no doubled userinfo
+    assert not any(t in "\n".join(d.audit.lines) + json.dumps(out) for t in TOKENS)
+
+
+def test_reauth_with_no_remote_is_not_ok(rig):
+    """ok means stored for a real remote's URL; with no remote the NOOP bakes (A8), and the helper
+    itself reports failure rather than storing under the request's URL."""
+    d, wm, ot = _focused_fork(rig)
+    _git("remote", "remove", "upstream", cwd=rig.ws, env=rig.env)
+    _recreate(rig)
+    assert wm.refresh_upstream_auth(UPSTREAM_TOK, rig.upstream).ok is False
+    assert not (rig.home / ".lc-git-credentials").exists() or not _entries(rig)
+
+
+def test_the_helper_is_a_noop_without_a_token(rig):
+    d, wm, ot = _focused_fork(rig)
+    before = _entries(rig)
+    assert wm.refresh_upstream_auth(None, rig.upstream).ok
+    assert wm.refresh_upstream_auth("", rig.upstream).ok
+    assert _entries(rig) == before
+
+
+def test_noop_with_upstream_token_but_no_origin_token_still_configures_the_helper(rig, monkeypatch):
+    """M9: the helper config must come from the upstream re-store itself, not only origin's."""
+    d, wm, ot = _focused_fork(rig)
+    monkeypatch.delenv("LC_DEPLOY_TOKEN", raising=False)
+    _recreate(rig)
+    out = _refocus(d, rig, upstream_token=UPSTREAM_TOK)
+    assert "origin_reauthed" not in out
+    assert out["upstream_reauthed"] is True
+    assert _fetch_upstream(ot, rig).ok
+    assert len(_entries(rig)) == 1
+
+
+def test_upstream_token_without_upstream_is_ignored(rig):
+    """F2 (out of scope, pinned as current behaviour): no `upstream` in the request -> no reauth, and
+    nothing is invented. The bridge only sends upstream_token together with upstream."""
+    d, wm, ot = _focused_fork(rig)
+    _recreate(rig)
+    out = asyncio.run(d.switch_project(ProjectRequest(repo=GITHUB_WIDGET, token=ORIGIN_TOK,
+                                                      upstream_token=UPSTREAM_TOK)))
+    assert "upstream_reauthed" not in out and "upstream" not in out
+    assert not any("project_upstream_reauthed" in ln for ln in d.audit.lines)
+
+
+def test_a_failed_store_is_reported_false_in_response_and_journal(rig):
+    """M4/M7: the flag and the journal's ok must come from the real result."""
+    d, wm, ot = _focused_fork(rig)
+    _recreate(rig)
+    (rig.home / ".lc-git-credentials").mkdir()                  # credential-store cannot write here
+    out = _refocus(d, rig, upstream_token=UPSTREAM_TOK)
+    assert out["upstream_reauthed"] is False and "upstream_mismatch" not in out
+    assert any('"ok": false' in ln and "project_upstream_reauthed" in ln for ln in d.audit.lines)
+
+
+def test_reauth_runs_no_remote_command_and_reports_the_upstream(rig):
+    """M5/M12: the response names the upstream; the NOOP never adds or re-points a remote."""
+    d, wm, ot = _focused_fork(rig)
+    rec = RecOT(ot)
+    wm.ot = rec
+    _recreate(rig)
+    out = _refocus(d, rig, upstream_token=UPSTREAM_TOK)
+    assert out["upstream"] == rig.upstream
+    cmds = [c.split("\n", 1)[0] for c in rec.seen]
+    assert cmds and not any(
+        " remote add" in c or "remote set-url" in c for c in cmds), "a remote was changed"
+
+
+def test_noop_with_a_missing_remote_still_bakes_only(rig):
+    """M13: the missing-remote path is unchanged (bake), and no reauth is reported on top of it."""
+    d, wm, ot = _focused_fork(rig)
+    _git("remote", "remove", "upstream", cwd=rig.ws, env=rig.env)
+    _recreate(rig)
+    out = _refocus(d, rig, token=ORIGIN_TOK, upstream_token=UPSTREAM_TOK)
+    assert out["upstream_ok"] is True and "upstream_reauthed" not in out
+    assert _fetch_upstream(ot, rig).ok
+    assert not any("project_upstream_reauthed" in ln for ln in d.audit.lines)
