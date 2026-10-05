@@ -412,6 +412,19 @@ class ToolSchema(unittest.TestCase):
                     ann = typing.get_type_hints(getattr(pantry.Tools, fn))[param]
                     check(_strip_optional(ann), f"{fn}.{param}")
 
+    def test_restock_descriptions(self):
+        """The model reads these; checked in the real get_tool_specs output when available."""
+        if _owui_get_tool_specs is not None:
+            specs = {s["name"]: s["parameters"]["properties"] for s in _owui_get_tool_specs(pantry.Tools())}
+            ex = specs["restock"]["except_items"]["description"]
+            bo = specs["restock"]["bought"]["description"]
+        else:
+            ex = bo = pantry.Tools.restock.__doc__
+        self.assertNotIn('bought="all"', ex)
+        self.assertIn("omit bought", ex.lower())
+        self.assertIn("empty list", bo.lower())
+        self.assertIn("nothing was bought", bo.lower())
+
     def test_which_path_ran(self):
         if os.environ.get("PANTRY_REQUIRE_OWUI"):  # container run: no silent fallback
             self.assertIsNotNone(_owui_get_tool_specs, "PANTRY_REQUIRE_OWUI set but get_tool_specs did not import")
@@ -545,6 +558,32 @@ class StringElementRows(Base):
             self.assertEqual(out["error"], "invalid", repr(bad))
             self.assertIn("bought", out["detail"])
         self.assertEqual(len(self.svc.requests), n)
+
+    def test_restock_polish_normalisation(self):
+        for given, want in [(["all"], "all"), ([" ALL "], "all"), ([" milk "], ["milk"]),
+                            ([" milk ", "eggs"], ["milk", "eggs"]), ([], [])]:
+            run(self.tool.restock("L1", bought=given))
+            self.assertEqual(self.last()["body"]["bought"], want, repr(given))
+        run(self.tool.restock("L1", except_items=[" leeks "]))
+        self.assertEqual(self.last()["body"]["except"], ["leeks"])
+        run(self.tool.restock("L1", except_items='[" leeks ", "kale"]'))
+        self.assertEqual(self.last()["body"]["except"], ["leeks", "kale"])
+
+    def test_restock_polish_blank_elements_refused(self):
+        n = len(self.svc.requests)
+        for kw in ({"bought": ["milk", ""]}, {"bought": ["  "]}, {"except_items": [""]},
+                   {"except_items": ["leeks", "   "]}):
+            out = json.loads(run(self.tool.restock("L1", **kw)))
+            self.assertFalse(out["ok"], repr(kw))
+            self.assertEqual(out["error"], "invalid", repr(kw))
+            self.assertTrue(out["nothing_sent"], repr(kw))
+        self.assertEqual(len(self.svc.requests), n)
+
+    def test_restock_docstrings(self):
+        doc = pantry.Tools.restock.__doc__
+        self.assertNotIn('bought="all"', doc)
+        self.assertIn("empty list", doc.lower())
+        self.assertIn("nothing was bought", doc.lower())
 
     def test_string_lists_untouched(self):
         run(self.tool.save_recipe(name="r", servings=2, ingredients=[{"name": "x"}], instructions=["a", "b"], tags=["t"]))

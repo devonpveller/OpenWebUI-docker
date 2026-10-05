@@ -705,8 +705,8 @@ class Tools:
         Record what was ACTUALLY bought for a shopping list. Unbought items carry over. The result lists planned meals whose shortfalls changed; propose a revision for each.
 
         :param list_id: The shopping list id.
-        :param bought: Item names/ids that were bought. Omit it when EVERYTHING on the list was bought (the same as "all").
-        :param except_items: Names/ids NOT bought (use with bought="all").
+        :param bought: Item names/ids that were bought. Omit it (or pass null) when EVERYTHING on the list was bought. A list of just "all" also means everything. An empty list [] means nothing was bought.
+        :param except_items: Names/ids of list items NOT bought, when everything else was bought: omit bought (or pass null) and list only the exceptions here.
         :param substitutions: List of {for, name, quantity, unit} for swapped items.
         :param actual: List of {name or id, quantity, unit} when the pack size differs from the list.
         :return: JSON with restocked, carried_over and affected_plans.
@@ -714,12 +714,25 @@ class Tools:
         b = _coerce(bought)
         if b is None or (isinstance(b, str) and b.strip().lower() == "all"):
             b = "all"
-        elif not (isinstance(b, list) and all(isinstance(x, str) for x in b)):
+        elif isinstance(b, list) and all(isinstance(x, str) and x.strip() for x in b):
+            b = [x.strip() for x in b]
+            if len(b) == 1 and b[0].lower() == "all":
+                b = "all"
+        else:
             return _compact(
                 {"ok": False, "error": "invalid", "nothing_sent": True,
-                 "detail": f"bought must be omitted (everything) or a list of item names/ids, got {_compact(bought)}",
+                 "detail": f"bought must be omitted (everything) or a list of non-empty item names/ids, got {_compact(bought)}",
                  "instruction": "Nothing was sent. Pass bought as a list of names, or omit it if everything was bought."}
             )
+        exc = _coerce(except_items)
+        if isinstance(exc, list):
+            if not all(not isinstance(x, str) or x.strip() for x in exc):
+                return _compact(
+                    {"ok": False, "error": "invalid", "nothing_sent": True,
+                     "detail": f"except_items must not contain empty names, got {_compact(except_items)}",
+                     "instruction": "Nothing was sent. Pass except_items as a list of item names/ids, or omit it."}
+                )
+            exc = [x.strip() if isinstance(x, str) else x for x in exc]
         try:
             subs = _rows(substitutions, "substitutions")
             act = _rows(actual, "actual")
@@ -732,7 +745,7 @@ class Tools:
                 {
                     "list_id": list_id,
                     "bought": b,
-                    "except": _coerce(except_items),
+                    "except": exc,
                     "substitutions": subs,
                     "actual": act,
                 }
