@@ -364,7 +364,12 @@ class AgentRunner:
         # --no-approve: pi treats the workspace as an UNTRUSTED project - its ./.pi settings
         # (packages, npmCommand), skills, prompts and SYSTEM.md are ignored. Always passed;
         # any trust flag in extra_args was dropped above (the daemon owns this policy).
-        cmd = [*a.command, "--model", a.model, *filtered_extra, "--no-approve"]
+        # Per-task model (ef-worker-model): resolved and allowlisted at enqueue; agent.model when the
+        # task named none. Re-checked here so no path can put a flag after `--model`.
+        model = getattr(ctx.state, "model", "") or a.model
+        if model.startswith("-"):
+            raise ValueError(f"refusing a model that reads as a flag: {model[:80]!r}")
+        cmd = [*a.command, "--model", model, *filtered_extra, "--no-approve"]
         if plan_only:
             merged = ",".join(x for x in (exclude_tools, "edit,write") if x)
             cmd.extend(["--exclude-tools", merged])

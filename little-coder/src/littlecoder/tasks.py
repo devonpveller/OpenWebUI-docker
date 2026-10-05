@@ -56,6 +56,10 @@ class TaskState:
     # ("too many thinking turns / time iterating on read without editing anything") and kill it
     # with a FLAIL-GUARD answer marker so the bridge can fork a fresh session and re-plan.
     flail_guard: bool = False
+    # The `--model` value this task runs (ef-worker-model): the caller's allowed choice, resolved
+    # at enqueue, else agent.model. "" only for a TaskState built outside enqueue (the agent then
+    # uses agent.model). Per task: never written back to the config.
+    model: str = ""
     status: TaskStatus = TaskStatus.QUEUED
     outcome: Outcome | None = None
     signal: str | None = None
@@ -89,6 +93,7 @@ class TaskState:
             "prompt_preview": (self.prompt or "")[:120],
             "repo": self.repo,
             "lang": self.lang,
+            "model": self.model,
             "created_ts": self.created_ts,
             "started_ts": self.started_ts,
             "ended_ts": self.ended_ts,
@@ -128,7 +133,8 @@ class TaskContext:
 
     def started(self) -> TaskStarted:
         return TaskStarted(
-            **self._envelope(), trigger_digest=digest(self.state.prompt)
+            **self._envelope(), trigger_digest=digest(self.state.prompt),
+            model=self.state.model or None,
         )
 
     def tool_call(

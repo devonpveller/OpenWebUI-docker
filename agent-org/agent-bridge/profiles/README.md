@@ -74,10 +74,19 @@ nothing itself. If `AO_PROFILE_TIER_MODELS_LOCAL`/`_CLOUD` is malformed or leave
 model (e.g. `large=local-large`), the listing still answers 200 with `tier_drift: null` and a
 `tier_drift_error` naming the variable, and the bridge logs it.
 
-Known limit, stated rather than implied: the pooled little-coder WORKERS run the model in
-little-coder's own config (`little-coder/config/little-coder.config.yaml`, `agent.model`); their
-task API takes no model, so `worker-default`'s model is the org's recorded policy for that role
-and is not yet what a worker dispatch runs on.
+Workers run their profile's model (ef-worker-model). The pooled little-coder WORKERS are
+not called through `ModelRouter`. Every worker turn is a `POST /tasks` to a worker's daemon,
+and the bridge puts the dispatching profile's `model` in that body. Every worker dispatch and
+the project survey run under `worker-default`. little-coder runs that model for that one task.
+It must be a key of `agent.allowed_models` in `little-coder/config/little-coder.config.yaml`
+(exact match). Otherwise the daemon refuses the task with a 422. The bridge then posts
+"refused model" in the effort thread and audits `worker_model_refused`. Nothing runs, and the
+bridge never falls back to another model. `wake_done` audits the model each turn was sent.
+
+The model is sent only when the profile is on the `local` lane. A cloud-lane worker profile is
+out of scope: the bridge sends no model, so the worker runs little-coder's `agent.model` as
+before. A worker daemon older than this change ignores the key and also runs `agent.model`.
+There is no `AO_WORKER_MODEL` / `AO_JUDGE_MODEL`: nothing read them, so they were removed.
 
 The ai-stack harness's tier policy for CLAUDE CODE subagents (opus / sonnet / haiku) is a
 separate configuration - `scripts/agent-harness/harness.config.json` `model_tiers` - and is
@@ -87,7 +96,7 @@ deliberately not merged with this one.
 
 These files only SEED a profile the database does not have yet; after that the database
 owns the live values (so an operator's lane flip survives a restart). A new install seeds
-`local-large`, the model role (`inference/README.md`). An existing install moves a profile
+each profile's tier model role (`inference/README.md`). An existing install moves a profile
 by saying so, like every operator inlet (NL -> OperatorIntent -> a governed handler):
 `set profile <name> model <model>` in `#mgmt` or through `POST /nl` (`{"message": ...,
 "actor": "<who>"}`), with `(dry run)` on the end to only check. Only that exact command

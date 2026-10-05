@@ -93,6 +93,11 @@ class TriggerRequest(BaseModel):
     # with a FLAIL-GUARD answer marker when it trips (the bridge then re-plans from a fresh
     # session). Opt-in — the bridge sets it on coding step wakes only.
     flail_guard: bool = False
+    # PER-TASK MODEL (ef-worker-model): the model role this one task runs on (the agent-org bridge
+    # sends the dispatching profile's model). Must be `agent.model` or a key of
+    # `agent.allowed_models`, matched exactly; anything else is refused 422 and no task is created.
+    # Absent = `agent.model`, so callers that never send it (OWUI, the CLI) are unchanged.
+    model: str | None = None
 
 
 class CheckRequest(BaseModel):
@@ -438,6 +443,12 @@ class LittleCoderDaemon:
             raise HTTPException(409, "no project focused — run /project first")
         if not req.prompt.strip():
             raise HTTPException(422, "empty prompt")
+        # The model becomes an argv element of the agent process: refuse before anything is
+        # created or queued (exact allowlist; empty and '-'-prefixed names never match).
+        try:
+            model = self.cfg.agent.resolve_model(req.model)
+        except ValueError as exc:
+            raise HTTPException(422, f"model refused: {exc}") from exc
         state = TaskState(
             task_id=new_ulid(),
             session_id=req.session_id or new_ulid(),
@@ -448,6 +459,7 @@ class LittleCoderDaemon:
             acceptance_command=req.acceptance_command,
             plan_only=req.plan_only,
             flail_guard=req.flail_guard,
+            model=model,
         )
         self.tasks[state.task_id] = state
         self.contexts[state.task_id] = TaskContext(state)

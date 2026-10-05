@@ -990,7 +990,7 @@ class Orchestrator:
         )
         self.router = Router(
             db, settings, self.gate, self.scheduler, self.harness, chat, self.audit,
-            context_builder=self.charters.build_context,
+            context_builder=self.charters.build_context, profiles=self.profiles,
         )
         # Stage-1 anchor: a cached read-only repo survey feeds the readiness gate (P3.8) so it
         # reasons from the real codebase instead of guessing. Only surveys when a repo is focused.

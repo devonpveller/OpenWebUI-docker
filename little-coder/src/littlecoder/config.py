@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 CONFIG_SCHEMA_VERSION = 1
 
@@ -46,6 +47,11 @@ class InferenceConfig(_Strict):
     embedding_model: str = "local-embed"
 
 
+# A model id as the agent's `--model` takes it: starts with a letter or digit (so never a flag),
+# then letters, digits and . _ : / - only (no whitespace, no shell or control characters).
+_MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*")
+
+
 class AgentConfig(_Strict):
     """The upstream little-coder CLI invocation (design §3.1).
 
@@ -56,6 +62,13 @@ class AgentConfig(_Strict):
 
     command: list[str] = Field(default_factory=lambda: ["little-coder"])
     model: str = "llamacpp/local-large"
+    # Per-task model (ef-worker-model): the names a POST /tasks caller may send as `model`, each
+    # mapped to the exact `--model` value the agent gets for that task. Keys are the gateway's
+    # model ROLES (what an agent-org profile names, e.g. `local-small`); values are pi's
+    # provider-qualified ids, which models.json must register. Matching is EXACT (no prefix, no
+    # pattern). Empty = a caller may name only `model` itself, so an unconfigured daemon behaves
+    # as before. A task without `model` always runs `model`.
+    allowed_models: dict[str, str] = Field(default_factory=dict)
     prompt_mode: Literal["stdin", "arg"] = "stdin"
     extra_args: list[str] = Field(default_factory=list)
     # Session-per-trigger continuity (design §3.1 follow-up). Each
@@ -81,6 +94,39 @@ class AgentConfig(_Strict):
             "batch": "batch-default",
         }
     )
+
+    @field_validator("allowed_models")
+    @classmethod
+    def _allowed_models_are_safe(cls, v: dict[str, str]) -> dict[str, str]:
+        # Each value becomes one argv element after `--model`. A bad entry fails the boot rather
+        # than reaching a command line: no empty name, nothing that could read as a flag.
+        for name, target in v.items():
+            for what, s in (("name", name), ("model", target)):
+                if not _MODEL_ID_RE.fullmatch(s):
+                    raise ValueError(
+                        f"agent.allowed_models {what} {s!r} is not a model id "
+                        f"(letters, digits and . _ : / -; must not start with '-')"
+                    )
+        return v
+
+    def resolve_model(self, requested: str | None) -> str:
+        """The `--model` value for a task that asked for `requested` (None = not asked: `model`).
+        Raises ValueError for an empty name, a name starting with '-', or a name that is neither
+        `model` nor a key of `allowed_models` (exact match only)."""
+        if requested is None:
+            return self.model
+        if not requested:
+            raise ValueError("model must not be empty")
+        if requested.startswith("-"):
+            raise ValueError("model must not start with '-'")
+        if requested in self.allowed_models:
+            return self.allowed_models[requested]
+        if requested == self.model:
+            return self.model
+        allowed = sorted({self.model, *self.allowed_models})
+        raise ValueError(
+            f"model {requested[:80]!r} is not allowed here (allowed: {', '.join(allowed)})"
+        )
 
 
 class WorkspaceConfig(_Strict):

@@ -79,6 +79,8 @@ class Error(Envelope):
 class TaskStarted(Envelope):
     event: Literal["task_started"] = "task_started"
     trigger_digest: str  # digest of the task prompt, not the raw prompt
+    # The `--model` the task ran (ef-worker-model). None in records written before the field.
+    model: str | None = None
 
 
 class TaskEnded(Envelope):
