@@ -114,7 +114,10 @@ try {
         Wait-All $procs
         $rows = Get-Rows
         $missing = @($ids | Where-Object { $rows -notcontains $_ })
-        if ($missing.Count) { $lost++; Write-Host ("  run {0}: LOST row(s) {1}" -f $r, ($missing -join ",")) -ForegroundColor Red }
+        if ($missing.Count) {
+            $lost++; Write-Host ("  run {0}: LOST row(s) {1}" -f $r, ($missing -join ",")) -ForegroundColor Red
+            foreach ($pp in $procs) { Write-Host ("    child exit={0} err/out tail: {1}" -f $pp.ExitCode, ((($pp.Err.Result + " " + $pp.Out.Result).Trim()) -replace "\s+", " ")) -ForegroundColor DarkRed }
+        }
         foreach ($i in $ids) { Remove-ScratchWorktree $i }
     }
     Write-Host ("[provision x{0} race] runs={1} runs_with_lost_row={2}" -f $Concurrency, $Runs, $lost)
