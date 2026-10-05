@@ -12,7 +12,7 @@ Full run with openpyxl, in a throwaway container (the production OWUI image alre
 openpyxl + pydantic), no network, labelled:
 
     docker run --rm --network none --label ai-stack.harness.owner=<id> \
-      -v "<repo>/frontend/owui:/o:ro" -e PYTHONDONTWRITEBYTECODE=1 \
+      -v "<repo>/frontend/owui:/o:ro" -e PYTHONDONTWRITEBYTECODE=1 -e PANTRY_REQUIRE_OWUI=1 \
       --entrypoint python openwebui:local -m unittest discover -s /o/tools/tests -v
 """
 
@@ -324,6 +324,233 @@ class Functions(Base):
         r = self.last()
         self.assertEqual((r["method"], r["path"]), ("POST", "/audit/commit"))
         self.assertEqual(r["body"], {"preview_id": "pv1", "missing": {"i9": "zero"}, "exclude": ["i1"]})
+
+
+# Row-carrying parameters: what the model must send as real objects. OWUI 0.11 renders a
+# bare `list` as {"type":"array","items":{"type":"string"}}, so the model sends each row
+# as a STRING (2026-10-04 live failure: update_pantry -> items[0] must be an object).
+OBJECT_ARRAYS = {
+    ("update_pantry", "items"),
+    ("save_recipe", "ingredients"),
+    ("save_household_recipe", "ingredients"),
+    ("correct_cook", "adjustments"),
+    ("restock", "substitutions"),
+    ("restock", "actual"),
+    ("record_evaluation", "exposures"),
+    ("propose_preferences", "statements"),
+}
+OBJECTS = {
+    ("get_guidance", "guest_context"),
+    ("save_recipe", "guest_context"),
+    ("cook", "guest_context"),
+    ("log_cooked_meal", "guest_context"),
+    ("plan_meal", "guest_context"),
+    ("confirm_preferences", "edits"),
+    ("manage_household", "settings"),
+    ("confirm_import", "missing"),
+}
+STRING_ARRAYS = {
+    ("save_recipe", "instructions"),
+    ("save_recipe", "tags"),
+    ("save_household_recipe", "instructions"),
+    ("save_household_recipe", "tags"),
+    ("restock", "except_items"),
+    ("restock", "bought"),
+    ("confirm_preferences", "ids"),
+    ("confirm_preferences", "reject"),
+    ("manage_household", "allergies"),
+    ("confirm_import", "exclude"),
+}
+
+_owui_get_tool_specs = None
+if importlib.util.find_spec("open_webui") is not None:  # only inside the openwebui image
+    # Importing OWUI initialises its env/db: give it a throwaway secret and data dir.
+    if not os.environ.get("WEBUI_SECRET_KEY"):
+        os.environ["WEBUI_SECRET_KEY"] = "test-only-not-a-secret"
+    os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="owui-data-")
+    try:
+        from open_webui.utils.tools import get_tool_specs as _owui_get_tool_specs
+    except (Exception, SystemExit) as _e:  # pragma: no cover
+        print("open_webui present but not importable:", repr(_e))
+        _owui_get_tool_specs = None
+
+
+def _unwrap(prop):
+    """Drop the null branch of an Optional[...] schema."""
+    if isinstance(prop, dict) and "anyOf" in prop:
+        rest = [b for b in prop["anyOf"] if b.get("type") != "null"]
+        if len(rest) == 1:
+            return rest[0]
+    return prop
+
+
+def _strip_optional(ann):
+    import typing
+
+    args = typing.get_args(ann)
+    if type(None) in args:
+        return [a for a in args if a is not type(None)][0]
+    return ann
+
+
+class ToolSchema(unittest.TestCase):
+    """The parameter schema the model sees. Runs OWUI's real get_tool_specs when
+    open_webui is importable (container run); otherwise checks the annotations."""
+
+    def _check(self, kind_set, check):
+        import typing
+
+        if _owui_get_tool_specs is not None:
+            specs = _owui_get_tool_specs(pantry.Tools())
+            props = {s["name"]: s["parameters"].get("properties", {}) for s in specs}
+            for fn, param in sorted(kind_set):
+                with self.subTest(fn=fn, param=param, via="get_tool_specs"):
+                    check(_unwrap(props[fn][param]), f"{fn}.{param}")
+        else:
+            for fn, param in sorted(kind_set):
+                with self.subTest(fn=fn, param=param, via="annotations"):
+                    ann = typing.get_type_hints(getattr(pantry.Tools, fn))[param]
+                    check(_strip_optional(ann), f"{fn}.{param}")
+
+    def test_which_path_ran(self):
+        if os.environ.get("PANTRY_REQUIRE_OWUI"):  # container run: no silent fallback
+            self.assertIsNotNone(_owui_get_tool_specs, "PANTRY_REQUIRE_OWUI set but get_tool_specs did not import")
+        print("\n[ToolSchema] path:", "OWUI get_tool_specs" if _owui_get_tool_specs else "annotations only (no open_webui)")
+
+    def test_object_arrays(self):
+        import typing
+
+        def chk(x, name):
+            if isinstance(x, dict):
+                self.assertEqual(x.get("type"), "array", name)
+                self.assertEqual(x["items"].get("type"), "object", name)
+            else:
+                self.assertIs(typing.get_origin(x), list, name)
+                self.assertEqual(typing.get_args(x), (dict,), name)
+
+        self._check(OBJECT_ARRAYS, chk)
+
+    def test_objects(self):
+        def chk(x, name):
+            if isinstance(x, dict):
+                self.assertEqual(x.get("type"), "object", name)
+            else:
+                self.assertIs(x, dict, name)
+
+        self._check(OBJECTS, chk)
+
+    def test_string_arrays_stay_strings(self):
+        import typing
+
+        def chk(x, name):
+            if isinstance(x, dict):
+                self.assertEqual(x.get("type"), "array", name)
+                self.assertEqual(x["items"].get("type"), "string", name)
+            else:
+                self.assertIs(typing.get_origin(x) or x, list, name)
+                self.assertNotIn(dict, typing.get_args(x), name)
+
+        self._check(STRING_ARRAYS, chk)
+
+    def test_every_list_or_dict_param_is_classified(self):
+        """A new list/dict parameter must be added to one of the sets above."""
+        import inspect
+        import typing
+
+        known = OBJECT_ARRAYS | OBJECTS | STRING_ARRAYS
+        # not model-visible (OWUI-injected) or documented as a JSON string / union
+        skip = {("import_pantry", "mapping")}
+        for fn in pantry.Tools.__dict__:
+            if fn.startswith("_") or not inspect.iscoroutinefunction(getattr(pantry.Tools, fn)):
+                continue
+            for param, ann in typing.get_type_hints(getattr(pantry.Tools, fn)).items():
+                if param.startswith("__") or param == "return" or (fn, param) in skip:
+                    continue
+                base = _strip_optional(ann)
+                if (typing.get_origin(base) or base) in (list, dict):
+                    self.assertIn((fn, param), known, f"{fn}.{param} is a list/dict param not classified")
+
+
+class StringElementRows(Base):
+    """2026-10-04 live failure: the model sent each row as a JSON-object STRING."""
+
+    def test_update_pantry_json_object_strings_become_objects(self):
+        rows = ['{"name":"Flour","kind":"staple","level":"plenty","create":true}',
+                ' {"name":"Rice","delta":500,"unit":"g","create":true} ']
+        run(self.tool.update_pantry(items=rows))
+        body = self.last()["body"]
+        self.assertEqual(body["items"][0], {"name": "Flour", "kind": "staple", "level": "plenty", "create": True})
+        self.assertEqual(body["items"][1]["name"], "Rice")
+        self.assertTrue(all(isinstance(i, dict) for i in body["items"]))
+
+    def test_non_json_string_element_sends_nothing(self):
+        out = json.loads(run(self.tool.update_pantry(items=['{"name":"Flour"}', "Flour, 2 bags"])))
+        self.assertEqual(self.svc.requests, [])
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"], "invalid_row")
+        self.assertIn("items[1]", out["detail"])
+        self.assertIn("Flour, 2 bags", out["detail"])
+
+    def test_json_array_element_string_is_not_an_object(self):
+        out = json.loads(run(self.tool.update_pantry(items=["[1,2]"])))
+        self.assertEqual(self.svc.requests, [])
+        self.assertEqual(out["error"], "invalid_row")
+
+    def test_every_row_param_parses_string_elements(self):
+        row = '{"name":"x","quantity":1,"unit":"g"}'
+        run(self.tool.save_recipe(name="r", servings=2, ingredients=[row], instructions=["a"]))
+        self.assertEqual(self.last()["body"]["ingredients"], [{"name": "x", "quantity": 1, "unit": "g"}])
+        run(self.tool.save_household_recipe(name="r", servings=2, ingredients=[row], instructions=["a"]))
+        self.assertEqual(self.last()["body"]["ingredients"][0]["name"], "x")
+        run(self.tool.correct_cook("c1", adjustments=['{"item_id":"i1","actual_used":2,"unit":"g"}']))
+        self.assertEqual(self.last()["body"]["adjustments"], [{"item_id": "i1", "actual_used": 2, "unit": "g"}])
+        run(self.tool.restock("L1", substitutions=['{"for":"a","name":"b","quantity":1,"unit":"g"}'],
+                              actual=['{"name":"a","quantity":2,"unit":"g"}']))
+        b = self.last()["body"]
+        self.assertEqual(b["substitutions"][0]["for"], "a")
+        self.assertEqual(b["actual"][0]["quantity"], 2)
+        run(self.tool.record_evaluation("c1", exposures=['{"subject":"leek","reaction":"refused"}']))
+        self.assertEqual(self.last()["body"]["exposures"], [{"subject": "leek", "reaction": "refused"}])
+        run(self.tool.propose_preferences(statements=['{"statement":"no leeks","strength":"soft"}']))
+        self.assertEqual(self.last()["body"]["statements"][0]["statement"], "no leeks")
+
+    def test_bad_element_in_other_row_params_sends_nothing(self):
+        cases = [
+            lambda: self.tool.save_recipe(name="r", servings=2, ingredients=["two eggs"], instructions=["a"]),
+            lambda: self.tool.correct_cook("c1", adjustments=["more oil"]),
+            lambda: self.tool.restock("L1", actual=["1kg"]),
+            lambda: self.tool.record_evaluation("c1", exposures=["refused"]),
+            lambda: self.tool.propose_preferences(statements=["no leeks"]),
+        ]
+        for c in cases:
+            out = json.loads(run(c()))
+            self.assertEqual(out["error"], "invalid_row")
+        self.assertEqual(self.svc.requests, [])
+
+    def test_restock_bought_forms(self):
+        for given, want in [(None, "all"), ("all", "all"), (["milk", "eggs"], ["milk", "eggs"]),
+                            ('["milk"]', ["milk"]), (" ALL ", "all")]:
+            run(self.tool.restock("L1", bought=given))
+            self.assertEqual(self.last()["body"]["bought"], want, repr(given))
+
+    def test_restock_bought_default_is_all(self):
+        run(self.tool.restock("L1"))
+        self.assertEqual(self.last()["body"]["bought"], "all")
+
+    def test_restock_bought_comma_string_is_invalid_and_sends_nothing(self):
+        n = len(self.svc.requests)
+        for bad in ("milk, eggs", "milk", "", '{"a":1}', ["ok", 3]):
+            out = json.loads(run(self.tool.restock("L1", bought=bad)))
+            self.assertFalse(out["ok"], repr(bad))
+            self.assertEqual(out["error"], "invalid", repr(bad))
+            self.assertIn("bought", out["detail"])
+        self.assertEqual(len(self.svc.requests), n)
+
+    def test_string_lists_untouched(self):
+        run(self.tool.save_recipe(name="r", servings=2, ingredients=[{"name": "x"}], instructions=["a", "b"], tags=["t"]))
+        b = self.last()["body"]
+        self.assertEqual(b["instructions"], ["a", "b"])
+        self.assertEqual(b["tags"], ["t"])
 
 
 class Errors(Base):
