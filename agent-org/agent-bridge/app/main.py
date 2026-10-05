@@ -19,7 +19,7 @@ from .adapters.chat import FakeChatAdapter
 from .adapters.mattermost import MattermostAdapter
 from .config import get_settings
 from .db import Database
-from .modules.profiles import ConcurrentProfileChange
+from .modules.profiles import ConcurrentProfileChange, UnknownProfile
 from .orchestrator import Orchestrator
 from .schemas import Concern, Decision, Trigger
 
@@ -248,7 +248,7 @@ def create_app(orch: Orchestrator | None = None) -> FastAPI:
 
         try:
             await orch.profiles.set_lane(body.name, body.lane)
-        except KeyError:
+        except UnknownProfile:
             await refuse(404, f"no active profile called `{body.name}`", "refused")
         except ConcurrentProfileChange:
             await refuse(409, f"profile `{body.name}` was changed concurrently by another request; "

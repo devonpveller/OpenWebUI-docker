@@ -83,6 +83,11 @@ class ConcurrentProfileChange(Exception):
     constraint refused this one); nothing of this request was written."""
 
 
+class UnknownProfile(KeyError):
+    """No active profile of that name. A KeyError subclass so existing `except KeyError` callers
+    still work; the HTTP route catches only this, so a stray KeyError is never mistaken for it."""
+
+
 class ProfileRegistry:
     def __init__(self, db: Database, profiles_dir: str) -> None:
         self.db = db
@@ -176,7 +181,7 @@ class ProfileRegistry:
         """Flip a role local<->cloud as a new profile version (audited). One field.
 
         Refuses (raises, writes nothing): a lane that is not local|cloud (ValueError), an unknown
-        profile (KeyError), and a lost race - another request wrote the same profile's next
+        profile (UnknownProfile), and a lost race - another request wrote the same profile's next
         version first, so the (name, version) constraint refused this insert
         (ConcurrentProfileChange). On a refused write the cache is re-read from the DB."""
         if lane not in ("local", "cloud"):
@@ -188,7 +193,7 @@ class ProfileRegistry:
                 )
             ).scalar_one_or_none()
             if cur is None:
-                raise KeyError(name)
+                raise UnknownProfile(name)
             cur.active = False
             s.add(
                 Profile(
