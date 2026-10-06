@@ -117,6 +117,23 @@ function Test-RegistryShape {
     return $true
 }
 
+# A name for a set-aside copy: <Path>.bad-<UTC stamp, ms>, and when that name already exists
+# (two incidents in the same millisecond, a repeated clock) <...>-2, -3, ... The name is
+# checked to be free here, and the caller still creates it without overwriting (File.Copy with
+# overwrite=false, or a Rename-Item, which refuses an existing target), so an earlier .bad-* is
+# never overwritten whatever the clock does.
+function Get-AsideName {
+    param([Parameter(Mandatory)][string]$Path)
+    # $global:WtlAsideStamp is a TEST seam (verify-registry-lock.ps1 pins the clock with it); unset in use.
+    $wtlStamp = [DateTime]::UtcNow.ToString("yyyyMMddHHmmssfff")
+    if ($global:WtlAsideStamp) { $wtlStamp = [string]$global:WtlAsideStamp }
+    $wtlBase = $Path + ".bad-" + $wtlStamp
+    $wtlName = $wtlBase
+    $wtlN = 1
+    while (Test-Path -LiteralPath $wtlName) { $wtlN++; $wtlName = $wtlBase + "-" + $wtlN }
+    return $wtlName
+}
+
 # When worktrees.json is absent under the lock, the rows may be stranded by a writer that was
 # killed between the delete and the move: finished content in worktrees.json.tmp (or, from an
 # older toolkit, worktrees.json~RF*.TMP). Picks the newest leftover that parses AND has the
@@ -139,9 +156,11 @@ function Get-RegistryRecovery {
             $wtlO = [System.IO.File]::ReadAllText($wtlC.FullName) | ConvertFrom-Json
             if (Test-RegistryShape $wtlO) {
                 $wtlSkipped = @()
-                $wtlStamp = (Get-Date).ToString("yyyyMMddHHmmssfff")
                 foreach ($wtlB in $wtlBadNew) {
-                    try { Rename-Item -Path $wtlB -NewName ((Split-Path -Leaf $wtlB) + ".bad-" + $wtlStamp) -ErrorAction Stop; $wtlSkipped += ($wtlB + ".bad-" + $wtlStamp) }
+                    # a unique target: a rename onto an existing .bad-<stamp> would fail and leave the
+                    # skipped file in place, to be overwritten by this writer's own .tmp
+                    $wtlAside = Get-AsideName -Path $wtlB
+                    try { Rename-Item -LiteralPath $wtlB -NewName (Split-Path -Leaf $wtlAside) -ErrorAction Stop; $wtlSkipped += $wtlAside }
                     catch { $wtlSkipped += $wtlB }
                 }
                 return @{ from = $wtlC.FullName; count = @($wtlO.worktrees.PSObject.Properties).Count; skipped = $wtlSkipped }
@@ -185,11 +204,12 @@ function Update-WorktreeRegistry {
                 foreach ($wtlP in $wtlParsed.worktrees.PSObject.Properties) { $wtlRows[$wtlP.Name] = $wtlP.Value }
             } else {
                 # Present but unreadable (corrupt, wrong shape, or held exclusively for > 3 s).
-                # Set it aside under a timestamped name FIRST (an earlier .bad is never
-                # overwritten); only if that works is a fresh registry started. If it cannot be
+                # Set it aside under a unique timestamped name FIRST (an earlier .bad is never
+                # overwritten: Get-AsideName picks a free name and File.Copy refuses to
+                # overwrite); only if that works is a fresh registry started. If it cannot be
                 # set aside nothing is overwritten and the writer stops.
-                $wtlBad = "$Registry.bad-" + (Get-Date).ToString("yyyyMMddHHmmssfff")
-                try { Copy-Item $Registry $wtlBad -ErrorAction Stop }
+                $wtlBad = Get-AsideName -Path $Registry
+                try { [System.IO.File]::Copy($Registry, $wtlBad, $false) }
                 catch { throw ("registry '{0}' is unreadable and could not be set aside ({1}); left untouched, the row was NOT written." -f $Registry, $_.Exception.Message) }
                 Write-Host ("  WARNING: registry unreadable, started a fresh one (old file kept as {0})" -f $wtlBad) -ForegroundColor Yellow
             }
