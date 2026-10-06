@@ -1,4 +1,4 @@
-param([string]$Tip = '', [string]$Harness = '', [Parameter(Mandatory)][string]$Scratch, [string[]]$Only = @())
+param([string]$Tip = '', [string]$Harness = '', [string]$Scratch = '', [string[]]$Only = @(), [switch]$CheckAnchors)
 # cf-watchdog / ef-watchdog: one-line mutations of the watchdog under test, each
 # removing one rule. Each must turn the named pure-part case red. Pure part only:
 # DOCKER_HOST is forced to a dead endpoint by the harness; no daemon is touched.
@@ -6,13 +6,22 @@ param([string]$Tip = '', [string]$Harness = '', [Parameter(Mandatory)][string]$S
 # the ~4-minute 42-loop simulation); P29 mutants run the full pure part.
 # Usage (repo root):
 #   powershell -NoProfile -File scripts\checks\test-watchdog-loops-mutants.ps1 -Scratch <empty dir> [-Only name,name]
+#   powershell -NoProfile -File scripts\checks\test-watchdog-loops-mutants.ps1 -CheckAnchors
+#     (seconds, runs nothing: verifies that every row's anchor text occurs exactly once in its
+#      target - the watchdog, or the harness for a 'harness' row - and exits with the number
+#      that do not. Run it before every full table run: a stale anchor is a SETUP ERROR.)
+# A 'harness' mutant is written as mut-harness-<name>.ps1 under $env:TEMP (never beside the
+# real harness, so a run killed mid-mutant leaves nothing in the checkout) and removed afterwards.
 # (-Tip / -Harness default to the sibling stack-watchdog.ps1 / test-watchdog-loops.ps1.)
 # Moved here from the plan store's cf-watchdog-mutants.ps1 by item ef-watchdog,
 # which added the P22/P30-P35 mutants at the end of the table.
 $Only = @($Only | ForEach-Object { $_ -split ',' } | Where-Object { $_ })   # -File passes a comma list as ONE string
 if (-not $Tip) { $Tip = Join-Path $PSScriptRoot 'stack-watchdog.ps1' }
 if (-not $Harness) { $Harness = Join-Path $PSScriptRoot 'test-watchdog-loops.ps1' }
-if (-not (Test-Path $Scratch)) { New-Item -ItemType Directory -Path $Scratch -Force | Out-Null }
+if (-not $CheckAnchors) {
+    if (-not $Scratch) { throw '-Scratch <empty dir> is required (except with -CheckAnchors)' }
+    if (-not (Test-Path $Scratch)) { New-Item -ItemType Directory -Path $Scratch -Force | Out-Null }
+}
 $src =[IO.File]::ReadAllText($Tip).Replace("`r`n", "`n")   # a blob from git cat-file is LF; the checkout is CRLF
 $mutants = [ordered]@{
     # --- detection -----------------------------------------------------------
@@ -147,20 +156,36 @@ $mutants = [ordered]@{
     'scrub-blob'             = @('$t = [regex]::Replace($t, ''(?<![A-Za-z0-9+/=_\-])[A-Za-z0-9+/]{40,512}(?!', '$null = [regex]::Replace($t, ''(?<![A-Za-z0-9+/=_\-])[A-Za-z0-9+/]{40,512}(?!', 'P34')
 }
 $bad = 0
+if ($CheckAnchors) {
+    $harnessText = [IO.File]::ReadAllText($Harness).Replace("`r`n", "`n")
+    foreach ($k in $mutants.Keys) {
+        $from, $to, $case, $target = $mutants[$k]
+        $text = if ($target -eq 'harness') { $harnessText } else { $src }
+        $n = ([regex]::Matches($text, [regex]::Escape($from.Replace("`r`n", "`n")))).Count
+        if ($n -ne 1) { $bad++ }
+        "{0,-26} {1,-8} anchor occurs {2} time(s){3}" -f $k, $(if ($target) { $target } else { 'watchdog' }), $n, $(if ($n -eq 1) { '' } else { '   <-- STALE (expected exactly 1)' })
+    }
+    "{0} row(s), {1} with a stale anchor" -f $mutants.Count, $bad
+    exit $bad
+}
 foreach ($k in $mutants.Keys) {
     if ($Only.Count -gt 0 -and $Only -notcontains $k) { continue }
     $from, $to, $case, $target = $mutants[$k]
     $from = $from.Replace("`r`n", "`n"); $to = $to.Replace("`r`n", "`n")
-    # A 4th element 'harness' mutates the test harness itself (a check on the check); the copy sits beside the
-    # real harness (it finds its fixtures relative to itself) and is removed afterwards.
+    # A 4th element 'harness' mutates the test harness itself (a check on the check); the copy is written
+    # under $env:TEMP and removed afterwards. The harness finds its fixtures relative to itself, so the copy's
+    # `$here` line is pinned to the real harness directory.
     $text = if ($target -eq 'harness') { [IO.File]::ReadAllText($Harness).Replace("`r`n", "`n") } else { $src }
     $n = ([regex]::Matches($text, [regex]::Escape($from))).Count
     if ($n -ne 1) { "{0,-24} SETUP ERROR: the anchor text occurs {1} times" -f $k, $n; $bad++; continue }
     $p = Join-Path $Scratch "mut-$k.ps1"
     $runHarness = $Harness
     if ($target -eq 'harness') {
-        $runHarness = Join-Path (Split-Path -Parent $Harness) "mut-harness-$k.ps1"
-        [IO.File]::WriteAllText($runHarness, $text.Replace($from, $to), (New-Object Text.ASCIIEncoding))
+        $runHarness = Join-Path $env:TEMP "mut-harness-$k.ps1"
+        $hereLine = '$here = Split-Path -Parent $MyInvocation.MyCommand.Path'
+        if (([regex]::Matches($text, [regex]::Escape($hereLine))).Count -ne 1) { "{0,-24} SETUP ERROR: the harness `$here line occurs other than once" -f $k; $bad++; continue }
+        $pinned = $text.Replace($hereLine, ('$here = ''' + ((Split-Path -Parent (Resolve-Path $Harness).Path) -replace "'", "''") + ''''))
+        [IO.File]::WriteAllText($runHarness, $pinned.Replace($from, $to), (New-Object Text.ASCIIEncoding))
         $p = $Tip
     } else {
         [IO.File]::WriteAllText($p, $text.Replace($from, $to), (New-Object Text.ASCIIEncoding))

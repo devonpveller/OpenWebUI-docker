@@ -398,7 +398,7 @@ function Invoke-Suite([string]$ScriptPath) {
       $c = New-Ctx $ScriptPath $Both; $made += $c
       Invoke-Pass $c; Invoke-Pass $c -Pct $HotX -Minutes $gap
       $f = Get-Facts $c
-      $bound = @($f.Log | Where-Object { $_ -match "$X cpu .*over the 20-min bound - not counted" })
+      $bound = @($f.Log | Where-Object { $_ -match "$X cpu .*over the 25-min bound - not counted" })
       $r1 = $f.Restarts.Count
       foreach ($i in 1..3) { Invoke-Pass $c -Pct $HotX }
       $r2 = (Get-Facts $c).Restarts.Count
@@ -422,7 +422,7 @@ function Invoke-Suite([string]$ScriptPath) {
     foreach ($i in 1..3) { Invoke-Pass $c -Pct $HotX -Set @{ "$X.exec" = 'error' } }
     Invoke-Pass $c -Pct $HotX
     $f = Get-Facts $c; $r1 = $f.Restarts.Count
-    $bound = @($f.Log | Where-Object { $_ -match "$X cpu .*over the 20-min bound - not counted" })
+    $bound = @($f.Log | Where-Object { $_ -match "$X cpu .*over the 25-min bound - not counted" })
     foreach ($i in 1..3) { Invoke-Pass $c -Pct $HotX }
     $f = Get-Facts $c
     $ok = ($r1 -eq 0 -and $bound.Count -eq 1 -and $f.Restarts.Count -eq 1 -and $f.Foreign.Count -eq 0)
@@ -431,11 +431,11 @@ function Invoke-Suite([string]$ScriptPath) {
 
   if (Want 'C11') {
     $det = @(); $okAll = $true
-    # (a) three hot intervals of 25 min (each over the bound): never counted
+    # (a) three hot intervals of 26 min (each over the 25-min bound): never counted
     $c = New-Ctx $ScriptPath $Both; $made += $c
-    Invoke-Pass $c; foreach ($i in 1..3) { Invoke-Pass $c -Pct $HotX -Minutes 25 }
+    Invoke-Pass $c; foreach ($i in 1..3) { Invoke-Pass $c -Pct $HotX -Minutes 26 }
     $a = (Get-Facts $c).Restarts.Count; if ($a -ne 0) { $okAll = $false }
-    $det += "(a) 3 hot intervals of 25 min: restarts $a (want 0)"
+    $det += "(a) 3 hot intervals of 26 min: restarts $a (want 0)"
     # (b) two hot intervals of 19 min (38 min, under the bound): too few intervals
     $c = New-Ctx $ScriptPath $Both; $made += $c
     Invoke-Pass $c; foreach ($i in 1..2) { Invoke-Pass $c -Pct $HotX -Minutes 19 }
@@ -453,7 +453,7 @@ function Invoke-Suite([string]$ScriptPath) {
     $c6 = (Get-Facts $c).Restarts.Count
     if ($c5 -ne 0 -or $c6 -ne 1) { $okAll = $false }
     $det += "(c) 5-min hot intervals: after 5 (25 min) restarts $c5 (want 0); after 6 (30 min) $c6 (want 1)"
-    Write-Case 'C11' 'the window needs 3+ hot intervals, each <= 20 min, spanning 30+ min' $okAll ($det -join "`n")
+    Write-Case 'C11' 'the window needs 3+ hot intervals, each <= 25 min, spanning 30+ min' $okAll ($det -join "`n")
   }
 
   if (Want 'C12') {
@@ -552,6 +552,53 @@ function Invoke-Suite([string]$ScriptPath) {
     Write-Case 'C15' 'external restart / counter drop: re-baseline, the streak starts over' $ok ("restarts after the identity change $r3 (want 0), identity lines $($idl.Count), backwards lines $($back.Count), negative-% lines $($neg.Count), after 2 more $r6 (want 0), after 3 $r7 (want 1)`n" + (Show (Get-Facts $c)))
   }
 
+  if (Want 'C16') {
+    # f2-harness (ef-mcpo-spin F1/F2/F4): the interval bound is 25 min (a skipped
+    # 10-min trigger is 1200 s and must COUNT), the 60-s minimum is pinned, and
+    # the over-bound line shows one decimal.
+    $det = @(); $okAll = $true
+    # (a) 3 hot intervals of 20.5 min: each counts (<= 25), 61 min >= window: ONE restart
+    $c = New-Ctx $ScriptPath $Both; $made += $c
+    Invoke-Pass $c; foreach ($i in 1..3) { Invoke-Pass $c -Pct $HotX -Minutes 21 }
+    $a = (Get-Facts $c).Restarts.Count; if ($a -ne 1) { $okAll = $false }
+    $det += "(a) 3 hot intervals of 21 min (a skipped trigger each): restarts $a (want 1)"
+    # (b) 60-s minimum: passes with no clock move (a few seconds apart) never count,
+    #     however many and however hot; a 1-min step then does
+    $c = New-Ctx $ScriptPath $Both; $made += $c
+    Invoke-Pass $c
+    foreach ($i in 1..8) { Invoke-Pass $c -Pct $HotX -Minutes 0 }
+    $f = Get-Facts $c
+    $short = @($f.Log | Where-Object { $_ -match "$X cpu interval \d+s too short to average; baseline kept" })
+    $hotl = @($f.Log | Where-Object { $_ -match "$X cpu \d+\.\d% of one core" })
+    if ($f.Restarts.Count -ne 0 -or $short.Count -ne 8 -or $hotl.Count -ne 0) { $okAll = $false }
+    $det += "(b) 8 passes under 60 s: restarts $($f.Restarts.Count) (want 0), too-short lines $($short.Count) (want 8), averaged lines $($hotl.Count) (want 0)"
+    Invoke-Pass $c -Pct $HotX -Minutes 1
+    $one = @((Get-Facts $c).Log | Where-Object { $_ -match "$X cpu \d+\.\d% of one core over 1 min" })
+    if ($one.Count -lt 1) { $okAll = $false }
+    $det += "(b) a 1-min interval is averaged: lines $($one.Count) (want >= 1)"
+    # (c) the over-bound line shows one decimal
+    $c = New-Ctx $ScriptPath $Both; $made += $c
+    Invoke-Pass $c; Invoke-Pass $c -Pct $HotX -Minutes 31
+    $dec = @((Get-Facts $c).Log | Where-Object { $_ -match "$X cpu baseline recorded: the interval was 31\.\d min, over the 25-min bound" })
+    if ($dec.Count -ne 1) { $okAll = $false }
+    $det += "(c) over-bound line with one decimal: $($dec.Count) (want 1)"
+    Write-Case 'C16' 'bound 25 min (a skipped trigger counts), 60-s minimum pinned, one-decimal wording' $okAll ($det -join "`n")
+  }
+
+  if (Want 'C17') {
+    # f2-harness (F4): a state time a little in the future (inside the 5-min skew)
+    # must not print a negative interval.
+    $c = New-Ctx $ScriptPath $Both; $made += $c
+    Invoke-Pass $c
+    Move-StateClock $c.Root -3
+    Invoke-Pass $c -Minutes 0
+    $f = Get-Facts $c
+    $neg = @($f.Log | Where-Object { $_ -match "$X cpu interval -\d" })
+    $zero = @($f.Log | Where-Object { $_ -match "$X cpu interval 0s too short to average" })
+    $ok = ($neg.Count -eq 0 -and $zero.Count -eq 1 -and $f.Restarts.Count -eq 0)
+    Write-Case 'C17' 'a near-future state time prints 0 s, never a negative interval' $ok ("negative lines $($neg.Count) (want 0), zero lines $($zero.Count) (want 1)`n" + (Show $f))
+  }
+
   if (-not $Keep) { foreach ($m in $made) { Remove-Item -LiteralPath $m.Root -Recurse -Force -ErrorAction SilentlyContinue } }
   else { Write-Host ("sandboxes kept: " + (($made | ForEach-Object Root) -join ', ')) }
   return $script:Failures
@@ -594,6 +641,8 @@ if ($Mutants) {
     'M12-bad-cap-uncapped' = @('if (-not $lr -or $lr -gt $skew) {', 'if ($false) {')
     # a counter that went backwards is averaged (negative %) instead of re-baselined
     'M13-counter-backwards' = @('} elseif ($usec -lt $prevUsec) {', '} elseif ($false) {')
+    # (f2-harness) the 60-s minimum interval is dropped: a 0-s pass is averaged
+    'M14-min-interval-60s' = @('if ($elapsed -lt 60) {', 'if ($elapsed -lt 0) {')
   }
   foreach ($k in $defs.Keys) {
     $pairs = $defs[$k]; $msrc = $src; $bad = ''

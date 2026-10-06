@@ -31,11 +31,12 @@
 # Docker restart) and half-pegged the host for about a day; on 2026-10-05 the
 # operator reversed the 2026-06-07 document-only decision. Upstream: the spin
 # is anyio's (agronholm/anyio#1111, a done task re-cancelled via call_soon
-# forever; fixed in anyio 4.14.x); mcpo v0.0.20 ships anyio 4.12.1 and no newer
-# mcpo exists (open-webui/mcpo#302 is open). So this probe now has a CPU-SPIN
-# GUARD for openbrain-mcpo and openbrain-mcpo-ext (same image): an average at or
+# forever; fixed in anyio 4.14.x). The cause is fixed in openbrain-mcpo:local
+# (OB1 docker/mcpo: the pinned mcpo digest + anyio 4.14.2, item ef-mcpo-anyio);
+# the stock mcpo v0.0.20 image ships anyio 4.12.1. This CPU-SPIN GUARD stays as
+# the safety net for openbrain-mcpo and openbrain-mcpo-ext (same image): an average at or
 # above -CpuSpinPercent (80% of one core) over at least -CpuSpinMinIntervals (3)
-# consecutive intervals of at most -CpuSpinMaxIntervalMinutes (20) each, spanning
+# consecutive intervals of at most -CpuSpinMaxIntervalMinutes (25) each, spanning
 # at least -CpuSpinWindowMinutes (30) -> under -Repair, `docker restart` of THAT container only, one log line,
 # one alert (#sysadmin, else Telegram); at most one auto-restart per container
 # per hour, a spin back inside the hour alerts only; no docker data, no action.
@@ -95,9 +96,10 @@ param(
   [ValidateRange(10, 1440)][int]$CpuSpinWindowMinutes = 30,
   # A spin needs this many consecutive hot intervals, and an interval longer than
   # the bound (missed passes, a NO DATA streak) is never counted: it re-baselines.
-  # The \StackWatchdog cadence is 10 min; 20 tolerates one skipped trigger.
+  # The \StackWatchdog cadence is 10 min; a skipped trigger makes the next
+  # interval 1200-1201 s, so 25 tolerates one skipped trigger (20 did not).
   [ValidateRange(2, 20)][int]$CpuSpinMinIntervals = 3,
-  [ValidateRange(2, 60)][int]$CpuSpinMaxIntervalMinutes = 20,
+  [ValidateRange(2, 60)][int]$CpuSpinMaxIntervalMinutes = 25,
   # Bound on each docker inspect / exec the guard makes (restart: 60 s).
   [ValidateRange(1, 300)][int]$DockerTimeoutSeconds = 20
 )
@@ -318,7 +320,8 @@ function ConvertTo-ObInt64 {
   return $null
 }
 
-# THE GUARD. openbrain-mcpo[-ext] (mcpo v0.0.20, anyio 4.12.1) can busy-spin
+# THE GUARD. openbrain-mcpo[-ext] (the stock mcpo v0.0.20 image, anyio 4.12.1;
+# fixed in openbrain-mcpo:local, so this guard is the safety net) can busy-spin
 # one core for days while its healthcheck stays green (header, and memory
 # openbrain-mcpo-ext-cpu-spin). Rule, per container, across runs:
 #   - each run reads the container's cumulative CPU counter; the AVERAGE over
@@ -326,7 +329,7 @@ function ConvertTo-ObInt64 {
 #     in % of one core. Not a `docker stats` snapshot: that is a ~1 s sample
 #     and catches the 30 s python healthcheck or one tool call as a spike.
 #   - an interval COUNTS only when it is 60 s to $CpuSpinMaxIntervalMinutes
-#     (20) long. A longer one - missed passes, a NO DATA streak, a restored
+#     (25) long. A longer one - missed passes, a NO DATA streak, a restored
 #     state file - is not evidence: one average over a long gap hides its shape
 #     (a 7-min 400% burst averages 90% over 31 min), so it re-baselines and any
 #     streak starts over.
@@ -411,11 +414,12 @@ function Invoke-CpuSpinGuard {
     } else {
       $elapsed = ($now - $prevAt).TotalSeconds
       if ($elapsed -lt 60) {
-        Write-Ob $label ok ("interval {0:N0}s too short to average; baseline kept" -f $elapsed)
+        # a state time a little in the future (inside the skew) gives a negative span: show 0
+        Write-Ob $label ok ("interval {0:N0}s too short to average; baseline kept" -f [Math]::Max(0, $elapsed))
         continue
       }
       if ($elapsed -gt ($CpuSpinMaxIntervalMinutes * 60)) {
-        $rebase = ("baseline recorded: the interval was {0:N0} min, over the {1}-min bound - not counted, streak reset" -f ($elapsed / 60), $CpuSpinMaxIntervalMinutes)
+        $rebase = ("baseline recorded: the interval was {0:N1} min, over the {1}-min bound - not counted, streak reset" -f ($elapsed / 60), $CpuSpinMaxIntervalMinutes)
       }
     }
     if ($rebase) {

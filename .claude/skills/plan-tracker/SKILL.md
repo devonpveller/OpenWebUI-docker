@@ -42,7 +42,7 @@ Collection `tasks`, one document per card, doc id = the card id (`A1`, `B3`):
 | `owner` | `claude` or `operator` |
 | `status` | `todo` `doing` `review` `gate` `blocked` `done` `parked` |
 | `detail` | what and why, one paragraph |
-| `progress` | free text on current state |
+| `progress` | free text on current state; the card shows it under `detail`, labelled "Progress" |
 | `evidence` | what was checked, with refs (rendered monospace) |
 | `ask` | for operator waits: the question or action wanted |
 
