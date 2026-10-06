@@ -1,7 +1,8 @@
 """A NOOP re-focus re-stores a fork's PRIVATE upstream credential (ef-lc-upstream, 2026-10-05).
 
-The credential store lives in the executor's HOME (emptied by a recreate or the credential scrub);
-the `upstream` remote lives in the workspace volume and survives. Before this item the NOOP branch of
+The credential store lives in the executor's HOME (emptied by a recreate); the `upstream` remote lives
+in the workspace volume and survives. After the credential scrub (credscrub.py strips tokens from the
+git-config URLs) a legacy upstream's in-URL token is gone and nothing is stored for it. Before this item the NOOP branch of
 `switch_project` re-stored only origin's credential and baked upstream only when the remote was
 MISSING, so a present upstream stayed unauthenticated: `git fetch upstream` failed until the next
 clone/switch (found in the cf-lc-token review, R1).
@@ -167,6 +168,7 @@ def _focused_fork(rig):
     d.workspace, d.audit = wm, _Audit()
     d.current_focus = normalize_repo_url(GITHUB_WIDGET)
     d._focus_token, d._focus_from_project = None, False
+    d._focus_upstream, d._focus_upstream_token = None, None
     d.in_flight, d.queue = None, asyncio.Queue()
     d.tasks, d.contexts = {}, {}
     # origin's credential, stored the way the daemon's own helpers store it
@@ -316,8 +318,9 @@ def test_f1_a_legacy_remote_url_with_userinfo_never_reaches_the_store_or_output(
     legacy = rig.upstream.replace("http://", f"http://x-access-token:{UPSTREAM_TOK}@", 1)
     _git("remote", "set-url", "upstream", legacy, cwd=rig.ws, env=rig.env)
     out = _refocus(d, rig, token=ORIGIN_TOK, upstream_token=UPSTREAM_TOK)
-    assert out["upstream_reauthed"] is True
-    mine = [ln for ln in _entries(rig) if ln.endswith("/parent/widget")]
+    # f2-runtime F4: git sends the URL's own userinfo, so the stored entry is not vouched for
+    assert out["upstream_reauthed"] is False and out["upstream_url_has_userinfo"] is True
+    mine =[ln for ln in _entries(rig) if ln.endswith("/parent/widget")]
     assert len(mine) == 1 and mine[0].count("@") == 1           # one clean entry, no doubled userinfo
     assert not any(t in "\n".join(d.audit.lines) + json.dumps(out) for t in TOKENS)
 
@@ -373,8 +376,11 @@ def test_a_failed_store_is_reported_false_in_response_and_journal(rig):
     assert any('"ok": false' in ln and "project_upstream_reauthed" in ln for ln in d.audit.lines)
 
 
-def test_reauth_runs_no_remote_command_and_reports_the_upstream(rig):
-    """M5/M12: the response names the upstream; the NOOP never adds or re-points a remote."""
+def test_reauth_runs_no_remote_command_and_reports_the_upstream(rig, monkeypatch):
+    """M5/M12: the response names the upstream; the NOOP never adds or re-points the UPSTREAM remote.
+    C1 (f2-runtime): independent of an ambient LC_DEPLOY_TOKEN (set in the little-coder and ao-worker
+    containers), whose legitimate `remote set-url origin` must not read as a changed upstream."""
+    monkeypatch.delenv("LC_DEPLOY_TOKEN", raising=False)
     d, wm, ot = _focused_fork(rig)
     rec = RecOT(ot)
     wm.ot = rec
@@ -382,8 +388,9 @@ def test_reauth_runs_no_remote_command_and_reports_the_upstream(rig):
     out = _refocus(d, rig, upstream_token=UPSTREAM_TOK)
     assert out["upstream"] == rig.upstream
     cmds = [c.split("\n", 1)[0] for c in rec.seen]
-    assert cmds and not any(
-        " remote add" in c or "remote set-url" in c for c in cmds), "a remote was changed"
+    upstream_changes = ("remote add upstream", "remote set-url upstream",
+                        "remote set-url --push upstream")
+    assert cmds and not any(u in c for c in cmds for u in upstream_changes), "upstream was changed"
 
 
 def test_noop_with_a_missing_remote_still_bakes_only(rig):
@@ -395,3 +402,71 @@ def test_noop_with_a_missing_remote_still_bakes_only(rig):
     assert out["upstream_ok"] is True and "upstream_reauthed" not in out
     assert _fetch_upstream(ot, rig).ok
     assert not any("project_upstream_reauthed" in ln for ln in d.audit.lines)
+
+
+# --- f2-runtime F4: a legacy upstream URL that still carries userinfo --------------------------
+
+@pytest.mark.parametrize("userinfo", ["other-username", "stale-token"])
+def test_f4_a_userinfo_remote_whose_fetch_fails_is_not_reported_reauthed(rig, userinfo):
+    """ef-lc-upstream attempt-2 P6b/P6c: the remote URL carries another username, or a STALE in-URL
+    token. git sends that userinfo instead of the stored entry, so `git fetch upstream` still fails
+    after the re-store. The NOOP must say so: upstream_reauthed false + upstream_url_has_userinfo,
+    in the response and the journal (base: upstream_reauthed true while the fetch fails)."""
+    d, wm, ot = _focused_fork(rig)
+    _recreate(rig)
+    stale = "ghs" + "_" + "DUMMYstale" + "e" * 30
+    prefix = "someuser@" if userinfo == "other-username" else f"x-access-token:{stale}@"
+    _git("remote", "set-url", "upstream", rig.upstream.replace("http://", "http://" + prefix, 1),
+         cwd=rig.ws, env=rig.env)
+
+    out = _refocus(d, rig, token=ORIGIN_TOK, upstream_token=UPSTREAM_TOK)
+
+    assert not _fetch_upstream(ot, rig).ok                     # the fetch really still fails
+    assert out["upstream_reauthed"] is False                   # base: True
+    assert out["upstream_url_has_userinfo"] is True
+    j = json.loads(next(ln for ln in d.audit.lines if "project_upstream_reauthed" in ln))
+    assert j["ok"] is False and j["url_has_userinfo"] is True and j["stored"] is True
+    blob = "\n".join(d.audit.lines) + json.dumps(out)
+    assert not any(t in blob for t in (*TOKENS, stale)) and "someuser" not in blob
+
+
+def test_f4_a_clean_remote_is_still_reported_reauthed_without_the_flag(rig):
+    """The flag is set only for a userinfo URL: a clean remote's NOOP reports true and fetch works."""
+    d, wm, ot = _focused_fork(rig)
+    _recreate(rig)
+    out = _refocus(d, rig, token=ORIGIN_TOK, upstream_token=UPSTREAM_TOK)
+    assert _fetch_upstream(ot, rig).ok
+    assert out["upstream_reauthed"] is True and "upstream_url_has_userinfo" not in out
+    j = json.loads(next(ln for ln in d.audit.lines if "project_upstream_reauthed" in ln))
+    assert j["ok"] is True and j["url_has_userinfo"] is False
+
+
+# --- f2-runtime: the pre-task re-store covers upstream (executor recreate after /project) ------
+
+def test_an_executor_recreate_between_project_and_task_leaves_upstream_authenticated(
+        rig, monkeypatch):
+    """/project (NOOP with upstream + upstream_token), then the executor is recreated (HOME empties)
+    before the task: the pre-task re-store must bring back upstream's OWN entry next to origin's
+    (base: only origin is re-stored and `git fetch upstream` fails)."""
+    monkeypatch.delenv("LC_DEPLOY_TOKEN", raising=False)
+    d, wm, ot = _focused_fork(rig)
+    rec = RecOT(ot)
+    wm.ot = rec
+    out = _refocus(d, rig, token=ORIGIN_TOK, upstream_token=UPSTREAM_TOK)
+    assert out["upstream_reauthed"] is True
+    _recreate(rig)
+    assert not _fetch_upstream(ot, rig).ok
+
+    d._ensure_git_credentials()                                 # what _run_task does first
+
+    r = _fetch_upstream(ot, rig)
+    assert r.ok, r.stderr[-300:]
+    assert ot.execute("git checkout -q -b agent/r && git push -q origin agent/r",
+                      cwd=str(rig.ws)).ok                       # origin too, with its own token
+    cred = (rig.home / ".lc-git-credentials").read_text()
+    assert ORIGIN_TOK in cred and UPSTREAM_TOK in cred
+    assert len(_entries(rig)) == 2                              # separate entries
+    urls = _remote_urls(rig)
+    assert not any(t in urls for t in TOKENS) and "x-access-token" not in urls
+    assert not any(t in "\n".join(rec.seen) for t in TOKENS)    # never in a command or its output
+    assert not any(t in "\n".join(d.audit.lines) for t in TOKENS)

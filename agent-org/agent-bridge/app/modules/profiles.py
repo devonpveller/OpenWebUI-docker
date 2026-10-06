@@ -280,6 +280,10 @@ class ProfileRegistry:
                 await s.commit()
             except IntegrityError as exc:
                 await s.rollback()
+                # C4 (f2-runtime): the lost race re-reads the cache like set_lane does - when the
+                # winner is another process (a second registry), only this refresh brings this
+                # process's cache in line with the DB.
+                await self.refresh()
                 raise ConcurrentProfileChange(name) from exc
             result["version"] = cur.version + 1
         await self.refresh()
