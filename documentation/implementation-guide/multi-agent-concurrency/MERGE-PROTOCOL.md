@@ -363,15 +363,49 @@ does not belong is a rejection, and the tool will not let you merge without sayi
 
 `-Misfits` on a merge is refused outright: if it does not belong, it does not land.
 
-**Learning record (2026-09-29; research-workbench `06-EXPANSION.md` §3.3).** Before merging an
-item that took more than one iteration (any return from tester or reviewer) or that parked,
-check that its `iterative` learning record exists beside its findings file in the plan store
-(`learning-record.schema.json`), that its factual fields (steer, red state, iterations, merge
-range or park) are derived from this queue and git rather than written, and that
-`outcome.summary` matches the diff you are about to merge. A missing record on such an item, or
-an outcome that does not match the diff, is a refusal like any other. A first-try green needs
-no record. The `mental_model` field is the worker's labelled claim; you check it exists and is
-labelled, not that it is right. This is a reviewer step until `queue.ps1 -Merged` enforces it.
+**Learning record (2026-09-29; enforced by `-Merged` since 2026-10-06, `vwm-p1`).** An item
+that came back at least once needs an `iterative` learning record
+(`learning-record.schema.json` in the plan store) at `<findings dir>/<id>.learning-record.json`,
+beside its anchor's `findings_sink`. "Came back" is read from the queue alone: a tester fail, a
+reviewer `-Reject`/`-Requeue`, or a `-Requeue` after a pass (an improvement send-back counts:
+improvements are learning too). A first-try green needs no record. Records exist to stop the
+next item from re-solving a solved problem, so the gate checks that a record is genuine before it
+can teach anything. `queue.ps1 -Merged` runs this check before it changes any state, and refuses
+with named reasons and "Nothing has been recorded":
+
+- `record-missing`, `sink-missing`, and `schema:<path>` (validated against the schema file itself);
+- `item-mismatch` (`source_ref.queue_item_id` is not this item) and `iterations-mismatch`
+  (`iterations` must equal the count of ALL returns; it is history, not a limit);
+- `green-not-genuine`: `outcome.kind` is green only when the queue's last verdict is a tester PASS
+  at the `tested_at_sha` being merged, recorded by someone other than the developer, with its
+  evidence file present;
+- `countersign-missing`: `reviewer_check.checked` is true and `reviewer_check.by` is you, the
+  reviewer, never the developer;
+- `range-unresolved` / `range-head-mismatch`: `source_ref.merge_range` is `base..head`, both ends
+  are commits, base is an ancestor of head, and head is the tested commit or the merge;
+- `evidence-sha-unresolved` / `evidence-path-missing`: every SHA-shaped and path-shaped token in
+  `outcome.evidence[]` and `hypotheses_refuted[].evidence` resolves. The rest is prose: the check
+  cannot verify it and prints that blind spot on every acceptance;
+- `placeholder-unfilled`: a `<FILL:` marker from `draft` is still there.
+
+A store, record, schema or queue item the check cannot read, or a git error, is refused as
+INDETERMINATE. That is never a pass, and the message says it is not the same as a missing record.
+Run the same check yourself before you merge (read-only), and generate the factual fields rather
+than typing them:
+
+```powershell
+python scripts/agent-harness/learning_records.py check --item <id> --merge-sha <merge sha> --reviewer <your-id>
+python scripts/agent-harness/learning_records.py draft --item <id> --merge-sha <merge sha>   # prints, writes nothing
+python scripts/agent-harness/learning_records.py audit                                        # every record in the store
+```
+
+`draft` prints the derived skeleton: `source_ref` with the merge range, `iterations`, each return
+with its reason from the queue, the outcome and the evidence refs. The developer adds only the
+labelled `mental_model` and `skill_candidate`; you compare `outcome.summary` with the diff and
+countersign. The `mental_model` is the worker's labelled claim: you check that it exists and is
+labelled, not that it is right. There is no per-item override. The only switch is
+`pipeline.learning_record.enforce_at_merged` in `harness.config.json`: `false` prints the check's
+result as advice and records the merge anyway.
 
 **Review is not where intent is decided (2026-08-29, U2).** This verdict used to be
 `-FitsAnchor`, which asked the reviewer to re-judge whether the work was the right *thing*.

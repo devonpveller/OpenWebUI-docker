@@ -93,6 +93,12 @@
 #       now warns by line number and prints the cases it recognised. A TAB-indented ``` is
 #       not a fence (CommonMark). The >2000-char inline evidence spill is written UTF-8
 #       without a BOM, like the item file.
+# ADDED 2026-10-06 (item `vwm-p1`, validated-work-memory phase 1):
+#   LR  -Merged runs learning_records.py check before any state change: refused for
+#       record-missing, iterations-mismatch, range-unresolved and an unreadable store
+#       (INDETERMINATE, never a pass); accepted for a compliant record, accepted with NO
+#       record for a first-try green, and accepted WITH ADVICE when
+#       pipeline.learning_record.enforce_at_merged is false (the off switch).
 
 [CmdletBinding()]
 param(
@@ -1707,6 +1713,148 @@ $script:LineOverride = "no-such-line"
 try { $r = Invoke-Q $nf5 @("-Merged", "-Id", "qnf5", "-By", "qrev", "-Sha", $p7Sha, "-FitsCodebase") } finally { $script:LineOverride = $null }
 Check "NF: P7 - an unresolvable work line is REFUSED, not skipped" `
     (($r.code -ne 0) -and ((Get-QItem $nf5 "qnf5").state -ne "merged") -and ($r.out -match "integration line")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+
+# ======================================================================================
+Step "LR  -Merged enforces the learning record (MERGE-PROTOCOL Step 4; vwm-p1)"
+# ======================================================================================
+# An item that came back (here: one tester FAIL) owes a genuine `iterative` learning record
+# beside its findings sink before -Merged records the merge. Each case below builds its own
+# scratch repo, scratch queue and scratch STORE (a directory with a .git, holding the schema
+# fixture); the live queue and the live plan store are never read or written.
+$lrSchemaSrc = Join-Path $PSScriptRoot "fixtures\learning-record\learning-record.schema.json"
+function New-LrStore([string]$name) {
+    $store = Join-Path $Root ("lrstore-" + $name)
+    New-Item -ItemType Directory -Force -Path (Join-Path $store ".git") | Out-Null
+    $sd = Join-Path $store "implementation-guide\research-workbench"
+    New-Item -ItemType Directory -Force -Path $sd | Out-Null
+    Copy-Item -LiteralPath $lrSchemaSrc -Destination (Join-Path $sd "learning-record.schema.json")
+    New-Item -ItemType Directory -Force -Path (Join-Path $store "implementation-guide\feat\findings") | Out-Null
+    return $store
+}
+function New-LrAnchor([string]$name, [string]$sinkPath) {
+    $a = Join-Path $Root ("lr-anchor-" + $name + ".json")
+    $sinkJson = ($sinkPath -replace '\\', '/')
+    Set-Content -Path $a -Encoding ascii -Value @(
+        '{',
+        '  "goal": "WORK.md states what the work was, unambiguously.",',
+        '  "artifact": "WORK.md - a one-line note produced by the drill fixture.",',
+        '  "audience": "The next agent to read the file with no other context.",',
+        '  "acceptance": ["WORK.md exists on the branch. Fail: it is absent."],',
+        '  "out_of_scope": ["Anything outside WORK.md."],',
+        ('  "findings_sink": "' + $sinkJson + '"'),
+        '}')
+    return $a
+}
+function Initialize-LrReviewing($fix, [string]$id, [string]$anchor, [switch]$WithFail) {
+    $evF = Join-Path $Root ("lr-" + $id + "-fail.md")
+    Set-Content -Path $evF -Encoding ascii -Value @("## Case 1 - WORK.md exists   FAIL", "WORK.md was empty on a cold cache.")
+    $evP = Join-Path $Root ("lr-" + $id + "-pass.md")
+    Set-Content -Path $evP -Encoding ascii -Value @($case1Pass, "ran case 1.")
+    Invoke-Q $fix @("-Propose", "-Id", $id, "-Anchor", $anchor, "-Developer", "qdev") | Out-Null
+    Invoke-Q $fix @("-ConfirmAnchor", "-Id", $id, "-By", "qoperator") | Out-Null
+    Invoke-Q $fix @("-Submit", "-Id", $id, "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planV1) | Out-Null
+    Invoke-Q $fix @("-Claim", "-Id", $id, "-Role", "tester", "-By", "qtester") | Out-Null
+    if ($WithFail) {
+        Invoke-Q $fix @("-Fail", "-Id", $id, "-By", "qtester", "-Evidence", $evF, "-PlanAdequate", "-Reason", "Case 1 fails on a cold cache") | Out-Null
+        Invoke-Q $fix @("-Resubmit", "-Id", $id, "-By", "qdev") | Out-Null
+        Invoke-Q $fix @("-Claim", "-Id", $id, "-Role", "tester", "-By", "qtester2") | Out-Null
+        Invoke-Q $fix @("-Pass", "-Id", $id, "-By", "qtester2", "-Evidence", $evP, "-PlanAdequate") | Out-Null
+    } else {
+        Invoke-Q $fix @("-Pass", "-Id", $id, "-By", "qtester", "-Evidence", $evP, "-PlanAdequate") | Out-Null
+    }
+    Invoke-Q $fix @("-Approve", "-Id", $id, "-By", "qoperator") | Out-Null
+    Invoke-Q $fix @("-Claim", "-Id", $id, "-Role", "reviewer", "-By", "qrev") | Out-Null
+    Push-Location $fix.repo
+    try {
+        Invoke-Git merge --no-ff -q work/qd -m "merge the work (evidence: drill)" | Out-Null
+        $m = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+        $b = (Invoke-Git rev-parse "HEAD^1" | Select-Object -First 1).Trim()
+    } finally { Pop-Location }
+    return @{ merge = $m; base = $b }
+}
+function Write-LrRecord([string]$store, [string]$id, [string]$range, [int]$iterations) {
+    $rec = [ordered]@{
+        schema_version = 1; fidelity = "iterative"; producer = "harness"
+        source_ref = [ordered]@{ queue_item_id = $id; anchor_id = $id; merge_range = $range }
+        domains = @("drill")
+        steer = "Anchor ${id}: WORK.md states what the work was."
+        red = "attempt 1 failed Case 1 on a cold cache"
+        iterations = $iterations
+        hypotheses_refuted = @()
+        outcome = [ordered]@{ kind = "green"; summary = "WORK.md carries the one-line note."; evidence = @("findings/$id.md") }
+        mental_model = [ordered]@{ claim = "WORKER CLAIM: a cold cache is the real first run."; author_role = "worker" }
+        reviewer_check = [ordered]@{ checked = $true; by = "qrev"; note = "summary checked against the diff" }
+        created_at = "2026-10-06T00:00:00Z"
+    }
+    $dir = Join-Path $store "implementation-guide\feat\findings"
+    Set-Content -Path (Join-Path $dir "$id.md") -Encoding ascii -Value "findings"
+    [System.IO.File]::WriteAllText((Join-Path $dir "$id.learning-record.json"), ($rec | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+# LR1 - record-missing: the item came back once and no record exists.
+$lf1 = New-Fixture "lr1"; $ls1 = New-LrStore "lr1"
+$la1 = New-LrAnchor "lr1" (Join-Path $ls1 "implementation-guide\feat\findings\qlr1.md")
+$mg = Initialize-LrReviewing $lf1 "qlr1" $la1 -WithFail
+$r = Invoke-Q $lf1 @("-Merged", "-Id", "qlr1", "-By", "qrev", "-Sha", $mg.merge, "-FitsCodebase")
+Check "LR: -Merged REFUSED for record-missing (exit 1, still reviewing, reason named)" `
+    (($r.code -eq 1) -and ((Get-QItem $lf1 "qlr1").state -eq "reviewing") -and ($r.out -match "record-missing") -and ($r.out -match "Nothing has been recorded")) `
+    ("exit=" + $r.code + " state=" + (Get-QItem $lf1 "qlr1").state)
+
+# LR2 - iterations-mismatch: the record writes the attempt number (2), the queue shows one return.
+Write-LrRecord $ls1 "qlr1" ($mg.base + ".." + $mg.merge) 2
+$r = Invoke-Q $lf1 @("-Merged", "-Id", "qlr1", "-By", "qrev", "-Sha", $mg.merge, "-FitsCodebase")
+Check "LR: -Merged REFUSED for iterations-mismatch" `
+    (($r.code -eq 1) -and ((Get-QItem $lf1 "qlr1").state -eq "reviewing") -and ($r.out -match "iterations-mismatch")) ("exit=" + $r.code)
+
+# LR3 - range-unresolved: an end that is not a commit here.
+Write-LrRecord $ls1 "qlr1" ($mg.base + "..0123456789abcdef0123456789abcdef01234567") 1
+$r = Invoke-Q $lf1 @("-Merged", "-Id", "qlr1", "-By", "qrev", "-Sha", $mg.merge, "-FitsCodebase")
+Check "LR: -Merged REFUSED for range-unresolved" `
+    (($r.code -eq 1) -and ((Get-QItem $lf1 "qlr1").state -eq "reviewing") -and ($r.out -match "range-unresolved")) ("exit=" + $r.code)
+
+# LR4 - the compliant record is accepted, and the declared blind spot is printed.
+Write-LrRecord $ls1 "qlr1" ($mg.base + ".." + $mg.merge) 1
+$recPath = Join-Path $ls1 "implementation-guide\feat\findings\qlr1.learning-record.json"
+$recHash = Get-Sha256 $recPath
+$r = Invoke-Q $lf1 @("-Merged", "-Id", "qlr1", "-By", "qrev", "-Sha", $mg.merge, "-FitsCodebase")
+Check "LR: -Merged ACCEPTED for a compliant record (exit 0, merged)" `
+    (($r.code -eq 0) -and ((Get-QItem $lf1 "qlr1").state -eq "merged") -and ($r.out -match "ACCEPTED") -and ($r.out -match "BLIND SPOT")) `
+    ("exit=" + $r.code + " | " + (First-Line $r.out))
+Check "LR: the check left the record byte-identical (read-only)" ((Get-Sha256 $recPath) -eq $recHash)
+
+# LR5 - a store that is not there is INDETERMINATE: refused, and not called a missing record.
+$lf5 = New-Fixture "lr5"
+$la5 = New-LrAnchor "lr5" (Join-Path $Root "no-such-store\implementation-guide\feat\findings\qlr5.md")
+$mg5 = Initialize-LrReviewing $lf5 "qlr5" $la5 -WithFail
+$r = Invoke-Q $lf5 @("-Merged", "-Id", "qlr5", "-By", "qrev", "-Sha", $mg5.merge, "-FitsCodebase")
+Check "LR: -Merged REFUSED on an unreadable store (indeterminate, not record-missing)" `
+    (($r.code -eq 1) -and ((Get-QItem $lf5 "qlr5").state -eq "reviewing") -and ($r.out -match "INDETERMINATE") -and ($r.out -match "store-unreadable") -and ($r.out -notmatch "record-missing")) `
+    ("exit=" + $r.code)
+
+# LR6 - a first-try green needs no record: accepted with NO record.
+$lf6 = New-Fixture "lr6"; $ls6 = New-LrStore "lr6"
+$la6 = New-LrAnchor "lr6" (Join-Path $ls6 "implementation-guide\feat\findings\qlr6.md")
+$mg6 = Initialize-LrReviewing $lf6 "qlr6" $la6
+$r = Invoke-Q $lf6 @("-Merged", "-Id", "qlr6", "-By", "qrev", "-Sha", $mg6.merge, "-FitsCodebase")
+Check "LR: -Merged ACCEPTED with NO record for a first-try green" `
+    (($r.code -eq 0) -and ((Get-QItem $lf6 "qlr6").state -eq "merged") -and ($r.out -match "NOT REQUIRED") -and `
+     -not (Test-Path (Join-Path $ls6 "implementation-guide\feat\findings\qlr6.learning-record.json"))) ("exit=" + $r.code)
+
+# LR7 - the off switch: enforce_at_merged=false prints the refusal as ADVICE and records the merge.
+$lf7 = New-Fixture "lr7"; $ls7 = New-LrStore "lr7"
+$la7 = New-LrAnchor "lr7" (Join-Path $ls7 "implementation-guide\feat\findings\qlr7.md")
+$mg7 = Initialize-LrReviewing $lf7 "qlr7" $la7 -WithFail
+$cfgOff = Join-Path $Root "harness.config.lr-off.json"
+$cfgObj = Get-Content -Raw -Path (Join-Path $PSScriptRoot "harness.config.json") -Encoding UTF8 | ConvertFrom-Json
+$cfgObj.pipeline.learning_record.enforce_at_merged = $false
+[System.IO.File]::WriteAllText($cfgOff, ($cfgObj | ConvertTo-Json -Depth 30), (New-Object System.Text.UTF8Encoding($false)))
+$prevCfg = $env:AI_STACK_HARNESS_CONFIG
+$env:AI_STACK_HARNESS_CONFIG = $cfgOff
+try { $r = Invoke-Q $lf7 @("-Merged", "-Id", "qlr7", "-By", "qrev", "-Sha", $mg7.merge, "-FitsCodebase") }
+finally { $env:AI_STACK_HARNESS_CONFIG = $prevCfg }
+Check "LR: enforce_at_merged=false -> accepted WITH ADVICE (exit 0, merged, record-missing printed as advice)" `
+    (($r.code -eq 0) -and ((Get-QItem $lf7 "qlr7").state -eq "merged") -and ($r.out -match "ADVICE") -and ($r.out -match "record-missing")) `
+    ("exit=" + $r.code)
 
 # --- verdict --------------------------------------------------------------------------
 $fail = @($results | Where-Object { -not $_.pass })

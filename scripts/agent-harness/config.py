@@ -52,6 +52,7 @@ DEFAULTS: Dict[str, Any] = {
         "claim_ttl_minutes": 60,
         "anchor_required": True,
         "gate_profile": "attended",
+        "learning_record": {"enforce_at_merged": True},
     },
     "worktree": {
         "root": ".claude/worktrees",
@@ -399,6 +400,12 @@ def resolve_role(role: str, profile: str = "", surface: str = "") -> Dict[str, s
 def gate_profile_name(requested: str = "") -> str:
     """Which gate profile is in force. Explicit request beats the configured default."""
     return requested or str(get("pipeline.gate_profile", "attended"))
+
+
+def learning_record_enforced() -> bool:
+    """Does queue.ps1 -Merged refuse on a failed learning-record check? (PS twin:
+    Get-LearningRecordEnforced.) False is the off switch: the check runs as advice only."""
+    return bool(get("pipeline.learning_record.enforce_at_merged", True))
 
 
 def resolve_gate(gate: str, profile: str = "") -> Dict[str, str]:

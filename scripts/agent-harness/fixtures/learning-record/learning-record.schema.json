@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "research-workbench/learning-record/v1",
+  "title": "Learning record v1 (06-EXPANSION §3.3)",
+  "description": "One record per steer→outcome pair, at one of two fidelities. The factual fields are derived from the record (harness queue, git, job tree), never authored; mental_model is the author's claim and is labelled as such. Comprehension state is NOT in this record (06-EXPANSION §3.4).",
+  "type": "object",
+  "required": ["schema_version", "fidelity", "producer", "source_ref", "domains", "steer", "red", "outcome", "created_at"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "fidelity": { "enum": ["iterative", "exploratory"], "description": "iterative = a harness lesson; exploratory = a research-branch delta. A registry (06-EXPANSION §1): later fidelities are added, never switched on in code." },
+    "producer": { "enum": ["harness", "job-tree"] },
+    "source_ref": {
+      "type": "object",
+      "description": "Where the factual fields were derived from.",
+      "properties": {
+        "queue_item_id": { "type": "string" },
+        "anchor_id": { "type": "string" },
+        "merge_range": { "type": "string", "description": "base..head of the merged worktree, or empty when parked" },
+        "session_id": { "type": "string" },
+        "branch_id": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "domains": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "topic tags; hubs stay emergent (D1), tags are only search handles" },
+    "steer": { "type": "string", "description": "iterative: the anchor's goal + acceptance; exploratory: the question or steer that opened the branch" },
+    "red": { "type": "string", "description": "iterative: what the failing state looked like (repro, test output); exploratory: the gap as stated" },
+    "iterations": { "type": "integer", "minimum": 0, "description": "iterative only: returns from tester or reviewer before green" },
+    "hypotheses_refuted": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["hypothesis", "why_refuted"],
+        "properties": {
+          "hypothesis": { "type": "string" },
+          "why_refuted": { "type": "string" },
+          "evidence": { "type": "string", "description": "commit, test output path, or claim id" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "required": ["kind", "summary"],
+      "properties": {
+        "kind": { "enum": ["green", "parked", "found", "gap-remains"] },
+        "summary": { "type": "string" },
+        "evidence": { "type": "array", "items": { "type": "string" }, "description": "commits, test outputs, claim ids with their credibility and coverage" },
+        "parked_reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "deviation": { "type": "string", "description": "the delta between steer and outcome, read in retrospect; exploratory: whether a human steer or a gap steer answered the gap (D3)" },
+    "mental_model": {
+      "type": "object",
+      "description": "AUTHORED. The abstraction that would have skipped the iterations. Labelled as the worker's claim; never treated as fact.",
+      "required": ["claim", "author_role"],
+      "properties": {
+        "claim": { "type": "string" },
+        "author_role": { "enum": ["worker", "tester", "reviewer", "research-service"] }
+      },
+      "additionalProperties": false
+    },
+    "skill_candidate": { "type": "string", "description": "Shared raw material for the agent-org / harness pillar. The research tooling stores it and never interprets or acts on it (06-EXPANSION §3.1)." },
+    "reviewer_check": {
+      "type": "object",
+      "description": "iterative only: the reviewer verified outcome.summary against the merge range before merging.",
+      "required": ["checked", "by"],
+      "properties": { "checked": { "type": "boolean" }, "by": { "type": "string" }, "note": { "type": "string" } },
+      "additionalProperties": false
+    },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}
