@@ -51,7 +51,15 @@ were retired by the follow-up item (ac-legacy-recovery) rather than fixed.
   claude-bridge health, Telegram alerting. Log stays at
   `logs/tailscale-health.log` for continuity.
 - `check-openbrain-health.ps1`, `check-agent-org-health.ps1` — per-project
-  probes (fanned out from the watchdog).
+  probes (fanned out from the watchdog, so they run every 10 minutes with
+  `-Repair` under the `\StackWatchdog` scheduled task). The Open Brain probe's
+  guards for "green but functionally dead" containers: STALE-POOL (openbrain-mcp,
+  -research, -curator, -pantry: restart after an openbrain-db restart) and
+  CPU-SPIN (openbrain-mcpo / -mcpo-ext: an average of 80% of one core or more,
+  sustained for 30 minutes, restarts that container only, at most once an
+  hour, and sends one alert; a spin back inside the hour only alerts; no docker
+  data means no action). Test: `test-openbrain-cpu-spin.ps1` (stub docker,
+  faked alert senders, `-Mutants`).
 - `check-backup-coverage.ps1` — every stateful path has a sidecar, and every
   required gitignored config/secret file is in the newest encrypted
   config-secrets archive (manual).

@@ -3,7 +3,11 @@
 # Health probe for the **Open Brain** compose project (project = "open-brain"),
 # which a plain `docker compose ...` from the ai-stack project dir CANNOT see.
 # This is the single, canonical Open Brain probe — called by both:
-#   - the autonomous monitor  (check-tailscale-health.ps1, with -Repair)
+#   - the autonomous monitor: scripts\checks\stack-watchdog.ps1 (formerly
+#     check-tailscale-health.ps1), Invoke-OpenBrainHealth, with
+#     -Repair -Quiet -LogPath logs\tailscale-health.log, on every pass of the
+#     host scheduled task \StackWatchdog (every 10 min, default -Mode check).
+#     That 10-minute cadence is what the CPU-spin guard's window is built on.
 #   - by hand, with or without -Repair. (quick-fixes.bat :status_check /
 #     :openbrain_check named it as %SCRIPT_DIR%check-openbrain-health.ps1,
 #     i.e. under scripts/recovery/, where it is not; that .bat was archived
@@ -23,14 +27,26 @@
 # reported healthy the whole time. Remediation: `docker restart openbrain-mcpo-ext`
 # (100% -> ~0.2% instantly). NOT triggered by a graceful upstream restart/pause --
 # it's a latent no-backoff spin in mcpo's streamable-http client, tripped by an
-# ungraceful disconnect (netns break / hard kill). This probe still only checks
-# liveness for mcpo-ext (no CPU-spin guard yet -- declined 2026-06-07).
+# ungraceful disconnect (netns break / hard kill). It came back 2026-10-04 (a
+# Docker restart) and half-pegged the host for about a day; on 2026-10-05 the
+# operator reversed the 2026-06-07 document-only decision. Upstream: the spin
+# is anyio's (agronholm/anyio#1111, a done task re-cancelled via call_soon
+# forever; fixed in anyio 4.14.x); mcpo v0.0.20 ships anyio 4.12.1 and no newer
+# mcpo exists (open-webui/mcpo#302 is open). So this probe now has a CPU-SPIN
+# GUARD for openbrain-mcpo and openbrain-mcpo-ext (same image): a sustained
+# average at or above -CpuSpinPercent (80% of one core) for -CpuSpinWindowMinutes
+# (30) -> under -Repair, `docker restart` of THAT container only, one log line,
+# one alert (#sysadmin, else Telegram); at most one auto-restart per container
+# per hour, a spin back inside the hour alerts only; no docker data, no action.
+# The rule and the measurement are above Invoke-CpuSpinGuard (item ef-mcpo-spin).
 # See memory: openbrain-mcpo-ext-cpu-spin.
 #
 # Probes (by container NAME, project-agnostic — never `docker compose`):
 #   - openbrain-db          running               (the dependency)
 #   - openbrain-mcp         running + STALE-POOL guard (db started after mcp -> restart)
-#   - openbrain-mcpo[-ext]  running               (the Open WebUI tool bridge)
+#   - openbrain-mcpo[-ext]  running + CPU-SPIN guard (sustained >= 80% of a core for
+#                           30 min -> restart that one, capped 1/h, alert;
+#                           state in logs\.openbrain-cpu-spin-state.json)
 #   - openbrain-research    http://127.0.0.1:8818/health "db":true  (STALE-POOL guard, same class as mcp)
 #   - openbrain-curator     http://127.0.0.1:8816/health "db":true  (same guard; absent = the 2026-09-05 loop)
 #   - openbrain-gateway     http://127.0.0.1:8061/health == "ok"   (functional, no secret)
@@ -65,11 +81,29 @@ param(
   # row is ever created. The liveness / stale-pool probes stay on 'openbrain-db'
   # - they describe THIS stack, the query describes a table.
   [string]$DbContainer = 'openbrain-db',
-  [string]$DbName = 'openbrain'
+  [string]$DbName = 'openbrain',
+  # CPU-spin guard (see Invoke-CpuSpinGuard). Which containers are MEASURED;
+  # restart is still refused for any name not on $SpinRestartAllowList below,
+  # so adding a name here only adds a report + alert.
+  [string[]]$CpuSpinContainers = @('openbrain-mcpo', 'openbrain-mcpo-ext'),
+  # Average CPU over a run interval, in % of ONE core, at or above which the
+  # interval counts as hot, and how long a hot streak must last to be a spin.
+  # Calibration 2026-10-05: idle mcpo 0.2%; the spin pins ~100%.
+  [ValidateRange(10, 1000)][int]$CpuSpinPercent = 80,
+  [ValidateRange(10, 1440)][int]$CpuSpinWindowMinutes = 30,
+  # Bound on each docker inspect / exec the guard makes (restart: 60 s).
+  [ValidateRange(1, 300)][int]$DockerTimeoutSeconds = 20
 )
 
 $ErrorActionPreference = 'Continue'
 $script:Faults = 0
+# The ONLY containers the CPU-spin guard may restart. Exact, case-sensitive
+# names; never openwebui, tailscale or anything else.
+$SpinRestartAllowList = @('openbrain-mcpo', 'openbrain-mcpo-ext')
+# scripts\checks\ -> repo root (state file under logs\, the alert senders' .venv).
+$RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+# `powershell -File` hands "a,b" over as ONE string; split it here.
+$CpuSpinContainers = @($CpuSpinContainers | ForEach-Object { "$_" -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
 function Write-Ob {
   param([string]$Name, [string]$State, [string]$Detail = '')
@@ -87,21 +121,28 @@ function Write-Ob {
   }
 }
 
+# Bounded since ef-mcpo-spin: a wedged docker used to hang the whole probe (and
+# the watchdog pass that calls it) here. 'unknown' = docker did not answer
+# within -DockerTimeoutSeconds or failed for a reason other than "no such
+# container"; callers take no action on it.
 function Get-CState {
   param([string]$Name)
-  $s = docker inspect --format '{{.State.Status}}' $Name 2>$null
-  if ($LASTEXITCODE -ne 0) { return 'absent' }
-  return $s
+  $r = Invoke-ObDocker @('inspect', '--format', '{{.State.Status}}', $Name)
+  if ($r.Ok) { return ((@($r.Lines) | Select-Object -First 1) -as [string]).Trim() }
+  if ($r.Why -match '(?i)no such (object|container)') { return 'absent' }
+  $script:CStateWhy[$Name] = $r.Why
+  return 'unknown'
 }
+$script:CStateWhy = @{}
 
 # Raw ISO-8601 UTC start timestamp. UTC ISO strings are lexicographically
 # ordered, so plain string comparison is a safe "started after" test (avoids
 # PS 5.1 choking on docker's 9-digit nanosecond fraction).
 function Get-CStartedAt {
   param([string]$Name)
-  $t = docker inspect --format '{{.State.StartedAt}}' $Name 2>$null
-  if ($LASTEXITCODE -ne 0) { return $null }
-  return $t
+  $r = Invoke-ObDocker @('inspect', '--format', '{{.State.StartedAt}}', $Name)
+  if (-not $r.Ok) { return $null }
+  return ((@($r.Lines) | Select-Object -First 1) -as [string]).Trim()
 }
 
 function Test-HttpOk {
@@ -126,6 +167,7 @@ function Confirm-ObContainer {
   $state = Get-CState $Name
   if ($state -eq 'running') { Write-Ob $Name ok 'running'; return $true }
   if ($state -eq 'absent')  { Write-Ob $Name down 'not present (container missing)'; $script:Faults++; return $false }
+  if ($state -eq 'unknown') { Write-Ob $Name warn "NO DATA (docker inspect $($script:CStateWhy[$Name])) - no action"; $script:Faults++; return $false }
 
   # exited / created / restarting / paused
   if ($Repair) {
@@ -137,6 +179,258 @@ function Confirm-ObContainer {
   }
 
   Write-Ob $Name down "state=$state (run with -Repair to start)"; $script:Faults++; return $false
+}
+
+# ---- CPU-spin guard helpers (ef-mcpo-spin, 2026-10-05) ----------------------
+# Every docker call the guard makes goes through Invoke-ObProcess: a .NET
+# Process with both streams read asynchronously and a hard WaitForExit bound,
+# the process tree killed on timeout (the stack-watchdog.ps1 Invoke-BoundedProcess
+# pattern, without its job object). A call that times out or fails returns
+# Ok=$false with a reason, and the guard then does NOTHING (no data = no action).
+function ConvertTo-ObArgument {
+  param([AllowEmptyString()][string]$Value)
+  if ($Value -eq '') { return '""' }
+  if ($Value -notmatch '[\s"]') { return $Value }
+  $e = [regex]::Replace($Value, '(\\*)"', '$1$1\"')
+  $e = [regex]::Replace($e, '(\\+)$', '$1$1')
+  return '"' + $e + '"'
+}
+
+function Invoke-ObProcess {
+  param([string]$FilePath, [string[]]$ProcArgs = @(), [int]$TimeoutSeconds = 20)
+  $res = [pscustomobject]@{ Ok = $false; Lines = @(); Why = '' }
+  $proc = New-Object System.Diagnostics.Process
+  try {
+    $psi = $proc.StartInfo
+    $psi.FileName = $FilePath
+    $psi.Arguments = ((@($ProcArgs) | ForEach-Object { ConvertTo-ObArgument $_ }) -join ' ')
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $true
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    [void]$proc.Start()
+    $outTask = $proc.StandardOutput.ReadToEndAsync()
+    $errTask = $proc.StandardError.ReadToEndAsync()
+    $proc.StandardInput.Close()
+    if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+      & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null
+      $res.Why = "did not answer within ${TimeoutSeconds}s"
+      return $res
+    }
+    $proc.WaitForExit()
+    $leftMs = [int][Math]::Max(0, ($TimeoutSeconds * 1000) - $sw.ElapsedMilliseconds)
+    if (-not [System.Threading.Tasks.Task]::WaitAll(@($outTask, $errTask), $leftMs)) {
+      $res.Why = "did not answer within ${TimeoutSeconds}s (a child kept its output open)"
+      return $res
+    }
+    $out = @(@($outTask.Result -split "`r?`n") | Where-Object { $_ -ne '' })
+    $err = @(@($errTask.Result -split "`r?`n") | Where-Object { $_ -and $_.Trim() })
+    if ($proc.ExitCode -ne 0) {
+      $first = @($err + $out) | Select-Object -First 1
+      $res.Why = "exited $($proc.ExitCode)" + $(if ($first) { ": $first" } else { '' })
+      return $res
+    }
+    $res.Ok = $true; $res.Lines = $out
+    return $res
+  } catch {
+    $res.Why = "could not run: $($_.Exception.Message)"
+    return $res
+  } finally {
+    try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
+    try { $proc.Dispose() } catch { }
+  }
+}
+
+function Invoke-ObDocker {
+  param([string[]]$DockerArgs, [int]$TimeoutSeconds = $DockerTimeoutSeconds)
+  return Invoke-ObProcess -FilePath 'docker' -ProcArgs $DockerArgs -TimeoutSeconds $TimeoutSeconds
+}
+
+# The container's own cumulative CPU time in microseconds, from its cgroup
+# (cgroup v2 cpu.stat usage_usec; v1 cpuacct.usage in ns as the fallback).
+# Read INSIDE the container: Docker Desktop's cgroups are not visible from the
+# Windows host, and the docker CLI exposes only a percentage. Returns
+# @{ Usec = <int64> } or @{ Why = <reason> }.
+function Get-ObCpuUsec {
+  param([string]$Name)
+  $r = Invoke-ObDocker @('exec', $Name, 'cat', '/sys/fs/cgroup/cpu.stat')
+  if ($r.Ok) {
+    foreach ($l in $r.Lines) {
+      if ($l -match '^usage_usec\s+(\d+)\s*$') { return @{ Usec = [int64]$Matches[1] } }
+    }
+    $why = 'cpu.stat has no usage_usec line'
+  } else {
+    $why = "docker exec $($r.Why)"
+    if ($r.Why -match 'did not answer') { return @{ Why = $why } }
+  }
+  $r1 = Invoke-ObDocker @('exec', $Name, 'cat', '/sys/fs/cgroup/cpuacct/cpuacct.usage')
+  if ($r1.Ok) {
+    $v = (@($r1.Lines) | Select-Object -First 1)
+    if ("$v".Trim() -match '^\d+$') { return @{ Usec = [int64]([int64]"$v".Trim() / 1000) } }
+  }
+  return @{ Why = $why }
+}
+
+# The house alert path for a standalone check (the scripts\maintenance\disk-guard.ps1
+# shape): #sysadmin via mm_post.py, else Telegram via telegram_notify.py, both
+# through the repo .venv python and bounded. Returns the channel that took it,
+# or '' when none did - never claims a send that did not happen.
+function Send-ObAlert {
+  param([string]$Text)
+  $py = Join-Path $RepoRoot '.venv\Scripts\python.exe'
+  if (-not (Test-Path $py)) { return '' }
+  $r = Invoke-ObProcess -FilePath $py -ProcArgs @((Join-Path $RepoRoot 'scripts\sysadmin-mcp\mm_post.py'), $Text) -TimeoutSeconds 45
+  if ($r.Ok) { return '#sysadmin' }
+  $r = Invoke-ObProcess -FilePath $py -ProcArgs @((Join-Path $RepoRoot 'scripts\sysadmin-mcp\telegram_notify.py'), ("ai-stack (Mattermost post failed): " + $Text)) -TimeoutSeconds 45
+  if ($r.Ok) { return 'Telegram' }
+  return ''
+}
+
+function ConvertFrom-ObInstant {
+  param($Value)
+  if (-not $Value) { return $null }
+  try { return [DateTime]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() }
+  catch { return $null }
+}
+
+# THE GUARD. openbrain-mcpo[-ext] (mcpo v0.0.20, anyio 4.12.1) can busy-spin
+# one core for days while its healthcheck stays green (header, and memory
+# openbrain-mcpo-ext-cpu-spin). Rule, per container, across runs:
+#   - each run reads the container's cumulative CPU counter; the AVERAGE over
+#     the interval since the previous run is (delta CPU time / delta wall time),
+#     in % of one core. Not a `docker stats` snapshot: that is a ~1 s sample
+#     and catches the 30 s python healthcheck or one tool call as a spike.
+#   - an interval at or above $CpuSpinPercent is "hot"; the hot streak starts
+#     at the start of its first hot interval; any cool interval ends it.
+#   - SPIN = a hot streak at least $CpuSpinWindowMinutes long. Never one sample.
+#   - action (under -Repair, and only for a name on $SpinRestartAllowList):
+#     `docker restart <that container>`, one log line, one alert. At most one
+#     auto-restart per container per hour: a spin back inside the hour gets an
+#     alert only (itself at most one per hour), never a second restart.
+#   - no data (docker inspect/exec timed out or failed) = no action: a clear
+#     log line, a fault, and the state is not advanced.
+# State: logs\.openbrain-cpu-spin-state.json (the watchdog's logs\ state-file
+# convention), keyed by container name; the restart/alert stamps survive the
+# restart that resets the counter.
+function Invoke-CpuSpinGuard {
+  param([string[]]$Names)
+  $statePath = Join-Path $RepoRoot 'logs\.openbrain-cpu-spin-state.json'
+  $st = @{}
+  if (Test-Path $statePath) {
+    try {
+      $raw = Get-Content -LiteralPath $statePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+      foreach ($p in $raw.PSObject.Properties) {
+        $h = @{}
+        foreach ($q in $p.Value.PSObject.Properties) { $h[$q.Name] = $q.Value }
+        $st[$p.Name] = $h
+      }
+    } catch {
+      Write-Ob 'cpu-spin-guard' warn "state file unreadable, starting fresh: $($_.Exception.Message)"
+      $st = @{}
+    }
+  }
+  $now = [DateTime]::UtcNow
+  $nowS = $now.ToString('o')
+
+  foreach ($name in $Names) {
+    $label = "$name cpu"
+    $insp = Invoke-ObDocker @('inspect', '--format', '{{.State.Status}}|{{.Id}}|{{.State.StartedAt}}', $name)
+    if (-not $insp.Ok) {
+      if ($insp.Why -match '(?i)no such (object|container)') { continue }   # absent: reported by the liveness probe
+      Write-Ob $label warn "NO DATA (docker inspect $($insp.Why)) - no action"; $script:Faults++; continue
+    }
+    $f = ((@($insp.Lines) | Select-Object -First 1) -split '\|')
+    if ($f[0] -ne 'running') { continue }                                   # not running: the liveness probe owns it
+    $identity = "$($f[1])|$($f[2])"
+    $cpu = Get-ObCpuUsec $name
+    if ($null -eq $cpu.Usec) {
+      Write-Ob $label warn "NO DATA (cpu counter: $($cpu.Why)) - no action"; $script:Faults++; continue
+    }
+    $usec = [int64]$cpu.Usec
+
+    $prev = $st[$name]
+    if (-not $prev) { $prev = @{} }
+    $prevAt = ConvertFrom-ObInstant $prev.at
+    if (-not $prevAt -or $prev.identity -ne $identity -or $null -eq $prev.usec -or $usec -lt [int64]$prev.usec) {
+      $prev.identity = $identity; $prev.usec = $usec; $prev.at = $nowS; $prev.hot_since = $null
+      $st[$name] = $prev
+      Write-Ob $label ok 'baseline recorded (CPU average is measured from the next run)'
+      continue
+    }
+    $elapsed = ($now - $prevAt).TotalSeconds
+    if ($elapsed -lt 60) {
+      Write-Ob $label ok ("interval {0:N0}s too short to average; baseline kept" -f $elapsed)
+      continue
+    }
+    $pct = 100.0 * ([int64]$usec - [int64]$prev.usec) / ($elapsed * 1000000.0)
+    $hot = ($pct -ge $CpuSpinPercent)
+    if ($hot) {
+      if (-not (ConvertFrom-ObInstant $prev.hot_since)) { $prev.hot_since = $prev.at }
+    } else {
+      $prev.hot_since = $null
+    }
+    $prev.usec = $usec; $prev.at = $nowS; $prev.identity = $identity
+    $st[$name] = $prev
+    $avg = "{0:N1}% of one core over {1:N0} min" -f $pct, ($elapsed / 60)
+    if (-not $hot) { Write-Ob $label ok $avg; continue }
+    $hotMin = ($now - (ConvertFrom-ObInstant $prev.hot_since)).TotalMinutes
+    if ($hotMin -lt $CpuSpinWindowMinutes) {
+      Write-Ob $label warn ("{0}; hot for {1:N0} min (< {2} min window) - watching" -f $avg, $hotMin, $CpuSpinWindowMinutes)
+      continue
+    }
+
+    # --- sustained spin --------------------------------------------------------
+    $what = "CPU SPIN on ${name}: {0}, at or above {1}% for {2:N0} min" -f $avg, $CpuSpinPercent, $hotMin
+    $lastRestart = ConvertFrom-ObInstant $prev.last_restart
+    # Throttle for the ALERT-ONLY paths (one per container per hour). The restart
+    # alert does not set it: a spin back inside the hour must page once more.
+    $lastAlert = ConvertFrom-ObInstant $prev.last_hold_alert
+    $alertDue = (-not $lastAlert) -or (($now - $lastAlert).TotalMinutes -ge 60)
+    if (-not $Repair) {
+      Write-Ob $label warn "$what - run with -Repair to act (restart + alert)"; $script:Faults++; continue
+    }
+    $why = $null
+    if ($SpinRestartAllowList -cnotcontains $name) {
+      $why = 'not on the restart allow-list - alert only'
+    } elseif ($lastRestart -and (($now - $lastRestart).TotalMinutes -lt 60)) {
+      $why = "back within the hour of the last auto-restart ($($prev.last_restart)) - alert only, no restart"
+    }
+    if ($why) {
+      $sent = ''
+      if ($alertDue) {
+        $sent = Send-ObAlert "openbrain: $what; $why. Manual fix: docker restart $name"
+        if ($sent) { $prev.last_hold_alert = $nowS }
+      }
+      $tail = if (-not $alertDue) { 'alert already sent this hour' } elseif ($sent) { "alert -> $sent" } else { 'alert NOT delivered (no channel took it)' }
+      Write-Ob $label warn "$what; $why; $tail"; $script:Faults++
+      continue
+    }
+
+    # restart: only this container, at most once an hour
+    $prev.last_restart = $nowS; $prev.hot_since = $null; $prev.usec = $null
+    $rs = Invoke-ObDocker @('restart', $name) 60
+    $outcome = if ($rs.Ok) { 'docker restart ok' } else { "docker restart FAILED ($($rs.Why))" }
+    $sent = Send-ObAlert "openbrain: $what; auto-restarted it ($outcome; cap 1 per hour). A spin back inside the hour alerts without restarting."
+    if ($sent) { $prev.last_restart_alert = $nowS }
+    $tail = if ($sent) { "alert -> $sent" } else { 'alert NOT delivered (no channel took it)' }
+    if ($rs.Ok) {
+      Write-Ob $label fix "$what -> docker restart $name ($outcome); $tail"
+    } else {
+      Write-Ob $label down "$what -> docker restart $name ($outcome); $tail"; $script:Faults++
+    }
+  }
+
+  try {
+    $dir = Split-Path -Parent $statePath
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $o = [ordered]@{}
+    foreach ($k in ($st.Keys | Sort-Object)) { $o[$k] = $st[$k] }
+    [IO.File]::WriteAllText($statePath, ($o | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding $false))
+  } catch {
+    Write-Ob 'cpu-spin-guard' warn "state file not written: $($_.Exception.Message)"
+  }
 }
 
 Write-Host "==> Open Brain stack health (project: open-brain)" -ForegroundColor Cyan
@@ -199,6 +493,8 @@ if ($dbUp -and $mcpUp) {
 # ---- 3. The Open WebUI tool bridge -----------------------------------------
 Confirm-ObContainer 'openbrain-mcpo'     | Out-Null
 Confirm-ObContainer 'openbrain-mcpo-ext' | Out-Null
+# ... and the CPU-spin guard for both (green-but-spinning; rule above Invoke-CpuSpinGuard).
+Invoke-CpuSpinGuard -Names $CpuSpinContainers
 
 # ---- 4. Functional probes on host-published endpoints (no secret needed) ----
 # openbrain-research /health does a live `SELECT 1` and returns 503 when its
