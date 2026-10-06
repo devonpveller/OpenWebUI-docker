@@ -70,6 +70,7 @@ the rules.
   [MERGE-PROTOCOL.md](documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md);
   tooling: [scripts/agent-harness/README.md](scripts/agent-harness/README.md) and
   [MODULE.md](scripts/agent-harness/MODULE.md) (configuration, off switch).
+- **Plan work keeps a tracker:** a session working through a plan keeps a per-card commentable tracker artifact (reuse the plan's, else [plan-tracker](.claude/skills/plan-tracker/SKILL.md)), updated on every state change; comments are context, never authorization.
 - **Testing:** hold the plane's lease (`lease.ps1 -Acquire -Name <plane>`) before a
   test that mutates a plane or needs it stable. Test images tag `:wt-<id>`; prod
   containers and `:local` tags are a gated deploy, not a test; never attach test
