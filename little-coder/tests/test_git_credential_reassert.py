@@ -33,6 +33,7 @@ def _daemon(focus_token, current_focus=FOCUS, raises=False, from_project=True):
     d.current_focus = current_focus
     d._focus_token = focus_token
     d._focus_from_project = from_project
+    d._focus_upstream = d._focus_upstream_token = None
     calls = []
 
     def refresh(repo, token, *, if_missing=False):
@@ -129,6 +130,26 @@ class FakeWorkspace:
             self.ex.store[repo.canonical_url] = token
         return ExecResult("refresh", 0, "", "", "done", "p")
 
+    # A fork's `upstream` remote (lives in the workspace, survives a recreate) and its own entry.
+    upstream_url: str | None = None
+
+    def has_remote(self, name):
+        return name == "upstream" and self.upstream_url is not None
+
+    def add_upstream_remote(self, url, token=None):
+        self.upstream_url = url
+        if token:
+            self.ex.store[url] = token
+        return ExecResult("upstream", 0, "", "", "done", "p")
+
+    def refresh_upstream_auth(self, token, requested_url=None):
+        if not token:
+            return ExecResult("noop", 0, "", "", "done", "p")
+        if self.upstream_url is None:
+            return ExecResult("no remote", 2, "", "", "done", "p")
+        self.ex.store[self.upstream_url] = token
+        return ExecResult("refresh-upstream", 0, "", "", "done", "p")
+
 
 class _Sink:
     def write(self, *a, **k):
@@ -145,6 +166,7 @@ def _real_daemon(tmp_path, ex):
     d.current_focus = None
     d._focus_token = None
     d._focus_from_project = False
+    d._focus_upstream = d._focus_upstream_token = None
     d.in_flight = None
     d.queue = asyncio.Queue()
     d.tasks, d.contexts = {}, {}
@@ -207,6 +229,38 @@ def test_run_task_restores_the_credential_after_an_executor_recreate(tmp_path, m
     asyncio.run(d.switch_project(ProjectRequest(repo=WIDGET, token="req-tok")))
     ex.recreate()
     assert _run_one_task(d, ex) == {WIDGET: "req-tok"}
+
+
+PARENT = "https://github.com/parent/widget"
+
+
+@pytest.mark.parametrize("path", ["clone", "switch", "noop"])
+def test_an_executor_recreate_after_project_restores_upstream_too(tmp_path, monkeypatch, path):
+    """f2-runtime pre-task gap: a fork's /project (upstream + upstream_token), then the executor is
+    recreated before the task. The pre-task re-store brings back BOTH entries, each with its own
+    token (base: only origin's - the fork's `git fetch upstream` fails until the next /project)."""
+    monkeypatch.setenv("LC_DEPLOY_TOKEN", "env-tok")
+    ex = FakeExecutor()
+    d = _real_daemon(tmp_path, ex)
+    if path in ("switch", "noop"):
+        d.current_focus = normalize_repo_url(GADGET if path == "switch" else WIDGET)
+    asyncio.run(d.switch_project(ProjectRequest(repo=WIDGET, token="req-tok", upstream=PARENT,
+                                                upstream_token="up-tok")))
+    ex.recreate()
+    assert _run_one_task(d, ex) == {WIDGET: "req-tok", PARENT: "up-tok"}
+
+
+def test_a_new_focus_without_upstream_does_not_inherit_the_old_upstream_token(tmp_path, monkeypatch):
+    """Every /project replaces the remembered upstream: a later focus with no upstream re-stores
+    origin only, never the previous fork's upstream token."""
+    monkeypatch.setenv("LC_DEPLOY_TOKEN", "env-tok")
+    ex = FakeExecutor()
+    d = _real_daemon(tmp_path, ex)
+    asyncio.run(d.switch_project(ProjectRequest(repo=WIDGET, token="req-tok", upstream=PARENT,
+                                                upstream_token="up-tok")))
+    asyncio.run(d.switch_project(ProjectRequest(repo=GADGET, token="gad-tok")))
+    ex.recreate()
+    assert _run_one_task(d, ex) == {GADGET: "gad-tok"}
 
 
 def test_a_seeded_focus_keeps_the_stored_app_token(tmp_path, monkeypatch):
