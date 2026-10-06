@@ -55,10 +55,11 @@ were retired by the follow-up item (ac-legacy-recovery) rather than fixed.
   `-Repair` under the `\StackWatchdog` scheduled task). The Open Brain probe's
   guards for "green but functionally dead" containers: STALE-POOL (openbrain-mcp,
   -research, -curator, -pantry: restart after an openbrain-db restart) and
-  CPU-SPIN (openbrain-mcpo / -mcpo-ext: an average of 80% of one core or more,
-  sustained for 30 minutes, restarts that container only, at most once an
-  hour, and sends one alert; a spin back inside the hour only alerts; no docker
-  data means no action). Test: `test-openbrain-cpu-spin.ps1` (stub docker,
+  CPU-SPIN (openbrain-mcpo / -mcpo-ext: an average of 80% of one core or more
+  over at least 3 consecutive intervals of at most 20 minutes each, spanning
+  30 minutes or more, restarts that container only, at most once an hour, and
+  sends one alert; a spin back inside the hour only alerts; one long interval
+  never counts, and no docker data means no action). Test: `test-openbrain-cpu-spin.ps1` (stub docker,
   faked alert senders, `-Mutants`).
 - `check-backup-coverage.ps1` — every stateful path has a sidecar, and every
   required gitignored config/secret file is in the newest encrypted

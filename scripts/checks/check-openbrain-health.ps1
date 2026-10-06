@@ -33,9 +33,10 @@
 # is anyio's (agronholm/anyio#1111, a done task re-cancelled via call_soon
 # forever; fixed in anyio 4.14.x); mcpo v0.0.20 ships anyio 4.12.1 and no newer
 # mcpo exists (open-webui/mcpo#302 is open). So this probe now has a CPU-SPIN
-# GUARD for openbrain-mcpo and openbrain-mcpo-ext (same image): a sustained
-# average at or above -CpuSpinPercent (80% of one core) for -CpuSpinWindowMinutes
-# (30) -> under -Repair, `docker restart` of THAT container only, one log line,
+# GUARD for openbrain-mcpo and openbrain-mcpo-ext (same image): an average at or
+# above -CpuSpinPercent (80% of one core) over at least -CpuSpinMinIntervals (3)
+# consecutive intervals of at most -CpuSpinMaxIntervalMinutes (20) each, spanning
+# at least -CpuSpinWindowMinutes (30) -> under -Repair, `docker restart` of THAT container only, one log line,
 # one alert (#sysadmin, else Telegram); at most one auto-restart per container
 # per hour, a spin back inside the hour alerts only; no docker data, no action.
 # The rule and the measurement are above Invoke-CpuSpinGuard (item ef-mcpo-spin).
@@ -44,8 +45,9 @@
 # Probes (by container NAME, project-agnostic — never `docker compose`):
 #   - openbrain-db          running               (the dependency)
 #   - openbrain-mcp         running + STALE-POOL guard (db started after mcp -> restart)
-#   - openbrain-mcpo[-ext]  running + CPU-SPIN guard (sustained >= 80% of a core for
-#                           30 min -> restart that one, capped 1/h, alert;
+#   - openbrain-mcpo[-ext]  running + CPU-SPIN guard (>= 80% of a core over 3+ intervals
+#                           of <= 20 min spanning 30+ min -> restart that one,
+#                           capped 1/h, alert;
 #                           state in logs\.openbrain-cpu-spin-state.json)
 #   - openbrain-research    http://127.0.0.1:8818/health "db":true  (STALE-POOL guard, same class as mcp)
 #   - openbrain-curator     http://127.0.0.1:8816/health "db":true  (same guard; absent = the 2026-09-05 loop)
@@ -91,6 +93,11 @@ param(
   # Calibration 2026-10-05: idle mcpo 0.2%; the spin pins ~100%.
   [ValidateRange(10, 1000)][int]$CpuSpinPercent = 80,
   [ValidateRange(10, 1440)][int]$CpuSpinWindowMinutes = 30,
+  # A spin needs this many consecutive hot intervals, and an interval longer than
+  # the bound (missed passes, a NO DATA streak) is never counted: it re-baselines.
+  # The \StackWatchdog cadence is 10 min; 20 tolerates one skipped trigger.
+  [ValidateRange(2, 20)][int]$CpuSpinMinIntervals = 3,
+  [ValidateRange(2, 60)][int]$CpuSpinMaxIntervalMinutes = 20,
   # Bound on each docker inspect / exec the guard makes (restart: 60 s).
   [ValidateRange(1, 300)][int]$DockerTimeoutSeconds = 20
 )
@@ -258,7 +265,12 @@ function Get-ObCpuUsec {
   $r = Invoke-ObDocker @('exec', $Name, 'cat', '/sys/fs/cgroup/cpu.stat')
   if ($r.Ok) {
     foreach ($l in $r.Lines) {
-      if ($l -match '^usage_usec\s+(\d+)\s*$') { return @{ Usec = [int64]$Matches[1] } }
+      if ($l -match '^usage_usec\s+(\S+)\s*$') {
+        $v = ConvertTo-ObInt64 $Matches[1]
+        if ($null -ne $v) { return @{ Usec = $v } }
+        # a usage_usec line whose value is not a 64-bit count: say so, do not guess
+        return @{ Why = ("cpu.stat usage_usec is not a 64-bit count: '{0}'" -f ($Matches[1].Substring(0, [Math]::Min(40, $Matches[1].Length)))) }
+      }
     }
     $why = 'cpu.stat has no usage_usec line'
   } else {
@@ -268,7 +280,8 @@ function Get-ObCpuUsec {
   $r1 = Invoke-ObDocker @('exec', $Name, 'cat', '/sys/fs/cgroup/cpuacct/cpuacct.usage')
   if ($r1.Ok) {
     $v = (@($r1.Lines) | Select-Object -First 1)
-    if ("$v".Trim() -match '^\d+$') { return @{ Usec = [int64]([int64]"$v".Trim() / 1000) } }
+    $ns = ConvertTo-ObInt64 "$v"
+    if ($null -ne $ns) { return @{ Usec = [int64]($ns / 1000) } }
   }
   return @{ Why = $why }
 }
@@ -295,6 +308,16 @@ function ConvertFrom-ObInstant {
   catch { return $null }
 }
 
+# A non-negative 64-bit count from a state field or a counter line, or $null.
+# Never casts blindly: a hand-edited "abc" or an overflowing value is $null.
+function ConvertTo-ObInt64 {
+  param($Value)
+  if ($null -eq $Value) { return $null }
+  $o = [int64]0
+  if ([int64]::TryParse(([string]$Value).Trim(), [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$o)) { return $o }
+  return $null
+}
+
 # THE GUARD. openbrain-mcpo[-ext] (mcpo v0.0.20, anyio 4.12.1) can busy-spin
 # one core for days while its healthcheck stays green (header, and memory
 # openbrain-mcpo-ext-cpu-spin). Rule, per container, across runs:
@@ -302,15 +325,27 @@ function ConvertFrom-ObInstant {
 #     the interval since the previous run is (delta CPU time / delta wall time),
 #     in % of one core. Not a `docker stats` snapshot: that is a ~1 s sample
 #     and catches the 30 s python healthcheck or one tool call as a spike.
-#   - an interval at or above $CpuSpinPercent is "hot"; the hot streak starts
+#   - an interval COUNTS only when it is 60 s to $CpuSpinMaxIntervalMinutes
+#     (20) long. A longer one - missed passes, a NO DATA streak, a restored
+#     state file - is not evidence: one average over a long gap hides its shape
+#     (a 7-min 400% burst averages 90% over 31 min), so it re-baselines and any
+#     streak starts over.
+#   - a counted interval at or above $CpuSpinPercent is "hot"; the streak starts
 #     at the start of its first hot interval; any cool interval ends it.
-#   - SPIN = a hot streak at least $CpuSpinWindowMinutes long. Never one sample.
+#   - SPIN = at least $CpuSpinMinIntervals (3) consecutive hot intervals AND at
+#     least $CpuSpinWindowMinutes (30) since the streak began. Never one
+#     sample, never one long gap.
 #   - action (under -Repair, and only for a name on $SpinRestartAllowList):
 #     `docker restart <that container>`, one log line, one alert. At most one
-#     auto-restart per container per hour: a spin back inside the hour gets an
-#     alert only (itself at most one per hour), never a second restart.
-#   - no data (docker inspect/exec timed out or failed) = no action: a clear
-#     log line, a fault, and the state is not advanced.
+#     auto-restart per container per hour, stamped BEFORE the attempt so a
+#     failed restart counts too: a spin back inside the hour gets an alert only
+#     (itself at most one per hour), never a second restart.
+#   - no data (docker inspect/exec timed out or failed, or the counter is not a
+#     number) = no action: a clear log line, a fault, the state not advanced.
+#   - a state timestamp more than 5 min in the FUTURE (clock skew, a hand edit)
+#     is corrupt: that container re-baselines rather than going blind until the
+#     clock catches up. A last_restart that is unreadable or in the future is
+#     read as "restarted now" - the safe side: alert only for the next hour.
 # State: logs\.openbrain-cpu-spin-state.json (the watchdog's logs\ state-file
 # convention), keyed by container name; the restart/alert stamps survive the
 # restart that resets the counter.
@@ -333,6 +368,7 @@ function Invoke-CpuSpinGuard {
   }
   $now = [DateTime]::UtcNow
   $nowS = $now.ToString('o')
+  $skew = $now.AddMinutes(5)
 
   foreach ($name in $Names) {
     $label = "$name cpu"
@@ -351,43 +387,71 @@ function Invoke-CpuSpinGuard {
     $usec = [int64]$cpu.Usec
 
     $prev = $st[$name]
-    if (-not $prev) { $prev = @{} }
-    $prevAt = ConvertFrom-ObInstant $prev.at
-    if (-not $prevAt -or $prev.identity -ne $identity -or $null -eq $prev.usec -or $usec -lt [int64]$prev.usec) {
-      $prev.identity = $identity; $prev.usec = $usec; $prev.at = $nowS; $prev.hot_since = $null
-      $st[$name] = $prev
-      Write-Ob $label ok 'baseline recorded (CPU average is measured from the next run)'
-      continue
-    }
-    $elapsed = ($now - $prevAt).TotalSeconds
-    if ($elapsed -lt 60) {
-      Write-Ob $label ok ("interval {0:N0}s too short to average; baseline kept" -f $elapsed)
-      continue
-    }
-    $pct = 100.0 * ([int64]$usec - [int64]$prev.usec) / ($elapsed * 1000000.0)
-    $hot = ($pct -ge $CpuSpinPercent)
-    if ($hot) {
-      if (-not (ConvertFrom-ObInstant $prev.hot_since)) { $prev.hot_since = $prev.at }
-    } else {
-      $prev.hot_since = $null
-    }
-    $prev.usec = $usec; $prev.at = $nowS; $prev.identity = $identity
+    if (-not ($prev -is [hashtable])) { $prev = @{} }
     $st[$name] = $prev
+    if ($prev.last_restart) {
+      $lr = ConvertFrom-ObInstant $prev.last_restart
+      if (-not $lr -or $lr -gt $skew) {
+        Write-Ob $label warn "last_restart '$($prev.last_restart)' is unreadable or in the future - read as restarted now (no auto-restart for an hour)"
+        $prev.last_restart = $nowS
+      }
+    }
+    $prevAt = ConvertFrom-ObInstant $prev.at
+    $prevUsec = ConvertTo-ObInt64 $prev.usec
+    $hotSince = ConvertFrom-ObInstant $prev.hot_since
+    $rebase = $null
+    if (-not $prevAt -or $null -eq $prevUsec) {
+      $rebase = 'baseline recorded (CPU average is measured from the next run)'
+    } elseif ($prevAt -gt $skew -or ($hotSince -and $hotSince -gt $skew)) {
+      $rebase = 'baseline recorded: a state timestamp is in the future (clock skew or a corrupt file) - re-baselined'
+    } elseif ($prev.identity -ne $identity) {
+      $rebase = 'baseline recorded (new container identity: it was restarted or recreated)'
+    } elseif ($usec -lt $prevUsec) {
+      $rebase = 'baseline recorded (the counter went backwards)'
+    } else {
+      $elapsed = ($now - $prevAt).TotalSeconds
+      if ($elapsed -lt 60) {
+        Write-Ob $label ok ("interval {0:N0}s too short to average; baseline kept" -f $elapsed)
+        continue
+      }
+      if ($elapsed -gt ($CpuSpinMaxIntervalMinutes * 60)) {
+        $rebase = ("baseline recorded: the interval was {0:N0} min, over the {1}-min bound - not counted, streak reset" -f ($elapsed / 60), $CpuSpinMaxIntervalMinutes)
+      }
+    }
+    if ($rebase) {
+      $prev.identity = $identity; $prev.usec = $usec; $prev.at = $nowS; $prev.hot_since = $null; $prev.hot_count = 0
+      Write-Ob $label ok $rebase
+      continue
+    }
+
+    $pct = 100.0 * ($usec - $prevUsec) / ($elapsed * 1000000.0)
+    $hot = ($pct -ge $CpuSpinPercent)
+    $hotCount = ConvertTo-ObInt64 $prev.hot_count
+    if ($null -eq $hotCount) { $hotCount = 0 }
+    if ($hot) {
+      # a streak with no counted hot interval behind it (old/restored state) starts here
+      if (-not $hotSince -or $hotCount -lt 1) { $prev.hot_since = $prev.at; $hotCount = 0 }
+      $hotCount++
+    } else {
+      $prev.hot_since = $null; $hotCount = 0
+    }
+    $prev.hot_count = $hotCount
+    $prev.usec = $usec; $prev.at = $nowS; $prev.identity = $identity
     $avg = "{0:N1}% of one core over {1:N0} min" -f $pct, ($elapsed / 60)
     if (-not $hot) { Write-Ob $label ok $avg; continue }
     $hotMin = ($now - (ConvertFrom-ObInstant $prev.hot_since)).TotalMinutes
-    if ($hotMin -lt $CpuSpinWindowMinutes) {
-      Write-Ob $label warn ("{0}; hot for {1:N0} min (< {2} min window) - watching" -f $avg, $hotMin, $CpuSpinWindowMinutes)
+    if ($hotCount -lt $CpuSpinMinIntervals -or $hotMin -lt $CpuSpinWindowMinutes) {
+      Write-Ob $label warn ("{0}; hot for {1:N0} min over {2} interval(s) (a spin needs {3} min and {4} intervals) - watching" -f $avg, $hotMin, $hotCount, $CpuSpinWindowMinutes, $CpuSpinMinIntervals)
       continue
     }
 
     # --- sustained spin --------------------------------------------------------
-    $what = "CPU SPIN on ${name}: {0}, at or above {1}% for {2:N0} min" -f $avg, $CpuSpinPercent, $hotMin
+    $what = "CPU SPIN on ${name}: {0}, at or above {1}% for {2:N0} min over {3} intervals" -f $avg, $CpuSpinPercent, $hotMin, $hotCount
     $lastRestart = ConvertFrom-ObInstant $prev.last_restart
     # Throttle for the ALERT-ONLY paths (one per container per hour). The restart
     # alert does not set it: a spin back inside the hour must page once more.
     $lastAlert = ConvertFrom-ObInstant $prev.last_hold_alert
-    $alertDue = (-not $lastAlert) -or (($now - $lastAlert).TotalMinutes -ge 60)
+    $alertDue = (-not $lastAlert) -or ($lastAlert -gt $skew) -or (($now - $lastAlert).TotalMinutes -ge 60)
     if (-not $Repair) {
       Write-Ob $label warn "$what - run with -Repair to act (restart + alert)"; $script:Faults++; continue
     }
@@ -408,8 +472,8 @@ function Invoke-CpuSpinGuard {
       continue
     }
 
-    # restart: only this container, at most once an hour
-    $prev.last_restart = $nowS; $prev.hot_since = $null; $prev.usec = $null
+    # restart: only this container, at most once an hour (stamped before the attempt)
+    $prev.last_restart = $nowS; $prev.hot_since = $null; $prev.hot_count = 0; $prev.usec = $null
     $rs = Invoke-ObDocker @('restart', $name) 60
     $outcome = if ($rs.Ok) { 'docker restart ok' } else { "docker restart FAILED ($($rs.Why))" }
     $sent = Send-ObAlert "openbrain: $what; auto-restarted it ($outcome; cap 1 per hour). A spin back inside the hour alerts without restarting."
