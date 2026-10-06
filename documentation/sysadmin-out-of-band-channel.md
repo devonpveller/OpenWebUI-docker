@@ -127,117 +127,57 @@ password holding `/` or `@`, the scheme-less `user:pw@tcp(host:3306)/db` and
 and `user/pw@alias`, also inside quotes); `Authorization:` header values
 (Bearer, Basic, Token); `key=value` and `key: value` for secret-named keys
 (password, passwd, passphrase, `pwd` as in ODBC `PWD=`, `pass` as a key - `pass=`,
-`DB_PASS`, `dbPass`, `DBPASS=` - secret, token, api key, auth key, access key,
-private key, credentials, dsn), with the value bare, quoted (`"..."`, `'...'`),
-bracketed or URL-encoded, after `=` or `:`, in JSON or YAML, and values that hold
-`;` or `,`; CLI flags (`--password <pw>`, `--token <t>`, mysql `-p<pw>`,
-`docker login -p`, `curl -u` / `-uUSER:PW` / `--user=`, `redis-cli -a`,
-`sshpass -p`); vendor tokens (sk-, ghp_, github_pat_, xox*-, AKIA, tskey-, hf_,
-glpat-, npm_, AIza), JWTs, Telegram bot tokens, Slack and Discord webhook
-secrets; docker config `"auth":"..."`, Azure SAS `sig=`, `<password>..</password>`
-tags, `Cookie:` / `Set-Cookie:` values (to the end of the line); PEM
-private-key blocks; padded base64, base64 blobs holding `+` or a few `/`, and
-any 40+ character run of letters, digits, `_` or `-` holding a letter and a
-digit (this last rule is also what catches a real 90-character Vault `hvs.`
-token; there is no `hvs.` prefix rule).
+`Pass:`, `DB_PASS`, `dbPass`, `DBPASS=`, `PASS=` - secret, token, api key, auth
+key, access key, private key, credentials, dsn), with the value bare, quoted
+(`"..."`, `'...'`), bracketed or URL-encoded, after `=` or `:`, in JSON or YAML,
+and values that hold `;` or `,`; CLI flags (`--password <pw>`, `--token <t>`,
+mysql `-p<pw>`, `docker login -p`, `curl -u` / `-uUSER:PW` / `--user=`,
+`redis-cli -a`, `sshpass -p`); vendor tokens (sk-, ghp_, github_pat_, xox*-,
+AKIA, tskey-, hf_, glpat-, npm_, AIza), JWTs, Telegram bot tokens, Slack and
+Discord webhook secrets; docker config `"auth":"..."`, Azure SAS `sig=`,
+`<password>..</password>` tags, `Cookie:` / `Set-Cookie:` values (to the end of
+the line); PEM private-key blocks; padded base64, base64 blobs holding `+` or a
+few `/`, and any 40+ character run of letters, digits, `_` or `-` holding a
+letter and a digit (that rule is also what catches a real 90-character Vault
+`hvs.` token).
 
-**One path exemption.** A value is kept readable only when the key's last word is
-`credential(s)` (`credentials: /etc/app/credentials.json: no such file`,
-`GOOGLE_APPLICATION_CREDENTIALS=/etc/app/sa.json`) AND it has a real path shape:
-a leading `/` plus another `/`, `~/`, a drive letter with `\`, `./`, or a filename
-with an extension; separator and quoting do not matter. A password, token,
-secret or other secret-named value that merely starts with `/` or `~`
-(`password:/Xy..`, `"token": "~Xy.."`, `password=/Xy..`) is masked. An ODBC
-`PWD=` is also kept when its value looks like a directory (`PWD=/home/app/src`,
-`PWD=C:\work`).
+**There is NO path exemption.** A value under a secret-named key is masked
+whatever it looks like - `credentials: /etc/app/credentials.json`,
+`GOOGLE_APPLICATION_CREDENTIALS=/etc/app/sa.json`, `password:/Xy..`,
+`"token": "~Xy.."`, `PWD=/home/app/src`. Four rounds of path exemptions each
+traded one leak for another; masking a path in an error line costs a little
+readability, a leaked secret costs far more, and the text around the value
+stays (`credentials: [redacted] no such file or directory`).
 
 **Deliberately NOT covered (a stated limit, not a surprise).** A secret written
 as plain prose with no shape ("the password is hunter2"); a short letters-only
-value after `:` (`secret_key: abcdefgh`, `X-Api-Key: abcdefgh`); a number after
-`:` (`password: 123456`; with `=` it is masked); a bare `key=` value shorter than
-16 characters; a Vault `hvs.` token shorter than the 40-character opaque-run
-threshold; a bare Bearer of letters only with no `Authorization:` header; redis
-`AUTH <pw>` replies; PEM body lines after the header (the fault line is one
-collapsed line, so this does not arise there); Telegram-style tokens that are not
-35 characters after the colon; Oracle `user/pw@host.example.com` with a dotted
-host and no port (masking it would also hit file names such as
-versioned archive names with an at-sign); an ODBC `PWD=/dir/<pw>` whose password looks like a
-directory; `curl -u <digits>:<6 or fewer digits>` (read as uid:gid, like
-`docker run -u 1000:1000`). **Masked even though they are not secrets
-(over-scrub, accepted):** sha256 digests (`app@sha256:<64 hex>`) and 64-hex
-container ids, any 40+ character model or file name with a letter and a digit
-(today's are 18-28 characters and are untouched), a 40+ character relative code
-path with one to three `/`, mixed case and a digit (for example
-`internal/Handlers2/RequestProcessorFactoryImpl`), `PWD=/app` (a shell working
-directory with a single path segment), a user-only URL (`http://user@host/`),
-`from:bob@example.com`, and `name/x@word`-shaped text followed by a space
-(`reg/app@sha256 pulled`, `pkg/name@alias`; `reg/app@sha256:abc` and `pkg/x@1.2`
-stay). Go / pytest output such as `--- PASS: TestX (0.01s)` and `PASS: test_x1`
-is NOT masked (an upper-case `PASS` is a key only with `=`).
+value after `:` (`secret_key: abcdefgh`, `X-Api-Key: abcdefgh`,
+`credentials: sa.json`); a number after `:` (`password: 123456`; with `=` it is
+masked); an upper-case `PASS:` (a key only with `=`); a bare `key=` value shorter
+than 16 characters; a Vault `hvs.` token shorter than the 40-character
+opaque-run threshold; a bare Bearer of letters only with no `Authorization:`
+header; redis `AUTH <pw>` replies; PEM body lines after the header (the fault
+line is one collapsed line, so this does not arise there); Telegram-style tokens
+that are not 35 characters after the colon; Oracle `user/pw@host.example.com`
+with a dotted host and no port (masking it would also hit versioned archive
+names with an at-sign); `curl -u <digits>:<6 or fewer digits>` (read as uid:gid, like
+`docker run -u 1000:1000`).
 
-| Key | Fires when |
-|---|---|
-| `tailscale-container` | the tailscale container will not become healthy |
-| `tailscale-logout` | the node is logged out (every `serve` route gone) |
-| `tailscale-daemon` | tailscaled stops answering |
-| `tailnet-connectivity` | no egress from inside the tailscale netns |
-| `mattermost` | Mattermost unreachable - an alert about it *cannot* go through it |
-| `inference` / `llm-gateway` | llama-cpp unreachable, or the gateway/queue front door is down |
+**Masked even though they are not secrets (over-scrub, accepted):** any path
+under a secret-named key, `credentials` included (`credentials: /etc/app/...`,
+`token: /var/run/secrets/kubernetes.io/...`, `private_key: /etc/ssl/private/...`,
+`secret: /run/secrets/...`, `api_key: ./config/key.txt`); any `PWD=` /
+`OLDPWD=` value, so a working-directory line in an env dump (`PWD=/home/app/src`,
+`PWD=C:\work`) is masked; a title-case `Pass:` followed by a test name; sha256
+digests (`app@sha256:<64 hex>`) and 64-hex container ids; any 40+ character model
+or file name with a letter and a digit (today's are 18-28 characters and are
+untouched); a 40+ character relative code path with one to three `/`, mixed case
+and a digit (for example `internal/Handlers2/RequestProcessorFactoryImpl`); a
+user-only URL (`http://user@host/`); `from:bob@example.com`; and
+`name/x@word`-shaped text followed by a space (`reg/app@sha256 pulled`,
+`pkg/name@alias`; `reg/app@sha256:abc` and `pkg/x@1.2` stay). Go / pytest output
+such as `--- PASS: TestX (0.01s)` and `PASS: test_x1` is NOT masked.
 
-Behaviour: Telegram first (Docker-independent), Mattermost mirrored best-effort;
-re-alerts hourly while the fault persists; sends a RESOLVED ping and re-arms once
-it clears. **Not** catastrophe tier, deliberately: stale backups, search gateway,
-Open Notebook, little-coder - those stay in the log and Mattermost.
-
-**Container-loop pages - catastrophe path, but with no repair (added 2026-09-29).**
-The watchdog also counts EVERY container, not only the listed ones, and pages
-through the same Telegram + Mattermost path. These keys are not "after a repair
-failed": the watchdog attempts no repair at all, because a restart loop is usually
-a credential or config fault and restarting again hides the evidence. The page
-says what to look at; the fix is yours. The `crashloop-<name>` page, and the
-`netns-<name>` pages for an owner that is not running or restarted after its
-joiner, carry the container's last fault line from `docker logs`. The
-`docker-unreadable` page and the `netns-<name>` "owner no longer exists" page
-carry none (docker could not be asked). Every page text is credential-scrubbed
-before it is logged or leaves the host (`Hide-CredentialShapes` in
-`stack-watchdog.ps1`; its permanent regression table is case P34 of
-`scripts/checks/test-watchdog-loops.ps1`). The scrub masks the SHAPE and keeps
-the words around it, so `invalid key` and `password authentication failed`
-still read.
-
-**Covered shape families.** URL and DSN userinfo (`scheme://user:pw@host`, a
-password holding `/` or `@`, the scheme-less `user:pw@tcp(host:3306)/db` and
-`user:pw@host:5432`, Oracle `user/pw@//host:1521/SVC` and `user/pw@alias`);
-`Authorization:` header values (Bearer, Basic, Token); `key=value` and
-`key: value` for secret-named keys (password, passwd, passphrase, `pwd` as in
-ODBC `PWD=`, `pass` / `DB_PASS`, secret, token, api key, auth key, access key,
-private key, credentials, dsn), including quoted, bracketed and URL-encoded
-values and values that hold `;` or `,`; CLI flags (`--password <pw>`,
-`--token <t>`, mysql `-p<pw>`, `docker login -p`, `curl -u` / `-uUSER:PW` /
-`--user=`, `redis-cli -a`, `sshpass -p`); vendor tokens (sk-, ghp_, github_pat_,
-xox*-, AKIA, tskey-, hf_, glpat-, npm_, hvs., AIza), JWTs, Telegram bot tokens,
-Slack and Discord webhook secrets; docker config `"auth":"..."`, Azure SAS
-`sig=`, `<password>..</password>` tags, `Cookie:` / `Set-Cookie:` values (to the
-end of the line); PEM private-key blocks; padded base64, base64 blobs holding
-`+` or a few `/`, and any 40+ character run of letters, digits, `_` or `-`
-holding a letter and a digit.
-
-**Deliberately NOT covered (a stated limit, not a surprise).** A secret written
-as plain prose with no shape ("the password is hunter2"); a short letters-only
-value after `:` (`secret_key: abcdefgh`, `X-Api-Key: abcdefgh`); a number after
-`:` (`password: 123456`; with `=` it is masked); a bare Bearer of letters only
-with no `Authorization:` header; redis `AUTH <pw>` replies; PEM body lines after
-the header (the fault line is one collapsed line, so this does not arise there);
-Telegram-style tokens that are not 35 characters after the colon. **Masked even
-though they are not secrets (over-scrub, accepted):** sha256 digests and 64-hex
-container ids, any 40+ character model or file name with a letter and a digit
-(today's are 18-28 characters and are untouched), a 40+ character relative code
-path with one to three `/`, mixed case and a digit (for example
-`internal/Handlers2/RequestProcessorFactoryImpl`), `PWD=/app` (a shell working
-directory with a single path segment), a user-only URL (`http://user@host/`),
-`from:bob@example.com`, and `pkg/name@alias`-shaped text. A path is kept only
-after `:` (`credentials: /etc/app/credentials.json: no such file`); after `=` it
-is a value (`password=/Xy..` is masked).
 
 | Key | Fires when |
 |---|---|

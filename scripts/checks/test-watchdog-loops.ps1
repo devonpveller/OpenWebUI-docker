@@ -879,7 +879,38 @@ function Invoke-PureCases {
         @{ T = "DbPass=$fq failed";                                            Gone = @($fq);    Keep = @('failed') },
         @{ T = "sqlplus `"app/$fpw@orcl`" failed";                             Gone = @($fpw);   Keep = @('sqlplus', 'failed') },
         @{ T = "UID=sa;PWD=/$fpw;";                                            Gone = @($fpw);   Keep = @('UID=sa') },
-        @{ T = "curl -u 1000:98765432 http://x/ failed";                       Gone = @('98765432'); Keep = @('http://x/ failed') }
+        @{ T = "curl -u 1000:98765432 http://x/ failed";                       Gone = @('98765432'); Keep = @('http://x/ failed') },
+        @{ T = "curl -u 1000:1234567 http://x/ failed";                        Gone = @('1234567'); Keep = @('http://x/ failed') },
+        # attempt 5: NO path exemption - every path-looking value under a secret-named key is masked
+        @{ T = "credentials: $fpw.txt rejected";                               Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials=$fpw.x9 rejected";                                 Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials:`"$fpw.json`" rejected";                           Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "GOOGLE_APPLICATION_CREDENTIALS=/a/$fpw not found";             Gone = @($fpw);   Keep = @('not found') },
+        @{ T = "credentials=C:\$fpw rejected";                                 Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials: ~/$fpw rejected";                                 Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials: ./$fpw rejected";                                 Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials: ../$fpw rejected";                                Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials: /$fpw/ rejected";                                 Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials: //$fpw rejected";                                 Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials: /$fpw rejected";                                  Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "{`"credentials`":`"~/$fpw`"} rejected";                        Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "db_credentials: ~/$fpw rejected";                              Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "password_credentials: ./$fpw rejected";                        Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials: /etc/app/credentials.json: no such file";         Gone = @('/etc/app/credentials.json'); Keep = @('credentials:', 'no such file') },
+        @{ T = "GOOGLE_APPLICATION_CREDENTIALS=/etc/app/sa.json not found";    Gone = @('/etc/app/sa.json'); Keep = @('not found') },
+        @{ T = "UID=sa;PWD=//$fpw;";                                           Gone = @($fpw);   Keep = @('UID=sa') },
+        @{ T = "UID=sa;PWD=/$fpw/;";                                           Gone = @($fpw);   Keep = @('UID=sa') },
+        @{ T = "UID=sa;PWD=C:\$fpw;";                                          Gone = @($fpw);   Keep = @('UID=sa') },
+        @{ T = "env PWD=/home/app/src OLDPWD=/home/app";                       Gone = @('/home/app/src'); Keep = @('env PWD=') },
+        @{ T = "Pass: $fpw failed";                                            Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "db.pass=$fpw failed";                                          Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "redis-pass=$fpw failed";                                       Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "db_pass: $fpw failed";                                         Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "token: /var/run/secrets/kubernetes.io/serviceaccount/token: no such file"; Gone = @('/var/run/secrets/kubernetes.io'); Keep = @('no such file') },
+        @{ T = "private_key: /etc/ssl/private/app.key: no such file";          Gone = @('/etc/ssl/private/app.key'); Keep = @('no such file') },
+        @{ T = "secret: /run/secrets/db_password not found";                   Gone = @('/run/secrets/db_password'); Keep = @('not found') },
+        @{ T = "api_key: ./config/key.txt missing";                            Gone = @('./config/key.txt'); Keep = @('missing') },
+        @{ T = "curl -u 1000:1234567 http://x/";                               Gone = @('1234567'); Keep = @('http://x/') }
     )
     $bad34 = @()
     foreach ($row in $rows) {
@@ -891,7 +922,9 @@ function Invoke-PureCases {
     # it must leave alone. A later rule change that reopens one fails HERE, by name. Shapes that are NOT
     # masked on purpose (prose, a short letters-only value after ':', a multi-line PEM body, AUTH/redis
     # replies, plain digests) are listed in $permSkip and in the docs, not hidden.
-    $permSkip = @('password: letters short', 'password is prose', 'yaml secret colon', 'api-key header', 'PEM multi-line body', 'AUTH cmd')
+    $permSkip = @('password: letters short', 'password is prose', 'yaml secret colon', 'api-key header', 'PEM multi-line body', 'AUTH cmd',
+                  # declared NOT covered (Layer 4): bare key= under 16 chars, dotted-host Oracle with no port, short letters after ':', short hvs.
+                  'D1 key=../x (bare key, weak)', 'D3 u/pw@host (no port)', 'D4 db_pass: letters', 'C hvs. short (24)')
     $permA = & {
 # fakes assembled from parts
 $pw   = 's3' + 'cret-Pw9'
@@ -1070,12 +1103,208 @@ $plain = @(
 
         @{ C = $cases; P = $plain }
     }
-    # By design masked (documented): sha256 digests / 64-hex ids, 50-char model names, a user-only URL.
-    $plainSkip = @('sha256:3f9a1c2b7d4e5f60', 'No such container: 3f9a1c2b7d4e5f603f9a', 'Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL-00001-of-00002', 'http://user@example.com')
+    $permC = & {
+# fakes assembled from parts
+$pw  = 'Vk' + '8rTq' + 'Nw3'        # mixed 9
+$pwl = 'mel' + 'onfarm'             # letters only 9
+$hvs = 'hv' + 's.' + ('CAESIq' + 'Zx9Lm2Wp4') * 3
+$hvsShort = 'hv' + 's.' + 'Ab3Cd5Ef7Gh9'
+$cases = @(
+  # D1
+  @{ n='D1 password=/pw';           t="fatal: password=/$pw invalid"; s=$pw }
+  @{ n='D1 token=~pw';              t="fatal: token=~$pw invalid"; s=$pw }
+  @{ n='D1 secret=./x';             t="secret=./$pw rejected"; s=$pw }
+  @{ n='D1 key=../x (bare key, weak)'; t="key=../$pw rejected"; s=$pw }
+  @{ n='D1 api_key=../x';           t="api_key=../$pw rejected"; s=$pw }
+  @{ n='D1 password:/x (colon path)'; t="password:/$pw rejected"; s=$pw }
+  @{ n='D1 password: ~x';           t="password: ~$pw rejected"; s=$pw }
+  @{ n='D1 password="/pw"';         t="password=`"/$pw`" rejected"; s=$pw }
+  @{ n='D1 password: "/pw"';        t="password: `"/$pw`" rejected"; s=$pw }
+  @{ n='D1 JSON "password":"/pw"';  t="{`"password`":`"/$pw`"} rejected"; s=$pw }
+  @{ n='D1 JSON "token":"~pw"';     t="{`"token`": `"~$pw`"} rejected"; s=$pw }
+  @{ n='D1 password=C:\pw';         t="password=C:\$pw rejected"; s=$pw }
+  # D2 ODBC
+  @{ n='D2 PWD=';                   t="DRIVER={ODBC Driver 18};SERVER=db;UID=sa;PWD=$pw;"; s=$pw }
+  @{ n='D2 pwd= lower';             t="uid=sa;pwd=$pw;database=x"; s=$pw }
+  @{ n='D2 Pwd = spaces';           t="Uid=sa; Pwd = $pw; Database=x"; s=$pw }
+  @{ n='D2 PWD={braced}';           t="UID=sa;PWD={$pw};"; s=$pw }
+  @{ n='D2 PWD=/pw (slash pw)';     t="UID=sa;PWD=/$pw;"; s=$pw }
+  @{ n='D2 PWD=/a/pw';              t="UID=sa;PWD=/x/$pw;"; s=$pw }
+  @{ n='D2 PWD=letters';            t="UID=sa;PWD=$pwl;"; s=$pwl }
+  # D3 Oracle
+  @{ n='D3 u/pw@host:port/SVC';     t="ORA-12154: scott/$pw@db.internal:1521/ORCL"; s=$pw }
+  @{ n='D3 u/pw@//host';            t="sqlplus app/$pw@//db.internal/XEPDB1 failed"; s=$pw }
+  @{ n='D3 u/pw@//host:port';       t="sqlplus app/$pwl@//db:1521/XE"; s=$pwl }
+  @{ n='D3 u/pw@alias';             t="connect app/$pw@orclpdb failed"; s=$pw }
+  @{ n='D3 u/pw@host (no port)';    t="connect app/$pw@db.internal failed"; s=$pw }
+  @{ n='D3 "u/pw@alias" quoted';    t="sqlplus `"app/$pw@orcl`""; s=$pw }
+  @{ n='D3 u/pw@alias end';         t="exp system/$pw@XE"; s=$pw }
+  # D4
+  @{ n='D4 pass=';                  t="user=app pass=$pw failed"; s=$pw }
+  @{ n='D4 DB_PASS=';               t="DB_PASS=$pw rejected"; s=$pw }
+  @{ n='D4 db_pass: mixed';         t="db_pass: $pw"; s=$pw }
+  @{ n='D4 db_pass: letters';       t="db_pass: $pwl"; s=$pwl }
+  @{ n='D4 DBPASS=';                t="DBPASS=$pw"; s=$pw }
+  @{ n='D4 Pass=';                  t="Pass=$pw"; s=$pw }
+  @{ n='D4 db.pass=';               t="db.pass=$pw"; s=$pw }
+  @{ n='D4 redis-pass=';            t="redis-pass=$pw"; s=$pw }
+  @{ n='D4 DbPass= (camel)';        t="DbPass=$pw"; s=$pw }
+  @{ n='D4 dbPass= (camel)';        t="dbPass=$pw"; s=$pw }
+  @{ n='D4 PASSWD env';             t="MYSQL_PASSWD=$pw"; s=$pw }
+  # D5 curl
+  @{ n='D5 curl --user=u:pw';       t="curl --user=admin:$pw http://x/"; s=$pw }
+  @{ n='D5 curl --user u:pw';       t="curl --user admin:$pw http://x/"; s=$pw }
+  @{ n='D5 curl -uu:pw';            t="curl -uadmin:$pw http://x/"; s=$pw }
+  @{ n="D5 curl -u 'u:pw'";         t="curl -u 'admin:$pw' http://x/"; s=$pw }
+  @{ n='D5 curl -u "u:pw"';         t="curl -u `"admin:$pw`" http://x/"; s=$pw }
+  @{ n="D5 curl --user='u:pw'";     t="curl --user='admin:$pw' http://x/"; s=$pw }
+  @{ n='D5 curl -u u:digits';       t="curl -u admin:12345678 http://x/"; s='12345678' }
+  @{ n='D5 curl -u 0:digits';       t="curl -u 1000:98765432 http://x/"; s='98765432' }
+  @{ n='D5 curl -u u:-pw (dash)';   t="curl -u admin:-$pw http://x/"; s=$pw }
+  @{ n='D5 curl -u -pw-user';       t="curl -u admin:$pw@x http://x/"; s=$pw }
+  # cover-claim checks
+  @{ n='C hvs. realistic';          t="X-Vault-Token: $hvs denied"; s=$hvs.Substring(4,12) }
+  @{ n='C hvs. bare';               t="vault: token $hvs revoked"; s=$hvs.Substring(4,12) }
+  @{ n='C hvs. short (24)';         t="vault: token $hvsShort revoked"; s=$hvsShort.Substring(4) }
+  @{ n='C AIza';                    t="key AIza" + ('Sy' + 'B1c2D3e4F5g6H7i8J9k0L1m2N3o4P5q') + " invalid"; s='B1c2D3e4F5g6' }
+  @{ n='C redis url :pw@';          t="redis://:$pw@cache:6379/0 NOAUTH"; s=$pw }
+  @{ n='C libpq';                   t="host=db port=5432 user=app password=$pw dbname=app sslmode=disable"; s=$pw }
+  @{ n='C Basic header';            t="Authorization: Basic " + ('YWRt' + 'aW46' + 'c2Vj'); s='YWRtaW46c2Vj' }
+  @{ n='C --password=';             t="--password=$pw"; s=$pw }
+  @{ n='C JSON api_key';            t="{`"api_key`":`"$pw`"}"; s=$pw }
+  @{ n='C stripe';                  t="sk_" + "live_" + ('51Hx' * 6); s=('51Hx' * 6) }
+  @{ n='C passphrase:';             t="passphrase: '$pwl'"; s=$pwl }
+  @{ n='C docker login -p';         t="docker login -u bob -p $pw reg.io"; s=$pw }
+  @{ n='C cookie';                  t="Set-Cookie: sid=$pw$pw; HttpOnly"; s=$pw }
+  @{ n='C xml secret tag';          t="<secret>$pwl</secret>"; s=$pwl }
+  @{ n='C SAS sig';                 t="https://a.blob.core.windows.net/c?sv=1&sig=$pw$pw"; s=$pw }
+  @{ n='C dsn=';                    t="dsn=$pwl"; s=$pwl }
+  @{ n='C credential=';             t="credential=$pw"; s=$pw }
+  # not-covered claims (expected to leak; declared)
+  @{ n='NC prose';                  t="the password is $pwl"; s=$pwl; nc=1 }
+  @{ n='NC password: 123456';       t="password: 12345678"; s='12345678'; nc=1 }
+  @{ n='NC Bearer letters no header'; t="got Bearer " + ('abcd' + 'efghij'); s='abcdefghij'; nc=1 }
+  @{ n='NC redis AUTH';             t="ERR AUTH $pw failed"; s=$pw; nc=1 }
+  @{ n='NC secret_key: letters';    t="secret_key: $pwl"; s=$pwl; nc=1 }
+)
+$plain = @(
+  'credentials: /etc/app/credentials.json: no such file or directory',
+  'credentials: "/etc/app/credentials.json": no such file',
+  'GOOGLE_APPLICATION_CREDENTIALS: ./sa.json not found',
+  'pull access denied for myapp:1.2.3, repository does not exist',
+  'image ghcr.io/open-webui/open-webui:v0.11.0 not found',
+  'listen tcp 0.0.0.0:8080: bind: address already in use',
+  'dial tcp 192.0.2.5:5432: connect: connection refused',
+  'container exited with code 137 (OOMKilled)',
+  'exit status 1; exit code 255',
+  'ORA-01017: invalid username/password; logon denied',
+  'ORA-28000: the account is locked',
+  'ORA-12541: TNS:no listener at db:1521/ORCL',
+  "Login failed for user 'sa'. Reason: Password did not match that for the login provided. [CLIENT: 192.0.2.4]",
+  'SQL Server error 18456, state 8',
+  'qwen36-27b failed: model not found',
+  'loading /models/Qwen3.6-35B-A3B-Q4_K_M.gguf',
+  'gemma-3-27b-it-qat-q4_0 offloaded 63/63 layers',
+  'Qwen3-Coder-30B-A3B-Instruct-Q4_K_M ready',
+  'docker run -u 1000:1000 app failed',
+  'chown 1000:1000 /data: operation not permitted',
+  'bypass=true compass=north tests_passed=12',
+  'password=true not allowed',
+  'PWD=/app/src/server/handlers working dir',
+  'PWD=C:\work\app',
+  'icons/logo@2x.png not found',
+  'reg/app@sha256 tag',
+  'npm ERR! peer react@18.2.0 from react-dom@18.2.0',
+  'git@github.com: Permission denied (publickey)',
+  'src/components/RequestProcessor/Factory.ts:42 TypeError',
+  'internal/handlers/request_processor_factory_impl.go:128 panic',
+  'at com.example.service.handlers.RequestProcessorFactoryImpl.process(RequestProcessorFactoryImpl.java:88)',
+  'max_retries=5 retry_after: 60',
+  'Secret: 3 keys rotated, 0 failed',
+  'token: expired',
+  'invalid key: expected 32 bytes',
+  'FATAL: password authentication failed for user app',
+  'key=value pairs must be quoted',
+  'primary_key=id duplicate',
+  'curl: (7) Failed to connect to localhost port 8080',
+  'curl -u admin http://x/ prompts for a password',
+  'ssh -p 2222 user@host refused',
+  'mysql: [Warning] Using a password on the command line interface can be insecure.',
+  'Cookie jar not writable',
+  'redis-cli ping: Could not connect to Redis at 127.0.0.1:6379'
+)
+$leaks = 0; $ncLeaks = 0
+
+        @{ C = $cases; P = $plain }
+    }
+    $permD = & {
+# fakes assembled from parts
+$pw  = 'Rq' + '5tKz' + 'Wb8'        # mixed 9
+$pwl = 'tur' + 'nipcart'            # letters only 10
+$pwL = 'Hx' + '4mQ9' + 'vT2s' + 'Lp7nW3'   # mixed 16
+$cases = @(
+  # --- exemption smuggling (key's last word credential(s) + path shape)
+  @{ n='X1 credentials: /<pw> (one segment)';        t="credentials: /$pw rejected"; s=$pw }
+  @{ n='X2 credentials: ~/<pw>';                      t="credentials: ~/$pw rejected"; s=$pw }
+  @{ n='X3 credentials: ./<pw>';                      t="credentials: ./$pw rejected"; s=$pw }
+  @{ n='X4 credentials: ../<pw>';                     t="credentials: ../$pw rejected"; s=$pw }
+  @{ n='X5 credentials: <pw>.txt';                    t="credentials: $pw.txt rejected"; s=$pw }
+  @{ n='X6 credentials=<pw>.x9 (dot inside secret)';  t="credentials=$pw.x9 rejected"; s=$pw }
+  @{ n='X7 GOOGLE_APPLICATION_CREDENTIALS=/a/<pw>';   t="GOOGLE_APPLICATION_CREDENTIALS=/a/$pw not found"; s=$pw }
+  @{ n='X8 JSON "credentials":"/<pw>"';               t="{`"credentials`":`"/$pw`"} rejected"; s=$pw }
+  @{ n='X9 JSON "credentials":"~/<pw>"';              t="{`"credentials`":`"~/$pw`"} rejected"; s=$pw }
+  @{ n='X10 credentials: /<pw>/ (trailing slash)';    t="credentials: /$pw/ rejected"; s=$pw }
+  @{ n='X11 credentials=C:\<pw>';                     t="credentials=C:\$pw rejected"; s=$pw }
+  @{ n='X12 credential: <pwL> (16, no path)';         t="credential: $pwL rejected"; s=$pwL }
+  @{ n='X13 credentials=/<pw> (=, one seg)';          t="credentials=/$pw rejected"; s=$pw }
+  @{ n='X14 db_credentials: ~/<pw>';                  t="db_credentials: ~/$pw rejected"; s=$pw }
+  @{ n='X15 password_credentials: ./<pw>';            t="password_credentials: ./$pw x"; s=$pw }
+  @{ n='X16 credentials: //<pw>';                     t="credentials: //$pw x"; s=$pw }
+  @{ n='X17 credentials:"<pw>.json"';                 t="credentials:`"$pw.json`" x"; s=$pw }
+  @{ n='X18 password: <pw>.txt (non-cred key, file)'; t="password: $pw.txt x"; s=$pw }
+  @{ n='X19 token: ~/<pw>';                           t="token: ~/$pw x"; s=$pw }
+  @{ n='X20 secret: /a/<pw>';                         t="secret: /a/$pw x"; s=$pw }
+  # --- ODBC PWD boundary
+  @{ n='O1 PWD=/<pw>';                                t="UID=sa;PWD=/$pw;"; s=$pw }
+  @{ n='O2 PWD=/<pw> end-of-line';                    t="UID=sa;PWD=/$pw"; s=$pw }
+  @{ n='O3 PWD=//<pw>';                               t="UID=sa;PWD=//$pw;"; s=$pw }
+  @{ n='O4 PWD=/<pw>/';                               t="UID=sa;PWD=/$pw/;"; s=$pw }
+  @{ n='O5 PWD=C:\<pw>';                              t="UID=sa;PWD=C:\$pw;"; s=$pw }
+  @{ n='O6 PWD="/<pw>"';                              t="UID=sa;PWD=`"/$pw`";"; s=$pw }
+  @{ n='O7 Pwd: /<pw>';                               t="Pwd: /$pw"; s=$pw }
+  @{ n='O8 PWD=/x/<pw> (declared)';                   t="UID=sa;PWD=/x/$pw;"; s=$pw; nc=$true }
+  # --- pass key forms
+  @{ n='K1 PASS=<pw>';                                t="PASS=$pw failed"; s=$pw }
+  @{ n='K2 db_pass: <pw>';                            t="db_pass: $pw"; s=$pw }
+  @{ n='K3 pass: <pw>';                               t="pass: $pw"; s=$pw }
+  @{ n='K4 Pass=<pw>';                                t="Pass=$pw"; s=$pw }
+  @{ n='K5 DBPASS: <pw>';                             t="DBPASS: $pw"; s=$pw }
+  @{ n='K6 dbPass: <pw>';                             t="dbPass: $pw"; s=$pw }
+  @{ n='K7 PASS="<pw>"';                              t="PASS=`"$pw`""; s=$pw }
+  @{ n='K8 DB_PASS: "<pw>"';                          t="DB_PASS: `"$pw`""; s=$pw }
+  @{ n='K9 PASS: <pw> (declared: upper PASS only with =)'; t="PASS: $pw"; s=$pw; nc=$true }
+  @{ n='K10 Pass: <pw> (title-case colon)';           t="Pass: $pw"; s=$pw; nc=$true }
+  # --- curl numeric bound
+  @{ n='C1 curl -u 1000:98765432';                    t="curl -u 1000:98765432 http://x/"; s='98765432' }
+  @{ n='C2 curl -u 1000:1234567 (7 digits)';          t="curl -u 1000:1234567 http://x/"; s='1234567' }
+  @{ n='C3 curl -u admin:123456';                     t="curl -u admin:123456 http://x/"; s='123456' }
+  @{ n='C4 curl --user=1000:12345678';                t="curl --user=1000:12345678 http://x/"; s='12345678' }
+  @{ n='C5 curl -u1000:12345678';                     t="curl -u1000:12345678 http://x/"; s='12345678' }
+  @{ n='C6 curl -u 1000:123456 (6 digits, declared)'; t="curl -u 1000:123456 http://x/"; s='123456'; nc=$true }
+)
+$leaks = 0; $ncl = 0
+
+        @{ C = $cases; P = $plain }
+    }
+    # By design masked or altered (documented in Layer 4): sha256 digests / 64-hex ids, 50-char model names, a user-only URL,
+    # a path under a credentials key (now masked), and the probes' declared over-scrubs.
+    $plainSkip = @('sha256:3f9a1c2b7d4e5f60', 'No such container: 3f9a1c2b7d4e5f603f9a', 'Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL-00001-of-00002', 'http://user@example.com',
+                   'credentials: /etc/app/credentials.json', 'credentials: "/etc/app/credentials.json"', 'reg/app@sha256 tag',
+                   'PWD=/app/src/server/handlers', 'PWD=C:\work\app')
     $permN = 0
-    foreach ($set in @($permA, $permB)) {
+    foreach ($set in @($permA, $permB, $permC, $permD)) {
         foreach ($c in $set.C) {
-            if ($permSkip -contains $c.n) { continue }
+            if (($permSkip -contains $c.n) -or $c.nc) { continue }
             $permN++
             $o = Hide-CredentialShapes $c.t
             foreach ($g in $c.s) { if ($o.Contains($g)) { $bad34 += "perm [$($c.n)] leaked a fake in: $o" } }
@@ -1087,23 +1316,20 @@ $plain = @(
                'token: expired', 'max_tokens=100 exceeded', 'PRIMARY_KEY=id duplicate', 'basic configuration validation failed',
                'tailscale: node key has expired', 'exit status 1',
                # attempt-2 over-scrub guards: the useful part of the error stays
-               'credentials: /etc/app/credentials.json: no such file or directory', 'Secret: 3 keys rotated, 0 failed',
+               'Secret: 3 keys rotated, 0 failed',
                'open /run/secrets/db_password: no such file', 'basic configuration validation failed', 'Basic Authentication failed',
                'dial tcp 10.0.0.1:5432: connect: connection refused',
                # today's model names (inference/): all well under the 40-character threshold
                'model Qwen3.6-35B-A3B-Q4_K_M.gguf failed to load', 'model Qwen3.6-27B-Q4_K_M.gguf and Qwen3.8-27B-Q4_K_M.gguf',
                'embed bge-m3-f16.gguf ready', 'routing local-large:nothink to qwen36-27b',
-               # attempt 4: a credentials KEY holding a real path stays readable, bare or quoted, any separator
-               'credentials: /etc/app/credentials.json: no such file or directory', 'credentials: "/etc/app/credentials.json" not found',
-               'GOOGLE_APPLICATION_CREDENTIALS=/etc/app/sa.json not found', 'credentials: ./sa.json missing', 'credentials: ~/.config/app/c.json missing',
                # go test / pytest output is not a password
                '--- PASS: TestRequestProcessorFactory (0.01s)', 'PASS: test_x1', 'PASS: TestHandlers2 (0.5s)',
                # one-segment ODBC PWD is a password (credential row), a directory is not; docker/chown ids; refs
-               'PWD=C:\Data\work\app', 'PWD=/app/src/x', 'chown 1000:1000 /data', 'curl -u 1000:1000 http://x/',
+               'chown 1000:1000 /data', 'curl -u 1000:1000 http://x/', 'curl -u 1000:123456 http://x/',
                'reg/app@sha256:abc123 pulled', 'pkg/x@1.2 installed', 'react@18.2.0',
                'password=false', 'token=null', 'secret=none', 'pass=nil', 'password=NONE',
                # attempt 3: the over-scrub rows - image tags, ports, exit codes, error texts, paths, flags
-               'bypass=true', 'compass=north', 'tests_passed=12', 'pass=true', 'password=true', 'OLDPWD=/home/app/src', 'PWD=/home/app/src',
+               'bypass=true', 'compass=north', 'tests_passed=12', 'pass=true', 'password=true',
                'icons/logo@2x.png missing', 'docker run -u 1000:1000 img', 'ORA-01017: invalid username/password; logon denied',
                'pull access denied for myapp:1.2.3, repository does not exist', 'container x exited with code 137 (OOMKilled)',
                'image ghcr.io/open-webui/open-webui:v0.11.0 not found', 'listen tcp 127.0.0.1:5432: bind: address already in use')

@@ -2198,11 +2198,13 @@ function Get-ContainerRuntimeFacts {
 # Telegram bot tokens, Slack/Discord webhook secrets; PEM private-key blocks;
 # padded base64 (32+ chars), base64-looking blobs holding + or / with all of
 # upper/lower/digit (a bare AWS secret key), and any 40+ character opaque run
-# holding a letter and a digit. DELIBERATELY NOT masked: a path under a secret-
-# named key ("credentials: /etc/app/credentials.json: no such file"), a number
-# after ':' ("Secret: 3 keys rotated"), a short letters-only value after ':'
-# (prose), a secret in prose with no shape, and the old 40-character threshold
-# for model/file names is unchanged (today's are 18-24 characters). The full
+# holding a letter and a digit. There is NO path exemption: a path under a
+# secret-named key (credentials: /etc/app/credentials.json, PWD=/home/app/src,
+# token: /var/run/secrets/...) is masked like any other value; the text around
+# it stays. DELIBERATELY NOT masked: a number after ':' ("Secret: 3 keys
+# rotated"), a short letters-only value after ':' (prose), a secret in prose
+# with no shape; the 40-character threshold for model/file names is unchanged
+# (today's are 18-24 characters). The full
 # covered / not-covered list is in documentation/sysadmin-out-of-band-channel.md
 # (Layer 4); the permanent regression table is case P34 of test-watchdog-loops.ps1. House
 # redactors considered (efwd findings): little-coder's sanitize.py and
@@ -2277,8 +2279,8 @@ function Hide-CredentialShapes {
         # 6. key=value / key: value whose key NAMES a secret. After '=' any
         #    value goes; after ':' only a value that looks like one (quoted,
         #    16+ characters, or letters mixed with a digit), so "token: expired"
-        #    and "Secret: 3 keys rotated" survive. A path is a location, not a
-        #    secret. An unquoted value runs past ';' and ',' (a password may
+        #    and "Secret: 3 keys rotated" survive. A path under a secret-named key
+        #    is masked like any value. An unquoted value runs past ';' and ',' (a password may
         #    hold them) unless what follows looks like the next key ("; Db=").
         $strong = [System.Text.RegularExpressions.MatchEvaluator]{
             param($x)
@@ -2288,19 +2290,15 @@ function Hide-CredentialShapes {
             $key = $x.Groups[1].Value
             if ($bare.StartsWith('[redacted')) { return $x.Value }
             if ($bare -imatch '^(?:true|false|null|none|nil)$') { return $x.Value }
-            # 'pass' is a secret only as a KEY: pass, Pass=, *_pass, *.pass, camelCase dbPass/DbPass, DBPASS=, or a
+            # 'pass' is a secret only as a KEY: pass, Pass, *_pass, *.pass, camelCase dbPass/DbPass, DBPASS=, or a
             # bare PASS with '='. Never inside bypass/compass, and never an upper-case PASS: followed by a test name
             # (Go "--- PASS: TestX", pytest "PASS: test_x1").
             if (($key -imatch 'pass$') -and ($key -inotmatch '(?:password|passwd|passphrase)$') -and
-                -not (($key -ceq 'pass') -or (($key -ceq 'Pass') -and ($sep -match '=')) -or (($key -ceq 'PASS') -and ($sep -match '=')) -or
+                -not (($key -ceq 'pass') -or ($key -ceq 'Pass') -or (($key -ceq 'PASS') -and ($sep -match '=')) -or
                       ($key -imatch '[_.\-]pass$') -or ($key -cmatch '[a-z0-9]Pass$') -or ($key -cmatch '^[A-Z0-9]{2,}PASS$'))) { return $x.Value }
-            # ODBC PWD= is a password; PWD=/some/dir (the shell's working directory) is not.
-            if (($key -imatch 'pwd$') -and ($bare -match '^(?:/[^/;\s]*/|[A-Za-z]:\\)')) { return $x.Value }
-            # The ONLY path exemption: a key whose last word is credential(s) ("credentials: /etc/app/credentials.json:
-            # no such file") holding a real path shape - a leading '/' plus another '/', '~/', a drive letter with
-            # '\', or a filename with an extension. Separator and quoting do not matter. A password / token / secret
-            # value that merely starts with '/' or '~' (password:/Xy.., "token": "~Xy..") is a secret.
-            if (($key -imatch '(?:^|[_.\-])credentials?$') -and ($bare -match '^(?:/[^/\s]*/|~/|[A-Za-z]:\\)|^[^\s/\\]+\.[A-Za-z0-9]{1,6}:?$|^(?:\./|\.\./)')) { return $x.Value }
+            # NO path exemption (decision 2026-10-05, after four rounds of trading one leak for another): a value
+            # under a secret-named key - credentials, PWD and the rest - is masked whatever it looks like. A path in
+            # an error line costs a little readability; a leaked secret costs far more.
             if ($sep -notmatch '=') {
                 $mixed = ($bare -match '\d') -and ($bare -match '[A-Za-z]') -and ($bare.Length -ge 6)
                 if (-not (($val -ne $bare) -or ($bare.Length -ge 16) -or $mixed)) { return $x.Value }
