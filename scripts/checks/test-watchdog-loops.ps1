@@ -795,6 +795,10 @@ function Invoke-PureCases {
     $fpad = ('dGhpcyBp' * 5) + '=='              # padded base64
     $fslack = 'Wxyz' + '1234' + $fq
     $fdisc = 'Ab1' * 8
+    $fletters = 'gra' + 'nite' + 'lake'            # letters only, 11
+    $fsym = 'p@ss' + '!wOrd'                       # symbols
+    $ftrub = 'Trub' + '-Fx#q'
+    $fhex40 = '82b7238e' + '1a2b3c4d' + '5e6f7a8b' + '9c0d1e2f' + '3a4b5c6d'   # 40 hex: a git commit id (and a legacy token shape)
     $fauth = 'dXNlcjpw' + 'YXNzd29yZA=='         # base64 of user:password (docker config auth)
     $fsig = 'r6' + 'Mk%2Fq8' + 'Zp%2BtW3' + 'vLx%3D'   # Azure SAS signature
     $pemHdr = { param($kind) '-----BEGIN ' + $kind + 'PRIVATE ' + 'KEY-----' }   # assembled: no key-header literal in the tree
@@ -910,7 +914,33 @@ function Invoke-PureCases {
         @{ T = "private_key: /etc/ssl/private/app.key: no such file";          Gone = @('/etc/ssl/private/app.key'); Keep = @('no such file') },
         @{ T = "secret: /run/secrets/db_password not found";                   Gone = @('/run/secrets/db_password'); Keep = @('not found') },
         @{ T = "api_key: ./config/key.txt missing";                            Gone = @('./config/key.txt'); Keep = @('missing') },
-        @{ T = "curl -u 1000:1234567 http://x/";                               Gone = @('1234567'); Keep = @('http://x/') }
+        @{ T = "curl -u 1000:1234567 http://x/";                               Gone = @('1234567'); Keep = @('http://x/') },
+        # attempt 6 D1: *_key names other than api/auth/access/private are keys (bare, quoted, JSON, short)
+        @{ T = "SECRET_KEY=$fpw failed";                                       Gone = @($fpw);   Keep = @('SECRET_KEY=', 'failed') },
+        @{ T = "SECRET_KEY=$fletters failed";                                  Gone = @($fletters); Keep = @('failed') },
+        @{ T = "secret_key=`"$fletters`" failed";                              Gone = @($fletters); Keep = @('failed') },
+        @{ T = "secret_key: `"$fletters`" failed";                             Gone = @($fletters); Keep = @('failed') },
+        @{ T = "secret_key: '$fq' failed";                                     Gone = @($fq);    Keep = @('failed') },
+        @{ T = "secretKey: $fq failed";                                        Gone = @($fq);    Keep = @('failed') },
+        @{ T = "secret_key: $fq failed";                                       Gone = @($fq);    Keep = @('failed') },
+        @{ T = "{`"secret_key`":`"$fq`"} failed";                              Gone = @($fq);    Keep = @('failed') },
+        @{ T = "SIGNING_KEY=$fq failed";                                       Gone = @($fq);    Keep = @('failed') },
+        @{ T = "ENCRYPTION_KEY=$fletters failed";                              Gone = @($fletters); Keep = @('failed') },
+        @{ T = "JWT_SECRET_KEY=$fq failed";                                    Gone = @($fq);    Keep = @('failed') },
+        @{ T = "MASTER_KEY: $fq failed";                                       Gone = @($fq);    Keep = @('failed') },
+        @{ T = "LICENSE_KEY=$fq failed";                                       Gone = @($fq);    Keep = @('failed') },
+        # attempt 6 D2: after ':' only one plain word of letters is kept; a digit, punctuation or symbol is masked at any length
+        @{ T = "password: $fsym rejected";                                     Gone = @($fsym);  Keep = @('rejected') },
+        @{ T = "secret: $ftrub rejected";                                      Gone = @($ftrub); Keep = @('rejected') },
+        @{ T = "api_key: $ftrub rejected";                                     Gone = @($ftrub); Keep = @('rejected') },
+        @{ T = "PWD: $fsym";                                                   Gone = @($fsym);  Keep = @('PWD:') },
+        @{ T = "password: a1b2c rejected";                                     Gone = @('a1b2c'); Keep = @('rejected') },
+        @{ T = "token: zx9! rejected";                                         Gone = @('zx9!'); Keep = @('rejected') },
+        @{ T = "Secret: 3 keys rotated, 0 failed";                             Gone = @('Secret: 3'); Keep = @('keys rotated') },
+        @{ T = "credentials: ./sa.json missing";                               Gone = @('./sa.json'); Keep = @('missing') },
+        @{ T = "token: `"expired`" please retry";                              Gone = @('expired'); Keep = @('please retry') },
+        # attempt 6 D4: a 40-hex git commit id is masked (legacy GitHub tokens are 40 hex too) - accepted over-scrub
+        @{ T = "commit $fhex40 checked out";                                   Gone = @($fhex40); Keep = @('commit', 'checked out') }
     )
     $bad34 = @()
     foreach ($row in $rows) {
@@ -918,12 +948,14 @@ function Invoke-PureCases {
         foreach ($g in $row.Gone) { if ($o.Contains($g)) { $bad34 += "leaked '$g' in: $o" } }
         foreach ($k in $row.Keep) { if (-not $o.Contains($k)) { $bad34 += "lost '$k' in: $o" } }
     }
-    # --- PERMANENT REGRESSION TABLE (attempt 3). Every shape any test round has masked, and the plain text
-    # it must leave alone. A later rule change that reopens one fails HERE, by name. Shapes that are NOT
-    # masked on purpose (prose, a short letters-only value after ':', a multi-line PEM body, AUTH/redis
-    # replies, plain digests) are listed in $permSkip and in the docs, not hidden.
+    # --- PERMANENT REGRESSION TABLE. Every shape the attempt-1..4 testers' probe sets masked (credential rows) and every
+    # plain line those sets said must stay readable, ported verbatim from the probes (fakes assembled from parts; PEM headers
+    # via $pemHdr). A later rule change that reopens one fails HERE, by name. Rows the probes themselves mark nc= (declared not
+    # covered) or that $permSkip / $plainSkip name (documented in Layer 4) are skipped; a set that contributes no credential
+    # rows or no plain rows fails loudly (the attempt-4 port silently lost its plain half).
     $permSkip = @('password: letters short', 'password is prose', 'yaml secret colon', 'api-key header', 'PEM multi-line body', 'AUTH cmd',
-                  # declared NOT covered (Layer 4): bare key= under 16 chars, dotted-host Oracle with no port, short letters after ':', short hvs.
+                  # declared NOT covered (Layer 4): bare key= under 16 chars, dotted-host Oracle with no port, short hvs.,
+                  # and letters-only words after ':' (status words are kept on purpose)
                   'D1 key=../x (bare key, weak)', 'D3 u/pw@host (no port)', 'D4 db_pass: letters', 'C hvs. short (24)')
     $permA = & {
 # fakes assembled from parts
@@ -1012,7 +1044,7 @@ $plain = @(
   'Traceback: File "/app/src/openbrain_gateway/server_handlers_v2_extended.py", line 99'
 )
 
-        @{ C = $cases; P = $plain }
+        @{ C = @($cases); P = @($plain) }
     }
     $permB = & {
 # all fakes assembled from parts
@@ -1101,7 +1133,7 @@ $plain = @(
   'connection to db:5432 refused (user=app, database=app)'
 )
 
-        @{ C = $cases; P = $plain }
+        @{ C = @($cases); P = @($plain) }
     }
     $permC = & {
 # fakes assembled from parts
@@ -1235,7 +1267,7 @@ $plain = @(
 )
 $leaks = 0; $ncLeaks = 0
 
-        @{ C = $cases; P = $plain }
+        @{ C = @($cases); P = @($plain) }
     }
     $permD = & {
 # fakes assembled from parts
@@ -1283,7 +1315,7 @@ $cases = @(
   @{ n='K7 PASS="<pw>"';                              t="PASS=`"$pw`""; s=$pw }
   @{ n='K8 DB_PASS: "<pw>"';                          t="DB_PASS: `"$pw`""; s=$pw }
   @{ n='K9 PASS: <pw> (declared: upper PASS only with =)'; t="PASS: $pw"; s=$pw; nc=$true }
-  @{ n='K10 Pass: <pw> (title-case colon)';           t="Pass: $pw"; s=$pw; nc=$true }
+  @{ n='K10 Pass: <pw> (title-case colon)';           t="Pass: $pw"; s=$pw }
   # --- curl numeric bound
   @{ n='C1 curl -u 1000:98765432';                    t="curl -u 1000:98765432 http://x/"; s='98765432' }
   @{ n='C2 curl -u 1000:1234567 (7 digits)';          t="curl -u 1000:1234567 http://x/"; s='1234567' }
@@ -1293,30 +1325,59 @@ $cases = @(
   @{ n='C6 curl -u 1000:123456 (6 digits, declared)'; t="curl -u 1000:123456 http://x/"; s='123456'; nc=$true }
 )
 $leaks = 0; $ncl = 0
+$plain = @(
+  'credentials: /etc/app/credentials.json: no such file or directory',
+  'credentials: "/etc/app/credentials.json" not found',
+  'GOOGLE_APPLICATION_CREDENTIALS=/etc/app/sa.json not found',
+  'credentials: ./sa.json missing', 'credentials: ~/.config/app/c.json missing',
+  'credentials: C:\app\creds.json missing', 'credentials file: sa.json',
+  'PWD=/home/app/src', 'PWD=/app/src/x', 'PWD=C:\Data\work\app', 'OLDPWD=/home/app/src',
+  '--- PASS: TestX', '--- PASS: TestRequestProcessorFactory (0.01s)', 'PASS: test_x1', 'PASSED', 'pass rate 98%',
+  'PASS: TestHandlers2 (0.5s)', 'XPASS: test_x1', '=== RUN TestX9 --- PASS: TestX9 (0.00s)', 'PASS', 'ok  pkg/x 0.01s PASS',
+  '--- FAIL: TestLogin2 (0.02s)', 'FAIL: test_login2', 'tests: 12 PASS, 0 FAIL',
+  'curl -u 1000:1000 http://x/', 'docker run -u 1000:1000 app', 'chown 1000:1000 /data', 'docker run -u 0:0 app',
+  'reg/app@sha256:abc123 pulled', 'pkg/x@1.2 installed', 'react@18.2.0',
+  # paths under non-credentials secret keys (readable at attempts 2/3; how are they now?)
+  'token: /var/run/secrets/kubernetes.io/serviceaccount/token: no such file or directory',
+  'private_key: /etc/ssl/private/app.key: no such file',
+  'secret: /run/secrets/db_password not found',
+  'password_file: /run/secrets/pw',
+  'api_key: ./config/key.txt missing'
+)
 
-        @{ C = $cases; P = $plain }
+        @{ C = @($cases); P = @($plain) }
     }
-    # By design masked or altered (documented in Layer 4): sha256 digests / 64-hex ids, 50-char model names, a user-only URL,
-    # a path under a credentials key (now masked), and the probes' declared over-scrubs.
+    # By design masked or altered (documented in Layer 4): sha256 digests / 64-hex ids / 40-hex commit ids, 50-char model names, a user-only
+    # URL, a path or a number under a secret-named key (masked now), PWD= working-directory lines, the probes' declared over-scrubs.
     $plainSkip = @('sha256:3f9a1c2b7d4e5f60', 'No such container: 3f9a1c2b7d4e5f603f9a', 'Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL-00001-of-00002', 'http://user@example.com',
                    'credentials: /etc/app/credentials.json', 'credentials: "/etc/app/credentials.json"', 'reg/app@sha256 tag',
-                   'PWD=/app/src/server/handlers', 'PWD=C:\work\app')
-    $permN = 0
-    foreach ($set in @($permA, $permB, $permC, $permD)) {
+                   'PWD=/app/src/server/handlers', 'PWD=C:\work\app', 'PWD=/home/app/src', 'PWD=/app/src/x', 'PWD=C:\Data\work\app', 'OLDPWD=',
+                   'GOOGLE_APPLICATION_CREDENTIALS', 'Secret: 3 keys rotated', 'credentials: ./sa.json', 'credentials: ~/.config', 'credentials: C:\app',
+                   'token: /var/run/secrets', 'private_key: /etc/ssl', 'secret: /run/secrets/db_password', 'api_key: ./config')
+    $permN = 0; $permBy = @()
+    foreach ($nm in 'permA', 'permB', 'permC', 'permD') {
+        $set = Get-Variable $nm -ValueOnly
+        $nc = 0; $np = 0
+        if (@($set.C).Count -lt 1 -or @($set.P).Count -lt 1) { $bad34 += "permanent set $nm is empty: $(@($set.C).Count) credential rows, $(@($set.P).Count) plain rows" }
         foreach ($c in $set.C) {
             if (($permSkip -contains $c.n) -or $c.nc) { continue }
-            $permN++
+            $nc++
             $o = Hide-CredentialShapes $c.t
-            foreach ($g in $c.s) { if ($o.Contains($g)) { $bad34 += "perm [$($c.n)] leaked a fake in: $o" } }
+            foreach ($g in $c.s) { if ($o.Contains($g)) { $bad34 += "perm $nm [$($c.n)] leaked a fake in: $o" } }
         }
-        foreach ($pl in $set.P) { if ($plainSkip | Where-Object { $pl.Contains($_) }) { continue }; $permN++; $o = Hide-CredentialShapes $pl; if ($o -cne $pl) { $bad34 += "perm plain text changed: '$pl' -> '$o'" } }
+        foreach ($pl in $set.P) {
+            if ($plainSkip | Where-Object { $pl.Contains($_) }) { continue }
+            $np++
+            $o = Hide-CredentialShapes $pl
+            if ($o -cne $pl) { $bad34 += "perm $nm plain text changed: '$pl' -> '$o'" }
+        }
+        $permN += $nc + $np; $permBy += "$nm $nc+$np"
     }
     # Meaning survives: ordinary error text comes back byte for byte.
     $plain = @('invalid key', 'invalid key: expected 32 bytes', 'FATAL: password authentication failed for user app',
                'token: expired', 'max_tokens=100 exceeded', 'PRIMARY_KEY=id duplicate', 'basic configuration validation failed',
                'tailscale: node key has expired', 'exit status 1',
                # attempt-2 over-scrub guards: the useful part of the error stays
-               'Secret: 3 keys rotated, 0 failed',
                'open /run/secrets/db_password: no such file', 'basic configuration validation failed', 'Basic Authentication failed',
                'dial tcp 10.0.0.1:5432: connect: connection refused',
                # today's model names (inference/): all well under the 40-character threshold
@@ -1325,7 +1386,10 @@ $leaks = 0; $ncl = 0
                # go test / pytest output is not a password
                '--- PASS: TestRequestProcessorFactory (0.01s)', 'PASS: test_x1', 'PASS: TestHandlers2 (0.5s)',
                # one-segment ODBC PWD is a password (credential row), a directory is not; docker/chown ids; refs
-               'chown 1000:1000 /data', 'curl -u 1000:1000 http://x/', 'curl -u 1000:123456 http://x/',
+               'chown 1000:1000 /data', 'curl -u 1000:1000 http://x/', 'curl -u 1000:123456 http://x/', 'docker run -u 0:0 app', 'curl -u 1234567:12 http://x/',
+               # status words after ':' are kept (one plain word of letters); a file-naming key is not a secret-named key
+               'token: expired', 'password: required', 'secret: missing', 'api_key: invalid', 'passphrase: none', 'token: expired, re-authenticate',
+               'password_file: /run/secrets/pw', 'credentials file: sa.json',
                'reg/app@sha256:abc123 pulled', 'pkg/x@1.2 installed', 'react@18.2.0',
                'password=false', 'token=null', 'secret=none', 'pass=nil', 'password=NONE',
                # attempt 3: the over-scrub rows - image tags, ports, exit codes, error texts, paths, flags
@@ -1347,7 +1411,7 @@ $leaks = 0; $ncl = 0
     if ($big.Length -gt 4100) { $bad34 += "output not bounded: $($big.Length)" }
     if ($sw.Elapsed.TotalSeconds -gt 5) { $bad34 += "slow on hostile input: $([math]::Round($sw.Elapsed.TotalSeconds,1))s" }
     Write-Case 'P34' 'Hide-CredentialShapes masks URL/DSN userinfo, Bearer, key=value, vendor tokens, JWT, PEM and keeps ordinary error text' `
-        ($bad34.Count -eq 0) ("$($rows.Count) credential rows, $($plain.Count) plain rows, $permN permanent-table rows, hostile input in $([math]::Round($sw.Elapsed.TotalSeconds,2))s" +
+        ($bad34.Count -eq 0) ("$($rows.Count) credential rows, $($plain.Count) plain rows, $permN permanent-table rows ($($permBy -join '; ')), hostile input in $([math]::Round($sw.Elapsed.TotalSeconds,2))s" +
                               $(if ($bad34) { "`n" + ($bad34 -join "`n") } else { '' }))
 
     }

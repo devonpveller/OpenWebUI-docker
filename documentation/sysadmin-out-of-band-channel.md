@@ -128,9 +128,17 @@ and `user/pw@alias`, also inside quotes); `Authorization:` header values
 (Bearer, Basic, Token); `key=value` and `key: value` for secret-named keys
 (password, passwd, passphrase, `pwd` as in ODBC `PWD=`, `pass` as a key - `pass=`,
 `Pass:`, `DB_PASS`, `dbPass`, `DBPASS=`, `PASS=` - secret, token, api key, auth
-key, access key, private key, credentials, dsn), with the value bare, quoted
-(`"..."`, `'...'`), bracketed or URL-encoded, after `=` or `:`, in JSON or YAML,
-and values that hold `;` or `,`; CLI flags (`--password <pw>`, `--token <t>`,
+key, access key, private key, `secret_key` / `SECRET_KEY` / `secretKey`,
+`SIGNING_KEY`, `ENCRYPTION_KEY`, `MASTER_KEY`, `LICENSE_KEY`, credentials, dsn),
+with the value bare, quoted (`"..."`, `'...'`), bracketed or URL-encoded, after
+`=` or `:`, in JSON or YAML, and values that hold `;` or `,`. **The rule for
+the value:** after `=` everything is masked except `true`, `false`, `null`,
+`none`, `nil`; after `:` a value stays readable ONLY when it is one plain,
+unquoted word of letters (1-15 letters, a status word such as `required`,
+`missing`, `invalid`, `expired`; a trailing `,` `.` `;` `:` `)` is ignored).
+Any value with a digit, punctuation, a quote or a symbol is masked at any
+length (`p@ss!wOrd`, `Trub-Fx#q`, `a1b2c`, `zx9!`, `./sa.json`, `3`), and so is
+any letters-only value of 16 or more characters; CLI flags (`--password <pw>`, `--token <t>`,
 mysql `-p<pw>`, `docker login -p`, `curl -u` / `-uUSER:PW` / `--user=`,
 `redis-cli -a`, `sshpass -p`); vendor tokens (sk-, ghp_, github_pat_, xox*-,
 AKIA, tskey-, hf_, glpat-, npm_, AIza), JWTs, Telegram bot tokens, Slack and
@@ -150,10 +158,12 @@ readability, a leaked secret costs far more, and the text around the value
 stays (`credentials: [redacted] no such file or directory`).
 
 **Deliberately NOT covered (a stated limit, not a surprise).** A secret written
-as plain prose with no shape ("the password is hunter2"); a short letters-only
-value after `:` (`secret_key: abcdefgh`, `X-Api-Key: abcdefgh`,
-`credentials: sa.json`); a number after `:` (`password: 123456`; with `=` it is
-masked); an upper-case `PASS:` (a key only with `=`); a bare `key=` value shorter
+as plain prose with no shape ("the password is hunter2"); a password that is
+itself a single plain word of 1-15 letters after `:` (`secret_key: abcdefgh`,
+`X-Api-Key: abcdefgh` - indistinguishable from the status word `required`;
+with `=` it is masked); an upper-case `PASS:` (a key only with `=`); a key that
+names a file rather than a secret (`password_file: /run/secrets/pw`,
+`credentials file: sa.json`); a bare `key=` value shorter
 than 16 characters; a Vault `hvs.` token shorter than the 40-character
 opaque-run threshold; a bare Bearer of letters only with no `Authorization:`
 header; redis `AUTH <pw>` replies; PEM body lines after the header (the fault
@@ -170,12 +180,15 @@ under a secret-named key, `credentials` included (`credentials: /etc/app/...`,
 `OLDPWD=` value, so a working-directory line in an env dump (`PWD=/home/app/src`,
 `PWD=C:\work`) is masked; a title-case `Pass:` followed by a test name; sha256
 digests (`app@sha256:<64 hex>`) and 64-hex container ids; any 40+ character model
-or file name with a letter and a digit (today's are 18-28 characters and are
-untouched); a 40+ character relative code path with one to three `/`, mixed case
+or file name with a letter and a digit (today's `.gguf` names are 23 and 27
+characters and are untouched); a 40+ character relative code path with one to three `/`, mixed case
 and a digit (for example `internal/Handlers2/RequestProcessorFactoryImpl`); a
 user-only URL (`http://user@host/`); `from:bob@example.com`; and
 `name/x@word`-shaped text followed by a space (`reg/app@sha256 pulled`,
-`pkg/name@alias`; `reg/app@sha256:abc` and `pkg/x@1.2` stay). Go / pytest output
+`pkg/name@alias`; `reg/app@sha256:abc` and `pkg/x@1.2` stay); a 40-hex git
+commit id (legacy GitHub tokens are 40 hex too, so the opaque-run rule keeps
+masking them); a number after `:` under a secret-named key (`Secret: 3 keys
+rotated` becomes `Secret: [redacted] keys rotated`). Go / pytest output
 such as `--- PASS: TestX (0.01s)` and `PASS: test_x1` is NOT masked.
 
 

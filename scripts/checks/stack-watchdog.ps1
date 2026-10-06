@@ -2201,10 +2201,10 @@ function Get-ContainerRuntimeFacts {
 # holding a letter and a digit. There is NO path exemption: a path under a
 # secret-named key (credentials: /etc/app/credentials.json, PWD=/home/app/src,
 # token: /var/run/secrets/...) is masked like any other value; the text around
-# it stays. DELIBERATELY NOT masked: a number after ':' ("Secret: 3 keys
-# rotated"), a short letters-only value after ':' (prose), a secret in prose
-# with no shape; the 40-character threshold for model/file names is unchanged
-# (today's are 18-24 characters). The full
+# it stays. DELIBERATELY NOT masked: a single plain word of letters after ':'
+# ("token: expired"), a secret in prose with no shape; the 40-character
+# threshold for model/file names is unchanged (today's are 23-27 characters;
+# a 40-hex git commit id IS masked: legacy GitHub tokens are 40 hex). The full
 # covered / not-covered list is in documentation/sysadmin-out-of-band-channel.md
 # (Layer 4); the permanent regression table is case P34 of test-watchdog-loops.ps1. House
 # redactors considered (efwd findings): little-coder's sanitize.py and
@@ -2277,9 +2277,9 @@ function Hide-CredentialShapes {
         $t = [regex]::Replace($t, '(\bredis-cli\b[^\n]{0,200}?[ \t]-a[ \t]+)(\S{1,256})', ('${1}' + $m))
         $t = [regex]::Replace($t, '(?i)(\bsshpass[ \t]+(?:-e[ \t]+)?-p[ \t]*)(\S{1,256})', ('${1}' + $m))
         # 6. key=value / key: value whose key NAMES a secret. After '=' any
-        #    value goes; after ':' only a value that looks like one (quoted,
-        #    16+ characters, or letters mixed with a digit), so "token: expired"
-        #    and "Secret: 3 keys rotated" survive. A path under a secret-named key
+        #    value goes except true/false/null/none/nil; after ':' everything
+        #    except one plain word of letters, so "token: expired" survives and
+        #    "secret: a1b2c", "api_key: Trub-Fx#q", "Secret: 3 keys" do not. A path under a secret-named key
         #    is masked like any value. An unquoted value runs past ';' and ',' (a password may
         #    hold them) unless what follows looks like the next key ("; Db=").
         $strong = [System.Text.RegularExpressions.MatchEvaluator]{
@@ -2300,12 +2300,16 @@ function Hide-CredentialShapes {
             # under a secret-named key - credentials, PWD and the rest - is masked whatever it looks like. A path in
             # an error line costs a little readability; a leaked secret costs far more.
             if ($sep -notmatch '=') {
-                $mixed = ($bare -match '\d') -and ($bare -match '[A-Za-z]') -and ($bare.Length -ge 6)
-                if (-not (($val -ne $bare) -or ($bare.Length -ge 16) -or $mixed)) { return $x.Value }
+                # After ':' a value stays readable ONLY when it is one plain unquoted word of letters (a status word:
+                # required, missing, invalid, expired). A digit, punctuation, a quote or a symbol in it - at any length -
+                # means masked ("p@ss!wOrd", "Trub-Fx#q", "a1b2c", "zx9!", "3" in "Secret: 3 keys"). Trailing prose
+                # punctuation does not count ("token: expired,"). After '=' only true/false/null/none/nil are kept.
+                $word = $bare.TrimEnd(',', '.', ';', ':', ')')
+                if (($val -eq $bare) -and ($word -match '^[A-Za-z]{1,15}$')) { return $x.Value }
             }
             return $x.Groups[1].Value + $x.Groups[2].Value + $sep + '[redacted]'
         }
-        $t = [regex]::Replace($t, '(?i)(?<![A-Za-z0-9])([A-Za-z0-9_.\-]{0,40}?(?:password|passwd|passphrase|pwd|pass|secret|token|api[_\-]?key|auth[_\-]?key|access[_\-]?key|private[_\-]?key|credentials?|dsn))(["'']?)(\s{0,3}[:=]\s{0,3})("(?:[^"\\]|\\.){1,512}"|''[^'']{1,512}''|(?:[^\s"'',;&]|[;,](?!\s*[A-Za-z_][A-Za-z0-9_.\- ]{0,30}\s*[=:])){1,512})', $strong)
+        $t = [regex]::Replace($t, '(?i)(?<![A-Za-z0-9])([A-Za-z0-9_.\-]{0,40}?(?:password|passwd|passphrase|pwd|pass|secret|token|(?:secret|signing|encryption|master|license)[_\-]?key|api[_\-]?key|auth[_\-]?key|access[_\-]?key|private[_\-]?key|credentials?|dsn))(["'']?)(\s{0,3}[:=]\s{0,3})("(?:[^"\\]|\\.){1,512}"|''[^'']{1,512}''|(?:[^\s"'',;&]|[;,](?!\s*[A-Za-z_][A-Za-z0-9_.\- ]{0,30}\s*[=:])){1,512})', $strong)
         #    A bare "key" or "auth" is a secret only when '=' is followed by a
         #    key-shaped value (PRIMARY_KEY=id is not).
         $weak = [System.Text.RegularExpressions.MatchEvaluator]{
