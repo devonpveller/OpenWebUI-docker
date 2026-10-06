@@ -244,7 +244,7 @@ function Invoke-PureCases {
     $missing = @($need | Where-Object { -not (Get-Command $_ -CommandType Function -ErrorAction SilentlyContinue) })
     if ($missing.Count -gt 0) {
         foreach ($id in 'P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8', 'P9', 'P10', 'P11', 'P12', 'P13', 'P14', 'P15',
-                        'P16', 'P17', 'P18', 'P19', 'P20', 'P21', 'P22', 'P23', 'P24', 'P25', 'P26', 'P27', 'P28', 'P29') {
+                        'P16', 'P17', 'P18', 'P19', 'P20', 'P21', 'P22', 'P23', 'P24', 'P25', 'P26', 'P27', 'P28', 'P29', 'P30', 'P31', 'P32', 'P33', 'P34', 'P35') {
             Write-Case $id 'container-loop detection' $false ("the watchdog under test defines none of: " + ($missing -join ', '))
         }
         return
@@ -576,7 +576,8 @@ function Invoke-PureCases {
     # P22 (attempt-4 X1): docker-unreadable FLAPPING - the batched and the
     # per-container inspect time out on alternate passes, 12 passes 10 min
     # apart. Its all-clear keeps the 1h throttle and the 6h cooldown, so this
-    # is ONE alert and at most one all-clear, not a pair every other pass.
+    # is ONE alert and ONE all-clear, not a pair every other pass. Exactly one
+    # (ef-watchdog): "at most one" also passed when no all-clear was ever sent.
     $u1 = @{ Name = '/u1'; Id = 'u1'; RestartCount = 0; State = @{ Status = 'running'; StartedAt = (& $iso 300) }
              HostConfig = @{ NetworkMode = 'bridge'; RestartPolicy = @{ Name = 'no'; MaximumRetryCount = 0 } } } | ConvertTo-Json -Compress -Depth 5
     $DockerProbeTimeoutSeconds = 8
@@ -596,8 +597,8 @@ function Invoke-PureCases {
     $tt = Get-Transport $sbx
     $p22a = Measure-Alerts $tt 'docker cannot describe 1 container\(s\) within 8s'
     $p22r = @($tt.Telegram | Where-Object { $_ -match 'RESOLVED ai-stack: docker can describe' }).Count
-    Write-Case 'P22' 'docker-unreadable flapping every other pass for 2h: one alert, at most one all-clear' `
-        (($p22a -eq 'tg=1 mm=1') -and ($p22r -le 1)) "12 passes, alternate inspect timeouts: alerts $p22a; RESOLVED $p22r"
+    Write-Case 'P22' 'docker-unreadable flapping every other pass for 2h: one alert and ONE all-clear (not none, not a pair per flap)' `
+        (($p22a -eq 'tg=1 mm=1') -and ($p22r -eq 1)) "12 passes, alternate inspect timeouts: alerts $p22a; RESOLVED $p22r"
     # Leave the key clean for P6.
     Get-ChildItem (Join-Path $sbx 'logs') -Force -File | Where-Object { $_.Name -like '*docker-unreadable' } | Remove-Item -Force
 
@@ -698,6 +699,772 @@ function Invoke-PureCases {
         (($p27page -eq 365) -and ($p27early -lt 0) -and ($p27clear -ge 575) -and ($p27clear -le 595) -and ($p27re -eq 585) -and ($p27clear2 -eq 645)) `
         ("paged at $p27page (expected 365); first all-clear at $p27clear, $(if ($p27clear -ge 0) { $p27clear - 357 } else { '-' }) min up (bar 210; " +
          "expected 575-595); relapse paged at $p27re (expected 585); relapse cleared at $p27clear2 (expected 645, 61 min up)")
+
+
+    # P31 (ef-watchdog): the ClearedAt clamp's OLD-restart guard. A ClearedAt a
+    # year ahead is clamped to NOW (P26 shows later restarts still page); the
+    # other half is that it must not bring the OLD restarts back: six restarts
+    # an hour ago, no new one, a ClearedAt a year ahead -> nothing to page. An
+    # UNREADABLE ClearedAt is 0 and does count them (errs toward an extra page).
+    $e31 = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - 3600
+    $st = Get-Content $statePath -Raw | ConvertFrom-Json
+    $st | Add-Member -NotePropertyName 'p31-old' -NotePropertyValue ([pscustomobject]@{
+        Count = 6; Id = 'p31o'; Streak = 0; Accum = 0; Missed = 0; Hist = @(1..6 | ForEach-Object { "${e31}:1" })
+        ClearedAt = ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + 365 * 86400) }) -Force
+    $st | Add-Member -NotePropertyName 'p31-unreadable' -NotePropertyValue ([pscustomobject]@{
+        Count = 6; Id = 'p31u'; Streak = 0; Accum = 0; Missed = 0; Hist = @(1..6 | ForEach-Object { "${e31}:1" })
+        ClearedAt = 'not-a-number' }) -Force
+    ($st | ConvertTo-Json -Depth 5) | Out-File $statePath -Encoding utf8 -Force
+    Test-ContainerRestartLoops -Facts @((& $fact 'cfwd-healthy' 'p31-old' 'p31o' 6 'running' (& $iso 5) ''),
+                                        (& $fact 'cfwd-healthy' 'p31-unreadable' 'p31u' 6 'running' (& $iso 5) '')) | Out-Null
+    $p31o = & $said "container 'p31-old'"
+    $p31u = & $said "container 'p31-unreadable' is CRASH-LOOPING: 6 restart\(s\) in the last"
+    Write-Case 'P31' 'a ClearedAt a year ahead is clamped to now and does not bring older restarts back; an unreadable one does count them' `
+        (($p31o -eq 0) -and ($p31u -eq 1)) `
+        "6 restarts an hour ago, no new one: future ClearedAt -> messages $p31o (expected 0); unreadable ClearedAt -> slow-loop pages $p31u (expected 1)"
+
+    # P32 (ef-watchdog): LastObs is carried across a pass that did not see the
+    # container, so the gap over that pass still reaches MaxGap. Restart seen at
+    # minute 10, a pass without it at 20, the next restart seen at minute 130:
+    # the gap is 120 minutes. Read from the state file the watchdog wrote.
+    $t0 = [datetime]::SpecifyKind([datetime]'2034-01-01T00:00:00', 'Utc')
+    $t0s = $t0.ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
+    $seq32 = @(@(0, 0), @(10, 1), @(20, -1), @(130, 2))
+    foreach ($s32 in $seq32) {
+        $script:SimNow = $t0.AddMinutes($s32[0]); $WatchdogClock = { $script:SimNow }
+        if ($s32[1] -lt 0) {
+            Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p32-other' 'p32x' 0 'running' $t0s '') | Out-Null
+        } else {
+            Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p32-obs' 'p32' $s32[1] 'running' $t0s '') | Out-Null
+        }
+    }
+    $WatchdogClock = $null
+    $st32 = (Get-Content $statePath -Raw | ConvertFrom-Json).'p32-obs'
+    $wantObs = [int64]([datetimeoffset]$t0.AddMinutes(130)).ToUnixTimeSeconds()
+    Write-Case 'P32' 'LastObs is carried across a pass that missed the container, so the 120-minute gap reaches MaxGap' `
+        (($null -ne $st32) -and ([double]$st32.MaxGap -eq 120) -and ([int64]$st32.LastObs -eq $wantObs)) `
+        "restart seen at 10 and 130, a pass without it at 20: state MaxGap=$($st32.MaxGap) (expected 120), LastObs=$($st32.LastObs) (expected $wantObs)"
+
+    # P33 (ef-watchdog): a MaxGap that is not a finite number (a hand edit:
+    # "NaN", "Infinity") is UNREADABLE, so the default bar (60 min) applies and
+    # a paged container can clear. Choice recorded in findings: NaN made every
+    # settle comparison false, so such a container could never clear.
+    $st = Get-Content $statePath -Raw | ConvertFrom-Json
+    foreach ($nm in @(@('p33-nan', 'NaN'), @('p33-inf', 'Infinity'))) {
+        $st | Add-Member -NotePropertyName $nm[0] -NotePropertyValue ([pscustomobject]@{
+            Count = 7; Id = $nm[0]; Streak = 0; Accum = 0; Missed = 0; Hist = @(); ClearedAt = 0; LastObs = 0; MaxGap = $nm[1] }) -Force
+        foreach ($sf in @(".loop-alert-crashloop-$($nm[0])", ".tg-state-crashloop-$($nm[0])")) {
+            'x' | Out-File (Join-Path $sbx "logs\$sf") -Encoding ascii -Force }
+    }
+    ($st | ConvertTo-Json -Depth 5) | Out-File $statePath -Encoding utf8 -Force
+    Test-ContainerRestartLoops -Facts @((& $fact 'cfwd-healthy' 'p33-nan' 'p33-nan' 7 'running' (& $iso 61) ''),
+                                        (& $fact 'cfwd-healthy' 'p33-inf' 'p33-inf' 7 'running' (& $iso 61) '')) | Out-Null
+    $p33n = & $said "RESOLVED ai-stack: container 'p33-nan'"
+    $p33i = & $said "RESOLVED ai-stack: container 'p33-inf'"
+    $after33 = Get-Content $statePath -Raw | ConvertFrom-Json
+    $gaps33 = "$($after33.'p33-nan'.MaxGap)/$($after33.'p33-inf'.MaxGap)"
+    $st = Get-Content $statePath -Raw | ConvertFrom-Json
+    $st | Add-Member -NotePropertyName 'p33-carry' -NotePropertyValue ([pscustomobject]@{
+        Count = 7; Id = 'p33c'; Streak = 0; Accum = 0; Missed = 0; Hist = @(); ClearedAt = 0; LastObs = 0; MaxGap = 'NaN' }) -Force
+    ($st | ConvertTo-Json -Depth 5) | Out-File $statePath -Encoding utf8 -Force
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p33-other' 'p33x' 0 'running' (& $iso 5) '') | Out-Null
+    $carried33 = (Get-Content $statePath -Raw | ConvertFrom-Json).'p33-carry'
+    $carryOk33 = ($null -ne $carried33) -and ([double]$carried33.MaxGap -eq 0) -and ((Get-Content $statePath -Raw) -cnotmatch 'NaN')
+    Write-Case 'P33' 'a non-finite MaxGap (NaN, Infinity) is read as unreadable: the default bar applies and the container clears' `
+        (($p33n -eq 1) -and ($p33i -eq 1) -and ($gaps33 -eq '0/0') -and $carryOk33) `
+        "paged containers up 61 min with MaxGap NaN / Infinity: RESOLVED $p33n / $p33i (expected 1 / 1); MaxGap written back $gaps33 (expected 0/0); NaN carried across a missed pass is cleaned: $carryOk33"
+
+    # P34 (ef-watchdog): the credential-shape scrub. Fakes are ASSEMBLED FROM
+    # PARTS so no secret-shaped literal is committed (push protection). Each row:
+    # the text, fragments that must be gone, fragments that must survive.
+    $fpw = 's3' + 'cret' + '-Pw9'
+    $fgh = 'gh' + 'p_' + ('A1b2C3d4E5' * 4)
+    $fsk = 'sk' + '-ant-' + ('x9Y8z7W6' * 3)
+    $fts = 'ts' + 'key-auth-' + 'k1234567890abc' + 'DEF-ZYX98765'
+    $faws = 'AK' + 'IA' + 'IOSFODNN7' + 'EXAMPLE'
+    $fjwt = 'ey' + 'Jhbgcixxxx.ey' + 'Jzdwixxxxx.sig' + 'natu' + 're99'
+    $ftg = '1234567890' + ':' + ('A1b2C3d4E5' * 3) + 'A1b2C'
+    $fbear = 'abc123' + 'def456' + 'ghi789'
+    $fpem = '-----BEGIN ' + 'RSA PRIVATE KEY----- MIIEowIBAAKCAQEA1'
+    $fq = 'hun' + 'ter2'
+    $fweak = 'Abc123' + 'Def456' + 'Ghi789'     # 18 characters: only the bare-key rule can take it
+    $fopq = '9f8e7d6c' * 6                       # 48 hex characters under no key: only the opaque-run rule
+    $fbasic = 'dXNlcjpw' + 'YXNz'                # base64 of user:pass - 12 letters, no digit
+    $faws = 'wJalrXUtnFEMI/K7MDENG/' + 'bPxRfiCY' + 'EXAMPLEKEY'   # 40 chars with '/', under no key
+    $fblob = ('Qm9v+YmFy' + 'L3F1dXhh') * 3      # 51 base64 chars holding + and /
+    $fpad = ('dGhpcyBp' * 5) + '=='              # padded base64
+    $fslack = 'Wxyz' + '1234' + $fq
+    $fdisc = 'Ab1' * 8
+    $fletters = 'gra' + 'nite' + 'lake'            # letters only, 11
+    $fsym = 'p@ss' + '!wOrd'                       # symbols
+    $ftrub = 'Trub' + '-Fx#q'
+    $fhex40 = '82b7238e' + '1a2b3c4d' + '5e6f7a8b' + '9c0d1e2f' + '3a4b5c6d'   # 40 hex: a git commit id (and a legacy token shape)
+    $fauth = 'dXNlcjpw' + 'YXNzd29yZA=='         # base64 of user:password (docker config auth)
+    $fsig = 'r6' + 'Mk%2Fq8' + 'Zp%2BtW3' + 'vLx%3D'   # Azure SAS signature
+    $pemHdr = { param($kind) '-----BEGIN ' + $kind + 'PRIVATE ' + 'KEY-----' }   # assembled: no key-header literal in the tree
+    if (-not (Get-Command Hide-CredentialShapes -CommandType Function -ErrorAction SilentlyContinue)) {
+        Write-Case 'P34' 'Hide-CredentialShapes masks credential shapes and keeps ordinary error text' $false 'the watchdog under test defines no Hide-CredentialShapes'
+    } else {
+    $rows = @(
+        @{ T = "dial tcp: postgres://app:$fpw@db.internal:5432/app failed";   Gone = @($fpw);   Keep = @('postgres://', 'db.internal:5432/app failed') },
+        @{ T = "connect failed: host=db user=app password=$fpw dbname=x";      Gone = @($fpw);   Keep = @('host=db', 'dbname=x') },
+        @{ T = "Server=x;Password=$fpw;Database=y";                            Gone = @($fpw);   Keep = @('Server=x', 'Database=y') },
+        @{ T = "401 Authorization: Bearer $fbear";                             Gone = @($fbear); Keep = @('401', 'Bearer') },
+        @{ T = "clone failed using $fgh";                                      Gone = @($fgh);   Keep = @('clone failed') },
+        @{ T = "$fsk rejected by the gateway";                                 Gone = @($fsk);   Keep = @('rejected by the gateway') },
+        @{ T = "TS_AUTHKEY=$fts not accepted";                                 Gone = @($fts);   Keep = @('not accepted') },
+        @{ T = "aws $faws denied";                                             Gone = @($faws);  Keep = @('denied') },
+        @{ T = "bad jwt $fjwt expired";                                        Gone = @($fjwt);  Keep = @('expired') },
+        @{ T = "bot$ftg rejected";                                             Gone = @($ftg);   Keep = @('rejected') },
+        @{ T = "API_TOKEN=$fq invalid";                                        Gone = @($fq);    Keep = @('invalid') },
+        @{ T = "{`"password`":`"$fq`",`"user`":`"app`"}";                      Gone = @($fq);    Keep = @('user') },
+        @{ T = "bad key $fpem";                                                Gone = @('MIIEow'); Keep = @('bad key') },
+        @{ T = "AccountKey=$fweak was refused";                                Gone = @($fweak); Keep = @('was refused') },
+        @{ T = "image digest $fopq mismatch";                                  Gone = @($fopq);  Keep = @('mismatch') },
+        # attempt-2 (tester L1-L9): shapes the anchor names that got through
+        @{ T = "Access denied using DSN app:$fpw@tcp(db:3306)/app";            Gone = @($fpw);   Keep = @('Access denied', 'tcp(db:3306)/app') },
+        @{ T = "cannot connect to app:$fpw@db.internal:5432";                   Gone = @($fpw);   Keep = @('cannot connect', 'db.internal:5432') },
+        @{ T = "cannot connect to app:$fpw@db:5432";                           Gone = @($fpw);   Keep = @('db:5432') },
+        @{ T = "Authorization: Basic $fbasic";                                 Gone = @($fbasic); Keep = @('Authorization: Basic') },
+        @{ T = "Authorization: Basic abc";                                     Gone = @('abc');  Keep = @('Authorization: Basic') },
+        @{ T = "sent Basic $fbasic now";                                       Gone = @($fbasic); Keep = @('sent Basic', 'now') },
+        @{ T = "postgres://app:p4/ss$fpw@db:5432/app";                         Gone = @($fpw, 'p4/ss'); Keep = @('db:5432/app') },
+        @{ T = "postgres://app:p4@ss$fpw@db:5432/app";                         Gone = @($fpw, 'p4@ss'); Keep = @('db:5432/app') },
+        @{ T = "run --password $fpw failed";                                   Gone = @($fpw);   Keep = @('run --password', 'failed') },
+        @{ T = "run --api-key $fpw failed";                                    Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "mysql -h db -u root -p$fpw -e x";                              Gone = @($fpw);   Keep = @('mysql -h db -u root -p', '-e x') },
+        @{ T = "docker login -u a -p $fpw reg.example";                        Gone = @($fpw);   Keep = @('reg.example') },
+        @{ T = "curl -u admin:$fpw https://x.example";                         Gone = @($fpw);   Keep = @('https://x.example') },
+        @{ T = "password=ab;$fpw";                                             Gone = @($fpw);   Keep = @('password=') },
+        @{ T = "password=ab,$fpw";                                             Gone = @($fpw);   Keep = @('password=') },
+        @{ T = "key $faws end";                                                Gone = @($faws);  Keep = @('key', 'end') },
+        @{ T = "blob $fblob end";                                              Gone = @($fblob); Keep = @('blob', 'end') },
+        @{ T = "padded $fpad end";                                             Gone = @($fpad);  Keep = @('padded', 'end') },
+        @{ T = "post https://hooks.slack.com/services/T0123ABCD/B0456EFGH/$fslack failed"; Gone = @($fslack); Keep = @('hooks.slack.com/services/', 'failed') },
+        @{ T = "post https://discord.com/api/webhooks/123456789012345678/$fdisc failed";  Gone = @($fdisc);  Keep = @('failed') },
+        @{ T = "bad key $(& $pemHdr 'OPENSSH ') b3BlbnNzaC1r";                 Gone = @('b3BlbnNz'); Keep = @('bad key') },
+        @{ T = "bad key $(& $pemHdr 'EC ') MHcCAQEEIB";                        Gone = @('MHcCAQ');   Keep = @('bad key') },
+        @{ T = "bad key $(& $pemHdr 'ENCRYPTED ') MIIFHDBO";                   Gone = @('MIIFHD');   Keep = @('bad key') },
+        @{ T = "bad key $(& $pemHdr '') MIIEvQIBAD";                           Gone = @('MIIEvQ');   Keep = @('bad key') },
+        # attempt 3 (tester D1-D5, N6-N10)
+        @{ T = "password=/$fpw failed";                                        Gone = @($fpw);   Keep = @('password=', 'failed') },
+        @{ T = "token=~$fpw failed";                                           Gone = @($fpw);   Keep = @('token=', 'failed') },
+        @{ T = "password=./$fpw failed";                                       Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "DRIVER={ODBC Driver 18};SERVER=db;UID=sa;PWD=$fpw;";           Gone = @($fpw);   Keep = @('SERVER=db', 'UID=sa') },
+        @{ T = "connection string Uid=app;Pwd=$fq; rejected";                  Gone = @($fq);    Keep = @('Uid=app', 'rejected') },
+        @{ T = "ORA-12154: could not resolve scott/$fpw@db:1521/ORCL";         Gone = @($fpw);   Keep = @('ORA-12154', 'db:1521/ORCL') },
+        @{ T = "sqlplus app/$fpw@//db.internal:1521/XEPDB1 failed";            Gone = @($fpw);   Keep = @('sqlplus', 'db.internal:1521/XEPDB1 failed') },
+        @{ T = "connect app/$fpw@orcl";                                        Gone = @($fpw);   Keep = @('connect', 'orcl') },
+        @{ T = "login user=app pass=$fpw failed";                              Gone = @($fpw);   Keep = @('user=app', 'failed') },
+        @{ T = "env DB_PASS=$fpw not accepted";                                Gone = @($fpw);   Keep = @('not accepted') },
+        @{ T = "MYSQL_PASS=$fq";                                               Gone = @($fq);    Keep = @('MYSQL_PASS=') },
+        @{ T = "DBPASS=$fpw";                                                  Gone = @($fpw);   Keep = @('DBPASS=') },
+        @{ T = "curl --user=admin:$fpw http://x/ failed";                      Gone = @($fpw);   Keep = @('http://x/ failed') },
+        @{ T = "curl -uadmin:$fpw http://x/ failed";                           Gone = @($fpw);   Keep = @('http://x/ failed') },
+        @{ T = "curl -u admin:$fpw http://x/ failed";                          Gone = @($fpw);   Keep = @('http://x/ failed') },
+        @{ T = "docker config {`"auths`":{`"r.example`":{`"auth`":`"$fauth`"}}} rejected"; Gone = @($fauth); Keep = @('r.example', 'rejected') },
+        @{ T = "403 https://acct.blob.core.windows.net/c/b?sv=2022&sp=r&sig=$fsig";       Gone = @($fsig);  Keep = @('acct.blob.core.windows.net', 'sp=r') },
+        @{ T = "redis-cli -a $fpw ping: NOAUTH";                               Gone = @($fpw);   Keep = @('redis-cli -a', 'ping: NOAUTH') },
+        @{ T = "sshpass -p $fpw ssh host failed";                              Gone = @($fpw);   Keep = @('ssh host failed') },
+        @{ T = "<password>$fpw</password> invalid";                            Gone = @($fpw);   Keep = @('<password>', 'invalid') },
+        @{ T = "Cookie: session=$fpw$fpw";                                     Gone = @($fpw);   Keep = @('Cookie:') },
+        @{ T = "Set-Cookie: sid=$fpw$fpw; Path=/";                             Gone = @($fpw);   Keep = @('Set-Cookie:') },
+        # attempt 4 (tester D1b): a path-looking value is a secret unless the KEY is a credentials key
+        @{ T = "password:/$fpw rejected";                                      Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "password: ~$fpw rejected";                                     Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "password: `"/$fpw`" rejected";                                 Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "{`"password`":`"/$fpw`"} rejected";                            Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "{`"token`": `"~$fpw`"} rejected";                              Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "secret: ./$fpw rejected";                                      Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "passphrase=/etc/$fpw rejected";                                Gone = @($fpw);   Keep = @('rejected') },
+        # camelCase pass keys, a quoted Oracle string, a one-segment ODBC PWD, a long numeric curl password
+        @{ T = "dbPass=$fpw failed";                                           Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "PASS=$fpw failed";                                             Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "DbPass=$fq failed";                                            Gone = @($fq);    Keep = @('failed') },
+        @{ T = "sqlplus `"app/$fpw@orcl`" failed";                             Gone = @($fpw);   Keep = @('sqlplus', 'failed') },
+        @{ T = "UID=sa;PWD=/$fpw;";                                            Gone = @($fpw);   Keep = @('UID=sa') },
+        @{ T = "curl -u 1000:98765432 http://x/ failed";                       Gone = @('98765432'); Keep = @('http://x/ failed') },
+        @{ T = "curl -u 1000:1234567 http://x/ failed";                        Gone = @('1234567'); Keep = @('http://x/ failed') },
+        # attempt 5: NO path exemption - every path-looking value under a secret-named key is masked
+        @{ T = "credentials: $fpw.txt rejected";                               Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials=$fpw.x9 rejected";                                 Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials:`"$fpw.json`" rejected";                           Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "GOOGLE_APPLICATION_CREDENTIALS=/a/$fpw not found";             Gone = @($fpw);   Keep = @('not found') },
+        @{ T = "credentials=C:\$fpw rejected";                                 Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials: ~/$fpw rejected";                                 Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials: ./$fpw rejected";                                 Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials: ../$fpw rejected";                                Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials: /$fpw/ rejected";                                 Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials: //$fpw rejected";                                 Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials: /$fpw rejected";                                  Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "{`"credentials`":`"~/$fpw`"} rejected";                        Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "db_credentials: ~/$fpw rejected";                              Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "password_credentials: ./$fpw rejected";                        Gone = @($fpw);   Keep = @('rejected') },
+        @{ T = "credentials: /etc/app/credentials.json: no such file";         Gone = @('/etc/app/credentials.json'); Keep = @('credentials:', 'no such file') },
+        @{ T = "GOOGLE_APPLICATION_CREDENTIALS=/etc/app/sa.json not found";    Gone = @('/etc/app/sa.json'); Keep = @('not found') },
+        @{ T = "UID=sa;PWD=//$fpw;";                                           Gone = @($fpw);   Keep = @('UID=sa') },
+        @{ T = "UID=sa;PWD=/$fpw/;";                                           Gone = @($fpw);   Keep = @('UID=sa') },
+        @{ T = "UID=sa;PWD=C:\$fpw;";                                          Gone = @($fpw);   Keep = @('UID=sa') },
+        @{ T = "env PWD=/home/app/src OLDPWD=/home/app";                       Gone = @('/home/app/src'); Keep = @('env PWD=') },
+        @{ T = "Pass: $fpw failed";                                            Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "db.pass=$fpw failed";                                          Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "redis-pass=$fpw failed";                                       Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "db_pass: $fpw failed";                                         Gone = @($fpw);   Keep = @('failed') },
+        @{ T = "token: /var/run/secrets/kubernetes.io/serviceaccount/token: no such file"; Gone = @('/var/run/secrets/kubernetes.io'); Keep = @('no such file') },
+        @{ T = "private_key: /etc/ssl/private/app.key: no such file";          Gone = @('/etc/ssl/private/app.key'); Keep = @('no such file') },
+        @{ T = "secret: /run/secrets/db_password not found";                   Gone = @('/run/secrets/db_password'); Keep = @('not found') },
+        @{ T = "api_key: ./config/key.txt missing";                            Gone = @('./config/key.txt'); Keep = @('missing') },
+        @{ T = "curl -u 1000:1234567 http://x/";                               Gone = @('1234567'); Keep = @('http://x/') },
+        # attempt 6 D1: *_key names other than api/auth/access/private are keys (bare, quoted, JSON, short)
+        @{ T = "SECRET_KEY=$fpw failed";                                       Gone = @($fpw);   Keep = @('SECRET_KEY=', 'failed') },
+        @{ T = "SECRET_KEY=$fletters failed";                                  Gone = @($fletters); Keep = @('failed') },
+        @{ T = "secret_key=`"$fletters`" failed";                              Gone = @($fletters); Keep = @('failed') },
+        @{ T = "secret_key: `"$fletters`" failed";                             Gone = @($fletters); Keep = @('failed') },
+        @{ T = "secret_key: '$fq' failed";                                     Gone = @($fq);    Keep = @('failed') },
+        @{ T = "secretKey: $fq failed";                                        Gone = @($fq);    Keep = @('failed') },
+        @{ T = "secret_key: $fq failed";                                       Gone = @($fq);    Keep = @('failed') },
+        @{ T = "{`"secret_key`":`"$fq`"} failed";                              Gone = @($fq);    Keep = @('failed') },
+        @{ T = "SIGNING_KEY=$fq failed";                                       Gone = @($fq);    Keep = @('failed') },
+        @{ T = "ENCRYPTION_KEY=$fletters failed";                              Gone = @($fletters); Keep = @('failed') },
+        @{ T = "JWT_SECRET_KEY=$fq failed";                                    Gone = @($fq);    Keep = @('failed') },
+        @{ T = "MASTER_KEY: $fq failed";                                       Gone = @($fq);    Keep = @('failed') },
+        @{ T = "LICENSE_KEY=$fq failed";                                       Gone = @($fq);    Keep = @('failed') },
+        # attempt 6 D2: after ':' only one plain word of letters is kept; a digit, punctuation or symbol is masked at any length
+        @{ T = "password: $fsym rejected";                                     Gone = @($fsym);  Keep = @('rejected') },
+        @{ T = "secret: $ftrub rejected";                                      Gone = @($ftrub); Keep = @('rejected') },
+        @{ T = "api_key: $ftrub rejected";                                     Gone = @($ftrub); Keep = @('rejected') },
+        @{ T = "PWD: $fsym";                                                   Gone = @($fsym);  Keep = @('PWD:') },
+        @{ T = "password: a1b2c rejected";                                     Gone = @('a1b2c'); Keep = @('rejected') },
+        @{ T = "token: zx9! rejected";                                         Gone = @('zx9!'); Keep = @('rejected') },
+        @{ T = "Secret: 3 keys rotated, 0 failed";                             Gone = @('Secret: 3'); Keep = @('keys rotated') },
+        @{ T = "credentials: ./sa.json missing";                               Gone = @('./sa.json'); Keep = @('missing') },
+        @{ T = "token: `"expired`" please retry";                              Gone = @('expired'); Keep = @('please retry') },
+        # attempt 6 D4: a 40-hex git commit id is masked (legacy GitHub tokens are 40 hex too) - accepted over-scrub
+        @{ T = "commit $fhex40 checked out";                                   Gone = @($fhex40); Keep = @('commit', 'checked out') },
+        # attempt 7 (D-A / D-B): '&', a quote mark inside an unquoted value do not end it
+        @{ T = "password: Ab&9x!Qz rejected";                                  Gone = @('Ab&9x!Qz', '9x!Qz'); Keep = @('rejected') },
+        @{ T = "password: Ab'9xQz rejected";                                   Gone = @('9xQz');  Keep = @('rejected') },
+        @{ T = "password: x`"$fq rejected";                                    Gone = @($fq);     Keep = @('rejected') },
+        @{ T = "password=Ab&9x!Qz rejected";                                   Gone = @('9x!Qz'); Keep = @('rejected') },
+        @{ T = "password=Ab'9xQz rejected";                                    Gone = @('9xQz');  Keep = @('rejected') },
+        @{ T = "GET /x?password=abc123&user=bob&x=1";                          Gone = @('abc123'); Keep = @('&user=bob&x=1') },
+        # pins for the status-word rule and the key family
+        @{ T = "token: expired! please";                                       Gone = @('expired!'); Keep = @('please') },
+        @{ T = "token: abcdefghijklmnopq";                                     Gone = @('abcdefghijklmnopq'); Keep = @('token:') },
+        @{ T = "Signing-Key: $fq x";                                           Gone = @($fq);     Keep = @('x') },
+        @{ T = "Secret-Key=$fq x";                                             Gone = @($fq);     Keep = @('x') }
+    )
+    $bad34 = @()
+    foreach ($row in $rows) {
+        $o = Hide-CredentialShapes $row.T
+        foreach ($g in $row.Gone) { if ($o.Contains($g)) { $bad34 += "leaked '$g' in: $o" } }
+        foreach ($k in $row.Keep) { if (-not $o.Contains($k)) { $bad34 += "lost '$k' in: $o" } }
+    }
+    # --- PERMANENT REGRESSION TABLE. Every shape the attempt-1..4 testers' probe sets masked (credential rows) and every
+    # plain line those sets said must stay readable, ported verbatim from the probes (fakes assembled from parts; PEM headers
+    # via $pemHdr). A later rule change that reopens one fails HERE, by name. Rows the probes themselves mark nc= (declared not
+    # covered) or that $permSkip / $plainSkip name (documented in Layer 4) are skipped; a set that contributes no credential
+    # rows or no plain rows fails loudly (the attempt-4 port silently lost its plain half).
+    $permSkip = @('password: letters short', 'password is prose', 'yaml secret colon', 'api-key header', 'PEM multi-line body', 'AUTH cmd',
+                  # declared NOT covered (Layer 4): bare key= under 16 chars, dotted-host Oracle with no port, short hvs.,
+                  # and letters-only words after ':' (status words are kept on purpose)
+                  'D1 key=../x (bare key, weak)', 'D3 u/pw@host (no port)', 'D4 db_pass: letters', 'C hvs. short (24)')
+    $permA = & {
+# fakes assembled from parts
+$pw   = 's3' + 'cret-Pw9'
+$pwl  = 'hun' + 'terpass'                 # letters only, 10
+$pws  = 'p4' + '/ss' + 'Wd'               # contains a slash
+$gh   = 'gh' + 'p_' + ('A1b2C3d4E5' * 4)
+$sk   = 's' + 'k-proj-' + ('Zq9' * 10)
+$xox  = 'xo' + 'xb-' + '1234567890-' + ('abcDEF' * 3)
+$akia = 'AK' + 'IA' + 'ABCDEFGHIJKLMNOP'
+$awss = ('wJalrXUtnFEMI/K7MDENG/bPxRfiCY' + 'EXAMPLEKEY')   # 40, has slashes
+$tg   = '1234' + '56789:' + 'AAH' + ('x9Y' * 10) + 'ab'  # 35 after colon
+$jwt  = 'ey' + 'JhbGciOiJIUzI1NiJ9.' + 'ey' + 'JzdWIiOiIxMjM0In0.' + 'SflKxwRJSMeKKF2QT4fwpM'
+$b64  = 'q8' + '3vEjZx+Lk/0pW7nYt' + 'R2sUa+/mQ1cB9dHe4fG6' + '=='  # base64 with + / =
+$basic= 'dXNl' + 'cjpwYXNz'               # "user:pass", no digit, 12 chars
+$strp = 'sk' + '_live_' + ('4eC39HqLyjWDarjtT1zdp7dc' )
+$whk  = 'T00000000/B00000000/' + 'XXXXXXXX' + 'XXXXXXXXXXXXXXXX'
+$hex48= ('a1b2c3d4' * 6)
+$pemb = 'MIIEvQIBADAN' + 'BgkqhkiG9w0BAQEFAASC'
+$cases = @(
+  @{ n='libpq kv';           t="connection failed: host=db port=5432 user=app password=$pw dbname=app"; s=@($pw) }
+  @{ n='libpq kv quoted';    t="host=db user=app password='$pw' sslmode=disable: connection refused"; s=@($pw) }
+  @{ n='redis url';          t="Error: connect ECONNREFUSED redis://:$pw@redis:6379/0"; s=@($pw) }
+  @{ n='amqp url';           t="amqp://guest:$pw@rabbit:5672/ connection refused"; s=@($pw) }
+  @{ n='mongodb+srv';        t="MongoServerError: bad auth mongodb+srv://u:$pw@c0.cluster.example.com/db"; s=@($pw) }
+  @{ n='jdbc';               t="jdbc:postgresql://app:$pw@db:5432/app failed"; s=@($pw) }
+  @{ n='url pw with slash';  t="dial: postgres://app:$pws@db:5432/app failed"; s=@($pws,'ss' + 'Wd@db') }
+  @{ n='url no path, then prose @'; t="failed postgres://app:$pw@db:5432 retry"; s=@($pw) }
+  @{ n='go mysql DSN no scheme'; t="Error 1045: Access denied using DSN app:$pw@tcp(db:3306)/app"; s=@($pw) }
+  @{ n='userinfo no scheme';  t="cannot connect to app:$pw@db.internal:5432"; s=@($pw) }
+  @{ n='Authorization Basic short'; t="401 Unauthorized: Authorization: Basic $basic"; s=@($basic) }
+  @{ n='Bearer short letters'; t="401 invalid Authorization: Bearer abcdefghijklmnop"; s=@('abcdefghijklmnop') }
+  @{ n='Bearer jwt';         t="rejected Bearer $jwt (expired)"; s=@($jwt) }
+  @{ n='--password=';        t="mysqld: [ERROR] invalid option --password=$pw"; s=@($pw) }
+  @{ n='--password space';   t="error: unknown flag --password $pw"; s=@($pw) }
+  @{ n='-p<pw> mysql';       t="mysql -uroot -p$pw failed: Access denied"; s=@($pw) }
+  @{ n='PGPASSWORD env';     t="env PGPASSWORD=$pwl psql failed"; s=@($pwl) }
+  @{ n='password: letters short'; t="error: config password: $pwl rejected"; s=@($pwl) }
+  @{ n='password is prose';  t="the password is $pwl"; s=@($pwl) }
+  @{ n='json api_key';       t='{"level":"error","api_key":"' + $pwl + '","msg":"denied"}'; s=@($pwl) }
+  @{ n='json password spaced'; t='{"password" : "' + $pw + '"}'; s=@($pw) }
+  @{ n='json token unquoted num'; t='{"token": 12345678901234567890}'; s=@('12345678901234567890') }
+  @{ n='yaml secret colon';  t="secret_key: $pwl"; s=@($pwl) }
+  @{ n='api-key header';     t="X-Api-Key: $pwl rejected"; s=@($pwl) }
+  @{ n='x-auth-token';       t="X-Auth-Token=$pwl invalid"; s=@($pwl) }
+  @{ n='kv value with semicolon'; t="password=ab;$pwl failed"; s=@($pwl) }
+  @{ n='kv value with comma'; t="password=ab,$pwl failed"; s=@($pwl) }
+  @{ n='kv quoted w/ space'; t="password = `"$pw x`" failed"; s=@($pw) }
+  @{ n='github pat';         t="git fetch failed with $gh."; s=@($gh) }
+  @{ n='openai sk-proj';     t="(`"$sk`") Incorrect API key"; s=@($sk) }
+  @{ n='slack xoxb';         t="slack: invalid_auth $xox"; s=@($xox) }
+  @{ n='AKIA';               t="InvalidAccessKeyId: $akia"; s=@($akia) }
+  @{ n='aws secret bare';    t="SignatureDoesNotMatch for $awss"; s=@($awss,'EXAMPLEKEY') }
+  @{ n='aws_secret_access_key'; t="aws_secret_access_key=$awss"; s=@($awss,'EXAMPLEKEY') }
+  @{ n='telegram in url';    t="POST https://api.telegram.org/bot$tg/sendMessage 401"; s=@($tg) }
+  @{ n='telegram bare';      t="bad token $tg."; s=@($tg) }
+  @{ n='jwt bare';           t="jwt malformed: $jwt"; s=@($jwt) }
+  @{ n='base64 blob bare';   t="decrypt failed for $b64"; s=@($b64, 'R2sUa') }
+  @{ n='stripe sk_live';     t="StripeAuthenticationError $strp"; s=@($strp) }
+  @{ n='slack webhook url';  t="POST https://hooks.slack.com/services/$whk 404"; s=@('XXXXXXXXXXXXXXXXXXXXXXXX') }
+  @{ n='hex48 bare';         t="key mismatch $hex48"; s=@($hex48) }
+  @{ n='PEM header inline';  t="load: $(& $pemHdr 'RSA ') $pemb"; s=@($pemb) }
+  @{ n='PEM multi-line body';t="load:`n$(& $pemHdr '')`n$pemb" + "+/abc`n-----END PRIVATE KEY-----"; s=@($pemb) }
+  @{ n='secret after `( `';  t="(token=$pw)"; s=@($pw) }
+  @{ n='kv secret= then [';  t="token=[$pwl]"; s=@($pwl) }
+  @{ n='tskey';              t="tailscale: invalid key " + 'ts' + 'key-auth-' + 'kAbc123CNTRL-' + ('Q' * 20); s=@('kAbc123CNTRL') }
+)
+$plain = @(
+  'FATAL: password authentication failed for user "app"',
+  'invalid key: expected 32 bytes',
+  'open /run/secrets/db_password: no such file or directory',
+  'credentials: /etc/app/credentials.json: no such file or directory',
+  'error loading model /models/Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL-00001-of-00002.gguf',
+  'failed to load model Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL-00001-of-00002',
+  'container ai-stack-openbrain-chunk-worker-1 exited with code 137',
+  'Error response from daemon: No such container: 3f9a1c2b7d4e',
+  'Secret: 3 keys rotated, 0 failed',
+  'token: expired',
+  'max_tokens=100 exceeded',
+  'ERROR: relation "auth_tokens" does not exist at character 15',
+  'secret_ref=vault/kv/data/app not found',
+  'authentication failed: key=id duplicate',
+  'tokenizer.json: 32000 tokens loaded; error at line 3',
+  'listen tcp 0.0.0.0:8080: bind: address already in use',
+  'http://user@example.com/x unreachable',
+  'Traceback: File "/app/src/openbrain_gateway/server_handlers_v2_extended.py", line 99'
+)
+
+        @{ C = @($cases); P = @($plain) }
+    }
+    $permB = & {
+# all fakes assembled from parts
+$pw   = 'Zq' + '7wLx' + 'Pm2'          # mixed, 9 chars
+$pwl  = 'hun' + 'ter' + 'pass'         # letters only
+$hex  = ('9f8e' + '7d6c') * 4          # 32 hex
+$ghp  = 'gh' + 'p_' + ('Kq3Lm9Zx2W' * 4)
+$glp  = 'gl' + 'pat-' + ('aB3dE6gH9jK2mN5pQ8sT' )
+$tg35 = '12345' + '6789:' + 'AA' + ('Hb3Xk' * 6) + 'Qw9'    # 2+30+3 = 35
+$acct = ('Eby8vdM02xNOcqFl' + 'qUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsu' + 'Fq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==')  # 88-char Azure-like
+$sig  = 'r6' + 'Mk%2Fq8' + 'Zp%2BtW3' + 'vLx%3D'
+$npm  = 'np' + 'm_' + ('Ab1Cd2Ef3G' * 4)
+$npmx = ('a1b2c3d4' + '-e5f6-' + '7a8b-9c0d-' + 'e1f2a3b4c5d6')  # uuid-style legacy npm token
+$b64u = 'dXNl' + 'cjpw' + 'YXNz' + 'd29yZA=='   # 20 chars padded, "user:password"
+$enc  = 'p%40' + 'ss%2F' + 'w0rd'
+$sha  = ('3f9a1c2b7d4e5f60' * 4)               # 64 hex
+$long = 'Zx9' + ('qW3eR5tY7u' * 4)            # 43 mixed
+
+$cases = @(
+  @{ n='sqlserver Password=';      t="Login failed: Server=tcp:db,1433;Database=app;User Id=sa;Password=$pw;Encrypt=True"; s=@($pw) }
+  @{ n='sqlserver Password= space value'; t="Server=db;User ID=sa;Password=$pwl;TrustServerCertificate=true"; s=@($pwl) }
+  @{ n='ODBC PWD=';                t="[ODBC Driver 18] Login failed: DRIVER={ODBC Driver 18};SERVER=db;UID=sa;PWD=$pw;"; s=@($pw) }
+  @{ n='ODBC Pwd= letters';        t="connection string Uid=app;Pwd=$pwl; rejected"; s=@($pwl) }
+  @{ n='oracle user/pass@host';    t="ORA-12154: could not resolve scott/$pw@db:1521/ORCL"; s=@($pw) }
+  @{ n='oracle sqlplus';           t="sqlplus app/$pwl@//db.internal:1521/XEPDB1 failed"; s=@($pwl) }
+  @{ n='oracle easy connect';      t="connect app/$pw@orcl"; s=@($pw) }
+  @{ n='curl -u';                  t="curl -u admin:$pwl http://x/ failed 401"; s=@($pwl) }
+  @{ n='curl -u quoted';           t="curl -s -u 'admin:$pw' http://x/"; s=@($pw) }
+  @{ n='curl -uUSER:PW no space';  t="curl -uadmin:$pw http://x/"; s=@($pw) }
+  @{ n='curl --user=';             t="curl --user=admin:$pw http://x/"; s=@($pw) }
+  @{ n='git url token user';       t="fatal: Authentication failed for 'https://$ghp@github.com/o/r.git/'"; s=@($ghp) }
+  @{ n='git url hex token user';   t="fatal: unable to access 'https://$hex@git.example.com/o/r.git/': 403"; s=@($hex) }
+  @{ n='git url oauth2:glpat';     t="remote: HTTP Basic: Access denied https://oauth2:$glp@gitlab.com/o/r.git"; s=@($glp) }
+  @{ n='docker registry url user'; t="Error response from daemon: Get `"https://$pwl@registry.example.com/v2/`": unauthorized"; s=@($pwl) }
+  @{ n='docker config auth json';  t='{"auths":{"registry.example.com":{"auth":"' + $b64u + '"}}} rejected'; s=@($b64u) }
+  @{ n='Azure AccountKey';         t="DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=$acct;EndpointSuffix=core.windows.net"; s=@($acct.Substring(10,20)) }
+  @{ n='Azure SharedAccessKey';    t="Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=Root;SharedAccessKey=$pw$pw"; s=@($pw) }
+  @{ n='Azure SAS sig=';           t="403 AuthenticationFailed https://acct.blob.core.windows.net/c/b?sv=2022-11-02&se=2026&sp=r&sig=$sig"; s=@($sig, 'Zp%2BtW3') }
+  @{ n='npm _authToken';           t="npm ERR! //registry.npmjs.org/:_authToken=$npmx"; s=@($npmx) }
+  @{ n='npm npm_ token';           t="npm ERR! 401 token $npm"; s=@($npm) }
+  @{ n='DB_PASS env';              t="env DB_PASS=$pw not accepted"; s=@($pw) }
+  @{ n='MYSQL_PASS env';           t="MYSQL_PASS=$pwl"; s=@($pwl) }
+  @{ n='pass= bare';               t="login user=app pass=$pw failed"; s=@($pw) }
+  @{ n='password double-quoted';   t="password=`"$pw`" rejected"; s=@($pw) }
+  @{ n='password in brackets';     t="password=[$pw] rejected"; s=@($pw) }
+  @{ n='password in parens';       t="password=($pw) rejected"; s=@($pw) }
+  @{ n='password in braces';       t="password={$pw} rejected"; s=@($pw) }
+  @{ n='password <angle>';         t="password=<$pw> rejected"; s=@($pw) }
+  @{ n='xml password tag';         t="<password>$pw</password> invalid"; s=@($pw) }
+  @{ n='yaml password quoted';     t="password: '$pwl'"; s=@($pwl) }
+  @{ n='password starts with /';   t="password=/$pw$pw failed"; s=@($pw) }
+  @{ n='token starts with ~';      t="token=~$pw failed"; s=@($pw) }
+  @{ n='url-encoded pw in url';    t="postgres://app:$enc@db:5432/app refused"; s=@($enc, 'w0rd') }
+  @{ n='url-encoded pw kv';        t="password=$enc failed"; s=@($enc, 'w0rd') }
+  @{ n='access_token query';       t="GET /api?access_token=$pw$pw&x=1 401"; s=@($pw) }
+  @{ n='telegram 35 bare';         t="bad token $tg35."; s=@($tg35.Substring(12)) }
+  @{ n='telegram 35 url';          t="POST https://api.telegram.org/bot$tg35/getMe 401"; s=@($tg35.Substring(12)) }
+  @{ n='redis-cli -a';             t="redis-cli -a $pw ping: NOAUTH"; s=@($pw) }
+  @{ n='AUTH cmd';                 t="ERR AUTH $pw failed: WRONGPASS"; s=@($pw) }
+  @{ n='sshpass -p';               t="sshpass -p $pw ssh host failed"; s=@($pw) }
+  @{ n='Cookie session';           t="Cookie: session=$pw$pw$pw rejected"; s=@($pw) }
+  @{ n='X-Vault-Token';            t="X-Vault-Token: hvs.$long denied"; s=@($long) }
+  @{ n='-e MYSQL_ROOT_PASSWORD';   t="docker run -e MYSQL_ROOT_PASSWORD=$pwl mysql failed"; s=@($pwl) }
+  @{ n='Basic in WWW-Authenticate'; t="authorization=Basic $b64u"; s=@($b64u) }
+)
+$plain = @(
+  'pull access denied for myapp:1.2.3, repository does not exist',
+  "Error response from daemon: manifest for ghcr.io/org/app@sha256:$sha not found",
+  "nginx:1.25@sha256:$sha digest mismatch",
+  "No such container: $sha",
+  'ORA-01017: invalid username/password; logon denied',
+  'Login failed for user ''sa''. Reason: Password did not match',
+  'container openbrain-gateway exited with code 137 (OOMKilled)',
+  'image ghcr.io/open-webui/open-webui:v0.11.0 not found',
+  'qwen36-27b failed to load: /models/Qwen3.6-35B-A3B-Q4_K_M.gguf',
+  'open C:\Data\Docker\wsl\data\ext4.vhdx: access denied',
+  'listen tcp 127.0.0.1:5432: bind: address already in use',
+  'pid=12345 exit status 1',
+  'ssh: git@github.com: Permission denied (publickey)',
+  'error at 2026-10-05T10:30:00Z: timeout after 30s',
+  'max_retries=5 exceeded, retry_after: 60',
+  'HTTP 401: token expired, re-authenticate',
+  'tokens=4096 > n_ctx=2048',
+  'error: key not found: OPENAI_API_KEY',
+  'invalid api_key format',
+  'connection to db:5432 refused (user=app, database=app)'
+)
+
+        @{ C = @($cases); P = @($plain) }
+    }
+    $permC = & {
+# fakes assembled from parts
+$pw  = 'Vk' + '8rTq' + 'Nw3'        # mixed 9
+$pwl = 'mel' + 'onfarm'             # letters only 9
+$hvs = 'hv' + 's.' + ('CAESIq' + 'Zx9Lm2Wp4') * 3
+$hvsShort = 'hv' + 's.' + 'Ab3Cd5Ef7Gh9'
+$cases = @(
+  # D1
+  @{ n='D1 password=/pw';           t="fatal: password=/$pw invalid"; s=$pw }
+  @{ n='D1 token=~pw';              t="fatal: token=~$pw invalid"; s=$pw }
+  @{ n='D1 secret=./x';             t="secret=./$pw rejected"; s=$pw }
+  @{ n='D1 key=../x (bare key, weak)'; t="key=../$pw rejected"; s=$pw }
+  @{ n='D1 api_key=../x';           t="api_key=../$pw rejected"; s=$pw }
+  @{ n='D1 password:/x (colon path)'; t="password:/$pw rejected"; s=$pw }
+  @{ n='D1 password: ~x';           t="password: ~$pw rejected"; s=$pw }
+  @{ n='D1 password="/pw"';         t="password=`"/$pw`" rejected"; s=$pw }
+  @{ n='D1 password: "/pw"';        t="password: `"/$pw`" rejected"; s=$pw }
+  @{ n='D1 JSON "password":"/pw"';  t="{`"password`":`"/$pw`"} rejected"; s=$pw }
+  @{ n='D1 JSON "token":"~pw"';     t="{`"token`": `"~$pw`"} rejected"; s=$pw }
+  @{ n='D1 password=C:\pw';         t="password=C:\$pw rejected"; s=$pw }
+  # D2 ODBC
+  @{ n='D2 PWD=';                   t="DRIVER={ODBC Driver 18};SERVER=db;UID=sa;PWD=$pw;"; s=$pw }
+  @{ n='D2 pwd= lower';             t="uid=sa;pwd=$pw;database=x"; s=$pw }
+  @{ n='D2 Pwd = spaces';           t="Uid=sa; Pwd = $pw; Database=x"; s=$pw }
+  @{ n='D2 PWD={braced}';           t="UID=sa;PWD={$pw};"; s=$pw }
+  @{ n='D2 PWD=/pw (slash pw)';     t="UID=sa;PWD=/$pw;"; s=$pw }
+  @{ n='D2 PWD=/a/pw';              t="UID=sa;PWD=/x/$pw;"; s=$pw }
+  @{ n='D2 PWD=letters';            t="UID=sa;PWD=$pwl;"; s=$pwl }
+  # D3 Oracle
+  @{ n='D3 u/pw@host:port/SVC';     t="ORA-12154: scott/$pw@db.internal:1521/ORCL"; s=$pw }
+  @{ n='D3 u/pw@//host';            t="sqlplus app/$pw@//db.internal/XEPDB1 failed"; s=$pw }
+  @{ n='D3 u/pw@//host:port';       t="sqlplus app/$pwl@//db:1521/XE"; s=$pwl }
+  @{ n='D3 u/pw@alias';             t="connect app/$pw@orclpdb failed"; s=$pw }
+  @{ n='D3 u/pw@host (no port)';    t="connect app/$pw@db.internal failed"; s=$pw }
+  @{ n='D3 "u/pw@alias" quoted';    t="sqlplus `"app/$pw@orcl`""; s=$pw }
+  @{ n='D3 u/pw@alias end';         t="exp system/$pw@XE"; s=$pw }
+  # D4
+  @{ n='D4 pass=';                  t="user=app pass=$pw failed"; s=$pw }
+  @{ n='D4 DB_PASS=';               t="DB_PASS=$pw rejected"; s=$pw }
+  @{ n='D4 db_pass: mixed';         t="db_pass: $pw"; s=$pw }
+  @{ n='D4 db_pass: letters';       t="db_pass: $pwl"; s=$pwl }
+  @{ n='D4 DBPASS=';                t="DBPASS=$pw"; s=$pw }
+  @{ n='D4 Pass=';                  t="Pass=$pw"; s=$pw }
+  @{ n='D4 db.pass=';               t="db.pass=$pw"; s=$pw }
+  @{ n='D4 redis-pass=';            t="redis-pass=$pw"; s=$pw }
+  @{ n='D4 DbPass= (camel)';        t="DbPass=$pw"; s=$pw }
+  @{ n='D4 dbPass= (camel)';        t="dbPass=$pw"; s=$pw }
+  @{ n='D4 PASSWD env';             t="MYSQL_PASSWD=$pw"; s=$pw }
+  # D5 curl
+  @{ n='D5 curl --user=u:pw';       t="curl --user=admin:$pw http://x/"; s=$pw }
+  @{ n='D5 curl --user u:pw';       t="curl --user admin:$pw http://x/"; s=$pw }
+  @{ n='D5 curl -uu:pw';            t="curl -uadmin:$pw http://x/"; s=$pw }
+  @{ n="D5 curl -u 'u:pw'";         t="curl -u 'admin:$pw' http://x/"; s=$pw }
+  @{ n='D5 curl -u "u:pw"';         t="curl -u `"admin:$pw`" http://x/"; s=$pw }
+  @{ n="D5 curl --user='u:pw'";     t="curl --user='admin:$pw' http://x/"; s=$pw }
+  @{ n='D5 curl -u u:digits';       t="curl -u admin:12345678 http://x/"; s='12345678' }
+  @{ n='D5 curl -u 0:digits';       t="curl -u 1000:98765432 http://x/"; s='98765432' }
+  @{ n='D5 curl -u u:-pw (dash)';   t="curl -u admin:-$pw http://x/"; s=$pw }
+  @{ n='D5 curl -u -pw-user';       t="curl -u admin:$pw@x http://x/"; s=$pw }
+  # cover-claim checks
+  @{ n='C hvs. realistic';          t="X-Vault-Token: $hvs denied"; s=$hvs.Substring(4,12) }
+  @{ n='C hvs. bare';               t="vault: token $hvs revoked"; s=$hvs.Substring(4,12) }
+  @{ n='C hvs. short (24)';         t="vault: token $hvsShort revoked"; s=$hvsShort.Substring(4) }
+  @{ n='C AIza';                    t="key AIza" + ('Sy' + 'B1c2D3e4F5g6H7i8J9k0L1m2N3o4P5q') + " invalid"; s='B1c2D3e4F5g6' }
+  @{ n='C redis url :pw@';          t="redis://:$pw@cache:6379/0 NOAUTH"; s=$pw }
+  @{ n='C libpq';                   t="host=db port=5432 user=app password=$pw dbname=app sslmode=disable"; s=$pw }
+  @{ n='C Basic header';            t="Authorization: Basic " + ('YWRt' + 'aW46' + 'c2Vj'); s='YWRtaW46c2Vj' }
+  @{ n='C --password=';             t="--password=$pw"; s=$pw }
+  @{ n='C JSON api_key';            t="{`"api_key`":`"$pw`"}"; s=$pw }
+  @{ n='C stripe';                  t="sk_" + "live_" + ('51Hx' * 6); s=('51Hx' * 6) }
+  @{ n='C passphrase:';             t="passphrase: '$pwl'"; s=$pwl }
+  @{ n='C docker login -p';         t="docker login -u bob -p $pw reg.io"; s=$pw }
+  @{ n='C cookie';                  t="Set-Cookie: sid=$pw$pw; HttpOnly"; s=$pw }
+  @{ n='C xml secret tag';          t="<secret>$pwl</secret>"; s=$pwl }
+  @{ n='C SAS sig';                 t="https://a.blob.core.windows.net/c?sv=1&sig=$pw$pw"; s=$pw }
+  @{ n='C dsn=';                    t="dsn=$pwl"; s=$pwl }
+  @{ n='C credential=';             t="credential=$pw"; s=$pw }
+  # not-covered claims (expected to leak; declared)
+  @{ n='NC prose';                  t="the password is $pwl"; s=$pwl; nc=1 }
+  @{ n='NC password: 123456';       t="password: 12345678"; s='12345678'; nc=1 }
+  @{ n='NC Bearer letters no header'; t="got Bearer " + ('abcd' + 'efghij'); s='abcdefghij'; nc=1 }
+  @{ n='NC redis AUTH';             t="ERR AUTH $pw failed"; s=$pw; nc=1 }
+  @{ n='NC secret_key: letters';    t="secret_key: $pwl"; s=$pwl; nc=1 }
+)
+$plain = @(
+  'credentials: /etc/app/credentials.json: no such file or directory',
+  'credentials: "/etc/app/credentials.json": no such file',
+  'GOOGLE_APPLICATION_CREDENTIALS: ./sa.json not found',
+  'pull access denied for myapp:1.2.3, repository does not exist',
+  'image ghcr.io/open-webui/open-webui:v0.11.0 not found',
+  'listen tcp 0.0.0.0:8080: bind: address already in use',
+  'dial tcp 192.0.2.5:5432: connect: connection refused',
+  'container exited with code 137 (OOMKilled)',
+  'exit status 1; exit code 255',
+  'ORA-01017: invalid username/password; logon denied',
+  'ORA-28000: the account is locked',
+  'ORA-12541: TNS:no listener at db:1521/ORCL',
+  "Login failed for user 'sa'. Reason: Password did not match that for the login provided. [CLIENT: 192.0.2.4]",
+  'SQL Server error 18456, state 8',
+  'qwen36-27b failed: model not found',
+  'loading /models/Qwen3.6-35B-A3B-Q4_K_M.gguf',
+  'gemma-3-27b-it-qat-q4_0 offloaded 63/63 layers',
+  'Qwen3-Coder-30B-A3B-Instruct-Q4_K_M ready',
+  'docker run -u 1000:1000 app failed',
+  'chown 1000:1000 /data: operation not permitted',
+  'bypass=true compass=north tests_passed=12',
+  'password=true not allowed',
+  'PWD=/app/src/server/handlers working dir',
+  'PWD=C:\work\app',
+  'icons/logo@2x.png not found',
+  'reg/app@sha256 tag',
+  'npm ERR! peer react@18.2.0 from react-dom@18.2.0',
+  'git@github.com: Permission denied (publickey)',
+  'src/components/RequestProcessor/Factory.ts:42 TypeError',
+  'internal/handlers/request_processor_factory_impl.go:128 panic',
+  'at com.example.service.handlers.RequestProcessorFactoryImpl.process(RequestProcessorFactoryImpl.java:88)',
+  'max_retries=5 retry_after: 60',
+  'Secret: 3 keys rotated, 0 failed',
+  'token: expired',
+  'invalid key: expected 32 bytes',
+  'FATAL: password authentication failed for user app',
+  'key=value pairs must be quoted',
+  'primary_key=id duplicate',
+  'curl: (7) Failed to connect to localhost port 8080',
+  'curl -u admin http://x/ prompts for a password',
+  'ssh -p 2222 user@host refused',
+  'mysql: [Warning] Using a password on the command line interface can be insecure.',
+  'Cookie jar not writable',
+  'redis-cli ping: Could not connect to Redis at 127.0.0.1:6379'
+)
+$leaks = 0; $ncLeaks = 0
+
+        @{ C = @($cases); P = @($plain) }
+    }
+    $permD = & {
+# fakes assembled from parts
+$pw  = 'Rq' + '5tKz' + 'Wb8'        # mixed 9
+$pwl = 'tur' + 'nipcart'            # letters only 10
+$pwL = 'Hx' + '4mQ9' + 'vT2s' + 'Lp7nW3'   # mixed 16
+$cases = @(
+  # --- exemption smuggling (key's last word credential(s) + path shape)
+  @{ n='X1 credentials: /<pw> (one segment)';        t="credentials: /$pw rejected"; s=$pw }
+  @{ n='X2 credentials: ~/<pw>';                      t="credentials: ~/$pw rejected"; s=$pw }
+  @{ n='X3 credentials: ./<pw>';                      t="credentials: ./$pw rejected"; s=$pw }
+  @{ n='X4 credentials: ../<pw>';                     t="credentials: ../$pw rejected"; s=$pw }
+  @{ n='X5 credentials: <pw>.txt';                    t="credentials: $pw.txt rejected"; s=$pw }
+  @{ n='X6 credentials=<pw>.x9 (dot inside secret)';  t="credentials=$pw.x9 rejected"; s=$pw }
+  @{ n='X7 GOOGLE_APPLICATION_CREDENTIALS=/a/<pw>';   t="GOOGLE_APPLICATION_CREDENTIALS=/a/$pw not found"; s=$pw }
+  @{ n='X8 JSON "credentials":"/<pw>"';               t="{`"credentials`":`"/$pw`"} rejected"; s=$pw }
+  @{ n='X9 JSON "credentials":"~/<pw>"';              t="{`"credentials`":`"~/$pw`"} rejected"; s=$pw }
+  @{ n='X10 credentials: /<pw>/ (trailing slash)';    t="credentials: /$pw/ rejected"; s=$pw }
+  @{ n='X11 credentials=C:\<pw>';                     t="credentials=C:\$pw rejected"; s=$pw }
+  @{ n='X12 credential: <pwL> (16, no path)';         t="credential: $pwL rejected"; s=$pwL }
+  @{ n='X13 credentials=/<pw> (=, one seg)';          t="credentials=/$pw rejected"; s=$pw }
+  @{ n='X14 db_credentials: ~/<pw>';                  t="db_credentials: ~/$pw rejected"; s=$pw }
+  @{ n='X15 password_credentials: ./<pw>';            t="password_credentials: ./$pw x"; s=$pw }
+  @{ n='X16 credentials: //<pw>';                     t="credentials: //$pw x"; s=$pw }
+  @{ n='X17 credentials:"<pw>.json"';                 t="credentials:`"$pw.json`" x"; s=$pw }
+  @{ n='X18 password: <pw>.txt (non-cred key, file)'; t="password: $pw.txt x"; s=$pw }
+  @{ n='X19 token: ~/<pw>';                           t="token: ~/$pw x"; s=$pw }
+  @{ n='X20 secret: /a/<pw>';                         t="secret: /a/$pw x"; s=$pw }
+  # --- ODBC PWD boundary
+  @{ n='O1 PWD=/<pw>';                                t="UID=sa;PWD=/$pw;"; s=$pw }
+  @{ n='O2 PWD=/<pw> end-of-line';                    t="UID=sa;PWD=/$pw"; s=$pw }
+  @{ n='O3 PWD=//<pw>';                               t="UID=sa;PWD=//$pw;"; s=$pw }
+  @{ n='O4 PWD=/<pw>/';                               t="UID=sa;PWD=/$pw/;"; s=$pw }
+  @{ n='O5 PWD=C:\<pw>';                              t="UID=sa;PWD=C:\$pw;"; s=$pw }
+  @{ n='O6 PWD="/<pw>"';                              t="UID=sa;PWD=`"/$pw`";"; s=$pw }
+  @{ n='O7 Pwd: /<pw>';                               t="Pwd: /$pw"; s=$pw }
+  @{ n='O8 PWD=/x/<pw> (declared)';                   t="UID=sa;PWD=/x/$pw;"; s=$pw; nc=$true }
+  # --- pass key forms
+  @{ n='K1 PASS=<pw>';                                t="PASS=$pw failed"; s=$pw }
+  @{ n='K2 db_pass: <pw>';                            t="db_pass: $pw"; s=$pw }
+  @{ n='K3 pass: <pw>';                               t="pass: $pw"; s=$pw }
+  @{ n='K4 Pass=<pw>';                                t="Pass=$pw"; s=$pw }
+  @{ n='K5 DBPASS: <pw>';                             t="DBPASS: $pw"; s=$pw }
+  @{ n='K6 dbPass: <pw>';                             t="dbPass: $pw"; s=$pw }
+  @{ n='K7 PASS="<pw>"';                              t="PASS=`"$pw`""; s=$pw }
+  @{ n='K8 DB_PASS: "<pw>"';                          t="DB_PASS: `"$pw`""; s=$pw }
+  @{ n='K9 PASS: <pw> (declared: upper PASS only with =)'; t="PASS: $pw"; s=$pw; nc=$true }
+  @{ n='K10 Pass: <pw> (title-case colon)';           t="Pass: $pw"; s=$pw }
+  # --- curl numeric bound
+  @{ n='C1 curl -u 1000:98765432';                    t="curl -u 1000:98765432 http://x/"; s='98765432' }
+  @{ n='C2 curl -u 1000:1234567 (7 digits)';          t="curl -u 1000:1234567 http://x/"; s='1234567' }
+  @{ n='C3 curl -u admin:123456';                     t="curl -u admin:123456 http://x/"; s='123456' }
+  @{ n='C4 curl --user=1000:12345678';                t="curl --user=1000:12345678 http://x/"; s='12345678' }
+  @{ n='C5 curl -u1000:12345678';                     t="curl -u1000:12345678 http://x/"; s='12345678' }
+  @{ n='C6 curl -u 1000:123456 (6 digits, declared)'; t="curl -u 1000:123456 http://x/"; s='123456'; nc=$true }
+)
+$leaks = 0; $ncl = 0
+$plain = @(
+  'credentials: /etc/app/credentials.json: no such file or directory',
+  'credentials: "/etc/app/credentials.json" not found',
+  'GOOGLE_APPLICATION_CREDENTIALS=/etc/app/sa.json not found',
+  'credentials: ./sa.json missing', 'credentials: ~/.config/app/c.json missing',
+  'credentials: C:\app\creds.json missing', 'credentials file: sa.json',
+  'PWD=/home/app/src', 'PWD=/app/src/x', 'PWD=C:\Data\work\app', 'OLDPWD=/home/app/src',
+  '--- PASS: TestX', '--- PASS: TestRequestProcessorFactory (0.01s)', 'PASS: test_x1', 'PASSED', 'pass rate 98%',
+  'PASS: TestHandlers2 (0.5s)', 'XPASS: test_x1', '=== RUN TestX9 --- PASS: TestX9 (0.00s)', 'PASS', 'ok  pkg/x 0.01s PASS',
+  '--- FAIL: TestLogin2 (0.02s)', 'FAIL: test_login2', 'tests: 12 PASS, 0 FAIL',
+  'curl -u 1000:1000 http://x/', 'docker run -u 1000:1000 app', 'chown 1000:1000 /data', 'docker run -u 0:0 app',
+  'reg/app@sha256:abc123 pulled', 'pkg/x@1.2 installed', 'react@18.2.0',
+  # paths under non-credentials secret keys (readable at attempts 2/3; how are they now?)
+  'token: /var/run/secrets/kubernetes.io/serviceaccount/token: no such file or directory',
+  'private_key: /etc/ssl/private/app.key: no such file',
+  'secret: /run/secrets/db_password not found',
+  'password_file: /run/secrets/pw',
+  'api_key: ./config/key.txt missing'
+)
+
+        @{ C = @($cases); P = @($plain) }
+    }
+    # By design masked or altered (documented in Layer 4): sha256 digests / 64-hex ids / 40-hex commit ids, 50-char model names, a user-only
+    # URL, a path or a number under a secret-named key (masked now), PWD= working-directory lines, the probes' declared over-scrubs.
+    $plainSkip = @('sha256:3f9a1c2b7d4e5f60', 'No such container: 3f9a1c2b7d4e5f603f9a', 'Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL-00001-of-00002', 'http://user@example.com',
+                   'credentials: /etc/app/credentials.json', 'credentials: "/etc/app/credentials.json"', 'reg/app@sha256 tag',
+                   'PWD=/app/src/server/handlers', 'PWD=C:\work\app', 'PWD=/home/app/src', 'PWD=/app/src/x', 'PWD=C:\Data\work\app', 'OLDPWD=',
+                   'GOOGLE_APPLICATION_CREDENTIALS', 'Secret: 3 keys rotated', 'credentials: ./sa.json', 'credentials: ~/.config', 'credentials: C:\app',
+                   'token: /var/run/secrets', 'private_key: /etc/ssl', 'secret: /run/secrets/db_password', 'api_key: ./config')
+    $permN = 0; $permBy = @()
+    foreach ($nm in 'permA', 'permB', 'permC', 'permD') {
+        $set = Get-Variable $nm -ValueOnly
+        $nc = 0; $np = 0
+        if (@($set.C).Count -lt 1 -or @($set.P).Count -lt 1) { $bad34 += "permanent set $nm is empty: $(@($set.C).Count) credential rows, $(@($set.P).Count) plain rows" }
+        foreach ($c in $set.C) {
+            if (($permSkip -contains $c.n) -or $c.nc) { continue }
+            $nc++
+            $o = Hide-CredentialShapes $c.t
+            foreach ($g in $c.s) { if ($o.Contains($g)) { $bad34 += "perm $nm [$($c.n)] leaked a fake in: $o" } }
+        }
+        foreach ($pl in $set.P) {
+            if ($plainSkip | Where-Object { $pl.Contains($_) }) { continue }
+            $np++
+            $o = Hide-CredentialShapes $pl
+            if ($o -cne $pl) { $bad34 += "perm $nm plain text changed: '$pl' -> '$o'" }
+        }
+        if ($nc -lt 1 -or $np -lt 1) { $bad34 += "permanent set $nm contributed $nc credential rows and $np plain rows after skips (each must be at least 1)" }
+        $permN += $nc + $np; $permBy += "$nm $nc+$np"
+    }
+    # Meaning survives: ordinary error text comes back byte for byte.
+    $plain = @('invalid key', 'invalid key: expected 32 bytes', 'FATAL: password authentication failed for user app',
+               'token: expired', 'max_tokens=100 exceeded', 'PRIMARY_KEY=id duplicate', 'basic configuration validation failed',
+               'tailscale: node key has expired', 'exit status 1',
+               # attempt-2 over-scrub guards: the useful part of the error stays
+               'open /run/secrets/db_password: no such file', 'basic configuration validation failed', 'Basic Authentication failed',
+               'dial tcp 10.0.0.1:5432: connect: connection refused',
+               # today's model names (inference/): all well under the 40-character threshold
+               'model Qwen3.6-35B-A3B-Q4_K_M.gguf failed to load', 'model Qwen3.6-27B-Q4_K_M.gguf and Qwen3.8-27B-Q4_K_M.gguf',
+               'embed bge-m3-f16.gguf ready', 'routing local-large:nothink to qwen36-27b',
+               # go test / pytest output is not a password
+               '--- PASS: TestRequestProcessorFactory (0.01s)', 'PASS: test_x1', 'PASS: TestHandlers2 (0.5s)',
+               # one-segment ODBC PWD is a password (credential row), a directory is not; docker/chown ids; refs
+               'chown 1000:1000 /data', 'curl -u 1000:1000 http://x/', 'curl -u 1000:123456 http://x/', 'docker run -u 0:0 app', 'curl -u 1234567:12 http://x/',
+               # status words after ':' are kept (one plain word of letters); a file-naming key is not a secret-named key
+               'token: Expired', 'token: expired.', 'token: Required, retry', 'token: expired', 'password: required', 'secret: missing', 'api_key: invalid', 'passphrase: none', 'token: expired, re-authenticate',
+               'password_file: /run/secrets/pw', 'credentials file: sa.json',
+               'reg/app@sha256:abc123 pulled', 'pkg/x@1.2 installed', 'react@18.2.0',
+               'password=false', 'token=null', 'secret=none', 'pass=nil', 'password=NONE',
+               # attempt 3: the over-scrub rows - image tags, ports, exit codes, error texts, paths, flags
+               'bypass=true', 'compass=north', 'tests_passed=12', 'pass=true', 'password=true',
+               'icons/logo@2x.png missing', 'docker run -u 1000:1000 img', 'ORA-01017: invalid username/password; logon denied',
+               'pull access denied for myapp:1.2.3, repository does not exist', 'container x exited with code 137 (OOMKilled)',
+               'image ghcr.io/open-webui/open-webui:v0.11.0 not found', 'listen tcp 127.0.0.1:5432: bind: address already in use')
+    foreach ($pl in $plain) { $o = Hide-CredentialShapes $pl; if ($o -cne $pl) { $bad34 += "changed plain text '$pl' -> '$o'" } }
+    $o = Hide-CredentialShapes "token: $fq"; if ($o.Contains($fq)) { $bad34 += "token: value leaked: $o" }
+    # Hostile input stays fast and bounded.
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    # Fails CLOSED: when the scrub throws, the text is withheld, never sent raw.
+    $WatchdogFailScrub = $true
+    $closed = Hide-CredentialShapes "token=$fq"
+    $WatchdogFailScrub = $false
+    if ($closed.Contains($fq) -or $closed -notmatch 'withheld') { $bad34 += "scrub failure did not fail closed: '$closed'" }
+    $big = Hide-CredentialShapes (('http://' + ('x' * 100000)) + (' a:=' * 20000))
+    $sw.Stop()
+    if ($big.Length -gt 4100) { $bad34 += "output not bounded: $($big.Length)" }
+    if ($sw.Elapsed.TotalSeconds -gt 5) { $bad34 += "slow on hostile input: $([math]::Round($sw.Elapsed.TotalSeconds,1))s" }
+    Write-Case 'P34' 'Hide-CredentialShapes masks URL/DSN userinfo, Bearer, key=value, vendor tokens, JWT, PEM and keeps ordinary error text' `
+        ($bad34.Count -eq 0) ("$($rows.Count) credential rows, $($plain.Count) plain rows, $permN permanent-table rows ($($permBy -join '; ')), hostile input in $([math]::Round($sw.Elapsed.TotalSeconds,2))s" +
+                              $(if ($bad34) { "`n" + ($bad34 -join "`n") } else { '' }))
+
+    }
+
+    # P35 (ef-watchdog): END TO END. A crash-looping container whose last log
+    # line carries a DSN and a token: the page that reaches BOTH transports (and
+    # the local log) is scrubbed and still names the container and the error.
+    $leak = "fatal: cannot connect to postgres://app:$fpw@db.internal:5432/app (token=$fgh)"
+    # A token that STRADDLES the 280-character cut: scrubbed before the cut it is
+    # masked whole; cut first, only an unrecognisable stub of it would be left.
+    $leakCut = 'error: ' + ('w ' * 131) + $fgh + ' end'
+    & {
+        function Invoke-BoundedDocker { param([string[]]$DockerArgs, [int]$TimeoutSeconds = 0)
+            $script:BoundedFailureReason = ''; $script:BoundedFailureLines = @()
+            return , @("starting up", $(if ($DockerArgs[-1] -eq 'p35-cut') { $leakCut } else { $leak })) }
+        Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p35-leaky' 'p35' 0 'running' (& $iso 1) ''),
+                                          (& $fact 'cfwd-healthy' 'p35-cut' 'p35c' 0 'running' (& $iso 1) '') | Out-Null
+        Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p35-leaky' 'p35' 10 'running' (& $iso 1) ''),
+                                          (& $fact 'cfwd-healthy' 'p35-cut' 'p35c' 10 'running' (& $iso 1) '') | Out-Null
+    }
+    $t35 = Get-Transport $sbx
+    $page35 = @(@($t35.Telegram) + @($t35.Mattermost) | Where-Object { $_ -match "container 'p35-leaky' is CRASH-LOOPING" })
+    $logTxt35 = Get-Content (Join-Path $sbx 'logs\tailscale-health.log') -Raw
+    $leaked35 = @(@($page35) + @($logTxt35) | Where-Object { $_ -match [regex]::Escape($fpw) -or $_ -match [regex]::Escape($fgh) }).Count
+    $pageCut = @(@($t35.Telegram) + @($t35.Mattermost) | Where-Object { $_ -match "container 'p35-cut' is CRASH-LOOPING" })
+    $cutOk = ($pageCut.Count -eq 2) -and (@($pageCut | Where-Object { $_ -match 'ghp_|A1b2C3' -or $_ -notmatch '\[redacted\]' }).Count -eq 0)
+    $named35 = @($page35 | Where-Object { $_ -match 'cannot connect to postgres://' -and $_ -match 'db\.internal:5432/app' }).Count
+    # The choke point: Send-LoopAlert scrubs whatever message it is handed.
+    $null = Send-LoopAlert -Key 'p35-direct' -Message "x postgres://u:$fpw@h/db and Bearer $fbear"
+    $t35b = Get-Transport $sbx
+    $direct35 = @(@($t35b.Telegram) + @($t35b.Mattermost) | Where-Object { $_ -match 'x postgres://' })
+    # Second send of the same key lands in the cooldown branch, which LOGS the message.
+    $null = Send-LoopAlert -Key 'p35-direct' -Message "x postgres://u:$fpw@h/db again"
+    $logCool35 = Get-Content (Join-Path $sbx 'logs\tailscale-health.log') -Raw
+    $logLeak35 = ($logCool35 -match [regex]::Escape($fpw)) -or ($logCool35 -match [regex]::Escape($fbear))
+    $logSeen35 = $logCool35 -match 'still firing; not re-paged inside'
+    $leakedD35 = @($direct35 | Where-Object { $_ -match [regex]::Escape($fpw) -or $_ -match [regex]::Escape($fbear) }).Count
+    Write-Case 'P35' 'a fault line carrying a DSN and a token goes to Telegram, Mattermost and the log scrubbed, still naming the error' `
+        (($page35.Count -eq 2) -and $cutOk -and ($leaked35 -eq 0) -and ($named35 -eq 2) -and ($direct35.Count -eq 2) -and ($leakedD35 -eq 0) -and $logSeen35 -and (-not $logLeak35)) `
+        "page on $($page35.Count) transport(s) (expected 2); messages/log still holding a fake: $leaked35; error text kept on $named35 of 2; token straddling the 280 cut masked on $($pageCut.Count) transport(s): $cutOk; Send-LoopAlert direct: $($direct35.Count) sent, $leakedD35 leaking; cooldown WARN line logged: $logSeen35, leaking the fake: $logLeak35"
 
     # P29 (attempt-4 F9): the premature all-clear, measured. 42 continuous slow
     # loops on a simulated clock (fixed 20/70 and 40/70; exponential gaps with
@@ -880,6 +1647,29 @@ public static class CfwdHang__SFX__ { public static int Main(string[] a) {
     Write-Case 'P19' 'a job the child could not be assigned to is closed (not leaked) and the fallback is logged' `
         (($ok19 -eq 40) -and (($h1 - $h0) -lt 20) -and ($logged19 -ge 40)) `
         "40 calls with assignment failing: $ok19 answered; process handle count $h0 -> $h1 (a leak adds one per call); fallback logged $logged19 time(s)"
+
+
+    # P30 (ef-watchdog): CreateJobObject returning 0 (test seam). The failure is
+    # remembered for the run (the job type is not retried per call) and logged
+    # ONCE as a WARN; every call still answers through the taskkill fallback.
+    # The two mutants: forget the failure (every call logs and retries), and
+    # drop the WARN.
+    $logPath30 = Join-Path $sbx 'logs\tailscale-health.log'
+    $w30a = if (Test-Path $logPath30) { @(Select-String -Path $logPath30 -Pattern 'CreateJobObject failed').Count } else { 0 }
+    $script:WatchdogJobUnavailable = $false
+    $WatchdogFailJobCreate = $true
+    $ok30 = 0
+    for ($i = 0; $i -lt 4; $i++) {
+        $r30 = Invoke-BoundedDocker -DockerArgs @('ps') -TimeoutSeconds 3
+        if ($r30 -and ($r30 -join '') -match 'cfwd-hang') { $ok30++ }
+    }
+    $WatchdogFailJobCreate = $false
+    $flag30 = [bool]$script:WatchdogJobUnavailable
+    $script:WatchdogJobUnavailable = $false
+    $w30 = @(Select-String -Path $logPath30 -Pattern 'CreateJobObject failed').Count - $w30a
+    Write-Case 'P30' 'CreateJobObject returning 0 marks the job unavailable for the run and logs one WARN; every call still answers' `
+        (($ok30 -eq 4) -and $flag30 -and ($w30 -eq 1)) `
+        "4 calls with CreateJobObject failing: $ok30 answered (expected 4); unavailable flag set: $flag30 (expected True); WARN lines: $w30 (expected 1)"
 
     # P20 (W-8): the job - and so the Add-Type compile - exists BEFORE the
     # child starts. Run in a FRESH process, where the first bounded call pays

@@ -43,13 +43,23 @@ were retired by the follow-up item (ac-legacy-recovery) rather than fixed.
 
 ## `checks/`
 
-- `stack-watchdog.ps1` — the 60 s watchdog (Scheduled Task `StackWatchdog`;
-  renamed from check-tailscale-health 2026-08-21). Covers: tailnet serves,
+- `stack-watchdog.ps1` — the watchdog, every 10 minutes (Scheduled Task
+  `StackWatchdog`, `PT10M`; renamed from check-tailscale-health 2026-08-21). Covers: tailnet serves,
   all seven compose projects in `scripts/lib/stack-services.json` (ai-stack,
   frontend, inference, search, coder, open-brain, agent-org — the
   portal is driven separately), Docker-engine restart, backup recency,
-  claude-bridge health, Telegram alerting. Log stays at
+  claude-bridge health, Telegram alerting, and a census of EVERY container
+  (restart loops and orphaned network-namespace joiners; pages, never repairs;
+  the fault line sent is credential-scrubbed). `-Mode loops` runs only that
+  census, bounded and read-only for the host (no repair, no compose); it writes
+  the same state file and sends real alerts, so run it between scheduled passes.
+  The pages and the all-clear bar:
+  [out-of-band channel, Layer 4](../documentation/sysadmin-out-of-band-channel.md). Log stays at
   `logs/tailscale-health.log` for continuity.
+- `test-watchdog-loops.ps1` (in `checks/`) — the fixed-scope test for that
+  census (`-Part pure`: no Docker; `-Part dind`: one disposable DinD), and
+  `test-watchdog-loops-mutants.ps1`, which removes each rule of the watchdog
+  in turn and requires the named case to go red.
 - `check-openbrain-health.ps1`, `check-agent-org-health.ps1` — per-project
   probes (fanned out from the watchdog, so they run every 10 minutes with
   `-Repair` under the `\StackWatchdog` scheduled task). The Open Brain probe's
