@@ -1139,6 +1139,45 @@ function Invoke-OracleOnStall([string]$i) {
     try { & python $mod check $QueueDir $i --repo $repo } finally { $ErrorActionPreference = $prev }
 }
 
+function Assert-LearningRecord($item, [string]$mergeSha, [string]$reviewer) {
+    # Read-only: learning_records.py never writes a record, an item or the plan store. Its
+    # exit code is the verdict - 0 accepted or not required, 1 refused, 3 refused because it
+    # could not read what it needs (INDETERMINATE: never a pass). Anything else, or no python,
+    # is indeterminate too.
+    $enforce = Get-LearningRecordEnforced
+    $mod = Join-Path $PSScriptRoot "learning_records.py"
+    $lrOut = @()
+    $lrCode = 3
+    if (-not (Test-Path -LiteralPath $mod)) {
+        $lrOut = @("learning-record check could not run: learning_records.py is not beside queue.ps1")
+    } elseif (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+        $lrOut = @("learning-record check could not run: python not found on PATH")
+    } else {
+        $repo = Get-MainCheckout
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $lrOut = @(& python $mod check --item $item.id --merge-sha $mergeSha --reviewer $reviewer --queue-dir $QueueDir --repo $repo 2>&1 | ForEach-Object { "$_" })
+            $lrCode = $LASTEXITCODE
+        } finally { $ErrorActionPreference = $prev }
+        if ($lrCode -notin @(0, 1, 3)) { $lrOut += ("(learning_records.py exited {0}: treated as indeterminate)" -f $lrCode); $lrCode = 3 }
+    }
+    if ($lrCode -eq 0) {
+        foreach ($l in $lrOut) { Write-Host ("  " + $l) -ForegroundColor DarkGray }
+        return
+    }
+    if (-not $enforce) {
+        Write-Host "  ADVICE (pipeline.learning_record.enforce_at_merged is false - the merge is recorded anyway):" -ForegroundColor Yellow
+        foreach ($l in $lrOut) { Write-Host ("  " + $l) -ForegroundColor Yellow }
+        return
+    }
+    $kind = if ($lrCode -eq 3) { "could not be checked (INDETERMINATE - not the same as a missing record)" } else { "is refused" }
+    Die (("the learning record for '{0}' {1}:`n{2}`n" +
+          "A record must exist, validate and be genuine before the merge is recorded (MERGE-PROTOCOL Step 4). " +
+          "Draft its factual fields with: python scripts/agent-harness/learning_records.py draft --item {0} --merge-sha {3}. " +
+          "Nothing has been recorded.") -f $item.id, $kind, (($lrOut | ForEach-Object { "    " + $_ }) -join "`n"), $mergeSha) 1
+}
+
 # --- gates: who passes them, and what the record says --------------------------------
 # The gate PROFILE decides who passes; this file still decides what passing DOES. See the
 # header and harness.config.json -> gate_profiles.
@@ -1279,7 +1318,7 @@ function Stop-OnAndon($andon, [string]$gate, [string]$id, [string]$parkedAt) {
 
 # --- list / show --------------------------------------------------------------------
 if ($CloseOut) {
-    # CLOSE OUT a row whose work landed OUTSIDE this queue's gates (§C.1).
+    # CLOSE OUT a row whose work landed OUTSIDE this queue's gates (section C.1).
     #
     # Not -Reject, and the distinction is the point. 'rejected' asserts a reviewer turned
     # the work down; these items MERGED. Recording them as rejected would put a false
@@ -2301,6 +2340,14 @@ if ($Merged) {
              "it failed silently: check its exit code before recording the outcome. Nothing " +
              "has been recorded.") 1
     }
+    # THE LEARNING RECORD (MERGE-PROTOCOL Step 4; vwm-p1, 2026-10-06). An item that came back
+    # at least once - a tester fail, a reviewer reject/requeue, or a send-back after a pass -
+    # owes an `iterative` learning record beside its findings sink, and the record must be
+    # genuine: schema-valid, derived fields equal to this queue and git, green backed by a
+    # tester pass at the tested commit, countersigned by this reviewer. learning_records.py
+    # decides; this only runs it BEFORE any state change. No per-item override: the only way
+    # past it is pipeline.learning_record.enforce_at_merged=false, which turns it into advice.
+    Assert-LearningRecord $item $Sha $By
     # WHAT DID THIS MERGE SHIP? Derived from the merge range - never from a list the author
     # typed - BEFORE the state changes, so a derivation that cannot complete (an OB1 pin no
     # clone holds) refuses the record rather than leaving a merged item with no surfaces.
