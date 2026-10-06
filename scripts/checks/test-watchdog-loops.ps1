@@ -940,7 +940,19 @@ function Invoke-PureCases {
         @{ T = "credentials: ./sa.json missing";                               Gone = @('./sa.json'); Keep = @('missing') },
         @{ T = "token: `"expired`" please retry";                              Gone = @('expired'); Keep = @('please retry') },
         # attempt 6 D4: a 40-hex git commit id is masked (legacy GitHub tokens are 40 hex too) - accepted over-scrub
-        @{ T = "commit $fhex40 checked out";                                   Gone = @($fhex40); Keep = @('commit', 'checked out') }
+        @{ T = "commit $fhex40 checked out";                                   Gone = @($fhex40); Keep = @('commit', 'checked out') },
+        # attempt 7 (D-A / D-B): '&', a quote mark inside an unquoted value do not end it
+        @{ T = "password: Ab&9x!Qz rejected";                                  Gone = @('Ab&9x!Qz', '9x!Qz'); Keep = @('rejected') },
+        @{ T = "password: Ab'9xQz rejected";                                   Gone = @('9xQz');  Keep = @('rejected') },
+        @{ T = "password: x`"$fq rejected";                                    Gone = @($fq);     Keep = @('rejected') },
+        @{ T = "password=Ab&9x!Qz rejected";                                   Gone = @('9x!Qz'); Keep = @('rejected') },
+        @{ T = "password=Ab'9xQz rejected";                                    Gone = @('9xQz');  Keep = @('rejected') },
+        @{ T = "GET /x?password=abc123&user=bob&x=1";                          Gone = @('abc123'); Keep = @('&user=bob&x=1') },
+        # pins for the status-word rule and the key family
+        @{ T = "token: expired! please";                                       Gone = @('expired!'); Keep = @('please') },
+        @{ T = "token: abcdefghijklmnopq";                                     Gone = @('abcdefghijklmnopq'); Keep = @('token:') },
+        @{ T = "Signing-Key: $fq x";                                           Gone = @($fq);     Keep = @('x') },
+        @{ T = "Secret-Key=$fq x";                                             Gone = @($fq);     Keep = @('x') }
     )
     $bad34 = @()
     foreach ($row in $rows) {
@@ -1371,6 +1383,7 @@ $plain = @(
             $o = Hide-CredentialShapes $pl
             if ($o -cne $pl) { $bad34 += "perm $nm plain text changed: '$pl' -> '$o'" }
         }
+        if ($nc -lt 1 -or $np -lt 1) { $bad34 += "permanent set $nm contributed $nc credential rows and $np plain rows after skips (each must be at least 1)" }
         $permN += $nc + $np; $permBy += "$nm $nc+$np"
     }
     # Meaning survives: ordinary error text comes back byte for byte.
@@ -1388,7 +1401,7 @@ $plain = @(
                # one-segment ODBC PWD is a password (credential row), a directory is not; docker/chown ids; refs
                'chown 1000:1000 /data', 'curl -u 1000:1000 http://x/', 'curl -u 1000:123456 http://x/', 'docker run -u 0:0 app', 'curl -u 1234567:12 http://x/',
                # status words after ':' are kept (one plain word of letters); a file-naming key is not a secret-named key
-               'token: expired', 'password: required', 'secret: missing', 'api_key: invalid', 'passphrase: none', 'token: expired, re-authenticate',
+               'token: Expired', 'token: expired.', 'token: Required, retry', 'token: expired', 'password: required', 'secret: missing', 'api_key: invalid', 'passphrase: none', 'token: expired, re-authenticate',
                'password_file: /run/secrets/pw', 'credentials file: sa.json',
                'reg/app@sha256:abc123 pulled', 'pkg/x@1.2 installed', 'react@18.2.0',
                'password=false', 'token=null', 'secret=none', 'pass=nil', 'password=NONE',

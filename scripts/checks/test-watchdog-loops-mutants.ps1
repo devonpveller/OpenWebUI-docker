@@ -124,6 +124,14 @@ $mutants = [ordered]@{
     'scrub-hex40-off'        = @('[A-Za-z0-9_\-]{40,512}(?![A-Za-z0-9_\-])''', '[A-Za-z0-9_\-]{41,512}(?![A-Za-z0-9_\-])''', 'P34')
     'scrub-curl-gid-min2'    = @('-match ''^[0-9]{1,6}$'')) { return $x.Value }', '-match ''^[0-9]{2,6}$'')) { return $x.Value }', 'P34')
     'scrub-curl-uid-max5'    = @('($x.Groups[2].Value -match ''^[0-9]+$'') -and', '($x.Groups[2].Value -match ''^[0-9]{1,5}$'') -and', 'P34')
+    'harness-skip-all-cred'  = @('if (($permSkip -contains $c.n) -or $c.nc) { continue }', 'if ($true) { continue }', 'P34', 'harness')
+    'harness-skip-all-plain' = @('if ($plainSkip | Where-Object { $pl.Contains($_) }) {', 'if ($true) {', 'P34', 'harness')
+    'scrub-trim-bang'        = @('$word = $bare.TrimEnd('','', ''.'', '';'', '':'', '')'')', '$word = $bare.TrimEnd('','', ''.'', '';'', '':'', '')'', ''!'', ''?'')', 'P34')
+    'scrub-word-max-20'      = @('$word -match ''^[A-Za-z]{1,15}$''', '$word -match ''^[A-Za-z]{1,20}$''', 'P34')
+    'scrub-word-lower-only'  = @('$word -match ''^[A-Za-z]{1,15}$''', '$word -cmatch ''^[a-z]{1,15}$''', 'P34')
+    'scrub-key-no-hyphen'    = @('(?:secret|signing|encryption|master|license)[_\-]?key|', '(?:secret|signing|encryption|master|license)_?key|', 'P34')
+    'scrub-value-amp-stop'   = @('[^\s;,&]|[;,&](?!', '[^\s;,&]|[;,](?!', 'P34')
+    'scrub-value-quote-stop' = @('[^\s"'''',;&](?:[^\s;,&]|', '[^\s"'''',;&](?:[^\s"'''',;&]|', 'P34')
     'scrub-curl-uid-long'    = @('-match ''^[0-9]{1,6}$'')) { return $x.Value }', '-match ''^[0-9]+$'')) { return $x.Value }', 'P34')
     'scrub-pass-upper-colon' = @('(($key -ceq ''PASS'') -and ($sep -match ''=''))', '($key -ceq ''PASS'')', 'P34')
     'scrub-pass-upper-eq'    = @('(($key -ceq ''PASS'') -and ($sep -match ''=''))', '$false', 'P34')
@@ -141,15 +149,26 @@ $mutants = [ordered]@{
 $bad = 0
 foreach ($k in $mutants.Keys) {
     if ($Only.Count -gt 0 -and $Only -notcontains $k) { continue }
-    $from, $to, $case = $mutants[$k]
+    $from, $to, $case, $target = $mutants[$k]
     $from = $from.Replace("`r`n", "`n"); $to = $to.Replace("`r`n", "`n")
-    $n = ([regex]::Matches($src, [regex]::Escape($from))).Count
+    # A 4th element 'harness' mutates the test harness itself (a check on the check); the copy sits beside the
+    # real harness (it finds its fixtures relative to itself) and is removed afterwards.
+    $text = if ($target -eq 'harness') { [IO.File]::ReadAllText($Harness).Replace("`r`n", "`n") } else { $src }
+    $n = ([regex]::Matches($text, [regex]::Escape($from))).Count
     if ($n -ne 1) { "{0,-24} SETUP ERROR: the anchor text occurs {1} times" -f $k, $n; $bad++; continue }
     $p = Join-Path $Scratch "mut-$k.ps1"
-    [IO.File]::WriteAllText($p, $src.Replace($from, $to), (New-Object Text.ASCIIEncoding))
-    $hargs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Harness, '-Part', 'pure', '-Script', $p)
+    $runHarness = $Harness
+    if ($target -eq 'harness') {
+        $runHarness = Join-Path (Split-Path -Parent $Harness) "mut-harness-$k.ps1"
+        [IO.File]::WriteAllText($runHarness, $text.Replace($from, $to), (New-Object Text.ASCIIEncoding))
+        $p = $Tip
+    } else {
+        [IO.File]::WriteAllText($p, $text.Replace($from, $to), (New-Object Text.ASCIIEncoding))
+    }
+    $hargs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runHarness, '-Part', 'pure', '-Script', $p)
     if ($case -ne 'P29') { $hargs += '-SkipSim' }
     $res = (& powershell @hargs | Select-String '^RESULT').Line
+    if ($target -eq 'harness') { Remove-Item $runHarness -Force -ErrorAction SilentlyContinue }
     $red = $res -match "\b$case FAIL\b"
     if (-not $red) { $bad++ }
     "{0,-24} expects {1,-4} red: {2}   {3}" -f $k, $case, $(if ($red) { 'YES' } else { 'NO ' }), $res

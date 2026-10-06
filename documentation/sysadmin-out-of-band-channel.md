@@ -135,7 +135,8 @@ with the value bare, quoted (`"..."`, `'...'`), bracketed or URL-encoded, after
 the value:** after `=` everything is masked except `true`, `false`, `null`,
 `none`, `nil`; after `:` a value stays readable ONLY when it is one plain,
 unquoted word of letters (1-15 letters, a status word such as `required`,
-`missing`, `invalid`, `expired`; a trailing `,` `.` `;` `:` `)` is ignored).
+`missing`, `invalid`, `expired`; a trailing run of `,` `.` `;` `:` `)` is stripped
+before the test, so `expired,` is still a word and `expired!` is not).
 Any value with a digit, punctuation, a quote or a symbol is masked at any
 length (`p@ss!wOrd`, `Trub-Fx#q`, `a1b2c`, `zx9!`, `./sa.json`, `3`), and so is
 any letters-only value of 16 or more characters; CLI flags (`--password <pw>`, `--token <t>`,
@@ -163,7 +164,13 @@ itself a single plain word of 1-15 letters after `:` (`secret_key: abcdefgh`,
 `X-Api-Key: abcdefgh` - indistinguishable from the status word `required`;
 with `=` it is masked); an upper-case `PASS:` (a key only with `=`); a key that
 names a file rather than a secret (`password_file: /run/secrets/pw`,
-`credentials file: sa.json`); a bare `key=` value shorter
+`credentials file: sa.json`); generic `*_KEY` names beyond the listed prefixes
+(`SESSION_KEY`, `HMAC_KEY`, `JWT_KEY`, `APP_KEY`, `client_key`, `webhook_key`,
+`stripe_key`, `deploy_key`, `root_key`, a bare `KEY`); an unterminated quoted
+value (`{"password": "Kp4v...` with no closing quote); Ruby / Perl hash syntax with
+spaces (`password => "..."`; the compact `{"password"=>"..."}` form is partly masked); three or more spaces or tabs after the `:` / `=`
+separator (the fault line collapses whitespace before the scrub, so this cannot
+reach a transport, but it can in a direct unit call); a bare `key=` value shorter
 than 16 characters; a Vault `hvs.` token shorter than the 40-character
 opaque-run threshold; a bare Bearer of letters only with no `Authorization:`
 header; redis `AUTH <pw>` replies; PEM body lines after the header (the fault
@@ -187,7 +194,8 @@ user-only URL (`http://user@host/`); `from:bob@example.com`; and
 `name/x@word`-shaped text followed by a space (`reg/app@sha256 pulled`,
 `pkg/name@alias`; `reg/app@sha256:abc` and `pkg/x@1.2` stay); a 40-hex git
 commit id (legacy GitHub tokens are 40 hex too, so the opaque-run rule keeps
-masking them); a number after `:` under a secret-named key (`Secret: 3 keys
+masking them); a 16+ character value with a digit under a name that merely ends
+in `key` (`sort_key=...`; the old weak rule); a number after `:` under a secret-named key (`Secret: 3 keys
 rotated` becomes `Secret: [redacted] keys rotated`). Go / pytest output
 such as `--- PASS: TestX (0.01s)` and `PASS: test_x1` is NOT masked.
 

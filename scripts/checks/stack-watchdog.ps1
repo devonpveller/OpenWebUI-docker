@@ -2281,7 +2281,8 @@ function Hide-CredentialShapes {
         #    except one plain word of letters, so "token: expired" survives and
         #    "secret: a1b2c", "api_key: Trub-Fx#q", "Secret: 3 keys" do not. A path under a secret-named key
         #    is masked like any value. An unquoted value runs past ';' and ',' (a password may
-        #    hold them) unless what follows looks like the next key ("; Db=").
+        #    hold them) unless what follows looks like the next key ("; Db=" or "&user=");
+        #    quote marks and '&' inside an unquoted value do not end it.
         $strong = [System.Text.RegularExpressions.MatchEvaluator]{
             param($x)
             $val = $x.Groups[4].Value
@@ -2309,7 +2310,7 @@ function Hide-CredentialShapes {
             }
             return $x.Groups[1].Value + $x.Groups[2].Value + $sep + '[redacted]'
         }
-        $t = [regex]::Replace($t, '(?i)(?<![A-Za-z0-9])([A-Za-z0-9_.\-]{0,40}?(?:password|passwd|passphrase|pwd|pass|secret|token|(?:secret|signing|encryption|master|license)[_\-]?key|api[_\-]?key|auth[_\-]?key|access[_\-]?key|private[_\-]?key|credentials?|dsn))(["'']?)(\s{0,3}[:=]\s{0,3})("(?:[^"\\]|\\.){1,512}"|''[^'']{1,512}''|(?:[^\s"'',;&]|[;,](?!\s*[A-Za-z_][A-Za-z0-9_.\- ]{0,30}\s*[=:])){1,512})', $strong)
+        $t = [regex]::Replace($t, '(?i)(?<![A-Za-z0-9])([A-Za-z0-9_.\-]{0,40}?(?:password|passwd|passphrase|pwd|pass|secret|token|(?:secret|signing|encryption|master|license)[_\-]?key|api[_\-]?key|auth[_\-]?key|access[_\-]?key|private[_\-]?key|credentials?|dsn))(["'']?)(\s{0,3}[:=]\s{0,3})("(?:[^"\\]|\\.){1,512}"|''[^'']{1,512}''|[^\s"'',;&](?:[^\s;,&]|[;,&](?!\s*[A-Za-z_][A-Za-z0-9_.\- ]{0,30}\s*[=:])){0,511})', $strong)
         #    A bare "key" or "auth" is a secret only when '=' is followed by a
         #    key-shaped value (PRIMARY_KEY=id is not).
         $weak = [System.Text.RegularExpressions.MatchEvaluator]{
