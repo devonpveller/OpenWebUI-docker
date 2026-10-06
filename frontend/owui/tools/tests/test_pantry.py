@@ -114,8 +114,8 @@ def run(coro):
 
 STOCK = [
     {"id": "i1", "name": "Chickpeas, canned", "aliases": [], "category": "Canned", "kind": "counted",
-     "quantity": 4, "unit": "count", "level": None, "location": "pantry", "expires_on": "2027-01-31",
-     "allergens": [], "may_contain": [], "reserved": 1, "available": 3, "use_soon": False},
+     "quantity": 4, "unit": "count", "pack_size": 400, "pack_unit": "g", "level": None, "location": "pantry",
+     "expires_on": "2027-01-31", "allergens": [], "may_contain": [], "reserved": 1, "available": 3, "use_soon": False},
     {"id": "i2", "name": "Olive oil", "aliases": [], "category": "Oils", "kind": "staple",
      "quantity": None, "unit": None, "level": "low", "location": "cupboard", "expires_on": None,
      "allergens": [], "may_contain": [], "reserved": 0, "available": None, "use_soon": False},
@@ -247,10 +247,40 @@ class Functions(Base):
         out = json.loads(run(self.tool.cook("r1", servings=3, meal_plan_id="p1")))
         r = self.last()
         self.assertEqual((r["method"], r["path"]), ("POST", "/cook"))
-        self.assertEqual(r["body"], {"recipe_id": "r1", "servings": 3, "meal_plan_id": "p1"})
+        # pantry-cook-confirm: the first call is a PREVIEW; a write needs an explicit preview=False
+        self.assertEqual(r["body"], {"recipe_id": "r1", "servings": 3, "meal_plan_id": "p1", "preview": True})
         self.assertTrue(any("shortfalls" in a for a in out["attention"]))
         run(self.tool.log_cooked_meal("r2", cooked_at="2026-10-03"))
-        self.assertEqual(self.last()["body"], {"recipe_id": "r2", "logged_after": True, "cooked_at": "2026-10-03"})
+        self.assertEqual(self.last()["body"], {"recipe_id": "r2", "logged_after": True, "cooked_at": "2026-10-03", "preview": True})
+        run(self.tool.cook("r1", servings=3, meal_plan_id="p1", preview=False))
+        self.assertEqual(self.last()["body"], {"recipe_id": "r1", "servings": 3, "meal_plan_id": "p1", "preview": False})
+        run(self.tool.log_cooked_meal("r2", cooked_at="2026-10-03", preview=False))
+        self.assertEqual(self.last()["body"], {"recipe_id": "r2", "logged_after": True, "cooked_at": "2026-10-03", "preview": False})
+
+    def test_preview_fails_safe_and_is_labelled_for_the_model(self):
+        self.svc.routes[("POST", "/cook")] = (200, {"preview": True, "cook_event_id": None, "deductions": [{"name": "Milk", "before": 1, "after": 0.9375, "delta": -0.0625, "unit": "count"}],
+                                                    "shortfalls": [], "unconvertible": [{"name": "Thyme", "reason": "cross_dimension_or_unknown_unit"}], "unmatched": []})
+        # a local model sending preview as a string, or something unreadable, never turns a preview into a write
+        for given, sent in (("false", False), ("False", False), ("no", False), ("true", True), ("maybe", True), (None, True), (0, False), ([], True)):
+            out = json.loads(run(self.tool.cook("r1", preview=given)))
+            self.assertIs(self.last()["body"]["preview"], sent, given)
+        out = json.loads(run(self.tool.log_cooked_meal("r1")))
+        joined = " ".join(out["attention"])
+        self.assertIn("PREVIEW ONLY", joined)
+        self.assertIn("preview=false", joined)
+        self.assertIn("pack_size", joined)  # the unconvertible note says to record the package size
+        self.assertIn("never rewrite", joined)
+        self.svc.routes[("POST", "/cook")] = (201, {"preview": False, "cook_event_id": "c1", "deductions": [], "shortfalls": [], "unconvertible": [], "unmatched": []})
+        out = json.loads(run(self.tool.cook("r1", preview=False)))
+        self.assertNotIn("attention", out)
+
+    def test_update_pantry_carries_pack_size(self):
+        self.svc.routes[("POST", "/pantry/adjust")] = (200, {"applied": [], "created": [], "unmatched": [], "unconvertible": []})
+        row = {"name": "Milk", "quantity": 1, "unit": "count", "pack_size": 128, "pack_unit": "fl_oz", "create": True}
+        run(self.tool.update_pantry([row]))
+        self.assertEqual(self.last()["body"]["items"], [row])
+        run(self.tool.update_pantry([{"name": "Milk", "pack_size": None, "pack_unit": None}]))
+        self.assertEqual(self.last()["body"]["items"], [{"name": "Milk", "pack_size": None, "pack_unit": None}])  # null clears
 
     def test_correct_cook(self):
         run(self.tool.correct_cook("c1", adjustments=[{"item_id": "i2", "actual_used": 30, "unit": "ml"}]))
@@ -424,6 +454,32 @@ class ToolSchema(unittest.TestCase):
         self.assertIn("omit bought", ex.lower())
         self.assertIn("empty list", bo.lower())
         self.assertIn("nothing was bought", bo.lower())
+
+    def test_cook_preview_and_pack_descriptions(self):
+        """The model reads these: preview first, keep real units, the pack-size fields exist. Checked in the
+        real get_tool_specs output when open_webui is importable (container run), else in the docstrings."""
+        import inspect
+
+        if _owui_get_tool_specs is not None:
+            specs = {s["name"]: s["parameters"]["properties"] for s in _owui_get_tool_specs(pantry.Tools())}
+            for fn in ("cook", "log_cooked_meal"):
+                prop = specs[fn]["preview"]
+                self.assertEqual(_unwrap(prop).get("type"), "boolean", fn)
+                self.assertIs(prop.get("default", _unwrap(prop).get("default")), True, fn)
+                d = prop["description"].lower()
+                self.assertIn("default", d, fn)
+                self.assertIn("write nothing", d, fn)
+            items = specs["update_pantry"]["items"]["description"]
+            fn_desc = {s["name"]: s["description"] for s in _owui_get_tool_specs(pantry.Tools())}
+        else:
+            items = pantry.Tools.update_pantry.__doc__
+            fn_desc = {"cook": pantry.Tools.cook.__doc__, "log_cooked_meal": pantry.Tools.log_cooked_meal.__doc__}
+        self.assertIn("pack_size", items)
+        self.assertIn("pack_unit", items)
+        for fn in ("cook", "log_cooked_meal"):
+            self.assertIn("PREVIEW FIRST", fn_desc[fn], fn)
+            self.assertIn("real units", fn_desc[fn], fn)
+            self.assertIs(inspect.signature(getattr(pantry.Tools, fn)).parameters["preview"].default, True)
 
     def test_which_path_ran(self):
         if os.environ.get("PANTRY_REQUIRE_OWUI"):  # container run: no silent fallback
@@ -634,7 +690,7 @@ def make_csv(n, headers=None):
     w = csv.writer(buf, lineterminator="\n")
     w.writerow(headers or pantry.EXPORT_COLUMNS)
     for i in range(n):
-        w.writerow([f"id{i}", f"Item {i}, \"special\" ü", "Cat", "counted", i + 1, "g", "", "shelf", "2027-01-01", "milk;soy", ""])
+        w.writerow([f"id{i}", f"Item {i}, \"special\" ü", "Cat", "counted", i + 1, "g", "", "", "", "shelf", "2027-01-01", "milk;soy", ""])
     return buf.getvalue().encode("utf-8")
 
 
@@ -643,7 +699,7 @@ def make_xlsx(n):
     ws = wb.active
     ws.append(pantry.EXPORT_COLUMNS)
     for i in range(n):
-        ws.append([f"id{i}", f"Item {i}", "Cat", "counted", i + 1, "g", None, "shelf", "2027-01-01", "milk;soy", None])
+        ws.append([f"id{i}", f"Item {i}", "Cat", "counted", i + 1, "g", None, None, None, "shelf", "2027-01-01", "milk;soy", None])
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
@@ -891,6 +947,65 @@ class SkillMatchesTool(unittest.TestCase):
         self.assertTrue({"log_cooked_meal", "correct_cook", "cook", "set_plan_status", "confirm_import"} <= listed)
 
 
+class SkillRules(unittest.TestCase):
+    """pantry-cook-confirm: the three rules are in the skill the Kitchen model reads (quoted in the test plan)."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(HERE, "..", "..", "skills", "kitchen-pantry.md"), encoding="utf-8") as fh:
+            cls.skill = fh.read()
+
+    def _rule(self, letter):
+        return next(l for l in self.skill.splitlines() if l.startswith(f"**{letter}. "))
+
+    def test_rule_a_consumed_means_subtract(self):
+        a = self._rule("A")
+        for phrase in ("made", "cooked", "finished", "completed", "ate", "I completed the recipe X", "we're making this one"):
+            self.assertIn(phrase, a)
+        order = [a.index(k) for k in ("(1)", "(2)", "(3)", "(4)")]
+        self.assertEqual(order, sorted(order))
+        self.assertLess(a.index("default `preview`"), a.index("show a table"))
+        self.assertLess(a.index("show a table"), a.index("preview=false"))
+        self.assertIn("will NOT be subtracted", a)
+        self.assertIn("`unconvertible`", a)
+        # step 4: cook needs rule 7's commit phrase, not any yes; log_cooked_meal keeps a plain yes
+        step4 = a[a.index("(4)"):]
+        self.assertIn("for `cook`, the commit phrase of rule 7", step4)
+        self.assertIn("we're making this one", step4)
+        self.assertIn("for `log_cooked_meal`, a plain yes", step4)
+        self.assertIn("Subtract these?", step4)
+        self.assertIn("do not demand the phrase twice", step4)
+
+    def test_flow_10_example_does_not_contradict_rule_c(self):
+        self.assertNotIn("olive oil", self.skill.lower().split("10. **accuracy report.**")[1].split("\n")[0])
+        self.assertIn("canned tomatoes", self.skill)
+
+    def test_cook_docstring_requires_the_commit_phrase(self):
+        doc = pantry.Tools.cook.__doc__
+        self.assertIn("commit phrase", doc)
+        self.assertIn("we're making this one", doc)
+
+    def test_rule_b_keep_real_units(self):
+        b = self._rule("B")
+        self.assertIn("Never rewrite a line as", b)
+        self.assertIn("count", b)
+        self.assertIn("how much is in one package", b)
+        self.assertIn("pack_size", b)
+        self.assertIn("pack_unit", b)
+        self.assertIn("update_pantry", b)
+        self.assertIn("Never guess a package size", b)
+
+    def test_rule_c_seasonings_are_staples(self):
+        c = self._rule("C")
+        for w in ("Spices", "seasonings", "dried herbs", "oils", "vinegar", "salt", "sugar", "flour", "baking"):
+            self.assertIn(w, c)
+        self.assertIn("kind: staple", c)
+        self.assertIn("never quantity-deducted", c)
+
+    def test_commit_phrase_applies_to_the_write(self):
+        self.assertIn("`preview=false` ONLY after you showed its preview", self.skill)
+
+
 class Export(Base):
     def setUp(self):
         super().setUp()
@@ -910,10 +1025,12 @@ class Export(Base):
         self.assertEqual(ctype, "text/csv")
         self.assertIn("/api/v1/files/fid/content", msg)
         rows = list(csv.reader(io.StringIO(data.decode("utf-8-sig"))))
-        self.assertEqual(rows[0], ["id", "name", "category", "kind", "quantity", "unit", "level", "location", "expires_on", "allergens", "actual"])
+        self.assertEqual(rows[0], ["id", "name", "category", "kind", "quantity", "unit", "pack_size", "pack_unit", "level", "location", "expires_on", "allergens", "actual"])
         self.assertEqual(len(rows), 4)
-        self.assertEqual(rows[3][9], "tree nuts;milk")
-        self.assertTrue(all(r[10] == "" for r in rows[1:]))
+        self.assertEqual(rows[3][11], "tree nuts;milk")
+        self.assertTrue(all(r[12] == "" for r in rows[1:]))
+        self.assertEqual(rows[1][6:8], ["400", "g"])  # a package size is exported after the unit
+        self.assertEqual(rows[2][6:8], ["", ""])  # no package size on file = empty cells
 
     @unittest.skipIf(openpyxl is None, "openpyxl not installed (run the container command)")
     def test_xlsx_option(self):
@@ -994,9 +1111,11 @@ class Export(Base):
         exp = []
         for it in STOCK:
             r = {"id": it["id"], "name": it["name"], "kind": it["kind"]}
-            for k in ("category", "unit", "level", "location", "expires_on"):
+            for k in ("category", "unit", "pack_unit", "level", "location", "expires_on"):
                 if it.get(k):
                     r[k] = it[k]
+            if it.get("pack_size") is not None:
+                r["pack_size"] = it["pack_size"]
             if it.get("quantity") is not None:
                 q = it["quantity"]
                 r["quantity"] = int(q) if float(q).is_integer() else q

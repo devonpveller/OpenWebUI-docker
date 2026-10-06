@@ -35,6 +35,8 @@ EXPORT_COLUMNS = [
     "kind",
     "quantity",
     "unit",
+    "pack_size",
+    "pack_unit",
     "level",
     "location",
     "expires_on",
@@ -42,7 +44,7 @@ EXPORT_COLUMNS = [
     "actual",
 ]
 _ROW_FIELDS = [c for c in EXPORT_COLUMNS if c != "actual"]
-_NUMERIC_FIELDS = {"quantity"}
+_NUMERIC_FIELDS = {"quantity", "pack_size"}
 _LIST_FIELDS = {"allergens", "may_contain"}
 # Extra, optional sheet columns that map straight onto an /audit/preview row key.
 _OPTIONAL_COLUMNS = ["may_contain"]
@@ -62,6 +64,10 @@ _SYNONYMS = {
     "stock": "quantity",
     "uom": "unit",
     "units": "unit",
+    "package size": "pack_size",
+    "pack size": "pack_size",
+    "package unit": "pack_unit",
+    "pack unit": "pack_unit",
     "type": "kind",
     "section": "category",
     "aisle": "category",
@@ -160,6 +166,21 @@ def _rows(value: Any, param: str) -> Any:
             raise InvalidRow(param, i, el)
         out.append(el)
     return out
+
+
+def _as_bool(value: Any, default: bool) -> bool:
+    """A boolean argument as local models send it ("false", "no", 0). Anything unclear is the default."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        t = value.strip().lower()
+        if t in ("false", "no", "0", "n", "f"):
+            return False
+        if t in ("true", "yes", "1", "y", "t"):
+            return True
+    return default
 
 
 def _clean(d: dict) -> dict:
@@ -273,13 +294,21 @@ class Tools:
         if not isinstance(body, dict):
             return body
         notes = []
+        if body.get("preview") is True:
+            notes.append(
+                "PREVIEW ONLY - nothing was written. Show the user a table of deductions (item, before, after, "
+                "what the recipe line was) and every line that will NOT be subtracted (unconvertible, unmatched, "
+                "shortfalls). Write only after they say yes, by calling the same function again with preview=false"
+            )
         if body.get("unmatched"):
             notes.append(
                 "unmatched: ask the user which pantry item each one is (use candidates); never pick one yourself"
             )
         if body.get("unconvertible"):
             notes.append(
-                "unconvertible: those lines were NOT written (unit dimension mismatch); ask the user for a usable quantity"
+                "unconvertible: those lines were NOT written (unit dimension mismatch); keep the recipe's real units - "
+                "ask the user how big one package of that item is and record it with update_pantry (pack_size + pack_unit); "
+                "never rewrite the recipe line as 'count' to make it fit"
             )
         if body.get("allergen_conflicts"):
             notes.append("allergen_conflicts: tell the user; remove or substitute before the recipe is used")
@@ -362,7 +391,7 @@ class Tools:
         Change pantry stock from what the user told you. Show the user the table of changes and get a yes BEFORE calling.
         A name that is not in the pantry is created only when that line has create=true; otherwise it comes back as unmatched with candidates - ask the user.
 
-        :param items: List of lines, each {id or name, quantity (absolute) or delta (+/-), unit, kind ("counted"/"staple"), level ("plenty"/"low"/"out" for staples), category, location, expires_on, allergens, may_contain, aliases, create (true only for a new item)}.
+        :param items: List of lines, each {id or name, quantity (absolute) or delta (+/-), unit, pack_size + pack_unit (package size of a COUNT item, e.g. a jug: quantity 1 unit "count" pack_size 128 pack_unit "fl_oz"; both or neither, null clears), kind ("counted"/"staple"), level ("plenty"/"low"/"out" for staples), category, location, expires_on, allergens, may_contain, aliases, create (true only for a new item)}.
         :param reason: "manual" for stock entry, "correct" to fix a wrong number.
         :return: JSON with applied, created, unmatched and unconvertible lines.
         """
@@ -511,18 +540,21 @@ class Tools:
         servings: Optional[float] = None,
         meal_plan_id: Optional[str] = None,
         guest_context: Optional[dict] = None,
+        preview: bool = True,
         __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
     ) -> str:
         """
-        Commit tonight's dinner: deducts every ingredient in one transaction. Call ONLY after the user said "yes, we're making this one" (or a clear variant).
-        Returns deductions and shortfalls (shortfalls do not block). A 409 allergen_conflict means nothing was written - tell the user.
+        Subtract tonight's dinner from the pantry. PREVIEW FIRST: the default call (preview=true) writes NOTHING and returns what would be subtracted; show that table, and call again with preview=false to write it ONLY after the user says the commit phrase ("yes, we're making this one" or a clear variant; if they already said it before the preview, a plain yes to "subtract these?" is enough).
+        Returns deductions and shortfalls (shortfalls do not block) plus unconvertible/unmatched lines that will NOT be subtracted. Recipe quantities keep their real units (cup, tsp, g); a counted item with a package size (e.g. a jug) is deducted as a fraction of the package. A 409 allergen_conflict means nothing was written - tell the user.
 
         :param recipe_id: Recipe to cook.
         :param servings: Portions to cook; omit for the household default plus guests.
         :param meal_plan_id: The plan row being cooked, if any.
         :param guest_context: Guests for this one meal: {adults, children, allergies, avoid, diet, note}.
-        :return: JSON with cook_event_id, deductions, shortfalls, unconvertible.
+        :param preview: True (default) = show what would be subtracted, write nothing. False = write it (only after the user confirmed the preview).
+        :return: JSON with preview, cook_event_id (null in a preview), deductions, shortfalls, unconvertible, unmatched.
         """
+        pv = _as_bool(preview, True)
         return await self._do(
             "POST",
             "/cook",
@@ -532,10 +564,11 @@ class Tools:
                     "servings": servings,
                     "meal_plan_id": meal_plan_id,
                     "guest_context": _coerce(guest_context),
+                    "preview": pv,
                 }
             ),
             emitter=__event_emitter__,
-            status="Cooking (deducting stock)",
+            status="Previewing cook (nothing written)" if pv else "Cooking (deducting stock)",
         )
 
     async def log_cooked_meal(
@@ -544,17 +577,21 @@ class Tools:
         cooked_at: Optional[str] = None,
         servings: Optional[float] = None,
         guest_context: Optional[dict] = None,
+        preview: bool = True,
         __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
     ) -> str:
         """
-        Log a meal that was ALREADY cooked without the model ("we made tacos last night"). Deducts stock and creates a cook event that can be evaluated.
+        Log a meal that was ALREADY cooked ("we made tacos last night", "I completed the recipe X"). Subtracts its ingredients and creates a cook event that can be evaluated. PREVIEW FIRST: the default call (preview=true) writes NOTHING and returns what would be subtracted; show the table, and only after the user confirms call again with preview=false.
+        Keep the recipe's real units (cup, tsp, g); never rewrite them as "count". Items without a usable unit come back in unconvertible and are NOT subtracted.
 
         :param recipe_id: The recipe that was cooked (create it first if needed).
         :param cooked_at: ISO date or datetime it was cooked.
         :param servings: Portions cooked, if known.
         :param guest_context: Guests at that meal, if any.
+        :param preview: True (default) = show what would be subtracted, write nothing. False = write it (only after the user confirmed the preview).
         :return: JSON like cook.
         """
+        pv = _as_bool(preview, True)
         return await self._do(
             "POST",
             "/cook",
@@ -565,10 +602,11 @@ class Tools:
                     "guest_context": _coerce(guest_context),
                     "logged_after": True,
                     "cooked_at": cooked_at,
+                    "preview": pv,
                 }
             ),
             emitter=__event_emitter__,
-            status="Logging cooked meal",
+            status="Previewing cooked meal (nothing written)" if pv else "Logging cooked meal",
         )
 
     async def correct_cook(
