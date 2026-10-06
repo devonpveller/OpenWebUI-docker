@@ -96,7 +96,7 @@ $mutants = [ordered]@{
     'scrub-slack'            = @('$t = [regex]::Replace($t, ''(?i)(hooks\.slack\.com', '$null = [regex]::Replace($t, ''(?i)(hooks\.slack\.com', 'P34')
     'scrub-discord'          = @('$t = [regex]::Replace($t, ''(?i)(discord', '$null = [regex]::Replace($t, ''(?i)(discord', 'P34')
     'scrub-pem-rsa-only'     = @('''-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----.*''', ('''-----BEGIN RSA PRIVATE ' + 'KEY-----.*'''), 'P34')
-    'scrub-kv-continue'      = @('|[;,](?!\s*[A-Za-z_][A-Za-z0-9_.\- ]{0,30}\s*[=:])', '', 'P34')
+    'scrub-kv-continue'      = @('|[;,&](?!\s*[A-Za-z_][A-Za-z0-9_.\- ]{0,30}\s*[=:])', '', 'P34')
     'scrub-pwd-key'          = @('passphrase|pwd|pass|secret', 'passphrase|pass|secret', 'P34')
     'scrub-pass-key'         = @('passphrase|pwd|pass|secret', 'passphrase|pwd|secret', 'P34')
     'scrub-pass-word-bound'  = @('if (($key -imatch ''pass$'') -and ($key -inotmatch', 'if ($false -and ($key -inotmatch', 'P34')

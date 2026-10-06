@@ -137,7 +137,8 @@ the value:** after `=` everything is masked except `true`, `false`, `null`,
 unquoted word of letters (1-15 letters, a status word such as `required`,
 `missing`, `invalid`, `expired`; a trailing run of `,` `.` `;` `:` `)` is stripped
 before the test, so `expired,` is still a word and `expired!` is not).
-Any value with a digit, punctuation, a quote or a symbol is masked at any
+Any value that starts with a character other than whitespace, a quote, `&`,
+`;` or `,` and holds a digit, punctuation, a quote or a symbol is masked at any
 length (`p@ss!wOrd`, `Trub-Fx#q`, `a1b2c`, `zx9!`, `./sa.json`, `3`), and so is
 any letters-only value of 16 or more characters; CLI flags (`--password <pw>`, `--token <t>`,
 mysql `-p<pw>`, `docker login -p`, `curl -u` / `-uUSER:PW` / `--user=`,
@@ -164,7 +165,8 @@ itself a single plain word of 1-15 letters after `:` (`secret_key: abcdefgh`,
 `X-Api-Key: abcdefgh` - indistinguishable from the status word `required`;
 with `=` it is masked); an upper-case `PASS:` (a key only with `=`); a key that
 names a file rather than a secret (`password_file: /run/secrets/pw`,
-`credentials file: sa.json`); generic `*_KEY` names beyond the listed prefixes
+`credentials file: sa.json`); a value that starts with `&`, `;`, `,` or an unterminated quote
+(`password: &<pw>`, `token=&<pw>`, `password: ;<pw>`); generic `*_KEY` names beyond the listed prefixes
 (`SESSION_KEY`, `HMAC_KEY`, `JWT_KEY`, `APP_KEY`, `client_key`, `webhook_key`,
 `stripe_key`, `deploy_key`, `root_key`, a bare `KEY`); an unterminated quoted
 value (`{"password": "Kp4v...` with no closing quote); Ruby / Perl hash syntax with
