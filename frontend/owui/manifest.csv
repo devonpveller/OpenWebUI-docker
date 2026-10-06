@@ -10,7 +10,7 @@ tools/deep_research.py,tool,Deep Research,deep_research,f4a8d5621d18fbb3c4db4ee4
 tools/fileshed.py,tool,FileShed,fileshed,deb7ec64d91d34908c3b74ce8cae2017d51659d10b289236cf1eb8a3e5477f14
 tools/github_chat_mcp_tools.py,tool,GitHub Repo Analyzer,github_chat_mcp_tools,d760c90da403b2180f63f8b99fd8c362afe4b3618da44b62757dd1d038b7beed
 tools/superpowers_tool.py,tool,superpowers_tool,superpowers_tool,2f150769da1fb25c2c0bffcd67d4eac52e1159b3eb1bb9b442ab967895c27f82
-tools/pantry.py,tool,Pantry (Kitchen model),pantry,8d25080319be293c71496f6f3ac67a44a946a2393807ee1d707eabca8328ee9c
+tools/pantry.py,tool,Pantry (Kitchen model),pantry,f78dce9ad265226e820511d6d2cf232eb48866b3b6db65a837c2370712a6ee91
 skills/skill-creator.md,skill,Skill Creator,skill-creator,dcd4803e61e913e6fc27294184cd3a71f09f5e924ff20c8a9a20173e7b3c2bcf
 skills/docx.md,skill,Docx,docx,cfbabd72b1aec7dfaad988fb6e5e16b27dc744b9a00cae15db9045e95f53903e
 skills/canvas-design.md,skill,Canvas Design,canvas-design,a1f288079624402f30682753c1d43920b6664785698d21d3e7aa197450a6448b
@@ -19,4 +19,4 @@ skills/github-repo-analyzer.md,skill,GitHub Repo Analyzer,github-repo-analyzer,0
 skills/feature-validation-workflow.md,skill,Feature Validation Workflow,feature-validation-workflow,73d857f1523e884f152f99308e5f0c09de143b6abf8377d32bb935ade8a3c21a
 skills/github-repo-expert.md,skill,Github Repo Expert,github-repo-expert,2c72be7ce3c862afc9283e82dc2fbd4a5d244c6fd15696e66df6409bd611428f
 skills/openwebui-tools.md,skill,Openwebui Tools,openwebui-tools,7d5cac3fb0425eb37701f21595416e1f8548e8b4d10659dab9ee44b908504f6f
-skills/kitchen-pantry.md,skill,Kitchen Pantry,kitchen-pantry,48191f65c2d5437e09ee13e5c0b0a4949038c2ee4e30d0168cc60eaee74d0679
+skills/kitchen-pantry.md,skill,Kitchen Pantry,kitchen-pantry,48db15fae9e02eb22f09346e7842a58af28bc747a2f4af01d4f73bd9ce17083e

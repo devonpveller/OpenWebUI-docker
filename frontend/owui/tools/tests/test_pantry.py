@@ -968,6 +968,22 @@ class SkillRules(unittest.TestCase):
         self.assertLess(a.index("show a table"), a.index("preview=false"))
         self.assertIn("will NOT be subtracted", a)
         self.assertIn("`unconvertible`", a)
+        # step 4: cook needs rule 7's commit phrase, not any yes; log_cooked_meal keeps a plain yes
+        step4 = a[a.index("(4)"):]
+        self.assertIn("for `cook`, the commit phrase of rule 7", step4)
+        self.assertIn("we're making this one", step4)
+        self.assertIn("for `log_cooked_meal`, a plain yes", step4)
+        self.assertIn("Subtract these?", step4)
+        self.assertIn("do not demand the phrase twice", step4)
+
+    def test_flow_10_example_does_not_contradict_rule_c(self):
+        self.assertNotIn("olive oil", self.skill.lower().split("10. **accuracy report.**")[1].split("\n")[0])
+        self.assertIn("canned tomatoes", self.skill)
+
+    def test_cook_docstring_requires_the_commit_phrase(self):
+        doc = pantry.Tools.cook.__doc__
+        self.assertIn("commit phrase", doc)
+        self.assertIn("we're making this one", doc)
 
     def test_rule_b_keep_real_units(self):
         b = self._rule("B")

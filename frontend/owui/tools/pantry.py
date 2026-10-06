@@ -544,7 +544,7 @@ class Tools:
         __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
     ) -> str:
         """
-        Subtract tonight's dinner from the pantry. PREVIEW FIRST: the default call (preview=true) writes NOTHING and returns what would be subtracted; show that table, and only after the user says yes (or "we're making this one") call again with preview=false to write it.
+        Subtract tonight's dinner from the pantry. PREVIEW FIRST: the default call (preview=true) writes NOTHING and returns what would be subtracted; show that table, and call again with preview=false to write it ONLY after the user says the commit phrase ("yes, we're making this one" or a clear variant; if they already said it before the preview, a plain yes to "subtract these?" is enough).
         Returns deductions and shortfalls (shortfalls do not block) plus unconvertible/unmatched lines that will NOT be subtracted. Recipe quantities keep their real units (cup, tsp, g); a counted item with a package size (e.g. a jug) is deducted as a fraction of the package. A 409 allergen_conflict means nothing was written - tell the user.
 
         :param recipe_id: Recipe to cook.
