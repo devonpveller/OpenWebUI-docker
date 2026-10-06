@@ -47,7 +47,7 @@ reads) unless marked otherwise. Confirm a row before relying on it — services 
 | `openbrain-podcast` (`link-enrich.ts`) | emails from `thoughts` via `AiNewsSection` (BrainClient → openbrain-rest) | openbrain-rest | ops | Filters `gmailLabels` startsWith `brain/`. **Zero brain/ mail in window = silent no-episode (exit 0)**. Chains: gmail-pull → podcast → digest |
 | wiki compiler (`generate-wiki.mjs`) | `thoughts`, `thought_entities(content)` **raw selects** when invoked without `--semantic-expand` (the wiki-service path) | PostgREST | was ungoverned → U5 home #4; bound since thoughts RLS | Publishes into 48k `wiki_pages` |
 | `openbrain-suggestion-worker`, `openbrain-curator` | thoughts/corpus | PostgREST/direct | ops | not deeply verified — confirm before contract changes |
-| OWUI tools (`deep_research.py`, plugins) | via `openbrain-mcpo` / `-ext` → openbrain-mcp | MCP | ops | mcpo-ext has a CPU-spin failure mode |
+| OWUI tools (`deep_research.py`, plugins) | via `openbrain-mcpo` / `-ext` → openbrain-mcp | MCP | ops | mcpo (both) has a CPU-spin failure mode; `check-openbrain-health.ps1` restarts a sustained spin (capped hourly, alerts) |
 | `open_notebook` | PostgREST (same net) | HTTP | RLS-bound | podcast audio renderer; SurrealDB is its own store |
 | agent-org Tier-2 advisor | `openbrain-research` | HTTP | — | research lane on llm-queue |
 | Harness recall (clause 8 seam) | `agent_memories` + recall traces | ops gateway | ops | |
