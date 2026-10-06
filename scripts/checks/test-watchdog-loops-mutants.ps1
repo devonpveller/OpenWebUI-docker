@@ -109,7 +109,7 @@ $mutants = [ordered]@{
     'scrub-pass-title-colon' = @('($key -ceq ''Pass'')', '$false', 'P34')
     'scrub-pass-sep-us-only' = @('($key -imatch ''[_.\-]pass$'')', '($key -imatch ''_pass$'')', 'P34')
     'scrub-pass-sep-eq-only' = @('($key -imatch ''[_.\-]pass$'')', '(($key -imatch ''[_.\-]pass$'') -and ($sep -match ''=''))', 'P34')
-    'scrub-path-exempt-back' = @("            if (`$sep -notmatch '=') {`n                `$mixed", "            if (`$bare -match '^(?:/|~|[A-Za-z]:\\|[^\s/]+\.[A-Za-z0-9]{1,6}`$)') { return `$x.Value }`n            if (`$sep -notmatch '=') {`n                `$mixed", 'P34')
+    'scrub-path-exempt-back' = @("            if (`$sep -notmatch '=') {`n                # After ':' a value stays readable", "            if (`$bare -match '^(?:/|~|[A-Za-z]:\\|[^\s/]+\\.[A-Za-z0-9]{1,6}`$)') { return `$x.Value }`n            if (`$sep -notmatch '=') {`n                # After ':' a value stays readable", 'P34')
     'scrub-colon-always'     = @('if (($val -eq $bare) -and ($word -match ''^[A-Za-z]{1,15}$'')) { return $x.Value }', '$null = 0', 'P34')
     'scrub-colon-word-digits' = @('$word -match ''^[A-Za-z]{1,15}$''', '$word -match ''^[A-Za-z0-9]{1,15}$''', 'P34')
     'scrub-colon-word-punct' = @('$word -match ''^[A-Za-z]{1,15}$''', '$word -match ''^[^\s]{1,15}$''', 'P34')
