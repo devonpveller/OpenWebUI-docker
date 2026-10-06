@@ -47,7 +47,7 @@
 #   - openbrain-db          running               (the dependency)
 #   - openbrain-mcp         running + STALE-POOL guard (db started after mcp -> restart)
 #   - openbrain-mcpo[-ext]  running + CPU-SPIN guard (>= 80% of a core over 3+ intervals
-#                           of <= 20 min spanning 30+ min -> restart that one,
+#                           of <= 25 min spanning 30+ min -> restart that one,
 #                           capped 1/h, alert;
 #                           state in logs\.openbrain-cpu-spin-state.json)
 #   - openbrain-research    http://127.0.0.1:8818/health "db":true  (STALE-POOL guard, same class as mcp)

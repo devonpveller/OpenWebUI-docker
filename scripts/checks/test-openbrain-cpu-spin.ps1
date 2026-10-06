@@ -23,8 +23,9 @@
 # Usage (from the repo root):
 #   powershell -NoProfile -File scripts\checks\test-openbrain-cpu-spin.ps1
 #   ... -Script <another check-openbrain-health.ps1>   (e.g. the base, for RED)
-#   ... -Mutants      also builds the four mutants (window, hourly cap, allow-list,
-#                     no-data-no-action) from -Script and expects each to fail >=1 case
+#   ... -Mutants      also builds the 14 mutants M1-M14 (window, hourly cap, allow-list,
+#                     no-data-no-action, ... 60-s minimum interval) from -Script and
+#                     expects each to fail >=1 case
 # Exit code = number of failed cases (with -Mutants: + surviving mutants).
 
 [CmdletBinding()]
