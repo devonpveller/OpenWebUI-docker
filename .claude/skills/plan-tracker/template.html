@@ -1,0 +1,256 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Plan Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ground:#F2F4F3; --panel:#FFFFFF; --ink:#16201D; --muted:#5A6964; --rule:#D6DEDB; --soft:#E7ECEA;
+  --accent:#1F6F5C; --accent-soft:#DCEDE7;
+  --done:#2E7D4F; --done-bg:#DDF0E4;
+  --doing:#1F5FA8; --doing-bg:#DCE8F7;
+  --review:#6B4FA8; --review-bg:#E9E2F6;
+  --gate:#9A6700; --gate-bg:#F8EBC9;
+  --blocked:#B3261E; --blocked-bg:#F8DEDB;
+  --todo:#6B7874; --todo-bg:#E7ECEA;
+  --parked:#8A8F8D; --parked-bg:#ECEDEC;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --cond:"IBM Plex Sans Condensed","IBM Plex Sans",system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,"Cascadia Mono",Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --ground:#101614; --panel:#17201D; --ink:#E4ECE9; --muted:#9AABA5; --rule:#2A3632; --soft:#1F2A26;
+    --accent:#5FC2A5; --accent-soft:#1D3A32;
+    --done:#6FCF97; --done-bg:#183826; --doing:#7FB2F0; --doing-bg:#172D48;
+    --review:#B9A2EE; --review-bg:#2A2244; --gate:#E8B84A; --gate-bg:#3A2E10;
+    --blocked:#F28B82; --blocked-bg:#44201D; --todo:#9AABA5; --todo-bg:#232E2A;
+    --parked:#7F8784; --parked-bg:#1F2522;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --ground:#101614; --panel:#17201D; --ink:#E4ECE9; --muted:#9AABA5; --rule:#2A3632; --soft:#1F2A26;
+  --accent:#5FC2A5; --accent-soft:#1D3A32;
+  --done:#6FCF97; --done-bg:#183826; --doing:#7FB2F0; --doing-bg:#172D48;
+  --review:#B9A2EE; --review-bg:#2A2244; --gate:#E8B84A; --gate-bg:#3A2E10;
+  --blocked:#F28B82; --blocked-bg:#44201D; --todo:#9AABA5; --todo-bg:#232E2A;
+  --parked:#7F8784; --parked-bg:#1F2522;
+}
+*{box-sizing:border-box}
+body{background:var(--ground);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.5;padding-inline:16px;padding-block:28px 64px}
+.wrap{max-width:1040px;margin:0 auto;display:grid;gap:28px}
+h1,h2,h3{font-family:var(--cond);text-wrap:balance;margin:0;line-height:1.15}
+h1{font-size:clamp(28px,4.2vw,40px);font-weight:700;letter-spacing:-.01em}
+h2{font-size:20px;font-weight:600}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}
+.lede{max-width:68ch;color:var(--muted);margin:10px 0 0}
+.meta{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:12px}
+header{display:grid;gap:4px}
+
+/* phase rail */
+.rail{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.phase-card{background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:12px 14px;display:grid;gap:8px;text-decoration:none;color:inherit}
+.phase-card:hover{border-color:var(--accent)}
+.phase-card:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.phase-card .k{font-family:var(--mono);font-size:12px;color:var(--muted)}
+.phase-card .n{font-family:var(--cond);font-weight:600;font-size:16px}
+.bar{height:6px;border-radius:3px;background:var(--soft);overflow:hidden;display:flex}
+.bar span{display:block;height:100%}
+.phase-card .c{font-family:var(--mono);font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+
+/* needs-you */
+.needs{background:var(--gate-bg);border-radius:6px;padding:16px 18px;display:grid;gap:10px}
+.needs h2{color:var(--gate)}
+.needs ul{margin:0;padding-left:18px;display:grid;gap:6px}
+.needs li b{font-family:var(--mono);font-weight:500;font-size:13px}
+.needs .empty{color:var(--muted);margin:0}
+
+/* filters */
+.filters{display:flex;flex-wrap:wrap;gap:8px}
+.filters button{font:500 13px var(--sans);color:var(--ink);background:var(--panel);border:1px solid var(--rule);border-radius:999px;padding:5px 12px;cursor:pointer}
+.filters button[aria-pressed="true"]{background:var(--ink);color:var(--ground);border-color:var(--ink)}
+.filters button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* phases */
+section.phase{display:grid;gap:10px;scroll-margin-top:16px}
+.phase-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px}
+.phase-head .goal{color:var(--muted);font-size:14px;flex:1 1 320px}
+.rows{background:var(--panel);border:1px solid var(--rule);border-radius:6px;overflow:hidden}
+.row{display:grid;grid-template-columns:64px 1fr auto;gap:4px 14px;padding:12px 16px;border-top:1px solid var(--rule)}
+.row:first-child{border-top:0}
+.row .id{font-family:var(--mono);font-size:13px;color:var(--muted);padding-top:1px}
+.row .t{font-weight:600}
+.row .d{grid-column:2 / 4;color:var(--muted);font-size:14px;max-width:80ch}
+.row .ev{grid-column:2 / 4;font-family:var(--mono);font-size:12px;color:var(--accent);overflow-wrap:anywhere}
+.tags{display:flex;gap:6px;align-items:start;justify-content:flex-end;flex-wrap:wrap}
+.pill{font:500 12px var(--mono);padding:2px 8px;border-radius:999px;white-space:nowrap}
+.s-done{color:var(--done);background:var(--done-bg)}
+.s-doing{color:var(--doing);background:var(--doing-bg)}
+.s-review{color:var(--review);background:var(--review-bg)}
+.s-gate{color:var(--gate);background:var(--gate-bg)}
+.s-blocked{color:var(--blocked);background:var(--blocked-bg)}
+.s-todo{color:var(--todo);background:var(--todo-bg)}
+.s-parked{color:var(--parked);background:var(--parked-bg)}
+.owner{font:500 12px var(--mono);color:var(--muted);border:1px solid var(--rule);padding:1px 7px;border-radius:999px;white-space:nowrap}
+.owner.you{color:var(--gate);border-color:var(--gate)}
+.row.dim .t{color:var(--muted)}
+
+/* log */
+.log{background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:6px 16px}
+.log ol{list-style:none;margin:0;padding:0}
+.log li{display:grid;grid-template-columns:128px 1fr;gap:12px;padding:8px 0;border-top:1px solid var(--rule);font-size:14px}
+.log li:first-child{border-top:0}
+.log time{font-family:var(--mono);font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;padding-top:2px}
+
+.notice{background:var(--panel);border:1px dashed var(--rule);border-radius:6px;padding:18px;color:var(--muted)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 12px;font-size:13px;color:var(--muted);align-items:center}
+
+@media (max-width:620px){
+  .row{grid-template-columns:1fr}
+  .row .d,.row .ev{grid-column:1}
+  .tags{justify-content:flex-start}
+  .log li{grid-template-columns:1fr;gap:2px}
+}
+@media (prefers-reduced-motion:no-preference){ .bar span{transition:width .4s ease} }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Project · line</div>
+    <h1>Plan Tracker</h1>
+    <p class="lede" id="headline">One sentence stating the goal of this plan.</p>
+    <div class="meta" id="updated">Loading tracker…</div>
+  </header>
+
+  <nav class="rail" id="rail" aria-label="Phases"></nav>
+
+  <div class="needs" id="needs" aria-live="polite">
+    <h2>Waiting on you</h2>
+    <p class="empty">Nothing yet.</p>
+  </div>
+
+  <div class="filters" role="group" aria-label="Filter tasks">
+    <button type="button" data-f="all" aria-pressed="true">All</button>
+    <button type="button" data-f="open" aria-pressed="false">Open</button>
+    <button type="button" data-f="you" aria-pressed="false">Needs you</button>
+    <button type="button" data-f="done" aria-pressed="false">Done</button>
+  </div>
+  <div class="legend" aria-label="Status legend">
+    <span class="pill s-todo">todo</span><span class="pill s-doing">doing</span><span class="pill s-review">in test/review</span><span class="pill s-gate">gate: you</span><span class="pill s-blocked">blocked</span><span class="pill s-done">done</span><span class="pill s-parked">parked</span>
+  </div>
+
+  <main id="phases"><div class="notice">Tracker rows load from this page’s shared store when it is opened in claude.ai.</div></main>
+
+  <section>
+    <h2 style="margin-bottom:10px">Activity</h2>
+    <div class="log"><ol id="log"><li><time>—</time><span>No entries yet.</span></li></ol></div>
+  </section>
+</div>
+
+<script>
+(function(){
+  const STATUS_LABEL={todo:"todo",doing:"doing",review:"in test/review",gate:"gate: you",blocked:"blocked",done:"done",parked:"parked"};
+  const ORDER=["done","review","doing","gate","blocked","todo","parked"];
+  let tasks=[], phases=[], filter="all";
+  try{ const f=localStorage.getItem("tracker.filter"); if(f) filter=f; }catch(e){}
+
+  const el=(tag,cls,text)=>{const n=document.createElement(tag); if(cls) n.className=cls; if(text!=null) n.textContent=text; return n;};
+  const fmt=iso=>{ if(!iso) return ""; const d=new Date(iso); if(isNaN(d)) return String(iso);
+    return d.toLocaleString(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}); };
+  const needsYou=t=>t.status==="gate"||(t.owner==="operator"&&t.status!=="done"&&t.status!=="parked");
+
+  function setFilter(f){
+    filter=f;
+    try{ localStorage.setItem("tracker.filter",f);}catch(e){}
+    document.querySelectorAll(".filters button").forEach(b=>b.setAttribute("aria-pressed",String(b.dataset.f===f)));
+    renderPhases();
+  }
+  document.querySelectorAll(".filters button").forEach(b=>b.addEventListener("click",()=>setFilter(b.dataset.f)));
+  document.querySelectorAll(".filters button").forEach(b=>b.setAttribute("aria-pressed",String(b.dataset.f===filter)));
+
+  function phaseList(){
+    if(phases.length) return phases;
+    const keys=[...new Set(tasks.map(t=>t.phase))].sort();
+    return keys.map(k=>({key:k,name:k,goal:""}));
+  }
+
+  function renderRail(){
+    const rail=document.getElementById("rail"); rail.replaceChildren();
+    for(const p of phaseList()){
+      const ts=tasks.filter(t=>t.phase===p.key); if(!ts.length) continue;
+      const a=el("a","phase-card"); a.href="#ph-"+p.key;
+      a.append(el("span","k","Phase "+p.key), el("span","n",p.name));
+      const bar=el("div","bar"); bar.setAttribute("aria-hidden","true");
+      for(const s of ORDER){ const c=ts.filter(t=>t.status===s).length; if(!c) continue;
+        const sp=el("span"); sp.style.width=(100*c/ts.length)+"%"; sp.style.background=`var(--${s==="todo"?"rule":s})`; bar.append(sp); }
+      const done=ts.filter(t=>t.status==="done").length;
+      a.append(bar, el("span","c",`${done} of ${ts.length} done`));
+      rail.append(a);
+    }
+  }
+
+  function renderNeeds(){
+    const box=document.getElementById("needs"); const h=box.querySelector("h2"); box.replaceChildren(h);
+    const list=tasks.filter(needsYou).sort((a,b)=>(a.phase+a.order).localeCompare(b.phase+b.order));
+    if(!list.length){ box.append(el("p","empty","Nothing is waiting on you right now.")); return; }
+    const ul=el("ul");
+    for(const t of list){ const li=el("li"); const b=el("b",null,t.id+" "); li.append(b, document.createTextNode(t.title+(t.ask?" — "+t.ask:""))); ul.append(li); }
+    box.append(ul);
+  }
+
+  function renderPhases(){
+    const main=document.getElementById("phases"); main.replaceChildren();
+    if(!tasks.length){ main.append(el("div","notice","No tasks recorded yet.")); return; }
+    for(const p of phaseList()){
+      let ts=tasks.filter(t=>t.phase===p.key).sort((a,b)=>String(a.order).localeCompare(String(b.order),undefined,{numeric:true}));
+      if(filter==="open") ts=ts.filter(t=>t.status!=="done"&&t.status!=="parked");
+      if(filter==="you") ts=ts.filter(needsYou);
+      if(filter==="done") ts=ts.filter(t=>t.status==="done");
+      if(!ts.length) continue;
+      const sec=el("section","phase"); sec.id="ph-"+p.key;
+      const head=el("div","phase-head"); head.append(el("h2",null,`${p.key} · ${p.name}`)); if(p.goal) head.append(el("span","goal",p.goal));
+      const rows=el("div","rows");
+      for(const t of ts){
+        const r=el("div","row"+(t.status==="parked"?" dim":""));
+        r.append(el("div","id",t.id));
+        r.append(el("div","t",t.title));
+        const tags=el("div","tags");
+        tags.append(el("span","pill s-"+(STATUS_LABEL[t.status]?t.status:"todo"),STATUS_LABEL[t.status]||t.status||"todo"));
+        tags.append(el("span","owner"+(t.owner==="operator"?" you":""),t.owner==="operator"?"you":(t.owner||"claude")));
+        r.append(tags);
+        if(t.detail) r.append(el("div","d",t.detail));
+        if(t.evidence) r.append(el("div","ev",t.evidence));
+        rows.append(r);
+      }
+      sec.append(head,rows); main.append(sec);
+    }
+    if(!main.children.length) main.append(el("div","notice","No tasks match this filter."));
+  }
+
+  function renderAll(){ renderRail(); renderNeeds(); renderPhases(); }
+
+  function renderLog(entries){
+    const ol=document.getElementById("log"); ol.replaceChildren();
+    if(!entries||!entries.length){ const li=el("li"); li.append(el("time",null,"—"),el("span",null,"No entries yet.")); ol.append(li); return; }
+    for(const e of entries.slice(0,40)){ const li=el("li"); const tm=el("time",null,fmt(e.at)); tm.dateTime=e.at||""; li.append(tm, el("span",null,e.text||"")); ol.append(li); }
+  }
+
+  (async()=>{
+    const db=await (window.claude?.use ? window.claude.use("db") : Promise.resolve(null));
+    if(!db){ document.getElementById("updated").textContent="Open this page in claude.ai to see live task status."; return; }
+    const upd=document.getElementById("updated");
+    db.collection("tasks").onSnapshot(s=>{ tasks=s.docs.map(d=>({id:d.id,...d.data()})); renderAll(); },
+      ()=>{ upd.textContent="Task list could not load. Reload the page to try again."; });
+    db.doc("meta/phases").onSnapshot(s=>{ phases=(s.exists&&Array.isArray(s.data().list))?s.data().list:[]; renderAll(); },()=>{});
+    db.doc("meta/summary").onSnapshot(s=>{
+      if(!s.exists) return; const d=s.data();
+      if(d.headline) document.getElementById("headline").textContent=d.headline;
+      upd.textContent=(d.updated?"Updated "+fmt(d.updated):"")+(d.next?" · Next: "+d.next:"");
+    },()=>{});
+    db.doc("meta/log").onSnapshot(s=>{ renderLog(s.exists?s.data().entries:[]); },()=>{});
+  })();
+})();
+</script>
+
+</body></html>
