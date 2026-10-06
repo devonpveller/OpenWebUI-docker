@@ -82,6 +82,7 @@ section.phase{display:grid;gap:10px;scroll-margin-top:16px}
 .row .id{font-family:var(--mono);font-size:13px;color:var(--muted);padding-top:1px}
 .row .t{font-weight:600}
 .row .d{grid-column:2 / 4;color:var(--muted);font-size:14px;max-width:80ch}
+.row .d .lbl{font:500 11px var(--mono);letter-spacing:.04em;text-transform:uppercase;margin-right:8px}
 .row .ev{grid-column:2 / 4;font-family:var(--mono);font-size:12px;color:var(--accent);overflow-wrap:anywhere}
 .tags{display:flex;gap:6px;align-items:start;justify-content:flex-end;flex-wrap:wrap}
 .pill{font:500 12px var(--mono);padding:2px 8px;border-radius:999px;white-space:nowrap}
@@ -220,6 +221,7 @@ section.phase{display:grid;gap:10px;scroll-margin-top:16px}
         tags.append(el("span","owner"+(t.owner==="operator"?" you":""),t.owner==="operator"?"you":(t.owner||"claude")));
         r.append(tags);
         if(t.detail) r.append(el("div","d",t.detail));
+        if(t.progress){ const pg=el("div","d prog"); pg.append(el("span","lbl","Progress"),document.createTextNode(String(t.progress))); r.append(pg); }
         if(t.evidence) r.append(el("div","ev",t.evidence));
         rows.append(r);
       }

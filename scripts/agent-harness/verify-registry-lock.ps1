@@ -56,6 +56,12 @@ $gitDir = (Resolve-Path (Join-Path $repo ".git")).Path
 $registry = Join-Path $gitDir "agent-worktrees\worktrees.json"
 if (-not $registry.StartsWith($root)) { throw "refusing: registry $registry is outside the scratch root" }
 
+# Saved here and restored in the finally below: run in-session (as the header shows) this must not
+# leave the caller's shell with a dead Docker endpoint, the stub on PATH or the work line forced.
+$savedEnv = @{}
+foreach ($n in @("PATH", "DOCKER_HOST", "AI_STACK_WORK_LINE", "AI_STACK_WORKTREE_STATE")) {
+    $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n, "Process")
+}
 $env:PATH = "$stub;$env:PATH"
 $env:DOCKER_HOST = "tcp://127.0.0.1:1"
 $env:AI_STACK_WORK_LINE = "dev"
@@ -385,6 +391,72 @@ try {
         $okC2 = ($bads.Count -eq 2) -and ($contents -contains "first { corrupt") -and ($contents -contains "second { corrupt")
         Write-Host ("[set-aside copies] files={0} both_incidents_kept={1} -> {2}" -f $bads.Count, (($contents -contains "first { corrupt") -and ($contents -contains "second { corrupt")), $(if ($okC2) { "OK" } else { "FAIL" }))
         if (-not $okC2) { $fail++ }
+        # (c2) f2-harness (ef-wt-lock A and B): two set-asides in the SAME millisecond (clock pinned in
+        # a child: the helper's stamp seam and a Get-Date shim, so the base's local-time stamp collides
+        # too) never overwrite each other, and a skipped newer .tmp whose rename target exists is kept
+        # under a unique name, never reported kept and then overwritten.
+        $pinPs1 = Join-Path $root "upd-pin.ps1"
+        Set-Content -Path $pinPs1 -Encoding ASCII -Value @(
+            "param([string]`$Reg, [string]`$Id)",
+            "`$ErrorActionPreference = 'Stop'",
+            ". '$lockLib'",
+            "`$global:WtlAsideStamp = '20260101000000000'",
+            "function global:Get-Date { [DateTime]::ParseExact('20260101000000000', 'yyyyMMddHHmmssfff', [Globalization.CultureInfo]::InvariantCulture) }",
+            "try { Update-WorktreeRegistry -Registry `$Reg -Mutate ({ param(`$r) `$r[`$Id] = @{ id = `$Id; path = 'x' } }.GetNewClosure()); Write-Output 'ok' }",
+            "catch { Write-Output ('ERR ' + `$_.Exception.Message); exit 1 }")
+        Reset-Left
+        Set-Content -Path $lfReg -Value "first { corrupt" -Encoding ASCII
+        $null = Invoke-PsFile $pinPs1 @($lfReg, "one")
+        Set-Content -Path $lfReg -Value "second { corrupt" -Encoding ASCII
+        $null = Invoke-PsFile $pinPs1 @($lfReg, "two")
+        $bads = @(Get-ChildItem $lf -Filter "worktrees.json.bad-*")
+        $contents = @($bads | ForEach-Object { (Get-Content -Raw $_.FullName).Trim() })
+        $okA3 = ($bads.Count -eq 2) -and ($contents -contains "first { corrupt") -and ($contents -contains "second { corrupt")
+        Write-Host ("[same-ms set-aside] files={0} both_incidents_kept={1} -> {2}" -f $bads.Count, (($contents -contains "first { corrupt") -and ($contents -contains "second { corrupt")), $(if ($okA3) { "OK" } else { "FAIL" }))
+        if (-not $okA3) { $fail++ }
+        Reset-Left
+        Set-Content -Path "$lfReg~RF9a9a9a.TMP" -Value (New-RegJson 5 "g") -Encoding ASCII
+        (Get-Item "$lfReg~RF9a9a9a.TMP").LastWriteTimeUtc = [DateTime]::UtcNow.AddDays(-3)
+        Set-Content -Path "$lfReg.tmp" -Value '{ "worktrees": { "x": ' -Encoding ASCII
+        Set-Content -Path "$lfReg.tmp.bad-20260101000000000" -Value "earlier skipped copy" -Encoding ASCII
+        $rb2 = Invoke-PsFile $pinPs1 @($lfReg, "added")
+        $tbads = @(Get-ChildItem $lf -Filter "worktrees.json.tmp.bad-*")
+        $tcont = @($tbads | ForEach-Object { (Get-Content -Raw $_.FullName).Trim() })
+        $okB2 = ($rb2.Exit -eq 0) -and ((Get-RowCount $lfReg) -eq 6) -and ($tbads.Count -eq 2) -and ($tcont -contains "earlier skipped copy") -and ($tcont -contains '{ "worktrees": { "x":')
+        Write-Host ("[same-ms skipped leftover] rows={0}/6 bad_files={1} earlier_kept={2} skipped_bytes_kept={3} -> {4}" -f (Get-RowCount $lfReg), $tbads.Count, ($tcont -contains "earlier skipped copy"), ($tcont -contains '{ "worktrees": { "x":'), $(if ($okB2) { "OK" } else { "FAIL" }))
+        if (-not $okB2) { $fail++ }
+        # (c3) f2-harness (ef-wt-lock C): the drill-row cleanup in verify-merge-protocol.ps1's
+        # preamble goes through the registry lock. The preamble text is cut out of the script and run
+        # in a child against a SCRATCH state dir (AI_STACK_WORKTREE_STATE), never the live registry.
+        $vmpText = [System.IO.File]::ReadAllText((Join-Path $ToolkitDir "verify-merge-protocol.ps1"))
+        $vmpA = $vmpText.IndexOf('$reg = Join-Path (Get-SharedStateDir) "worktrees.json"')
+        $vmpB = $vmpText.IndexOf('$devBefore =')
+        if ($vmpA -lt 0 -or $vmpB -le $vmpA) { Write-Host "[drill preamble lock] preamble not found -> FAIL"; $fail++ }
+        else {
+            $stDir = Join-Path $root "vmpstate"; New-Item -ItemType Directory -Force -Path $stDir | Out-Null
+            $vmpReg = Join-Path $stDir "worktrees.json"
+            $vmpPs1 = Join-Path $root "vmp-preamble.ps1"
+            Set-Content -Path $vmpPs1 -Encoding ASCII -Value (@("`$ErrorActionPreference = 'Continue'", ". '$(Join-Path $ToolkitDir 'common.ps1')'") + @($vmpText.Substring($vmpA, $vmpB - $vmpA) -split "`r?`n"))
+            $rowsJson = (@{ worktrees = @{ drilla = @{ id = "drilla" }; drillb = @{ id = "drillb" }; keepme = @{ id = "keepme" } } } | ConvertTo-Json -Depth 5)
+            Set-Content -Path $vmpReg -Value $rowsJson -Encoding ASCII
+            $envState = $env:AI_STACK_WORKTREE_STATE
+            $env:AI_STACK_WORKTREE_STATE = $stDir; $env:AI_STACK_REGISTRY_LOCK_TIMEOUT_SEC = "2"
+            try {
+                $vh = Start-Holder "$vmpReg.lock"
+                try { $null = Invoke-PsFile $vmpPs1 @() } finally { $vh.Kill() }
+                $heldRows = @((Get-Content -Raw $vmpReg | ConvertFrom-Json).worktrees.PSObject.Properties.Name)
+                $heldOk = ($heldRows -contains "drilla") -and ($heldRows -contains "drillb") -and ($heldRows -contains "keepme")
+                Start-Sleep -Milliseconds 300
+                $null = Invoke-PsFile $vmpPs1 @()
+                $freeRows = @((Get-Content -Raw $vmpReg | ConvertFrom-Json).worktrees.PSObject.Properties.Name)
+                $freeOk = ($freeRows.Count -eq 1) -and ($freeRows -contains "keepme")
+            } finally {
+                $env:AI_STACK_WORKTREE_STATE = $envState; Remove-Item Env:AI_STACK_REGISTRY_LOCK_TIMEOUT_SEC -ErrorAction SilentlyContinue
+            }
+            $okV = $heldOk -and $freeOk
+            Write-Host ("[drill preamble lock] rows_untouched_while_lock_held={0} rows_cleaned_when_free={1} -> {2}" -f $heldOk, $freeOk, $(if ($okV) { "OK" } else { "FAIL" }))
+            if (-not $okV) { $fail++ }
+        }
         # (d) ~RF leftovers of THIS registry beside a present registry are cleaned after a good
         # swap; another file's ~RF is left alone.
         Reset-Left
@@ -464,6 +536,7 @@ finally {
     $p = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     try { $null = & git -C $repo worktree prune 2>&1 } finally { $ErrorActionPreference = $p }
     Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
+    foreach ($n in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($n, $savedEnv[$n], "Process") }
 }
 if ($fail) { Write-Host "RESULT: RED ($fail scenario(s) failed)" -ForegroundColor Red; exit 1 }
 Write-Host "RESULT: GREEN" -ForegroundColor Green

@@ -97,15 +97,16 @@ Clear-DrillQueue
 # the exact failure this toolkit exists to prevent, and it was mine.
 $reg = Join-Path (Get-SharedStateDir) "worktrees.json"
 if (Test-Path $reg) {
+    # The write goes through Update-WorktreeRegistry (lock.ps1): a locked read-modify-write, so
+    # it cannot interleave with a provision or removal by another agent. A registry that is not
+    # readable as a registry is left alone (Update-WorktreeRegistry would set it aside).
     try {
-        $rows = (Get-Content -Raw -Path $reg | ConvertFrom-Json).worktrees
-        $keep = [ordered]@{}
-        if ($rows) {
-            foreach ($prop in $rows.PSObject.Properties) {
-                if ($prop.Name -notin @("drilla", "drillb")) { $keep[$prop.Name] = $prop.Value }
-            }
+        $cur = Read-RegistryJson -Path $reg
+        if ((Test-RegistryShape $cur) -and (@($cur.worktrees.PSObject.Properties.Name) -match '^(drilla|drillb)$')) {
+            Update-WorktreeRegistry -Registry $reg -Mutate ({ param($r)
+                foreach ($id in @("drilla", "drillb")) { if ($r.ContainsKey($id)) { $r.Remove($id) } }
+            }.GetNewClosure())
         }
-        (@{ worktrees = $keep } | ConvertTo-Json -Depth 6) | Set-Content $reg -Encoding ASCII
     } catch { }   # unreadable registry: leave it alone rather than truncate someone else's state
 }
 

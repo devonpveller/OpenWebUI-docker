@@ -2192,7 +2192,7 @@ function Get-ContainerRuntimeFacts {
 # (Bearer/Basic/Token, any length) and bare Bearer/Basic values that look like
 # credentials; key=value and key: value pairs whose key names a secret
 # (password, token, secret, api key, dsn ...) with unquoted values running past
-# ';' and ',' unless the next key starts; CLI flags (--password <pw>,
+# ';', ',' and '&' unless the next key starts; CLI flags (--password <pw>,
 # --token <t>, mysql -p<pw>, docker login -p <pw>, curl -u user:pw); vendor
 # token prefixes (sk-, ghp_, github_pat_, xox*-, AKIA, tskey-, hf_ ...), JWTs,
 # Telegram bot tokens, Slack/Discord webhook secrets; PEM private-key blocks;
@@ -2240,7 +2240,7 @@ function Hide-CredentialShapes {
         #    A bare Bearer/Basic value: credential-shaped (a digit, 20+, interior
         #    capitals among lowercase, or + / =) - prose ("basic configuration",
         #    "Basic Authentication") is left alone.
-        $bare = [System.Text.RegularExpressions.MatchEvaluator]{
+        $bareAuth = [System.Text.RegularExpressions.MatchEvaluator]{
             param($x)
             $v = $x.Groups[2].Value
             $inner = $v.Substring(1)
@@ -2248,7 +2248,7 @@ function Hide-CredentialShapes {
             if (-not $shaped) { return $x.Value }
             return $x.Groups[1].Value + ' [redacted]'
         }
-        $t = [regex]::Replace($t, '(?i)\b(bearer|basic)\s+([A-Za-z0-9._~+/=\-]{8,512})', $bare)
+        $t = [regex]::Replace($t, '(?i)\b(bearer|basic)\s+([A-Za-z0-9._~+/=\-]{8,512})', $bareAuth)
         # 3. Vendor token prefixes, JWTs, Telegram bot tokens, webhook secrets.
         $t = [regex]::Replace($t, '(?<![A-Za-z0-9_\-])(?:sk-(?:ant-|proj-)?[A-Za-z0-9_\-]{16,256}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{10,256}|xox[abeprs]-[A-Za-z0-9\-]{10,256}|xapp-[A-Za-z0-9\-]{10,256}|hf_[A-Za-z0-9]{20,256}|tskey-(?:auth-|api-|client-)?[A-Za-z0-9_\-]{10,256}|AIza[0-9A-Za-z_\-]{30,256}|glpat-[A-Za-z0-9_\-]{20,256}|npm_[A-Za-z0-9]{30,256}|github_pat_[A-Za-z0-9_]{20,256}|gh[pousr]_[A-Za-z0-9]{20,256}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_\-]{5,512}\.eyJ[A-Za-z0-9_\-]{5,512}\.[A-Za-z0-9_\-]{5,512})', $m)
         $t = [regex]::Replace($t, '(?<![0-9])[0-9]{8,10}:[A-Za-z0-9_\-]{35}(?![A-Za-z0-9_\-])', $m)
