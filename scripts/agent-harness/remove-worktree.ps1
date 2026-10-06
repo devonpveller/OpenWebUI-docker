@@ -54,17 +54,23 @@ function Invoke-GitQuiet {
 function Read-Registry {
     if (-not (Test-Path $Registry)) { return @{} }
     $out = @{}
-    $parsed = Get-Content -Raw -Path $Registry | ConvertFrom-Json
+    $parsed = Read-RegistryJson -Path $Registry
+    if ($null -eq $parsed) { return $out }
     if ($parsed.worktrees) {
         foreach ($p in $parsed.worktrees.PSObject.Properties) { $out[$p.Name] = $p.Value }
     }
     return $out
 }
 
-function Write-Registry([hashtable]$Rows) {
-    $tmp = "$Registry.tmp"
-    (@{ worktrees = $Rows } | ConvertTo-Json -Depth 6) | Set-Content -Path $tmp -Encoding ASCII
-    Move-Item -Path $tmp -Destination $Registry -Force
+# Locked read-modify-write (lock.ps1): re-reads the file under the lock and drops only these
+# ids, so a row another process added since our first read is never lost.
+function Remove-RegistryRows([string[]]$Ids) {
+    try {
+        Update-WorktreeRegistry -Registry $Registry -Mutate ({ param($r) foreach ($i in $Ids) { $r.Remove($i) } }.GetNewClosure())
+    } catch {
+        Fail (("{0}`n       The registry row(s) for {1} were NOT dropped (git and the branch may already be gone). " +
+               "Once the holder exits, run: remove-worktree.ps1 -PruneRegistry") -f $_.Exception.Message, ($Ids -join ", "))
+    }
 }
 
 $rows = Read-Registry
@@ -74,8 +80,7 @@ if ($PruneRegistry) {
     if (-not $gone.Count) { Write-Host "Registry clean - every row's path exists." -ForegroundColor Green; exit 0 }
     Write-Host ("Dropping {0} row(s) whose worktree is gone: {1}" -f $gone.Count, ($gone -join ", ")) -ForegroundColor Yellow
     if (-not $WhatIfOnly) {
-        foreach ($g in $gone) { $rows.Remove($g) }
-        Write-Registry $rows
+        Remove-RegistryRows $gone
         $null = Invoke-GitQuiet @('worktree','prune')
     }
     exit 0
@@ -103,7 +108,7 @@ $path = $row.path
 $branch = $row.branch
 if (-not (Test-Path $path)) {
     Write-Host "Worktree path already gone; dropping the registry row." -ForegroundColor Yellow
-    if (-not $WhatIfOnly) { $rows.Remove($Id); Write-Registry $rows; $null = Invoke-GitQuiet @('worktree','prune') }
+    if (-not $WhatIfOnly) { Remove-RegistryRows @($Id); $null = Invoke-GitQuiet @('worktree','prune') }
     exit 0
 }
 
@@ -223,8 +228,7 @@ if (-not $KeepBranch) {
     $branchExit = Invoke-GitQuiet @('branch','-D',$branch)
     if ($branchExit -ne 0) { Write-Host ("  WARNING: could not delete branch {0} - remove it by hand" -f $branch) -ForegroundColor Yellow }
 }
-$rows.Remove($Id)
-Write-Registry $rows
+Remove-RegistryRows @($Id)
 $null = Invoke-GitQuiet @('worktree','prune')
 # One more attempt at the directory, now that git has let go of it. Best-effort: the point
 # of the retry is that the common holder (a shell that has since moved) is often gone by
