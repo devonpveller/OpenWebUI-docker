@@ -211,6 +211,11 @@ class LittleCoderDaemon:
         # its container-local HOME, which a recreate empties, so `_ensure_git_credentials` re-stores
         # it before every task (cf-lc-token, 2026-09-28 — the token no longer rides in .git/config).
         self._focus_token: str | None = None
+        # A fork's `upstream` URL and read token as the last /project gave them (f2-runtime), held
+        # like `_focus_token` - in memory ONLY - so the pre-task re-store re-stores upstream's OWN
+        # entry too: an executor recreate between /project and the task empties both entries.
+        self._focus_upstream: str | None = None
+        self._focus_upstream_token: str | None = None
         # True once a /project (clone, switch or NOOP) set the focus in THIS process. False for a
         # focus seeded from disk after a restart: the caller's token is then unknown, so the
         # pre-task re-store only fills an EMPTY store (after an executor recreate) with
@@ -255,15 +260,23 @@ class LittleCoderDaemon:
         (2026-09-28) the token is never in `.git/config`; it sits in the executor's credential store,
         which lives in the executor's HOME and is emptied when that container is recreated. A task
         dispatched without a fresh /project (OWUI, or after an executor restart) would otherwise push
-        with no credential. Best-effort: a failure here leaves the task to report its own push error."""
-        token = self._focus_token or os.environ.get("LC_DEPLOY_TOKEN") or None
-        if not token or self.current_focus is None:
+        with no credential. A fork's private `upstream` is re-stored too, under its OWN entry (never
+        origin's), with the token the last /project gave for it (f2-runtime); without one, nothing is
+        stored for upstream here. Best-effort: a failure here leaves the task to report its own error."""
+        if self.current_focus is None:
             return
-        try:
-            self.workspace.refresh_origin_auth(
-                self.current_focus, token, if_missing=not self._focus_from_project)
-        except (OpenTerminalError, OSError):  # executor unreachable — the task will surface it
-            pass
+        token = self._focus_token or os.environ.get("LC_DEPLOY_TOKEN") or None
+        if token:
+            try:
+                self.workspace.refresh_origin_auth(
+                    self.current_focus, token, if_missing=not self._focus_from_project)
+            except (OpenTerminalError, OSError):  # executor unreachable — the task will surface it
+                pass
+        if self._focus_upstream and self._focus_upstream_token:
+            try:
+                self.workspace.refresh_upstream_auth(self._focus_upstream_token)
+            except (OpenTerminalError, OSError):
+                pass
 
     async def shutdown(self) -> None:
         """SIGTERM drain (design §12.7): refuse new triggers, let the
@@ -561,6 +574,7 @@ class LittleCoderDaemon:
             noop_token = req.token or os.environ.get("LC_DEPLOY_TOKEN") or None
             self._focus_token = req.token or None
             self._focus_from_project = True
+            self._remember_upstream(req)
             if noop_token:
                 res = await asyncio.to_thread(
                     self.workspace.refresh_origin_auth, requested, noop_token
@@ -577,27 +591,37 @@ class LittleCoderDaemon:
                 out["upstream_ok"] = upstream_ok
             elif req.upstream and req.upstream_token:
                 # The remote survived but its credential may not: the credential store lives in the
-                # executor's HOME (emptied by a recreate or the credential scrub) while the remote
-                # lives in the workspace volume. Re-store upstream's OWN entry (never origin's, no
+                # executor's HOME (emptied by a recreate) while the remote lives in the workspace
+                # volume; after the credential scrub a legacy remote's in-URL token is gone and
+                # nothing is stored for it. Re-store upstream's OWN entry (never origin's, no
                 # token in the remote URL, remote not re-added). Without an upstream_token an
                 # existing entry is simply left alone (ef-lc-upstream).
                 res = await asyncio.to_thread(
                     self.workspace.refresh_upstream_auth, req.upstream_token, req.upstream
                 )
-                # `ok` = stored under the URL the remote ACTUALLY has (not the request's), so the
-                # flag is true only when `git fetch upstream` can use it. A caller whose URL differs
-                # from the remote's still gets the remote's entry; it is told via upstream_mismatch
-                # (the remote is never re-pointed here: that is a clone/switch decision).
+                # `ok` = stored under the URL the remote ACTUALLY has (not the request's). The flag
+                # is true only when `git fetch upstream` can use that entry: stored, AND the remote's
+                # URL carries no userinfo - git sends a URL's own `user[:secret]@` (another username,
+                # a stale in-URL token) instead of the entry, so then the flag is false and
+                # `upstream_url_has_userinfo` says why (f2-runtime F4; the remote is not re-pointed).
+                # A caller whose URL differs from the remote's still gets the remote's entry; it is
+                # told via upstream_mismatch (re-pointing is a clone/switch decision).
+                lines = res.stdout.split() if res.ok else []
+                userinfo = "userinfo" in lines
                 out["upstream"] = req.upstream
-                out["upstream_reauthed"] = bool(res.ok)
-                if res.ok and res.stdout.strip() == "differs":
+                out["upstream_reauthed"] = bool(res.ok) and not userinfo
+                if userinfo:
+                    out["upstream_url_has_userinfo"] = True
+                if "differs" in lines:
                     out["upstream_mismatch"] = True
                 self.audit.write(
                     "project_upstream_reauthed",
                     actor=req.actor,
                     repo=requested.canonical_url,
                     upstream=req.upstream,
-                    ok=bool(res.ok),
+                    ok=out["upstream_reauthed"],
+                    stored=bool(res.ok),
+                    url_has_userinfo=userinfo,
                     mismatch=bool(out.get("upstream_mismatch")),
                 )
             return out
@@ -622,6 +646,7 @@ class LittleCoderDaemon:
         token = req.token or os.environ.get("LC_DEPLOY_TOKEN") or None
         self._focus_token = req.token or None
         self._focus_from_project = True
+        self._remember_upstream(req)
         result = await asyncio.to_thread(
             self.workspace.clone, requested, token, req.recurse_submodules)
         if not result.ok:
@@ -650,6 +675,13 @@ class LittleCoderDaemon:
             out["upstream"] = req.upstream
             out["upstream_ok"] = upstream_ok
         return out
+
+    def _remember_upstream(self, req: ProjectRequest) -> None:
+        """Keep the focus's upstream URL + token for the pre-task re-store (`_ensure_git_credentials`).
+        Every /project replaces it, so a new focus never inherits an old focus's upstream token."""
+        both = bool(req.upstream and req.upstream_token)
+        self._focus_upstream = req.upstream if both else None
+        self._focus_upstream_token = req.upstream_token if both else None
 
     async def _bake_upstream(self, req: ProjectRequest, requested) -> bool:
         """Bake (or refresh) the read-only `upstream` remote for a fork and journal the

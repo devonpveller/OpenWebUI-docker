@@ -1281,15 +1281,22 @@ class Orchestrator:
         when a turn returns).
 
         Ordered by the append-only event id, not the timestamp: ids are assigned in write order,
-        so equal or skewed clocks cannot flip the answer."""
+        so equal or skewed clocks cannot flip the answer.
+
+        A later `dispatch_intent` resolves it too (f2-runtime G1): `_reengage` and `delegate` log
+        one BEFORE the pre-acquire prep, so a re-run the operator was told is "Dispatching workers
+        now" is the watchdog's again even when the bridge dies before `scheduler.acquire`. No loop:
+        every dispatch writes its intent (and acquire) BEFORE its refusal, so a re-run that is
+        refused again re-pins the effort; at most one watchdog re-run follows a lost intent."""
         async with self.db.session_factory() as s:
-            def _newest(kind: str):
+            def _newest(*kinds: str):
                 return (select(func.max(Event.id))
-                        .where(Event.effort_id == eid, Event.kind == kind))
+                        .where(Event.effort_id == eid, Event.kind.in_(kinds)))
             refused = (await s.execute(_newest("worker_model_refused"))).scalar_one_or_none()
             if refused is None:
                 return False
-            started = (await s.execute(_newest("worker_acquire"))).scalar_one_or_none()
+            started = (await s.execute(
+                _newest("worker_acquire", "dispatch_intent"))).scalar_one_or_none()
         return started is None or started < refused
 
     def _awaiting_operator_decision(self, eid: str) -> bool:
@@ -5286,6 +5293,9 @@ class Orchestrator:
             if mgmt_thread:
                 self._effort_mgmt_thread[eid] = mgmt_thread
             await self.router.update_effort_card(eid, "active")
+            # f2-runtime G1 - durable BEFORE the "Dispatching workers now" post: a bridge death
+            # between that post and scheduler.acquire must not leave a model refusal pinned.
+            await self.audit.log("dispatch_intent", effort_id=eid, payload={"source": "reengage"})
             self._spawn(self.delegate(eid, proj_channel, root, goal))
             started.append(eid)
             roots[eid] = root
@@ -6857,6 +6867,10 @@ class Orchestrator:
             log.info("delegate: %s is archived (operator abort) — not dispatching", effort_id)
             return
         self._delegating.add(effort_id)   # honest "work is happening now" marker
+        # f2-runtime G1 - the dispatch is accepted: record it before the pre-acquire prep (GitHub
+        # reads, exec gate, authorize), so a death in that window reads as a lost dispatch (the
+        # watchdog's) rather than an unresolved model refusal (see _model_refusal_unresolved).
+        await self.audit.log("dispatch_intent", effort_id=effort_id, payload={"source": "delegate"})
         # A (re-)dispatch supersedes a handoff wait — the operator's manual re-run must never be
         # ignored because a stale wait marker says the effort is still paused on a fix.
         self._handoff_waiting.discard(effort_id)
@@ -13531,10 +13545,19 @@ class Orchestrator:
             # not the individual reply's post id.
             sess = await self.router.resolve_session(root)
             session_id = sess[1] if sess else effort_id
-            await self.router.wake(
-                effort_id, role="worker-default", thread_id=root, channel_id=proj_channel,
-                session_id=session_id, instruction=stripped,
-            )
+            try:
+                await self.router.wake(
+                    effort_id, role="worker-default", thread_id=root, channel_id=proj_channel,
+                    session_id=session_id, instruction=stripped,
+                )
+            except WorkerModelRefused as exc:
+                # f2-runtime O1 - a model refusal is HANDLED here: the router already audited it
+                # (worker_model_refused) and posted the actionable fix in this thread, and nothing
+                # ran. Raising would leave the event unprocessed, so every restart's catch-up would
+                # replay it (re-posting the refusal, or running this stale reply after the fix).
+                # Any other failure still raises and is retried by the EventGateway.
+                log.info("effort-thread reply on %s refused for its model (%s): handled",
+                         effort_id, exc.model)
             return
 
         # A top-level @mention in a project channel opens a NEW effort in that project.
