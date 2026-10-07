@@ -268,6 +268,29 @@ def _is_infra_failure(output: str) -> bool:
     return not _SOURCE_ERROR_RE.search(output)
 
 
+# ao-checks (gym-002, 2026-10-07) - a check whose failure is the SHELL refusing to run it: a parse error
+# (dash's "Syntax error: Unterminated quoted string" / "end of file unexpected", bash's "syntax error near
+# unexpected token" / "unexpected EOF") or a missing command ("sh: 1: x: not found", "x: command not
+# found"). Such a failure says nothing about the product - 14 of 15 gym corpus checks were commands
+# truncated mid-token that failed exactly this way on every delivery. Anchored on the shell's own message
+# prefix (`sh: 1: ` / `bash: line 1: ` / `sh: -c: line 0: `) so a product that prints "syntax error" or
+# "not found" in its own output is not mistaken for a broken check.
+_SHELL_BROKEN_RE = re.compile(
+    r"(?:^|\s)(?:/\S*/)?(?:ba|da)?sh: (?:-c: )?(?:line )?(?:\d+: )?"
+    r"(?:syntax error|unexpected EOF|[^\n:]+: (?:command )?not found)",
+    re.I | re.M)
+# Exit codes that mean the command never ran as a test of anything: 2 = shell misuse / parse error,
+# 126 = not executable, 127 = command not found.
+_SHELL_BROKEN_EXITS = frozenset({2, 126, 127})
+# The failing-log header of a burn-down the acceptance corpus started (ao-checks).
+_CORPUS_LOG_PREFIX = "acceptance corpus failing:\n"
+
+
+def _shell_broken(output: str) -> bool:
+    """True when `output` carries the shell's own parse-error / command-not-found message (ao-checks)."""
+    return bool(output) and bool(_SHELL_BROKEN_RE.search(output))
+
+
 # A monitor/PM CONCERN whose subject is an ENVIRONMENT/WORKSPACE symptom — the org can self-heal it
 # by re-cloning + retrying (operator-authorized autonomous recovery, 2026-07-13). Deliberately
 # SPECIFIC (a missing `.git`, an unpopulated clone, an uninitialised submodule, "reset the repository
@@ -1079,6 +1102,10 @@ class Orchestrator:
         # effort -> the CURRENT round's failing log (full, in-memory) — burn-down wakes read
         # the tail from here when the failure has no parseable error lines (runtime crashes).
         self._last_burn_log: dict[str, str] = {}
+        # ao-checks (gym-002) — effort → the durable acceptance checks a CORPUS-seeded burn-down must
+        # re-run every round, each with its latest error output. The burn-down used to re-check only
+        # the BUILD, which passed, so it declared green after one round while these checks stayed red.
+        self._burndown_corpus: dict[str, list[tuple[dict, str]]] = {}
         # effort → branch head the ORG itself verified green (its own build run + log, not a
         # worker's word) — the finish path skips a duplicate composition check and the closure is
         # labelled "org-verified". Cleared on every fresh dispatch.
@@ -3706,6 +3733,21 @@ class Orchestrator:
                 await self.chat.post(
                     channel_id, "That acceptance check needs a command to run — `accept check for "
                     "<project>: <command> :: <note>`.", thread_id=thread_id)
+            return
+        # RETIRE durable acceptance checks by id (ao-checks) — the operator's one-line answer to a
+        # "the check itself is broken" escalation. Deterministic, operator-issued; the org never
+        # retires a check on its own. Retiring keeps the row and its audit trail (active=false).
+        m_rc = re.match(r"^\s*retire\s+(?:acceptance\s+)?checks?\s+(?P<ids>ac-[0-9a-f]{12}"
+                        r"(?:[\s,]+ac-[0-9a-f]{12})*)\s*\.?\s*$", message.strip(), re.I)
+        if m_rc:
+            ids = re.findall(r"ac-[0-9a-f]{12}", m_rc.group("ids").lower())
+            done = [i for i in ids if await self.projects.set_acceptance_check_active(i, False)]
+            unknown = [i for i in ids if i not in done]
+            body = (f"📐 Retired {len(done)} acceptance check(s): "
+                    + (", ".join(f"`{i}`" for i in done) or "none")
+                    + (f". Unknown id(s): {', '.join(f'`{i}`' for i in unknown)}." if unknown else ".")
+                    + " They no longer gate deliveries; the record and its audit trail are kept.")
+            await self.chat.post(channel_id, body, thread_id=thread_id)
             return
         # EXPLICIT NEW-EFFORT idiom — deterministic, immune to the board/hygiene classifiers
         # (gym finding ⑤, 2026-07-15: "start effort gym-003-…: <goal>" whose goal text mentioned
@@ -8209,7 +8251,8 @@ class Orchestrator:
             return ""
         return ((result.output or "") if result else "").strip()[:4000]
 
-    def _queue_burndown(self, effort_id: str, failing_log: str, *, origin: str = "") -> None:
+    def _queue_burndown(self, effort_id: str, failing_log: str, *, origin: str = "",
+                        checks: list[tuple[dict, str]] | None = None) -> None:
         """Start (or defer) the burn-down for a RED org build. Inside delegate's single-flight the
         loop must wait for the current run to close — delegate's finally launches it; anywhere
         else it starts immediately.
@@ -8219,7 +8262,13 @@ class Orchestrator:
         becomes a durable LEARNED CONSTRAINT. Recorded BEFORE the defer/spawn branch, so the clause
         is already on the effort when the loop reads it. Content-addressed + infra-filtered inside
         `_record_constraint`, so the several paths that report the same underlying failure collapse
-        to one clause and a tool breakage never steers the search."""
+        to one clause and a tool breakage never steers the search.
+
+        `checks` (ao-checks): the failing durable acceptance checks (check, error output) when the
+        red came from the corpus — the burn-down re-runs exactly these each round and is green only
+        when they pass, not merely when the build does."""
+        if checks:
+            self._burndown_corpus[effort_id] = list(checks)
         self._spawn(self._record_constraint(effort_id, failing_log, origin=origin or "burn-down"))
         if effort_id in self._delegating:
             self._burndown_after[effort_id] = failing_log
@@ -8511,6 +8560,60 @@ class Orchestrator:
             return "fail", out, _error_count(out)
         return "unknown", out, None
 
+    @staticmethod
+    def _fmt_corpus_fails(fails: list[tuple[dict, str]]) -> str:
+        """ao-checks — each failing acceptance check as id, origin, command AND its error output
+        (the whole tail the check run kept, so the assertion that names the defect - usually the
+        LAST line of a traceback - is in it; the old `tail[:300]` kept the traceback header and cut
+        the assertion off)."""
+        out = []
+        for c, t in fails:
+            err = "\n".join("      " + ln for ln in ((t or "").strip() or "(no output)").splitlines())
+            out.append(f"- [{c['id']}] {c.get('origin_note') or ''}\n    cmd: `{c['body']}`\n"
+                       f"    error output:\n{err}")
+        return "\n".join(out)
+
+    async def _rerun_corpus_checks(self, effort_id: str, checks: list[dict], *, repo: str
+                                   ) -> list[tuple[dict, str]]:
+        """ao-checks — re-run the given durable acceptance checks on the effort branch; returns the
+        ones that FAIL with their error output. An 'unknown' (cannot run) is not a pass for a check
+        that was failing: it stays in the failing set with what the run said. A check the operator
+        retired since (active=false) is no longer run - retiring is how they answer a broken check."""
+        branch = self._effort_branch(effort_id)
+        proj = await self._effort_project(effort_id)
+        if proj:
+            active = {c["id"] for c in await self.projects.list_acceptance_checks(proj)}
+            checks = [c for c in checks if c["id"] in active]
+        fails: list[tuple[dict, str]] = []
+        for c in checks:
+            status, tail, _prov = await self._run_check(effort_id, c["body"], branch=branch, repo=repo)
+            if status != "pass":
+                fails.append((c, tail if status == "fail" else f"(check could not run: {tail})"))
+        return fails
+
+    async def _escalate_broken_checks(self, effort_id: str, broken: list[tuple[dict, str]]) -> None:
+        """ao-checks — a failing acceptance check whose OWN error is a shell parse error or a missing
+        command is a broken CHECK, not a product defect: no worker is woken to "fix" it (gym-002's
+        worker spent a turn proving the feature already worked). The operator is told which check(s)
+        and how to retire them. Retiring stays the operator's call — nothing is retired here."""
+        ids = [c["id"] for c, _ in broken]
+        lines = "\n".join(f"- `{c['id']}` ({(c.get('origin_note') or '')[:80]}): `{c['body'][:120]}`\n"
+                          f"    → {((t or '').strip().splitlines() or ['(no output)'])[-1][:200]}"
+                          for c, t in broken)
+        retire = f"retire check {' '.join(ids)}"
+        msg = (f"🧰 **{effort_id}: the check itself is broken** — {len(ids)} durable acceptance "
+               f"check(s) fail because the SHELL cannot run them (a parse error or a missing "
+               f"command), not because of the delivered code:\n{lines}\n"
+               f"No worker was asked to fix this, and the merge stays withheld (a check that cannot "
+               f"run is not a pass). To retire them, reply: `{retire}` (equivalently "
+               f"`ProjectRegistry.set_acceptance_check_active(<id>, False)`), or capture a corrected "
+               f"check with `accept check for <project>: <command>`.")
+        await self.audit.log("acceptance_check_broken", effort_id=effort_id,
+                             payload={"ids": ids, "errors": [(t or "")[-200:] for _, t in broken]})
+        await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
+        await self.comms.post(Intent.operator_reply, msg, thread_id=self._mgmt_thread_of(effort_id))
+        await self.router.update_effort_card(effort_id, "needs-attention")
+
     async def _burndown_loop(self, effort_id: str, failing_log: str) -> None:
         """AUTONOMOUS ERROR BURN-DOWN (operator 2026-07-07: "all 138 errors should have been
         worked through autonomously and not elevated in the first place" + "multiple workers
@@ -8555,7 +8658,9 @@ class Orchestrator:
             await self.comms.post(Intent.operator_reply, msg,
                                   thread_id=self._mgmt_thread_of(effort_id))
             await self.audit.log("burndown_started", effort_id=effort_id,
-                                 payload={"errors": n0, "brief": brief[:300]})
+                                 payload={"errors": n0, "brief": brief[:300],
+                                          "checks": [c["id"] for c, _ in
+                                                     self._burndown_corpus.get(effort_id) or []]})
             errors_log = failing_log
             self._last_burn_log[effort_id] = failing_log
             last_sig = self._failure_sig(failing_log)
@@ -8596,6 +8701,29 @@ class Orchestrator:
                 if not branch_exists:
                     branch_exists = (await self._verify_delivery(effort_id, repo)).landed
                 verdict, out, n = await self._org_build_check(effort_id, on_branch=branch_exists)
+                # ao-checks — a burn-down the ACCEPTANCE CORPUS started re-runs THOSE checks every
+                # round. The build passing is not green while they fail (gym-002: `burndown_green
+                # [2,0]` against the unittest build, the checks red again on the next delivery).
+                corpus = self._burndown_corpus.get(effort_id)
+                if corpus and (verdict == "pass" or (verdict == "unknown" and out.startswith(
+                        "no check command configured"))):
+                    cfails = await self._rerun_corpus_checks(
+                        effort_id, [c for c, _ in corpus], repo=repo)
+                    await self.audit.log("burndown_corpus_recheck", effort_id=effort_id,
+                                         payload={"round": rnd, "checks": [c["id"] for c, _ in corpus],
+                                                  "failed": [c["id"] for c, _ in cfails]})
+                    broken = [(c, t) for c, t in cfails if _shell_broken(t)]
+                    if broken:
+                        # the check ITSELF stopped running — no worker can fix that by editing code
+                        await self._escalate_broken_checks(effort_id, broken)
+                        return
+                    if cfails:
+                        self._burndown_corpus[effort_id] = cfails
+                        verdict, n = "fail", len(cfails)
+                        out = _CORPUS_LOG_PREFIX + self._fmt_corpus_fails(cfails)
+                    else:
+                        self._burndown_corpus.pop(effort_id, None)
+                        verdict, n = "pass", 0
                 if verdict == "pass":
                     counts.append(0)
                     traj = " → ".join(str(c) if c >= 0 else "?" for c in counts)
@@ -8806,6 +8934,18 @@ class Orchestrator:
         if len(err_lines) > cap:
             slice_txt += (f"\n… plus {len(err_lines) - cap} more (later rounds — do NOT attempt "
                           f"them this turn; finish and PUSH your slice)")
+        # ao-checks — a corpus-seeded round names each failing acceptance check WITH its error output
+        # (the worker was shown only the commands and could not see why they failed).
+        corpus = self._burndown_corpus.get(effort_id)
+        if corpus:
+            corpus_txt = ("FAILING ACCEPTANCE CHECKS — durable checks this delivery must pass. Each "
+                          "is shown with its command and the error output it produced; make each "
+                          "one pass (run it yourself before you push):\n"
+                          + self._fmt_corpus_fails(corpus))
+            if (self._last_burn_log.get(effort_id) or "").startswith(_CORPUS_LOG_PREFIX):
+                slice_txt = corpus_txt               # the build is green — the checks ARE the errors
+            else:
+                slice_txt = f"{slice_txt}\n\n{corpus_txt}"
         files = sorted({m.group(1) for m in (
             _ERR_FILE_RE.match(ln) for ln in err_lines[:cap]) if m})
         scope = ("ONLY touch these files — a sibling worker owns the rest in parallel: "
@@ -9903,20 +10043,47 @@ class Orchestrator:
                     out.append((c, tail))
             return out
 
-        def _fmt(fs: list[tuple[dict, str]]) -> str:
-            return "\n".join(f"- [{c['id']}] {c['origin_note']}\n    cmd: `{c['body']}`\n    {t[:300]}"
-                             for c, t in fs)
+        _fmt = self._fmt_corpus_fails
+        total = len(checks)
+        broken_ids: set[str] = set()
 
-        fails = await _run_all(delivery)
+        async def _split_broken(fs: list[tuple[dict, str]]) -> list[tuple[dict, str]]:
+            """ao-checks — a check that fails because the SHELL cannot run it (parse error / missing
+            command) is BROKEN, not red: escalate it to the operator, never wake a worker for it, and
+            stop running it this gate. Returns the genuine failures, which carry on as before."""
+            broken = [(c, t) for c, t in fs if _shell_broken(t)]
+            if broken:
+                await self._escalate_broken_checks(effort_id, broken)
+                broken_ids.update(c["id"] for c, _ in broken)
+                checks[:] = [c for c in checks if c["id"] not in broken_ids]
+            return [(c, t) for c, t in fs if c["id"] not in broken_ids]
+
+        async def _withhold_for_broken() -> tuple[str, BranchDelivery]:
+            # Only broken checks are red: nothing for a worker to fix, but a check that cannot run is
+            # not a pass either — the merge gate is withheld until the operator retires or fixes it.
+            self._pending_merge.pop(merge_id, None)
+            await self.pending.delete(merge_id)
+            await self.audit.log("acceptance_corpus_failed", effort_id=effort_id,
+                                 payload={"failed": sorted(broken_ids), "broken": sorted(broken_ids),
+                                          "total": total})
+            return (f"\n⛔ **Acceptance corpus: {len(broken_ids)} check(s) are broken** (the shell "
+                    f"cannot run them) — escalated to the operator; merge gate withheld, no fix round "
+                    f"dispatched.", delivery)
+
+        fails = await _split_broken(await _run_all(delivery))
+        if not fails and broken_ids:
+            return await _withhold_for_broken()
         if not fails:
+            self._burndown_corpus.pop(effort_id, None)
             await self.audit.log("acceptance_corpus_passed", effort_id=effort_id,
-                                 payload={"total": len(checks)})
-            return (f"\n📐 **Acceptance corpus passed** — {len(checks)} durable check(s) from prior "
+                                 payload={"total": total})
+            return (f"\n📐 **Acceptance corpus passed** — {total} durable check(s) from prior "
                     f"reviews.", delivery)
-        # RED — route back ONCE, naming the exact broken standards (executable, not prose).
+        # RED — route back ONCE, naming the exact broken standards (executable, not prose) and, per
+        # check, the error output it produced (ao-checks: the worker must see WHY each one fails).
         await self.comms.post(
             Intent.worker_activity,
-            f"❌ **Acceptance corpus failed** ({len(fails)}/{len(checks)}) — durable checks captured "
+            f"❌ **Acceptance corpus failed** ({len(fails)}/{total}) — durable checks captured "
             f"from earlier human reviews; these are non-negotiable. Routing back to fix:\n{_fmt(fails)}",
             effort_id=effort_id)
         loc = await self.router.effort_thread(effort_id)
@@ -9925,8 +10092,9 @@ class Orchestrator:
             fix_instruction = (
                 f"THE PROJECT'S DURABLE ACCEPTANCE CHECKS FAILED on your delivered branch. Each encodes "
                 f"a standard the org committed to from an earlier human review — they are NOT optional "
-                f"and must not be worked around. Fix the CAUSE of each (stay in scope of your task), "
-                f"then commit + push to the SAME branch ({delivery.branch}):\n{_fmt(fails)}\n"
+                f"and must not be worked around. Each is listed with its command and the error output "
+                f"it produced. Fix the CAUSE of each (stay in scope of your task), run the check "
+                f"yourself, then commit + push to the SAME branch ({delivery.branch}):\n{_fmt(fails)}\n"
                 f"  git add -A && git commit -m \"fix: acceptance corpus\" && "
                 f"git push origin {delivery.branch}\nThen reply with what you changed.")
             try:
@@ -9940,24 +10108,29 @@ class Orchestrator:
             new_delivery = await self._verify_delivery(effort_id, repo)
             if new_delivery.landed:
                 delivery = new_delivery
-            fails = await _run_all(delivery)
+            fails = await _split_broken(await _run_all(delivery))
+            if not fails and broken_ids:
+                return await _withhold_for_broken()
             if not fails:
+                self._burndown_corpus.pop(effort_id, None)
                 await self.audit.log("acceptance_corpus_passed", effort_id=effort_id,
-                                     payload={"total": len(checks), "after_fix": True})
-                return (f"\n📐 **Acceptance corpus passed after one fix round** — {len(checks)} "
+                                     payload={"total": total, "after_fix": True})
+                return (f"\n📐 **Acceptance corpus passed after one fix round** — {total} "
                         f"check(s).", delivery)
-        # STILL red → withdraw the merge gate + burn-down (never ship a broken promise).
+        # STILL red → withdraw the merge gate + burn-down (never ship a broken promise). The burn-down
+        # carries the failing checks, re-runs them every round and is green only when they pass.
         self._pending_merge.pop(merge_id, None)
         await self.pending.delete(merge_id)
-        self._queue_burndown(effort_id, "acceptance corpus failing:\n" + _fmt(fails))
+        self._queue_burndown(effort_id, _CORPUS_LOG_PREFIX + _fmt(fails), checks=fails)
         await self.audit.log("acceptance_corpus_failed", effort_id=effort_id,
-                             payload={"failed": [c["id"] for c, _ in fails], "total": len(checks)})
+                             payload={"failed": [c["id"] for c, _ in fails], "total": total,
+                                      "broken": sorted(broken_ids)})
         await self.comms.post(
             Intent.escalation,
-            f"⛔ **Acceptance corpus still failing** ({len(fails)}/{len(checks)}) after a fix round. "
+            f"⛔ **Acceptance corpus still failing** ({len(fails)}/{total}) after a fix round. "
             f"The merge gate is withdrawn — the org will not ship a delivery that breaks a standard it "
             f"already committed to. Burn-down engaged.", effort_id=effort_id)
-        return (f"\n⛔ **Acceptance corpus FAILED** ({len(fails)}/{len(checks)} durable check(s)) — "
+        return (f"\n⛔ **Acceptance corpus FAILED** ({len(fails)}/{total} durable check(s)) — "
                 f"merge gate withdrawn; burn-down continues.", delivery)
 
     async def _execute_merge(self, merge_id: str, reply=None) -> None:
@@ -11176,6 +11349,23 @@ class Orchestrator:
                 f"is one observation it had established and written down before stopping.\n\n"
                 + "\n".join(lines))
 
+    async def _read_lens_findings_file(self, effort_id: str, *, round_no: int) -> str:
+        """ao-checks — the lens findings FILE, read whole and then removed: the `FINDING:` and `REPRO:`
+        lines exactly as the lens wrote them. A COMPLETE source (the shell already resolved the echo's
+        quoting), unlike the worker's command stream, which is display-truncated. '' when the file is
+        empty or cannot be read."""
+        cmd = (f"cat {_LENS_FINDINGS_PATH} 2>/dev/null; "
+               f"rm -f {_LENS_FINDINGS_PATH} 2>/dev/null; echo SALVAGE-DONE")
+        try:
+            _exit, out, _timed = await self.router.exec_check(
+                effort_id, command=cmd, session_id=f"{effort_id}~salvage{round_no}",
+                repo=None, repo_token=None, timeout=120)
+        except Exception as exc:  # noqa: BLE001 — an unreadable file leaves the answer text
+            log.debug("lens findings file read failed for %s: %s", effort_id, exc)
+            return ""
+        return "\n".join(ln.strip() for ln in (out or "").splitlines()
+                         if ln.strip().startswith(("FINDING:", "REPRO:")))
+
     async def _clear_lens_findings(self, effort_id: str, *, round_no: int) -> None:
         """Drop any findings file left over before a lens runs. Without this, a lens that finishes
         cleanly leaves its file behind and the NEXT lens's salvage would pick it up — attributing
@@ -11480,12 +11670,43 @@ class Orchestrator:
             return {"findings": 0, "reproduced": 0, "checks_added": 0}
         text = ((result.output or "") if result else "")
         cmds = list(getattr(result, "commands", None) or [])
-        salvaged = await self._salvage_lens_findings(effort_id, "mode_b", round_no=0, commands=cmds)
-        blob = "\n".join([text, "\n".join(str(c) for c in cmds), salvaged])
-        pairs = self._mode_b_pairs(blob)
+        # ao-checks (gym-002): REPRO commands come ONLY from COMPLETE sources - the findings FILE the
+        # lens appended to and the turn's answer text. Never from `result.commands`: that stream is the
+        # worker's activity record, which little-coder cut at 240 chars, so a long `echo 'REPRO: ...'`
+        # arrived cut mid-token (`python3 -c "import os,todo; os.e`) and was banked as a permanent check
+        # that failed with a shell syntax error on every later delivery (14 of 15 gym checks).
+        file_txt = await self._read_lens_findings_file(effort_id, round_no=0)
+        pairs: list[tuple[str, str]] = []
+        for src in (file_txt, text):
+            for pr in self._mode_b_pairs(src):
+                if pr not in pairs:
+                    pairs.append(pr)
+        # A REPRO seen ONLY in the command stream is dropped - visibly, never silently.
+        complete = {r for _, r in pairs}
+        stream_only = [r for _, r in self._mode_b_pairs("\n".join(str(c) for c in cmds))
+                       if r not in complete]
+        if stream_only:
+            await self.audit.log("mode_b_stream_repro_ignored", effort_id=effort_id,
+                                 payload={"count": len(stream_only),
+                                          "samples": [r[:120] for r in stream_only[:3]],
+                                          "reason": "command stream is display-truncated; REPRO "
+                                                    "taken only from the findings file / answer"})
         reproduced = 0
         checks = 0
         for desc, repro in pairs:
+            # PARSE GATE (ao-checks) — a REPRO the shell cannot even parse is not a check. `sh -n`
+            # reads it without executing it; anything but a clean parse is refused before it runs.
+            try:
+                _pexit, _pout, _ptimed = await self.router.exec_check(
+                    effort_id, command=f"sh -n -c {shlex.quote(repro)}",
+                    session_id=f"{effort_id}~modebrepro", repo=None, repo_token=None, timeout=60)
+            except Exception:  # noqa: BLE001 — cannot confirm it parses ⇒ fail closed, bank nothing
+                _pexit, _pout, _ptimed = None, "", False
+            if _ptimed or _pexit != 0:
+                await self.audit.log("mode_b_finding_unreproduced", effort_id=effort_id,
+                                     payload={"desc": desc[:200], "exit": _pexit, "timed_out": _ptimed,
+                                              "reason": "shell_syntax", "detail": (_pout or "")[:200]})
+                continue
             # REPRODUCIBILITY GATE (§6) — keep only a REPRO that FAILS on the current code: a real break,
             # and a check meaningful enough to red-gate future deliveries. Runs it on the delivered branch.
             chk = (f"git fetch origin {delivery.branch} >/dev/null 2>&1; "
@@ -11495,10 +11716,20 @@ class Orchestrator:
                     effort_id, command=chk, session_id=f"{effort_id}~modebrepro", repo=repo,
                     repo_token=token, timeout=300)
             except Exception:  # noqa: BLE001 — an unrunnable repro is not a reproduced defect
-                _exit, _timed = 0, False
+                _exit, _out, _timed = 0, "", False
             if _timed or _exit == 0:
                 await self.audit.log("mode_b_finding_unreproduced", effort_id=effort_id,
-                                     payload={"desc": desc[:200], "exit": _exit, "timed_out": _timed})
+                                     payload={"desc": desc[:200], "exit": _exit, "timed_out": _timed,
+                                              "reason": "timed_out" if _timed else "passed"})
+                continue
+            # A reproduction must FAIL FOR THE DEFECT'S REASON (ao-checks). Exit 2/126/127 or the shell's
+            # own syntax / command-not-found message means the command never exercised the product -
+            # gym-002's checks "reproduced" exactly this way. Only a failure the program produced counts.
+            if _exit in _SHELL_BROKEN_EXITS or _shell_broken(_out or ""):
+                await self.audit.log("mode_b_finding_unreproduced", effort_id=effort_id,
+                                     payload={"desc": desc[:200], "exit": _exit, "timed_out": False,
+                                              "reason": "not_a_defect_failure",
+                                              "detail": (_out or "")[-200:]})
                 continue
             reproduced += 1
             cid = await self.projects.add_acceptance_check(
