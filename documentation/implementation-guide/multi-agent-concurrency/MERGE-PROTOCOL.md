@@ -382,12 +382,14 @@ with named reasons and "Nothing has been recorded":
   linked anyway (inferred); `"continues": "none"` declares there is no predecessor. The record
   is then required, and `iterations` counts the whole chain;
 - `return-reason-mismatch`: `red` carries each return's reason from the queue (`draft` writes
-  them as a numbered list) and names no return kind the queue does not have;
+  them as a numbered list) and, outside those quoted reasons, names no return kind and lists no
+  return the queue does not have;
 - `green-not-genuine`: `outcome.kind` is green only when the queue's last verdict is a tester PASS
   at the `tested_at_sha` being merged, recorded by someone other than the developer, with its
   evidence file present. That file is checked too: `evidence-not-pass` (it is not THAT pass's
   `<id>.attempt<N>.evidence.md` in the queue, e.g. an earlier FAIL's file; an inline or relative
-  evidence string is never looked up in the current directory), `evidence-empty`, and
+  evidence string is never looked up in the current directory), `evidence-empty` (the file is read
+  as `-Pass` reads it: UTF-8, or UTF-16/UTF-32 by its byte-order mark), and
   `evidence-verdict-mismatch` (a case heading that does not end in PASS, no case heading at all,
   or case verdicts that differ from the ones `-Pass` recorded);
 - `countersign-missing`: `reviewer_check.checked` is true and `reviewer_check.by` is you, the
@@ -395,7 +397,8 @@ with named reasons and "Nothing has been recorded":
 - `range-unresolved` / `range-head-mismatch`: `source_ref.merge_range` is `base..head`, both ends
   are commits, base is an ancestor of head, and head is the tested commit or the merge;
 - `evidence-sha-unresolved` / `evidence-path-missing` / `evidence-path-outside`: every SHA-shaped
-  (lowercase or UPPERCASE hex) and path-shaped (`/` or `\`) token in `outcome.evidence[]` and
+  (lowercase or UPPERCASE hex) and path-shaped (`/` or `\`; an absolute `D:\...` path may contain
+  spaces) token in `outcome.evidence[]` and
   `hypotheses_refuted[].evidence` resolves, and a path resolves only inside the code repo or the
   plan store. The rest is prose: the check cannot verify it and prints that blind spot on every
   acceptance;

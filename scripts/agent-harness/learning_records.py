@@ -553,12 +553,62 @@ def read_record(path: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------- tokens
+ABS_START_RE = re.compile(r"^[A-Za-z]:[\\/]")
+ABS_MAX_WORDS = 12
+
+
+def _clean_path(cand: str) -> str:
+    c = cand.lstrip(STRIP_LEAD).rstrip(STRIP_TRAIL)
+    return LINE_SUFFIX_RE.sub("", c.split("#", 1)[0]).replace("\\", "/")
+
+
+def _absolute_spans(text: str) -> Tuple[List[str], List[str]]:
+    """(the remaining whitespace tokens, absolute drive paths taken out whole).
+
+    vwm-p1b round 2 (F3): the repo and the store may live under a directory whose name has a space, so splitting on
+    whitespace first cut every absolute path in two. A token that starts a drive path
+    (`C:\\` or `C:/`) is extended over the following words: the LONGEST extension that exists
+    on disk is the path; when none exists, the SHORTEST one whose last segment carries a file
+    extension (it is then judged missing/outside); otherwise the token stays as it was.
+    """
+    toks = list(re.finditer(r"\S+", text))
+    rest: List[str] = []
+    found: List[str] = []
+    i = 0
+    while i < len(toks):
+        first = toks[i].group(0).lstrip(STRIP_LEAD)
+        if not ABS_START_RE.match(first):
+            rest.append(toks[i].group(0))
+            i += 1
+            continue
+        best_exist, first_ext = None, None
+        for j in range(i, min(len(toks), i + ABS_MAX_WORDS)):
+            cand = _clean_path(text[toks[i].start():toks[j].end()])
+            try:
+                if Path(cand).exists():
+                    best_exist = (j, cand)
+            except (OSError, ValueError):
+                pass
+            if first_ext is None and PATH_EXT_RE.search(cand.rsplit("/", 1)[-1]):
+                first_ext = (j, cand)
+        pick = best_exist or first_ext
+        if pick is None:
+            rest.append(toks[i].group(0))
+            i += 1
+            continue
+        found.append(pick[1])
+        i = pick[0] + 1
+    return rest, found
+
+
 def tokens_of(text: str) -> Tuple[List[str], List[str], bool]:
     """(sha tokens, path tokens, has_prose). Prose = anything left once both are taken out."""
     shas: List[str] = []
     paths: List[str] = []
     prose = False
-    for raw in str(text).split():
+    raws, abs_paths = _absolute_spans(str(text))
+    paths += abs_paths
+    for raw in raws:
         tok = raw.lstrip(STRIP_LEAD).rstrip(STRIP_TRAIL)
         if not tok:
             continue
@@ -656,6 +706,26 @@ def evidence_verdicts(text: str) -> List[Dict[str, str]]:
     return rows
 
 
+def decode_like_pass(raw: bytes) -> str:
+    """Decode evidence bytes the way queue.ps1 -Pass reads them ([IO.File]::ReadAllText(path,
+    UTF8)): a byte-order mark decides (UTF-32 LE/BE, UTF-16 LE/BE, UTF-8), else UTF-8.
+
+    vwm-p1b round 2 (F2): PS 5.1's Out-File and `>` write UTF-16LE with a BOM. -Pass read such
+    a file fine and recorded the pass; reading it as UTF-8 found no case heading and refused a
+    genuine pass.
+    """
+    boms = ((b"\xff\xfe\x00\x00", "utf-32-le"), (b"\x00\x00\xfe\xff", "utf-32-be"),
+            (b"\xef\xbb\xbf", "utf-8"), (b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be"))
+    for bom, enc in boms:
+        if raw.startswith(bom):
+            return raw[len(bom):].decode(enc, errors="replace")
+    return raw.decode("utf-8", errors="replace")
+
+
+def read_evidence_text(path: Path) -> str:
+    return decode_like_pass(Path(path).read_bytes())
+
+
 def _attempt_no(v: Any) -> Optional[int]:
     if isinstance(v, bool):
         return None
@@ -722,7 +792,7 @@ def check_pass_evidence(item: Dict[str, Any], item_id: str, p: Dict[str, Any], q
                                                         f"(attempt {r.get('attempt')}, by {r.get('by')}), not of the pass"))
                 break
     try:
-        text = cand.read_text(encoding="utf-8-sig", errors="replace")
+        text = read_evidence_text(cand)
     except OSError as exc:
         raise Indeterminate("queue-unreadable", f"cannot read the pass's evidence {cand}: {exc}") from exc
     if not text.strip():
@@ -758,6 +828,36 @@ REASON_PREFIX = 160
 ENUM_RETURN_RE = re.compile(r"(?:^|\s)(\d+)\)\s+(" + "|".join(RETURN_KINDS) + r")\b")
 
 
+def _reason_pattern(words: List[str]) -> Optional["re.Pattern[str]"]:
+    if not words:
+        return None
+    return re.compile(r"(?<!\w)" + r"[\W_]*".join(re.escape(w) for w in words) + r"(?!\w)", re.IGNORECASE)
+
+
+def _without_reasons(red: str, rets: List[Dict[str, Any]]) -> str:
+    """`red` with every queue reason (and its first REASON_PREFIX normalised characters, for a
+    record that quoted only the start) blanked out. Words are matched case-insensitively with
+    any punctuation/whitespace between them, so a hand-quoted reason is found too."""
+    out = red
+    reasons = sorted({str(r.get("reason") or "").strip() for r in rets} - {""}, key=len, reverse=True)
+    for reason in reasons:
+        words = re.findall(r"\w+", reason)
+        pat = _reason_pattern(words)
+        if pat is not None:
+            out = pat.sub(" ", out)
+        # the prefix the presence check uses
+        acc, pre = 0, []
+        for w in words:
+            acc += len(w) + 1
+            pre.append(w)
+            if acc >= REASON_PREFIX:
+                break
+        pat = _reason_pattern(pre)
+        if pat is not None and len(pre) < len(words):
+            out = pat.sub(" ", out)
+    return out
+
+
 def check_return_reasons(rec: Dict[str, Any], rets: List[Dict[str, Any]]) -> List[Finding]:
     """`red` must carry each return's reason from the queue, and name no return the queue
     does not have (vwm-p1b). `draft` writes them as `N) <kind> ... by <who>: <reason>`.
@@ -776,11 +876,16 @@ def check_return_reasons(rec: Dict[str, Any], rets: List[Dict[str, Any]]) -> Lis
             out.append(Finding("return-reason-mismatch",
                                f"return {i} ({r['kind']} by {r.get('by')} on '{r.get('item')}') has the queue reason "
                                f"'{str(r.get('reason'))[:100]}', which `red` does not carry"))
+    # The kind names and the numbered list are read from `red` with the queue's own reasons
+    # taken OUT first (vwm-p1b round 2, F1): `draft` copies each reason verbatim, and a
+    # tester's reason may itself say "reviewer-reject" or "1) tester-fail". Those words are
+    # the queue's, not a claimed return.
+    scan = _without_reasons(red, rets)
     have = {k: sum(1 for r in rets if r["kind"] == k) for k in RETURN_KINDS}
     for k in RETURN_KINDS:
-        if have[k] == 0 and re.search(r"(?<![a-z-])" + re.escape(k) + r"(?![a-z-])", red.lower()):
+        if have[k] == 0 and re.search(r"(?<![a-z-])" + re.escape(k) + r"(?![a-z-])", scan.lower()):
             out.append(Finding("return-reason-mismatch", f"`red` names a {k} return; the queue shows none"))
-    listed = [k for _, k in ENUM_RETURN_RE.findall(red)]
+    listed = [k for _, k in ENUM_RETURN_RE.findall(scan)]
     if listed and listed != [r["kind"] for r in rets]:
         out.append(Finding("return-reason-mismatch",
                            f"`red` lists the returns as ({', '.join(listed)}); the queue shows "

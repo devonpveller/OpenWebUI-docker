@@ -58,7 +58,12 @@ def _no_state_env(monkeypatch):
 
 @pytest.fixture
 def world(tmp_path):
-    """A code repo with base -> w1 (failed) -> w2 (tested) merged --no-ff as M; a store; a queue."""
+    """A code repo with base -> w1 (failed) -> w2 (tested) merged --no-ff as M; a store; a queue.
+
+    Everything sits under a root whose name contains a SPACE, like the real checkout
+    (vwm-p1b round 2, F3: absolute paths were cut at the space)."""
+    tmp_path = tmp_path / "spaced root"
+    tmp_path.mkdir()
     repo = tmp_path / "code"
     repo.mkdir()
     git(repo, "init", "-q", "-b", "line")
@@ -862,3 +867,104 @@ def test_p1b_7_the_pre_merge_check_command_names_no_merge_sha():
              if x.startswith("python scripts/agent-harness/learning_records.py check")]
     assert lines, "MERGE-PROTOCOL Step 4 shows no check command"
     assert all("--merge-sha" not in x for x in lines), lines
+
+
+# =============================================================================== vwm-p1b round 2
+# The tester's attempt-1 FAIL: three GENUINE records the round-1 gate refused. Each test below
+# FAILS at d1bcbf06 (round 1) and passes at the tip; the refusal halves stay refused.
+
+def _fail_reason_item(w, reason):
+    item = make_item(w)
+    item["results"][0]["reason"] = reason
+    item["history"][4]["what"] = f"tests FAILED (attempt 1): {reason}"
+    _set_item(w, item)
+    return item
+
+
+def _filled_draft(w):
+    buf, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(buf), redirect_stderr(err):
+        assert lr.main(["draft", "--item", ID, "--merge-sha", w["merge"], "--reviewer", "r-lrx",
+                        "--queue-dir", str(w["queue"]), "--repo", str(w["repo"])]) == 0
+    d = json.loads(buf.getvalue())
+    # filled honestly: only the lesson fields and the countersign; the derived parts untouched
+    d["domains"] = ["drill"]
+    d["red"] = d["red"].split(lr.PLACEHOLDER)[0] + "the failing state"
+    d["outcome"]["summary"] = "x = 2"
+    d["mental_model"]["claim"] = "WORKER'S CLAIM: caches lie"
+    d.pop("skill_candidate")
+    d["reviewer_check"] = {"checked": True, "by": "r-lrx", "note": "checked"}
+    return d
+
+
+@pytest.mark.parametrize("reason", [
+    "Case 1: the reviewer-reject path leaves WORK.md empty",
+    "T2: developer-requeue after a pass loses the plan hash",
+    "T3: a reviewer-requeue is not counted",
+    "steps 1) tester-fail 2) reviewer-requeue then the record is wrong",
+    "T1 fails on a cold cache",  # control: no kind word
+])
+def test_p1b_r2_f1_a_draft_built_record_passes_whatever_the_reason_says(world, reason):
+    w = world
+    _fail_reason_item(w, reason)
+    d = _filled_draft(w)
+    write_record(w, d)
+    _accepted(w)
+    # the padded twin stays refused: an extra numbered return the queue does not have
+    d["red"] = d["red"] + " 2) tester-fail by t9: an invented second failure"
+    write_record(w, d)
+    _refused(w, "return-reason-mismatch")
+
+
+def test_p1b_r2_f1_an_invented_kind_outside_the_quoted_reason_is_still_refused(world):
+    w = world
+    _fail_reason_item(w, "Case 1: the reviewer-reject path leaves WORK.md empty")
+    d = _filled_draft(w)
+    d["red"] = d["red"] + "; then a developer-requeue for style"
+    write_record(w, d)
+    _refused(w, "return-reason-mismatch")
+
+
+PASS_BODY = "## T1 - the thing works   PASS\r\nran it\r\n"
+
+
+@pytest.mark.parametrize("enc,bom", [
+    ("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff"), ("utf-8", b"\xef\xbb\xbf"), ("utf-8", b""),
+])
+def test_p1b_r2_f2_pass_evidence_is_read_like_pass_reads_it(world, enc, bom):
+    w = world
+    make_item(w)
+    write_record(w, good_record(w))
+    ev = w["queue"] / f"{ID}.attempt2.evidence.md"
+    ev.write_bytes(bom + PASS_BODY.encode(enc))
+    _accepted(w)
+    # the same encoding carrying a FAIL case is still refused
+    ev.write_bytes(bom + "## T1 - the thing works   PASS\r\n## T2 - cold   FAIL\r\n".encode(enc))
+    _refused(w, "evidence-verdict-mismatch")
+
+
+def test_p1b_r2_f3_absolute_paths_with_spaces_resolve(world):
+    w = world
+    make_item(w)
+    assert " " in str(w["repo"])
+    thing = w["repo"] / "src" / "thing.py"
+    runlog = w["store"] / "journal" / "evidence" / "lrx" / "run.log"
+    good = good_record(w)
+    good["outcome"]["evidence"] += [
+        str(thing),                                   # backslash form (Windows str)
+        thing.as_posix(),                             # forward-slash form
+        f"see {thing}:1 at the merge",                # with a line suffix and prose around it
+        f"log {runlog.as_posix()}, then prose",       # inside the plan store
+    ]
+    write_record(w, good)
+    _accepted(w)
+    outside = w["tmp"] / "out side" / "x y.md"
+    outside.parent.mkdir()
+    outside.write_text("not evidence\n", encoding="utf-8")
+    for token, reason in [(str(outside), "evidence-path-outside"),
+                          (outside.as_posix(), "evidence-path-outside"),
+                          (str(w["repo"] / "src" / "never written.py"), "evidence-path-missing")]:
+        bad = copy.deepcopy(good)
+        bad["outcome"]["evidence"].append(token)
+        write_record(w, bad)
+        _refused(w, reason)
