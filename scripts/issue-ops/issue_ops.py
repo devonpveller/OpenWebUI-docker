@@ -792,6 +792,24 @@ def cmd_gate_plan(n: int) -> int:
 
 BRIDGE_URL = "http://127.0.0.1:8830"  # agent-bridge NL inlet (same one the gym drives)
 ORG_PROJECT = "ai-stack"              # the deployed repo as an org project
+AO_ENV = ROOT / "agent-org" / "docker" / ".env"  # holds AO_OPERATOR_TOKEN (ao-auth)
+
+
+def bridge_headers() -> dict:
+    """JSON + the operator bearer the bridge requires on every control route (ao-auth).
+    Read from the environment, else from agent-org/docker/.env; never printed. Missing -> the
+    bridge answers 401 and the caller says so."""
+    import os
+    tok = os.environ.get("AO_OPERATOR_TOKEN", "").strip()
+    if not tok and AO_ENV.is_file():
+        for line in AO_ENV.read_text(encoding="utf-8", errors="replace").splitlines():
+            k, sep, v = line.strip().partition("=")
+            if sep and k.strip() == "AO_OPERATOR_TOKEN":
+                tok = v.strip().strip('"').strip("'")
+    h = {"Content-Type": "application/json"}
+    if tok:
+        h["Authorization"] = f"Bearer {tok}"
+    return h
 
 
 def cmd_execute(n: int) -> int:
@@ -849,7 +867,7 @@ def cmd_execute(n: int) -> int:
     def bridge(path: str, payload: dict) -> dict:
         breq = urllib.request.Request(f"{BRIDGE_URL}{path}",
                                       data=json.dumps(payload).encode(),
-                                      headers={"Content-Type": "application/json"})
+                                      headers=bridge_headers())
         with urllib.request.urlopen(breq, timeout=120) as resp:
             return json.loads(resp.read().decode() or "{}")
     out = bridge("/nl", {"message": goal})
@@ -871,7 +889,7 @@ def cmd_archive(effort_id: str) -> int:
     import urllib.request
     req = urllib.request.Request(f"{BRIDGE_URL}/nl",
                                  data=json.dumps({"message": f"archive {effort_id}"}).encode(),
-                                 headers={"Content-Type": "application/json"})
+                                 headers=bridge_headers())
     with urllib.request.urlopen(req, timeout=120) as resp:
         out = json.loads(resp.read().decode() or "{}")
     print(f"archive {effort_id} — {json.dumps(out)[:300]}")

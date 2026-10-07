@@ -190,9 +190,9 @@ docker compose -f agent-org/docker/docker-compose.yml --profile workers up -d --
 2. Start it: `docker compose -f agent-org/docker/docker-compose.yml --profile cloud up -d`.
 3. Issue one virtual key with a budget per judgment role on `llm-gateway-cloud`.
 4. Set `AO_CLOUD_ENABLED=true` and move each judgment role:
-   `curl -X POST http://127.0.0.1:8830/profiles/lane -H "Content-Type: application/json" -d '{"name":"pm","lane":"cloud"}'`
-   (repeat for the other judgment roles; without the header the bridge answers
-   422). Workers stay local.
+   `curl -X POST http://127.0.0.1:8830/profiles/lane -H "Authorization: Bearer $AO_OPERATOR_TOKEN" -H "Content-Type: application/json" -d '{"name":"pm","lane":"cloud"}'`
+   (repeat for the other judgment roles; without the bearer the bridge answers
+   401, without the content type 422). Workers stay local.
 
 **Mobile.** Install the Mattermost app and expose the server on your tailnet
 only; there is no public exposure and no end-to-end encryption on agent
@@ -213,7 +213,10 @@ python scripts/stack/stack.py down agent-org
 `curl -fsS http://127.0.0.1:8830/health`.
 
 The chat is the primary control surface; the bridge also serves an HTTP control
-plane on `127.0.0.1:8830` for tooling and the floor hook:
+plane on `127.0.0.1:8830` for tooling and the floor hook. Every route except
+`GET /health` needs `Authorization: Bearer <AO_OPERATOR_TOKEN>` (from
+`agent-org/docker/.env`); the floor hook's route also takes `AO_WORKER_TOKEN`.
+See "HTTP control-plane auth" under Security notes.
 
 | Action | From chat (`#mgmt`) | From HTTP |
 |--------|-------------------|-----------|
@@ -284,6 +287,39 @@ plane holds four such parts, and a default `up` starts none of them:
   diagnostics on its own defaults is upstream behaviour this repository does not
   settle (`MM_LOGSETTINGS_ENABLEDIAGNOSTICS` is not set here).
 - Published ports are `127.0.0.1:8065` and `127.0.0.1:8830`, loopback only.
+- **HTTP control-plane auth (ao-auth, 2026-10-07).** Loopback is not a boundary
+  inside Docker: before this, anything that could reach `agent-bridge:8000` -
+  including `ao-ot-1/2`, where worker commands run - could POST any operator
+  verb to `/nl` (approve a gate, move a model lane, abort an effort, retire a
+  check). Now:
+  - **`AO_OPERATOR_TOKEN`** is required on every route except `GET /health`
+    (the one classification table is `ROUTE_ACCESS` in
+    [`agent-bridge/app/main.py`](agent-bridge/app/main.py); a route missing from
+    it stops the app from starting). Unset, those routes answer **503** and the
+    bridge logs `AO_OPERATOR_TOKEN is not set` at startup - fail closed, never
+    open. Missing or wrong: **401**; the worker token: **403**. `/docs` and
+    `/openapi.json` are off.
+  - **`AO_WORKER_TOKEN`** is accepted only on `POST /hook/floor-check` (the
+    one route the worker side calls - `hooks/pretooluse_floor.py`; nothing on
+    the worker side calls `/lateral-concern`, `/handoff` or `/suggestion`,
+    which are operator routes). Compose sets it in `ao-worker-1/2` only. The
+    hook sends it and blocks an irreversible action if it is missing or the
+    bridge refuses.
+  - **`ao-ot-1/2` are on `ao-worker-net` only** (no longer on
+    `ai-stack_llm-net`), so a worker command cannot connect to the bridge; they
+    keep their worker and `ao-git-egress`. The agent and its model calls run in
+    `ao-worker-N`.
+  - **Callers.** Host tooling sends `Authorization: Bearer <AO_OPERATOR_TOKEN>`:
+    `scripts/issue-ops/issue_ops.py` and `scripts/maintenance/disk-guard.ps1`
+    read it from `agent-org/docker/.env`; `gym-watch-effort.py` runs inside the
+    bridge and uses its env. The **gym runner** (`ai-orchestration-gym`,
+    `runner/gym_runner.py`) must send that same header on every bridge call
+    (`/health` excepted) - it already reads this `.env` (`--env-file`), so it
+    takes `AO_OPERATOR_TOKEN` from there. Mattermost intake is unaffected (the
+    bridge's outbound websocket).
+  - **Rotation:** two different random values; on change, `--force-recreate`
+    `agent-bridge` and `ao-worker-1/2`. Both are on the key-rotation list in
+    [`SECURITY.md`](../SECURITY.md).
 - No secret belongs in a file under git: bot tokens, database passwords and
   model keys come from `agent-org/docker/.env` only.
 

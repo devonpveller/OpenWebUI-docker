@@ -368,17 +368,19 @@ async def test_the_landing_path_through_the_http_inlet(db_url, tmp_path):
     import httpx
 
     from app.main import create_app
+    from authtok import OP_HEADERS, OP_TOKEN
 
     d = _profiles_on(tmp_path, "qwen36-27b")
     settings = Settings(
         _env_file=None, chat_adapter="fake", database_url=db_url, profiles_dir=str(d),
         charters_dir=str(ROOT / "charters"), floor_dir=str(ROOT / "floor"),
-        worker_instance_urls="http://w1:8090")
+        worker_instance_urls="http://w1:8090", operator_token=OP_TOKEN)
     orch = Orchestrator(settings, Database(db_url), FakeChatAdapter(),
                         model_client=FakeModelClient(), harness=FakeHarness())
     app = create_app(orch)
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                     headers=OP_HEADERS) as c:
             names = sorted((await c.get("/profiles")).json()["profiles"])
             assert len(names) == 9
             for n in names:

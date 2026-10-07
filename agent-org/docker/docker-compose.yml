@@ -162,6 +162,9 @@ services:
         condition: service_healthy
     # Per-project deploy tokens (AO_TOKEN_<PROJECT>=<PAT>) live here so the bridge can resolve
     # them per project (multi-PAT). Secrets via env only; the DB stores just the var NAME.
+    # The HTTP control-plane tokens arrive the same way (ao-auth, app/auth.py): AO_OPERATOR_TOKEN
+    # (every route but /health; unset = those routes refuse with 503) and AO_WORKER_TOKEN (the
+    # floor-check route only). Never set either in an ao-ot command sandbox.
     env_file:
       - .env
     environment:
@@ -372,6 +375,9 @@ services:
       # Floor hook (P3.3) — block irreversible actions without a cleared decision.
       - AO_BRIDGE_URL=http://agent-bridge:8000
       - AO_SUBJECT=ao-worker-1
+      # ao-auth: the bearer the floor hook sends to /hook/floor-check - the ONLY route it opens.
+      # Workers only; the ao-ot sandboxes (where commands run) never get it.
+      - AO_WORKER_TOKEN=${AO_WORKER_TOKEN:-}
       # sl-ao-envfile (2026-09-19): the two names that replaced `env_file: ../../.env`.
       # Measured, not assumed — they are the only variables the little-coder image reads
       # container-side that the wildcard was carrying and this block did not already set:
@@ -424,6 +430,8 @@ services:
       - API_KEY=${AO_OPEN_TERMINAL_KEY}
       # J.1 miss #7 second half: with LC_ROUTE_EXEC=1 the pi process can run inside
       # the executor, so the gateway lane key must exist HERE too (see ao-worker note).
+      # ao-auth: off llm-net this key reaches no gateway - pi runs in the worker; candidate for
+      # removal (findings ao-auth), left in place pending that decision.
       - LLAMACPP_API_KEY=${LC_LLAMA_API_KEY}
       # /workspace is a bind-mount; git 2.36+ refuses to discover a submodule's gitdir across the
       # mount boundary unless this is set — without it a RECURSIVE clone leaves nested submodule
@@ -435,13 +443,17 @@ services:
       - HTTPS_PROXY=http://ao-git-egress:8888
       - http_proxy=http://ao-git-egress:8888
       - https_proxy=http://ao-git-egress:8888
-      - NO_PROXY=llama-cpp,agent-bridge,ao-worker-1,ao-git-egress,localhost,127.0.0.1
-      - no_proxy=llama-cpp,agent-bridge,ao-worker-1,ao-git-egress,localhost,127.0.0.1
+      - NO_PROXY=ao-worker-1,ao-git-egress,localhost,127.0.0.1
+      - no_proxy=ao-worker-1,ao-git-egress,localhost,127.0.0.1
     volumes:
       - ao-worker-1-workspace:/workspace
+    # ao-auth (2026-10-07): ao-worker-net ONLY. This container runs the worker's shell commands;
+    # on ai-stack_llm-net it could reach agent-bridge:8000 (and everything else on that net). It
+    # needs only its worker (ao-worker-1 -> here) and ao-git-egress, both on ao-worker-net. The
+    # agent (pi) and its model calls run in ao-worker-1, not here (little-coder entrypoint-agent.sh
+    # + pi-extension/open-terminal-exec: only `bash` is routed here, via ot-exec).
     networks:
       - ao-worker-net
-      - llm-net
     restart: unless-stopped
     <<: *hardening
     healthcheck:
@@ -476,6 +488,9 @@ services:
       - LITTLE_CODER_NO_CTX_PROBE=1
       - AO_BRIDGE_URL=http://agent-bridge:8000
       - AO_SUBJECT=ao-worker-2
+      # ao-auth: the bearer the floor hook sends to /hook/floor-check - the ONLY route it opens.
+      # Workers only; the ao-ot sandboxes (where commands run) never get it.
+      - AO_WORKER_TOKEN=${AO_WORKER_TOKEN:-}
       # See ao-worker-1 for the measurement: the deploy token on the clone path, and the
       # key little-coder itself reads (config.py inference.api_key_env), which the
       # differently-named LLAMACPP_API_KEY above does not cover. From agent-org/docker/.env.
@@ -510,6 +525,8 @@ services:
       - API_KEY=${AO_OPEN_TERMINAL_KEY}
       # J.1 miss #7 second half: with LC_ROUTE_EXEC=1 the pi process can run inside
       # the executor, so the gateway lane key must exist HERE too (see ao-worker note).
+      # ao-auth: off llm-net this key reaches no gateway - pi runs in the worker; candidate for
+      # removal (findings ao-auth), left in place pending that decision.
       - LLAMACPP_API_KEY=${LC_LLAMA_API_KEY}
       # /workspace bind-mount: let git discover submodule gitdirs across the boundary (git 2.36+).
       # Without it a recursive clone leaves submodules unpopulated (MSB1009) + the proxy's `git
@@ -519,13 +536,13 @@ services:
       - HTTPS_PROXY=http://ao-git-egress:8888
       - http_proxy=http://ao-git-egress:8888
       - https_proxy=http://ao-git-egress:8888
-      - NO_PROXY=llama-cpp,agent-bridge,ao-worker-2,ao-git-egress,localhost,127.0.0.1
-      - no_proxy=llama-cpp,agent-bridge,ao-worker-2,ao-git-egress,localhost,127.0.0.1
+      - NO_PROXY=ao-worker-2,ao-git-egress,localhost,127.0.0.1
+      - no_proxy=ao-worker-2,ao-git-egress,localhost,127.0.0.1
     volumes:
       - ao-worker-2-workspace:/workspace
+    # ao-auth: ao-worker-net only - see ao-ot-1.
     networks:
       - ao-worker-net
-      - llm-net
     restart: unless-stopped
     <<: *hardening
     healthcheck:

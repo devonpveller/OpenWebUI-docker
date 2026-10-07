@@ -19,6 +19,7 @@ from app.config import Settings
 from app.modules.profiles import TIERS, parse_tier_models, tier_model
 
 from test_profile_model_intent import _events, _orch, _profiles_on, _rows
+from authtok import OP_HEADERS, OP_TOKEN
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -151,12 +152,13 @@ async def test_get_profiles_reports_tier_and_drift(db_url, tmp_path):
     settings = Settings(
         _env_file=None, chat_adapter="fake", database_url=db_url, profiles_dir=str(d),
         charters_dir=str(ROOT / "charters"), floor_dir=str(ROOT / "floor"),
-        worker_instance_urls="http://w1:8090")
+        worker_instance_urls="http://w1:8090", operator_token=OP_TOKEN)
     orch = Orchestrator(settings, Database(db_url), FakeChatAdapter(),
                         model_client=FakeModelClient(), harness=FakeHarness())
     app = create_app(orch)
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                     headers=OP_HEADERS) as c:
             body = (await c.get("/profiles")).json()
     assert body["profiles"]["planner"]["tier"] == "large"
     assert body["profiles"]["worker-default"]["tier"] == "small"
@@ -178,12 +180,13 @@ async def _get_profiles(db_url, tmp_path, **extra) -> tuple[int, dict]:
     settings = Settings(
         _env_file=None, chat_adapter="fake", database_url=db_url, profiles_dir=str(d),
         charters_dir=str(ROOT / "charters"), floor_dir=str(ROOT / "floor"),
-        worker_instance_urls="http://w1:8090", **extra)
+        worker_instance_urls="http://w1:8090", operator_token=OP_TOKEN, **extra)
     orch = Orchestrator(settings, Database(db_url), FakeChatAdapter(),
                         model_client=FakeModelClient(), harness=FakeHarness())
     app = create_app(orch)
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                     headers=OP_HEADERS) as c:
             r = await c.get("/profiles")
     return r.status_code, r.json()
 

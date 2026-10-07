@@ -37,11 +37,11 @@ $results = @()
 
 # Shared state the fakes write to. GLOBAL on purpose: inside a function called from the child
 # script, $script: would resolve to the GUARD's script scope, not this one.
-$global:DGT = @{ Free = 0.0; Size = 930.5 * 1GB; Workers = @(); Docker = @(); Rest = @(); Tick = 0; Clock = [datetime]'2026-01-01' }
+$global:DGT = @{ Free = 0.0; Size = 930.5 * 1GB; Workers = @(); Docker = @(); Rest = @(); Auth = @(); Tick = 0; Clock = [datetime]'2026-01-01' }
 
 function Get-CimInstance { param($ClassName, $Filter) [pscustomobject]@{ FreeSpace = $global:DGT.Free; Size = $global:DGT.Size } }
 function docker { $global:DGT.Docker += ($args -join ' '); if ($args[0] -eq 'ps') { return $global:DGT.Workers } }
-function Invoke-RestMethod { param($Method = 'GET', $Uri, $ContentType, $Body, $TimeoutSec) $global:DGT.Rest += "$Method $Uri"; [pscustomobject]@{ instances = @() } }
+function Invoke-RestMethod { param($Method = 'GET', $Uri, $ContentType, $Body, $TimeoutSec, $Headers) $global:DGT.Rest += "$Method $Uri"; $global:DGT.Auth += [string]$(if ($Headers) { $Headers['Authorization'] } else { '' }); [pscustomobject]@{ instances = @() } }
 function Start-Sleep { }
 # Get-Date is real unless a case sets DGT.Tick: then every call advances a fake clock by Tick
 # seconds (the space walk's budget checks become deterministic). [DateTime]::UtcNow is untouched.
@@ -183,6 +183,25 @@ try {
          $mm.Count -eq 2 -and $mm[0] -match 'DISK CRITICAL' -and $mm[0] -match 'ao-worker-1' -and $mm[0] -notmatch 'big 30 MB' -and
          $mm[1] -like 'DISK CRITICAL follow-up*' -and $mm[1] -match 'big 30 MB') `
         "rest=$($global:DGT.Rest -join ', ')`nstops=$($stops -join ', ') posts=$($mm.Count)`nmessage: $($mm -join ' | ')"
+    $global:DGT.Workers = @()
+
+    # D4a - ao-auth: the kill-switch and the drain poll carry the operator bearer read from the
+    # plane .env (a fake token built from parts); with no token the guard warns, still tries, and
+    # the hard stop runs regardless
+    $fakeTok = (@('fake', 'dg', 'operator', '7c1e') -join '-')
+    $r = Box; $global:DGT.Workers = @('ao-worker-1'); $global:DGT.Docker = @(); $global:DGT.Rest = @(); $global:DGT.Auth = @()
+    New-Item -ItemType Directory -Path (Join-Path $r 'agent-org\docker') -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $r 'agent-org\docker\.env'), "# plane env`nAO_OPERATOR_TOKEN=$fakeTok`n")
+    $o = Invoke-Guard $r 10.0
+    $authOk = ($global:DGT.Auth.Count -ge 2 -and @($global:DGT.Auth | Where-Object { $_ -ne "Bearer $fakeTok" }).Count -eq 0)
+    $logOk = -not ((Get-GuardLog $r) -match [regex]::Escape($fakeTok)) -and -not ((@(Get-Calls $r 'mm_post.py') -join ' ') -match [regex]::Escape($fakeTok))
+    $r2 = Box; $global:DGT.Rest = @(); $global:DGT.Auth = @(); $global:DGT.Docker = @()
+    $o2 = Invoke-Guard $r2 10.0
+    $noTokOk = (($global:DGT.Rest -join ',') -match 'POST http://127.0.0.1:8830/kill-switch' -and
+                @($global:DGT.Auth | Where-Object { $_ }).Count -eq 0 -and (Get-GuardLog $r2) -match 'AO_OPERATOR_TOKEN not found' -and
+                @($global:DGT.Docker | Where-Object { $_ -like 'stop *' }).Count -eq 1)
+    Write-Case 'D4a' 'CRITICAL: bridge calls carry the operator bearer from agent-org\docker\.env; never logged; no token -> warn + hard stop' `
+        ($authOk -and $logOk -and $noTokOk) "auth-calls=$($global:DGT.Auth.Count) authOk=$authOk logOk=$logOk noTokOk=$noTokOk"
     $global:DGT.Workers = @()
 
     # D5 - throttle: same severity inside the window is not re-sent; worse is; an aged alert is;

@@ -16,6 +16,7 @@ from app.main import create_app
 from app.modules.model_router import FakeModelClient
 from app.orchestrator import Orchestrator
 from app.worker.harness import FakeHarness
+from authtok import OP_HEADERS, OP_TOKEN
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,13 +27,14 @@ async def client(db_url):
         _env_file=None, chat_adapter="fake", database_url=db_url,
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
+        operator_token=OP_TOKEN,
     )
     orch = Orchestrator(settings, Database(db_url), FakeChatAdapter(),
                         model_client=FakeModelClient(), harness=FakeHarness())
     app = create_app(orch)
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=OP_HEADERS) as c:
             yield c
 
 
@@ -86,14 +88,30 @@ async def test_nl_inlet_drives_the_org_like_an_operator_message(db_url):
     settings = Settings(
         _env_file=None, chat_adapter="fake", database_url=db_url,
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
-        floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090")
+        floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
+        operator_token=OP_TOKEN)
     orch = Orchestrator(settings, Database(db_url), FakeChatAdapter(),
                         model_client=FakeModelClient(), harness=FakeHarness())
     orch.models._client.queue_structured(OperatorIntent(kind="status", reply="Here's the board."))
     app = create_app(orch)
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=OP_HEADERS) as c:
             r = await c.post("/nl", json={"message": "how's it going?"})
             assert r.status_code == 200 and r.json()["ok"] is True
     assert orch.chat.posted, "the /nl inlet did not reach nl_intake (no org reply posted)"
+
+
+async def test_control_routes_refuse_a_caller_without_the_operator_token(client):
+    """ao-auth RED/GREEN in this file's own terms: the same app, a caller with no bearer. Before
+    ao-auth every one of these answered (the K8 finding); now each is 401 and nothing ran."""
+    anon = {"Authorization": ""}
+    for path, body in (("/nl", {"message": "kill"}), ("/kill-switch", {"on": True}),
+                       ("/effort", {"name": "x"}), ("/egress", {"host": "evil.example"})):
+        r = await client.post(path, json=body, headers=anon)
+        assert r.status_code == 401, (path, r.status_code)
+    for path in ("/audit", "/scheduler", "/projects", "/profiles", "/suggestions"):
+        assert (await client.get(path, headers=anon)).status_code == 401, path
+    assert (await client.get("/health", headers=anon)).status_code == 200
+    r = await client.get("/egress")                       # the fixture's operator bearer
+    assert r.status_code == 200 and "evil.example" not in r.text

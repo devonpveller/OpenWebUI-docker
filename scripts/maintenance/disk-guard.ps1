@@ -151,8 +151,21 @@ if ($critical) {
     # orchestrator stops dispatching and workers wind down their in-flight
     # turns, then wait a bounded grace window watching the scheduler drain.
     $graceMinutes = 5
+    # ao-auth: the bridge's control routes need the operator bearer (AO_OPERATOR_TOKEN in
+    # agent-org\docker\.env). Read here, never logged. Absent -> the bridge refuses (401), the catch
+    # below logs it and the hard stop still runs.
+    $bridgeHeaders = @{}
+    $aoEnv = Join-Path $repoRoot 'agent-org\docker\.env'
+    if (Test-Path -LiteralPath $aoEnv) {
+        foreach ($l in (Get-Content -LiteralPath $aoEnv)) {
+            if ($l -match '^\s*AO_OPERATOR_TOKEN\s*=\s*(.+?)\s*$') {
+                $bridgeHeaders['Authorization'] = 'Bearer ' + $Matches[1].Trim('"', "'")
+            }
+        }
+    }
+    if (-not $bridgeHeaders.Count) { Log "WARN: AO_OPERATOR_TOKEN not found in $aoEnv - the bridge will refuse the kill-switch" }
     try {
-        Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8830/kill-switch' `
+        Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8830/kill-switch' -Headers $bridgeHeaders `
             -ContentType 'application/json' -Body '{"on": true}' -TimeoutSec 10 | Out-Null
         $orgAction = "kill-switch engaged"
         Log "org kill-switch ENGAGED via agent-bridge; waiting up to ${graceMinutes}m for the scheduler to drain..."
@@ -160,7 +173,7 @@ if ($critical) {
         while ((Get-Date) -lt $deadline) {
             Start-Sleep -Seconds 20
             try {
-                $sched = Invoke-RestMethod -Uri 'http://127.0.0.1:8830/scheduler' -TimeoutSec 10
+                $sched = Invoke-RestMethod -Uri 'http://127.0.0.1:8830/scheduler' -Headers $bridgeHeaders -TimeoutSec 10
                 if (-not $sched.instances -or @($sched.instances).Count -eq 0) {
                     Log "scheduler drained cleanly"
                     $orgAction = "kill-switch engaged, drained cleanly"
@@ -291,7 +304,7 @@ function Get-AlertText([string]$SpaceLine) {
     return "$head -> ${after} GB after reclaim. $reclaimLine (freed inside the Docker vhdx; C: gets it back at the next compaction)." +
            $(if ($orgAction) { " Org: $orgAction." } else { "" }) +
            $(if ($stopped.Count) { " Gym workers stopped: $($stopped -join ', ')." } else { "" }) +
-           $(if ($critical) { " To RESUME after space is safe: release the kill-switch (POST http://127.0.0.1:8830/kill-switch {\""on\"":false} or ask the org via Mattermost) and docker start the workers." } else { "" }) +
+           $(if ($critical) { " To RESUME after space is safe: release the kill-switch (POST http://127.0.0.1:8830/kill-switch {\""on\"":false} with the operator bearer AO_OPERATOR_TOKEN, or ask the org via Mattermost) and docker start the workers." } else { "" }) +
            " $SpaceLine" +
            " Weekly compaction: Sundays 03:15; trigger early via the sysadmin channel if needed."
 }
