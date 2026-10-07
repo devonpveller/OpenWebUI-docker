@@ -2811,6 +2811,113 @@ function Test-PortalAlertDelivery {
 }
 # === END PORTAL ALERT DELIVERY ================================================
 
+# === INFERENCE SHEDDING (ao-queue, 2026-10-07) ================================
+# gym-002 (2026-10-07): llm-queue held 126 of its 128 connections and refused
+# 46 requests in ten minutes with 503 queue_connections_exhausted - the bridge's
+# own calls among them - and nobody was told; callers read it as their own
+# failure. llm-queue now folds capacity refusals and held-connection pressure
+# into EPISODES (inference/llm-queue/src/llm_queue/shedding.py: start at a
+# refusal or held >= 75% of the cap; clear at held <= 50% with no refusal for
+# 300 s) and publishes the state on its own /healthz under `shedding`.
+#
+# This rule reads that (docker exec llm-queue curl .../healthz - llm-queue's
+# liveness route, never LiteLLM, never an upstream) and pages ONCE per episode
+# through Send-LoopAlert (host Telegram + the Mattermost mirror), with the
+# all-clear through Resolve-LoopAlert. An episode that began AND ended between
+# two passes still gets its one notice and its all-clear, in the same pass:
+# llm-queue keeps the last closed episode, and logs\.watchdog-shed-state.json
+# remembers the last episode id this watchdog reported (per llm-queue process,
+# keyed by its process_started_at, since a restart numbers episodes from 1).
+# A new episode that starts before the previous one was cleared on a pass is
+# the same page (Send-LoopAlert cooldown) - one ongoing incident.
+# Unreadable state (container down, an image without the field) is not judged
+# here: the llm-gateway catastrophe key above owns "llm-queue is down".
+$InferenceShedKey = 'inference-shedding'
+
+# Test seam: tests redefine this function. Returns the parsed `shedding` object
+# from llm-queue's /healthz, or $null when it cannot be read.
+function Get-LlmQueueShedding {
+    [CmdletBinding()]
+    param()
+    $lines = Invoke-BoundedDocker -DockerArgs @('exec', 'llm-queue', 'curl', '-fsS', '-m', '5', 'http://127.0.0.1:8080/healthz') -TimeoutSeconds $DockerProbeTimeoutSeconds
+    if ($null -eq $lines) { return $null }
+    try {
+        $o = (@($lines) -join "`n") | ConvertFrom-Json -ErrorAction Stop
+        return $o.shedding
+    } catch { return $null }
+}
+
+function ConvertTo-ShedUtc {
+    param($Epoch)
+    try {
+        $d = [double]$Epoch
+        if ([double]::IsNaN($d) -or $d -le 0) { return 'unknown' }
+        return [DateTimeOffset]::FromUnixTimeMilliseconds([int64]($d * 1000)).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    } catch { return 'unknown' }
+}
+
+function Test-InferenceShedding {
+    [CmdletBinding()]
+    param()
+    $key = $InferenceShedKey
+    $s = Get-LlmQueueShedding
+    if (-not $s -or -not $s.state) {
+        Write-LogEntry "inference shedding: llm-queue /healthz has no shedding state (container down, or an image before ao-queue) - nothing to judge" "DEBUG"
+        return $true
+    }
+    $statePath = Join-Path $PROJECT_DIR 'logs\.watchdog-shed-state.json'
+    $proc = ConvertTo-SafeAlertToken ([string]$s.process_started_at) 32
+    $seen = [int64]0
+    try {
+        if (Test-Path -LiteralPath $statePath) {
+            $prev = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json -ErrorAction Stop
+            if ([string]$prev.process -eq $proc) { $seen = ConvertTo-AlertCount $prev.last_episode_seen }
+        }
+    } catch { }
+    $cap = ConvertTo-AlertCount $s.cap
+    $held = ConvertTo-AlertCount $s.held
+    $clearAt = ConvertTo-AlertCount $s.clear_at
+    $quiet = ConvertTo-AlertCount $s.clear_quiet_s
+    $ok = $true
+    $newSeen = $seen
+
+    if ([string]$s.state -eq 'shedding' -and $s.current) {
+        $ok = $false
+        $ep = $s.current
+        $id = ConvertTo-AlertCount $ep.id
+        $trig = ConvertTo-SafeAlertToken ([string]$ep.trigger) 24
+        $msg = "INFERENCE SHEDDING: llm-queue episode $id ($trig) since $(ConvertTo-ShedUtc $ep.started_at) - $held of $cap held connections, $(ConvertTo-AlertCount $ep.refusals) capacity refusal(s) (503 queue_connections_exhausted). Callers (OWUI, agent-org workers, Open Brain) see 503 / 'Connection error': this is the environment, not their code. Clears at held <= $clearAt with no refusal for ${quiet}s. Look: docker logs llm-queue (inference_shedding_*, conn_reaper)."
+        Write-LogEntry $msg "ERROR"
+        Send-LoopAlert -Key $key -Message $msg | Out-Null
+        if ($id -gt $newSeen) { $newSeen = $id }
+    } else {
+        $last = $s.last
+        if ($last) {
+            $id = ConvertTo-AlertCount $last.id
+            $span = "episode $id ($(ConvertTo-SafeAlertToken ([string]$last.trigger) 24)) $(ConvertTo-ShedUtc $last.started_at) to $(ConvertTo-ShedUtc $last.cleared_at): peak $(ConvertTo-AlertCount $last.peak_held) of $cap held, $(ConvertTo-AlertCount $last.refusals) capacity refusal(s)"
+            $paged = Test-Path (Join-Path $PROJECT_DIR "logs\.loop-alert-$key")
+            if ($id -gt $seen -and -not $paged) {
+                # Began and ended between two passes: its one notice, then its all-clear.
+                $msg = "INFERENCE SHED between passes: llm-queue $span (503 queue_connections_exhausted to callers; the environment, not their code)."
+                Write-LogEntry $msg "ERROR"
+                Send-LoopAlert -Key $key -Message $msg | Out-Null
+            }
+            if (Resolve-LoopAlert -Key $key -Message "llm-queue stopped shedding - $span; held now $held of $cap.") {
+                Write-LogEntry "inference shedding cleared: $span" "SUCCESS"
+            }
+            if ($id -gt $newSeen) { $newSeen = $id }
+        } else {
+            Resolve-LoopAlert -Key $key -Message "llm-queue is not shedding; held now $held of $cap." | Out-Null
+        }
+    }
+    try {
+        $j = @{ process = $proc; last_episode_seen = $newSeen } | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText($statePath, $j)
+    } catch { Write-LogEntry "inference shedding: could not write $statePath ($($_.Exception.Message))" "WARN" }
+    return $ok
+}
+# === END INFERENCE SHEDDING ===================================================
+
 # === HOST MEMORY (hm-watchdog, 2026-10-07) ====================================
 # Nothing watched host memory. 2026-07-05: com.docker.backend leaked to 83.9 GB
 # private and vmmemWSL to 122 GB, commit charge reached 224.7 of 244 GB,
@@ -3691,6 +3798,10 @@ function Invoke-HealthCheck {
         $script:HealthIssues += ($dead -join '+')
     } else {
         Resolve-Catastrophe -Key 'llm-gateway' -Message "llm-gateway and llm-queue are healthy again."
+        # ao-queue: up is not the same as serving - is llm-queue refusing for capacity?
+        if (-not [bool](@(Test-InferenceShedding) | Select-Object -Last 1)) {
+            $script:HealthIssues += 'inference-shedding'
+        }
     }
     Confirm-AuxiliaryContainer -Container "llm-gateway-db" -RestartWaitSeconds 15 | Out-Null
     Confirm-AuxiliaryContainer -Container "llm-gateway-ui" -RestartWaitSeconds 15 | Out-Null

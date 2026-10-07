@@ -244,6 +244,22 @@ that `up` will never start: remove it with the `rm -sf` line in
 `stats` adds the queue's live board (under `local`) and the ledger's demand, by
 caller and in total.
 
+**Shedding is announced, once.** When `llm-queue` refuses for capacity (503
+`queue_connections_exhausted`), or its held connections reach 75% of
+`LLM_QUEUE_MAX_TOTAL_CONNECTIONS` (96 of 128), it opens a shedding *episode*;
+the episode clears when held is back at or under 50% (64) with no refusal for
+300 s (`LLM_QUEUE_SHED_ALERT_RATIO` / `_CLEAR_RATIO` / `_CLEAR_QUIET_S`). Each
+transition is one log line (`inference_shedding_started` /
+`inference_shedding_cleared`) and one `shed_start` / `shed_clear` event, and the
+state rides on llm-queue's `/healthz` under `shedding`. The host watchdog
+(`scripts/checks/stack-watchdog.ps1`, `Test-InferenceShedding`, every pass while
+llm-queue and llm-gateway are up) reads that with `docker exec llm-queue curl
+.../healthz` and pages **once per episode** on Telegram plus the Mattermost
+mirror (key `inference-shedding`), naming it an environment problem, with a
+`RESOLVED` all-clear. An episode that starts and ends between two passes still
+gets its one notice and its all-clear. It is observability only: admission and
+priority are unchanged. Test: `scripts/checks/test-watchdog-inference-shedding.ps1`.
+
 `recover inference` stops the plane and starts it again container by container,
 the upstreams and `llm-queue` before `llm-gateway`, and stops at the first
 container that fails its gate.
@@ -300,7 +316,8 @@ up with your own tools (`lm-models-backup` tars it weekly under `local`).
 | Every caller gets 401 | Its key is not a virtual key this gateway issued - see [Issue a key for each caller](#issue-a-key-for-each-caller). A caller left on a default such as `llama` is refused. |
 | A model is missing from `/v1/models` | `docker logs llm-gateway` shows the `[assemble-config]` decision for every fragment: `SKIP local.yaml - needs compose profile 'local'` or `DROP cloud-large ... env not set: OPENROUTER_API_KEY`. |
 | `stack.py health` fails `serving depth: llama-cpp-upstream's /models holds NO .gguf files` | `LM_MODELS_DIR` points at an empty or wrong directory. The line names the host path that was bound. |
-| GPU at 0% and `queue_connections_exhausted` in `docker logs llm-queue` | A queue connection leak; `docker restart llm-queue`. |
+| GPU at 0% and `queue_connections_exhausted` in `docker logs llm-queue` | Held connections that are not real requests. Since ao-queue (2026-10-07) a stream that ends early - the client hangs up mid-stream or right after `[DONE]`, or the upstream dies mid-body - releases its slot at once (the cleanup is shielded from the disconnect's cancellation; before, it was held until the reaper's 1,200 s TTL). If it recurs, compare `held_total` on `/healthz` with real connections, look for `conn_reaper reclaimed` lines, and `docker restart llm-queue` (stateless). |
+| `ALERT ai-stack: INFERENCE SHEDDING` | llm-queue is refusing for capacity, or close to it - see *Shedding is announced, once* under [Operate](#operate). Callers see 503 / `Connection error`; it is not their code. Look at `docker logs llm-queue` (`inference_shedding_*`, `queue_reject`, `conn_reaper`) for who is holding connections. |
 
 ## Security notes
 

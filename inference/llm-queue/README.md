@@ -28,6 +28,20 @@ callers → llama-cpp:8080 (alias) → llm-gateway (LiteLLM) → llm-queue → l
 - **Transparent SSE passthrough** — token streams relayed unbuffered.
 - **Client-disconnect eviction** — a waiter that drops is removed before it burns
   a slot.
+- **Prompt release on an early end** (ao-queue, 2026-10-07) — uvicorn speaks ASGI
+  spec 2.3, so Starlette *cancels* the streaming task when the client hangs up.
+  The end-of-stream cleanup (`routes/data.py`) runs under
+  `anyio.CancelScope(shield=True)` and releases the permit and the held
+  connection before any I/O (the upstream close and the events write follow,
+  bounded at 10 s). Before, the events-store write raised `CancelledError` first
+  and the slot stayed held until the reaper's 1,200 s TTL — gym-002 went 63 → 126
+  of 128 and shed. A `finish` event with status 502 now carries `reason`
+  `client_disconnect` or `upstream_error`. The reaper stays as the backstop.
+  Test: `tests/test_disconnect_leak.py`.
+- **Shedding episodes** (`shedding.py`) — a capacity refusal or held ≥ 75 % of
+  the cap opens an episode, held ≤ 50 % with no refusal for 300 s clears it; one
+  log line + one event per transition, state on `/healthz` → `shedding`, paged
+  once per episode by the host watchdog (see `../README.md`, *Operate*).
 
 ## Architecture (modules)
 
@@ -39,6 +53,7 @@ callers → llama-cpp:8080 (alias) → llm-gateway (LiteLLM) → llm-queue → l
 | `metrics.py` | rolling-`T` |
 | `events.py` | analytics events → llm-queue's OWN store (never LiteLLM's schema) |
 | `registry.py` | model → queue routing + global connection cap |
+| `shedding.py` | shedding episodes (start / clear with hysteresis) for `/healthz` and the watchdog |
 | `routes/` | data plane (admission + proxy), control plane, health |
 
 ## Tuning invariant (three-place coupling)

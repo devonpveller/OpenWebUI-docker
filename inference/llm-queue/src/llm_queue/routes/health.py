@@ -19,4 +19,6 @@ async def healthz(request: Request) -> dict[str, object]:
         "status": "ok",
         "held_total": state.registry.held_total,
         "models": list(state.registry.queues().keys()),
+        # ao-queue: the shedding episode state the host watchdog pages on (shedding.py).
+        "shedding": state.shed.snapshot(state.registry.held_total),
     }

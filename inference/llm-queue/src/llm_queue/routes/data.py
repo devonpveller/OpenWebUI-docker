@@ -19,6 +19,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 
+import anyio
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
@@ -51,6 +52,26 @@ class _ReleasingStreamingResponse(StreamingResponse):
             aclose = getattr(self.body_iterator, "aclose", None)
             if aclose is not None:
                 await aclose()
+
+# Upper bound on the shielded end-of-stream cleanup (the upstream close + the events write).
+# Shielded so a client disconnect cannot cut it short; bounded so a stuck close cannot hold a task.
+_CLEANUP_BOUND_S = 10.0
+
+
+async def _close_quietly(resp) -> None:
+    if resp is None:
+        return
+    with anyio.move_on_after(_CLEANUP_BOUND_S):
+        try:
+            await resp.aclose()
+        except Exception:  # noqa: BLE001 - a failed close must not skip the releases after it
+            log.warning("upstream_close_failed", exc_info=True)
+
+
+async def _emit_quietly(state: AppState, event: str, **fields: object) -> None:
+    with anyio.move_on_after(_CLEANUP_BOUND_S):
+        await state.events.emit(event, **fields)
+
 
 # Nginx/uvicorn's "client closed request" — the request was abandoned while queued.
 _CLIENT_CLOSED = 499
@@ -188,7 +209,9 @@ async def _admit_and_proxy(request: Request, upstream_path: str) -> Response:
             "reject", ts=time.time(), request_id=rid, key=waiter.key, model=model_name,
             prio=cls.rank, status=r.status_code, reason=r.type,
         )
+        await state.note_shed(refused=True)  # ao-queue: one notice per episode, see shedding.py
         return _rejection_response(r)
+    await state.note_shed()
 
     # Admission decision (honest 429 before any bytes).
     try:
@@ -251,14 +274,20 @@ async def _admit_and_proxy(request: Request, upstream_path: str) -> Response:
             ok = False
             raise
         finally:
-            await resp.aclose()
-            await mq.release(waiter, record_duration=ok)
-            await state.registry.release_connection(rid)
-            await state.events.emit(
-                "finish", ts=time.time(), request_id=rid, key=waiter.key, model=model_name,
-                prio=cls.rank, wait_s=waiter.wait_seconds, duration_s=_elapsed(waiter),
-                est_wait_s=waiter.est_at_enqueue, status=resp.status_code,
-            )
+            # ao-queue: SHIELDED. On a client disconnect Starlette cancels this task (ASGI spec 2.3
+            # task group), and an unshielded `await` here raised CancelledError before the slot was
+            # released - held until the reaper's TTL. The permit and the slot go first, before any
+            # I/O; the close and the events write follow, bounded.
+            with anyio.CancelScope(shield=True):
+                await mq.release(waiter, record_duration=ok)
+                await state.registry.release_connection(rid)
+                await _close_quietly(resp)
+                await _emit_quietly(
+                    state, "finish", ts=time.time(), request_id=rid, key=waiter.key,
+                    model=model_name, prio=cls.rank, wait_s=waiter.wait_seconds,
+                    duration_s=_elapsed(waiter), est_wait_s=waiter.est_at_enqueue,
+                    status=resp.status_code,
+                )
 
     return _ReleasingStreamingResponse(
         relay(),
@@ -292,6 +321,7 @@ async def _stream_waiting_then_proxy(
     dispatched = False
     resp = None
     ok = True
+    cancelled = False
     cls = waiter.cls
     model_name = waiter.model
     try:
@@ -320,6 +350,7 @@ async def _stream_waiting_then_proxy(
             yield chunk
     except asyncio.CancelledError:
         ok = False
+        cancelled = True
         raise
     except Exception as exc:  # noqa: BLE001
         ok = False
@@ -327,23 +358,31 @@ async def _stream_waiting_then_proxy(
         msg = json.dumps({"error": {"type": "upstream_error", "message": f"llm-queue: {exc}"}})
         yield f"data: {msg}\n\n".encode()
     finally:
-        if resp is not None:
-            await resp.aclose()
-        if dispatched:
-            await mq.release(waiter, record_duration=ok)
-            await state.events.emit(
-                "finish", ts=time.time(), request_id=rid, key=waiter.key, model=model_name,
-                prio=cls.rank, wait_s=waiter.wait_seconds, duration_s=_elapsed(waiter),
-                est_wait_s=waiter.est_at_enqueue, status=200 if ok else 502,
-            )
-        else:
-            await mq.cancel_waiting(waiter)
-            await state.events.emit(
-                "cancel", ts=time.time(), request_id=rid, key=waiter.key, model=model_name,
-                prio=cls.rank, reason="client_disconnect_or_cancel",
-            )
-        if conn_held:
-            await state.registry.release_connection(rid)
+        # ao-queue: SHIELDED, releases first. A client disconnect cancels this task (Starlette's
+        # ASGI spec 2.3 task group); the old order awaited the upstream close and the events-store
+        # write before `release_connection`, so the first of them to suspend raised CancelledError
+        # and the slot stayed held until the reaper's 1,200 s TTL (gym-002: 63 -> 126 of 128).
+        with anyio.CancelScope(shield=True):
+            if dispatched:
+                await mq.release(waiter, record_duration=ok)
+            else:
+                await mq.cancel_waiting(waiter)
+            if conn_held:
+                await state.registry.release_connection(rid)
+            await _close_quietly(resp)
+            if dispatched:
+                await _emit_quietly(
+                    state, "finish", ts=time.time(), request_id=rid, key=waiter.key,
+                    model=model_name, prio=cls.rank, wait_s=waiter.wait_seconds,
+                    duration_s=_elapsed(waiter), est_wait_s=waiter.est_at_enqueue,
+                    status=200 if ok else 502,
+                    reason=None if ok else ("client_disconnect" if cancelled else "upstream_error"),
+                )
+            else:
+                await _emit_quietly(
+                    state, "cancel", ts=time.time(), request_id=rid, key=waiter.key,
+                    model=model_name, prio=cls.rank, reason="client_disconnect_or_cancel",
+                )
 
 
 # ---- pass-through (no admission) -----------------------------------------
