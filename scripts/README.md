@@ -50,7 +50,10 @@ were retired by the follow-up item (ac-legacy-recovery) rather than fixed.
   portal is driven separately), Docker-engine restart, backup recency,
   claude-bridge health, Telegram alerting, and a census of EVERY container
   (restart loops and orphaned network-namespace joiners; pages, never repairs;
-  the fault line sent is credential-scrubbed). `-Mode loops` runs only that
+  the fault line sent is credential-scrubbed), and host memory (available,
+  commit charge, vmmemWSL and com.docker.backend private bytes and the
+  backend's growth; read before the Docker step, alert only, one `hostmem:`
+  line per pass; test `test-watchdog-host-memory.ps1`). `-Mode loops` runs only that
   census, bounded and read-only for the host (no repair, no compose); it writes
   the same state file and sends real alerts, so run it between scheduled passes.
   The pages and the all-clear bar:
