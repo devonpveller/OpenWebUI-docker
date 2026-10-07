@@ -67,6 +67,18 @@ function Get-QueueBoard {
     return (($out | ForEach-Object { "$_" }) -join "`n")
 }
 
+function Invoke-QueueChild([string[]]$QArgs) {
+    # A queue call whose MESSAGE is asserted, run as a child process for the reason
+    # Get-QueueBoard gives (Write-Host never reaches an in-process pipeline). vwm-p1b: the
+    # learning-record refusals are asserted by their REASON, not only by the state they leave.
+    $psExe = Join-Path $PSHOME "powershell.exe"
+    if (-not (Test-Path $psExe)) { $psExe = "powershell" }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try { $out = & $psExe -NoProfile -NonInteractive -File $queue @QArgs 2>&1; $code = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    return @{ code = $code; out = (($out | ForEach-Object { "$_" }) -join "`n") }
+}
+
 function Get-QueueState([string]$id) {
     $f = Join-Path $QueueDir "$id.json"
     if (-not (Test-Path $f)) { return "(missing)" }
@@ -550,9 +562,11 @@ $bogus = "0000000000000000000000000000000000000000"
 Check "a nonexistent sha is refused, not recorded" ((Get-QueueState "drill-a") -ne "merged")
 
 # drill-a came back once (the Step 5 FAIL), so it owes a learning record (Step 4).
-& $queue -Merged -Id drill-a -By wt-reviewer -Sha $mergeSha -FitsCodebase 2>&1 | Out-Null
-Check "-Merged refuses drill-a while its learning record is missing" ((Get-QueueState "drill-a") -eq "reviewing")
-Write-DrillLearningRecord "drill-a" $mergeSha "case 2: the note did not state the unit"
+$lrRefusal = Invoke-QueueChild @("-Merged", "-Id", "drill-a", "-By", "wt-reviewer", "-Sha", $mergeSha, "-FitsCodebase")
+Check "-Merged refuses drill-a while its learning record is missing (reason: record-missing)" `
+    (((Get-QueueState "drill-a") -eq "reviewing") -and ($lrRefusal.code -eq 1) -and ($lrRefusal.out -match "record-missing") -and ($lrRefusal.out -notmatch "INDETERMINATE")) `
+    ("exit=" + $lrRefusal.code)
+Write-DrillLearningRecord "drill-a" $mergeSha "1) tester-fail by wt-tester: case 2: the note does not state the unit"
 & $queue -Merged -Id drill-a -By wt-reviewer -Sha $mergeSha -FitsCodebase | Out-Null
 Check "drill-a merged by the reviewer" ((Get-QueueState "drill-a") -eq "merged")
 Check "the verdict recorded is fits_codebase, not the retired fits_anchor" (
@@ -608,9 +622,11 @@ Step 10 "the reviewer lands the adapted work"
 Invoke-DrillGit -C $wtMerge merge --no-ff work/drillb -m "merge drill B: per-caller override, A's default kept (evidence: drill)"
 $mergeB = (Get-DrillGit -C $wtMerge rev-parse HEAD).Trim()
 # drill-b CAME BACK once (the stale-pass -Requeue), so it owes a learning record (Step 4).
-& $queue -Merged -Id drill-b -By wt-reviewer -Sha $mergeB -FitsCodebase 2>&1 | Out-Null
-Check "-Merged refuses drill-b while its learning record is missing" ((Get-QueueState "drill-b") -eq "reviewing")
-Write-DrillLearningRecord "drill-b" $mergeB "the rebase onto A's merge changed the tested file (stale pass)"
+$lrRefusal = Invoke-QueueChild @("-Merged", "-Id", "drill-b", "-By", "wt-reviewer", "-Sha", $mergeB, "-FitsCodebase")
+Check "-Merged refuses drill-b while its learning record is missing (reason: record-missing)" `
+    (((Get-QueueState "drill-b") -eq "reviewing") -and ($lrRefusal.code -eq 1) -and ($lrRefusal.out -match "record-missing") -and ($lrRefusal.out -notmatch "INDETERMINATE")) `
+    ("exit=" + $lrRefusal.code)
+Write-DrillLearningRecord "drill-b" $mergeB "1) reviewer-requeue by wt-reviewer: rebase onto A's merge changed the file; the pass no longer describes it"
 & $queue -Merged -Id drill-b -By wt-reviewer -Sha $mergeB -FitsCodebase | Out-Null
 Check "drill-b merged after re-test" ((Get-QueueState "drill-b") -eq "merged")
 

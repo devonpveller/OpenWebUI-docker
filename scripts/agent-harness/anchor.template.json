@@ -29,5 +29,7 @@
 
   "_tier_howto": "OPTIONAL. large | small - the MODEL SIZE this item deserves (harness.config.json model_tiers). large: planning, long-horizon or new-logic work. small: narrow, mechanical or doc-only work. Leave it out and the item is large (model_tiers.default_tier). Any other value is refused at -Propose. Advisory: queue.ps1 prints the recommended model for each next role and never blocks on it.",
 
+  "_continues_howto": "OPTIONAL. When this item continues a REJECTED one under a new id (X -> X2), add \"continues\": \"<X>\". queue.ps1 -Propose refuses an id the queue does not hold and writes it to the item as `predecessor`; the learning-record gate (MERGE-PROTOCOL Step 4) then counts X's returns as this item's. An X2 beside a rejected X is linked even when undeclared; \"continues\": \"none\" says there is no predecessor.",
+
   "findings_sink": "../documentation-plans-ai-stack/implementation-guide/<feature>/findings/<id>.md (or ../documentation-plans-ai-stack/journal/notes/<topic>-<yyyy-mm-dd>.md when there is no feature) - IN THE PLAN STORE, never this repo, whose pre-commit refuses new files under documentation/notes. Where anything true but out of scope gets written down instead of being pasted into the deliverable or discarded. HELD TO THE SAME STANDARD AS THE ARTIFACT: a claim here about what a script does is verified against that code path, not against its comments. An unverified sink is worse than no sink - it looks like a record, and the next item acts on it."
 }
