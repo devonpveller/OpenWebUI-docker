@@ -70,6 +70,10 @@ class AgentResult:
     commands_run: int
 
 
+_COMMAND_DISPLAY_CAP = 240     # the chat/log line copy of a command
+_COMMAND_FULL_CAP = 8000       # bound on the full copy (a heredoc can be large; activity is kept in state)
+
+
 def _event_to_activity(ev: dict) -> dict:
     """One ot-exec command event → a compact activity record for the UI. The command + its stderr
     are streamed to the operator's chat and journaled, so a deploy token that surfaced in either
@@ -77,8 +81,17 @@ def _event_to_activity(ev: dict) -> dict:
     denied = bool(ev.get("git_proxy_denied"))
     code = ev.get("exit_code")
     # Redact BEFORE truncating so a token can't survive as a fragment split across the length cap.
+    full = redact_secrets(str(ev.get("command", "")))
+    # ao-checks (agent-org gym-002, 2026-10-07): `command` stays the 240-char DISPLAY copy (chat/log
+    # lines), but a consumer that reads commands as data (agent-org parsed `REPRO:` lines out of them
+    # and banked commands cut mid-token as permanent checks) needs the whole text, or at least to
+    # know it was cut. `command_full` carries it (bounded), `command_truncated` says whether
+    # `command` is shorter than what ran, `command_full_truncated` whether even the full copy was capped.
     return {
-        "command": redact_secrets(str(ev.get("command", "")))[:240],
+        "command": full[:_COMMAND_DISPLAY_CAP],
+        "command_truncated": len(full) > _COMMAND_DISPLAY_CAP,
+        "command_full": full[:_COMMAND_FULL_CAP],
+        "command_full_truncated": len(full) > _COMMAND_FULL_CAP,
         "exit_code": code,
         "ok": code == 0 and not denied,
         "denied": denied,

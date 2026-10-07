@@ -83,7 +83,8 @@ async def test_a_reproduced_defect_becomes_a_durable_corpus_check(db_url):
             "REPRO: python3 -c \"import todo; assert todo.db_path('')\"")
         orch.harness.check_queue = [
             (0, "CLEARED", False),          # _clear_lens_findings
-            (0, "SALVAGE-DONE", False),     # _salvage_lens_findings (cat)
+            (0, "SALVAGE-DONE", False),     # _read_lens_findings_file (cat)
+            (0, "", False),                 # ao-checks: `sh -n` - the REPRO parses
             (1, "AssertionError", False),   # the REPRO FAILS on the current code → a real, reproduced defect
         ]
         r = await orch._mode_b_phase(eid, chan, root, REPO, _delivery())
@@ -106,6 +107,7 @@ async def test_an_unreproduced_finding_is_dropped_not_banked(db_url):
         orch.harness.check_queue = [
             (0, "CLEARED", False),
             (0, "SALVAGE-DONE", False),
+            (0, "", False),                 # ao-checks: `sh -n` - the REPRO parses
             (0, "", False),                 # the REPRO PASSES → not a real break → dropped
         ]
         r = await orch._mode_b_phase(eid, chan, root, REPO, _delivery())

@@ -202,15 +202,18 @@ class ProjectRegistry:
         return [{"id": r.id, "origin_note": r.origin_note, "kind": r.kind, "body": r.body,
                  "active": r.active} for r in rows]
 
-    async def set_acceptance_check_active(self, check_id: str, active: bool) -> bool:
-        """Retire (or restore) a corpus check without deleting its audit trail. False if unknown."""
+    async def set_acceptance_check_active(self, check_id: str, active: bool, *,
+                                         actor: str | None = None) -> bool:
+        """Retire (or restore) a corpus check without deleting its audit trail. False if unknown.
+        `actor` (ao-checks round 2): who did it, recorded on the `acceptance_check_toggled` event."""
         async with self.db.session_factory() as s:
             row = await s.get(AcceptanceCheck, check_id)
             if row is None:
                 return False
             row.active = active
             await s.commit()
-        await self.audit.log("acceptance_check_toggled", payload={"id": check_id, "active": active})
+        await self.audit.log("acceptance_check_toggled", actor=actor,
+                             payload={"id": check_id, "active": active})
         return True
 
     async def get(self, slug: str) -> dict | None:
