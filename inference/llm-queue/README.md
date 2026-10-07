@@ -38,6 +38,14 @@ callers → llama-cpp:8080 (alias) → llm-gateway (LiteLLM) → llm-queue → l
   of 128 and shed. A `finish` event with status 502 now carries `reason`
   `client_disconnect` or `upstream_error`. The reaper stays as the backstop.
   Test: `tests/test_disconnect_leak.py`.
+- **One release, decided by the waiter's state** (ao-queue round 2) — a
+  `_Lease` per admitted request gives back the heap entry or model permit, the
+  held slot and the upstream response exactly once. It reads `waiter.dispatched`
+  (enqueue may dispatch before the generator sees it — a client that hung up
+  before the first byte used to leak the PERMIT forever), and the response
+  wrapper closes it too when the body generator never ran. Backstop:
+  `ModelQueue.reap_stale_running` returns a permit with no upstream byte for
+  `LLM_QUEUE_CONN_TTL_S`; counted on `/healthz` `permits_reaped_total`.
 - **Shedding episodes** (`shedding.py`) — a capacity refusal or held ≥ 75 % of
   the cap opens an episode, held ≤ 50 % with no refusal for 300 s clears it; one
   log line + one event per transition, state on `/healthz` → `shedding`, paged

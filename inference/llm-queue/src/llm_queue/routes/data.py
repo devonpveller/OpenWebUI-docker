@@ -45,6 +45,10 @@ class _ReleasingStreamingResponse(StreamingResponse):
     aclose() on an already-
     exhausted generator (normal completion) is a harmless no-op, and the release is idempotent."""
 
+    def __init__(self, *args, lease: _Lease | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._lease = lease
+
     async def stream_response(self, send) -> None:  # type: ignore[override]
         try:
             await super().stream_response(send)
@@ -52,6 +56,26 @@ class _ReleasingStreamingResponse(StreamingResponse):
             aclose = getattr(self.body_iterator, "aclose", None)
             if aclose is not None:
                 await aclose()
+
+    async def __call__(self, scope, receive, send) -> None:  # type: ignore[override]
+        # ao-queue round 2: the body generator's `finally` is not enough. Under ASGI spec 2.3
+        # Starlette can cancel the streaming task before the generator takes its first step (the
+        # client sent the request and hung up at once); an unstarted generator has no frame, so its
+        # `finally` never runs and the permit + slot were never released. This outer `finally`
+        # always runs, in the request task, after the task group: close the lease here too. It is
+        # idempotent - a no-op when the generator already closed it.
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if self._lease is not None and not self._lease.closed:
+                with anyio.CancelScope(shield=True):
+                    aclose = getattr(self.body_iterator, "aclose", None)
+                    if aclose is not None:
+                        with anyio.move_on_after(_CLEANUP_BOUND_S):
+                            await aclose()
+                    if not self._lease.closed:
+                        log.warning("stream_body_never_ran_released", request_id=self._lease.rid)
+                        await self._lease.close(record_duration=False)
 
 # Upper bound on the shielded end-of-stream cleanup (the upstream close + the events write).
 # Shielded so a client disconnect cannot cut it short; bounded so a stuck close cannot hold a task.
@@ -71,6 +95,31 @@ async def _close_quietly(resp) -> None:
 async def _emit_quietly(state: AppState, event: str, **fields: object) -> None:
     with anyio.move_on_after(_CLEANUP_BOUND_S):
         await state.events.emit(event, **fields)
+
+
+class _Lease:
+    """What one admitted request holds: its global connection slot, its waiter (heap entry or model
+    permit) and, once opened, the upstream response. `close()` gives all of it back exactly once and
+    decides from the WAITER's own state, never from a caller's local flag: `mq.enqueue` may already
+    have dispatched it (permit taken, `waiter.dispatched`) before the generator ever observed that -
+    the round-2 permit leak (tester A1). `cancel_waiting` is a no-op once dispatched and `release` a
+    no-op unless running, so calling both is correct in every state. Callers shield it."""
+
+    __slots__ = ("state", "mq", "waiter", "rid", "resp", "closed")
+
+    def __init__(self, state: AppState, mq: ModelQueue, waiter: Waiter, rid: str) -> None:
+        self.state, self.mq, self.waiter, self.rid = state, mq, waiter, rid
+        self.resp = None
+        self.closed = False
+
+    async def close(self, *, record_duration: bool) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        await self.mq.cancel_waiting(self.waiter)
+        await self.mq.release(self.waiter, record_duration=record_duration)
+        await self.state.registry.release_connection(self.rid)
+        await _close_quietly(self.resp)
 
 
 # Nginx/uvicorn's "client closed request" — the request was abandoned while queued.
@@ -228,11 +277,13 @@ async def _admit_and_proxy(request: Request, upstream_path: str) -> Response:
     fwd_headers = filter_request_headers(dict(request.headers))
 
     if want_stream:
+        lease = _Lease(state, mq, waiter, rid)
         return _ReleasingStreamingResponse(
             _stream_waiting_then_proxy(request, state, mq, waiter, upstream_base, upstream_path,
-                                       fwd_headers, raw, rid),
+                                       fwd_headers, raw, rid, lease=lease),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            lease=lease,
         )
 
     # Non-streaming: block (no heartbeat possible) racing disconnect, then relay.
@@ -264,11 +315,14 @@ async def _admit_and_proxy(request: Request, upstream_path: str) -> Response:
 
     headers = filter_response_headers(resp.headers)
     headers.update(_queue_headers(waiter, mq))
+    lease = _Lease(state, mq, waiter, rid)
+    lease.resp = resp
 
     async def relay() -> AsyncIterator[bytes]:
         ok = True
         try:
             async for chunk in resp.aiter_raw():
+                waiter.last_progress_monotonic = time.monotonic()
                 yield chunk
         except Exception:  # noqa: BLE001
             ok = False
@@ -279,9 +333,7 @@ async def _admit_and_proxy(request: Request, upstream_path: str) -> Response:
             # released - held until the reaper's TTL. The permit and the slot go first, before any
             # I/O; the close and the events write follow, bounded.
             with anyio.CancelScope(shield=True):
-                await mq.release(waiter, record_duration=ok)
-                await state.registry.release_connection(rid)
-                await _close_quietly(resp)
+                await lease.close(record_duration=ok)
                 await _emit_quietly(
                     state, "finish", ts=time.time(), request_id=rid, key=waiter.key,
                     model=model_name, prio=cls.rank, wait_s=waiter.wait_seconds,
@@ -294,6 +346,7 @@ async def _admit_and_proxy(request: Request, upstream_path: str) -> Response:
         status_code=resp.status_code,
         headers=headers,
         media_type=resp.headers.get("content-type"),
+        lease=lease,
     )
 
 
@@ -313,11 +366,13 @@ async def _stream_waiting_then_proxy(
     fwd_headers: dict[str, str],
     raw: bytes,
     rid: str,
+    lease: _Lease | None = None,
 ) -> AsyncIterator[bytes]:
     """Streaming path: heartbeat SSE comments while queued (so idle-read timeouts
     don't fire on a long wait, §10.4), then relay the upstream token stream. The
     connection slot + permit are released exactly once in the outer finally."""
-    conn_held = True
+    if lease is None:
+        lease = _Lease(state, mq, waiter, rid)
     dispatched = False
     resp = None
     ok = True
@@ -346,7 +401,9 @@ async def _stream_waiting_then_proxy(
         resp = await state.upstream.open_stream(
             upstream_base, "POST", upstream_path, headers=fwd_headers, content=raw
         )
+        lease.resp = resp
         async for chunk in resp.aiter_raw():
+            waiter.last_progress_monotonic = time.monotonic()
             yield chunk
     except asyncio.CancelledError:
         ok = False
@@ -363,14 +420,11 @@ async def _stream_waiting_then_proxy(
         # write before `release_connection`, so the first of them to suspend raised CancelledError
         # and the slot stayed held until the reaper's 1,200 s TTL (gym-002: 63 -> 126 of 128).
         with anyio.CancelScope(shield=True):
-            if dispatched:
-                await mq.release(waiter, record_duration=ok)
-            else:
-                await mq.cancel_waiting(waiter)
-            if conn_held:
-                await state.registry.release_connection(rid)
-            await _close_quietly(resp)
-            if dispatched:
+            # The waiter's own state decides (round 2): it may have been dispatched - permit taken -
+            # before this generator observed it, and the local `dispatched` is then still False.
+            was_dispatched = waiter.dispatched
+            await lease.close(record_duration=ok and dispatched)
+            if was_dispatched:
                 await _emit_quietly(
                     state, "finish", ts=time.time(), request_id=rid, key=waiter.key,
                     model=model_name, prio=cls.rank, wait_s=waiter.wait_seconds,

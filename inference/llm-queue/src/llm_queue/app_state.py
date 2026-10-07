@@ -36,6 +36,7 @@ class AppState:
         )
         self._seq = itertools.count()
         self._reaper_task: asyncio.Task | None = None
+        self.permits_reaped_total = 0
 
     def next_seq(self) -> int:
         return next(self._seq)
@@ -88,6 +89,26 @@ class AppState:
         await self.events.stop()
         await self.upstream.aclose()
 
+    async def _reap_permits(self, ttl: float) -> int:
+        """Permit backstop (ao-queue round 2): a model permit held by a request that made no
+        progress for `ttl` is returned, LOGGED at WARNING and counted on /healthz
+        (`permits_reaped_total`), so a wedge of lost permits is both bounded and visible."""
+        n = 0
+        for name, mq in self.registry.queues().items():
+            reaped = await mq.reap_stale_running(ttl)
+            if reaped:
+                n += len(reaped)
+                log.warning(
+                    "permit_reaper reclaimed stuck model permit(s)",
+                    model=name, count=len(reaped), request_ids=[w.id for w in reaped][:20],
+                    ttl_s=ttl,
+                )
+                await self.events.emit(
+                    "permit_reaped", ts=time.time(), model=name, depth=len(reaped),
+                )
+        self.permits_reaped_total += n
+        return n
+
     async def _reap_loop(self) -> None:
         """Periodically reclaim leaked held connections. Any reap is LOGGED
         (WARNING) + emitted as an
@@ -98,6 +119,7 @@ class AppState:
             try:
                 await asyncio.sleep(interval)
                 reclaimed = await self.registry.reap_stale_connections(ttl)
+                await self._reap_permits(ttl)
                 # Time-based all-clear: an episode clears on a quiet tick, not only on traffic.
                 await self.note_shed()
                 if reclaimed:

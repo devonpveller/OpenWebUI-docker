@@ -255,10 +255,24 @@ state rides on llm-queue's `/healthz` under `shedding`. The host watchdog
 (`scripts/checks/stack-watchdog.ps1`, `Test-InferenceShedding`, every pass while
 llm-queue and llm-gateway are up) reads that with `docker exec llm-queue curl
 .../healthz` and pages **once per episode** on Telegram plus the Mattermost
-mirror (key `inference-shedding`), naming it an environment problem, with a
-`RESOLVED` all-clear. An episode that starts and ends between two passes still
-gets its one notice and its all-clear. It is observability only: admission and
-priority are unchanged. Test: `scripts/checks/test-watchdog-inference-shedding.ps1`.
+mirror (key `inference-shedding`), naming it an environment problem. The
+`RESOLVED` all-clear goes to **Telegram only** - the watchdog's shared
+all-clear path (`Resolve-Catastrophe`) does not mirror to Mattermost, so a
+Mattermost reader sees the ALERT but not the all-clear. An episode that starts
+and ends between two passes still gets its one notice and its all-clear; an
+episode still open after the 6 h page cooldown is re-paged once per cooldown.
+It is observability only: admission and priority are unchanged.
+
+**Lost model permits are bounded and visible.** Every admitted request's
+permit and held slot are given back by one idempotent release that reads the
+request's own dispatch state - also when the client hung up before the first
+response byte, and also when the response body never started (ao-queue round 2).
+As a backstop, the reaper returns a model permit whose request has relayed no
+upstream byte for `LLM_QUEUE_CONN_TTL_S` (1,200 s; a live stream cannot be that
+quiet - the 600 s upstream read timeout ends it first), logs
+`permit_reaper reclaimed stuck model permit(s)` at WARNING and counts it in
+`/healthz` `permits_reaped_total` (`running_total` beside it). Any reap is a
+defect signal. Test: `scripts/checks/test-watchdog-inference-shedding.ps1`.
 
 `recover inference` stops the plane and starts it again container by container,
 the upstreams and `llm-queue` before `llm-gateway`, and stops at the first

@@ -109,3 +109,51 @@ async def test_full_cap_of_leaks_self_heals_via_reaper():
     # recovered: a new request is admitted again
     await reg.reserve_connection("new", "qwen36-27b")
     assert reg.held_total == 1
+
+
+# ---- ao-queue round 2: the PERMIT backstop (tester finding 1) ---------------------------------
+
+
+async def test_permit_reaper_returns_a_stuck_permit_and_spares_a_live_one(make_queue, make_waiter):
+    import time as _t
+
+    mq = make_queue(slots=2, max_in_flight=2)
+    stuck, live, queued = make_waiter(), make_waiter(), make_waiter()
+    for w in (stuck, live, queued):
+        await mq.enqueue(w)
+    assert stuck.dispatched and live.dispatched and not queued.dispatched  # model wedged at 2
+    stuck.last_progress_monotonic = _t.monotonic() - 100  # no byte for 100 s: its request is gone
+    live.last_progress_monotonic = _t.monotonic()  # a stream still relaying
+    reaped = await mq.reap_stale_running(ttl_s=50)
+    assert [w.id for w in reaped] == [stuck.id]
+    assert queued.dispatched  # the returned permit went to the next waiter at once
+    assert {r["id"] for r in mq.snapshot()["running"]} == {live.id, queued.id}
+    await mq.release(stuck)  # a late release of a reaped waiter is a no-op (no extra permit)
+    assert mq.snapshot()["permits_free"] == 0
+
+
+async def test_permit_reap_is_logged_and_counted_on_healthz():
+    import httpx
+
+    from llm_queue.app_state import AppState
+    from llm_queue.main import app
+    from llm_queue.policy import PriorityClass
+    from llm_queue.scheduler import Waiter
+
+    st = AppState(_settings())
+    sent = []
+
+    async def _emit(event, **f):
+        sent.append(event)
+
+    st.events.emit = _emit  # stubbed sender
+    app.state.app = st
+    mq = st.registry.queue_for("qwen36-27b")
+    w = Waiter(id="lost", key="k", model="qwen36-27b", cls=PriorityClass("c", 2, 120, None), seq=1)
+    await mq.enqueue(w)
+    w.last_progress_monotonic -= 5000
+    assert await st._reap_permits(1200) == 1
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://q") as c:
+        h = (await c.get("/healthz")).json()
+    assert h["permits_reaped_total"] == 1 and h["running_total"] == 0
+    assert sent == ["permit_reaped"]

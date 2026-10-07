@@ -228,3 +228,116 @@ async def test_many_aborts_stay_under_cap(tmp_path):
         assert await _settled(st) == {"held": 0, "in_flight": 0}
     finally:
         await st.stop()
+
+
+# ---- round 2 (tester attempt 1, A1): the model PERMIT, not only the held slot -----------------
+
+
+async def _drive_fire_and_close(stream=True, spec_version="2.3"):
+    """A client that sends a complete request and hangs up at once (before any response byte)."""
+    body = json.dumps({"model": "qwen36-27b", "stream": stream,
+                       "messages": [{"role": "user", "content": "hi"}]}).encode()
+    sent_req = False
+
+    async def receive():
+        nonlocal sent_req
+        if not sent_req:
+            sent_req = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}  # already gone
+
+    async def send(msg):
+        raise OSError("client gone")
+
+    try:
+        await asyncio.wait_for(app(_scope(spec_version), receive, send), timeout=5)
+    except (OSError, asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
+@pytest.mark.parametrize("spec", ["2.3", "2.4"])
+async def test_fire_and_close_on_idle_queue_frees_permit_and_next_request_runs(tmp_path, spec):
+    st = await _state(tmp_path)
+    try:
+        for _ in range(4):  # more than max_in_flight (2): a leak would wedge the model
+            await _drive_fire_and_close(spec_version=spec)
+        assert await _settled(st) == {"held": 0, "in_flight": 0}
+        got = await _drive(stream=True, disconnect_after_chunks=None)
+        assert got["status"] == 200 and got["done"] is True
+        assert await _settled(st) == {"held": 0, "in_flight": 0}
+    finally:
+        await st.stop()
+
+
+async def test_cancel_at_dispatch_instant_frees_permit(tmp_path):
+    """Deterministic form of the race: enqueue dispatches at once (permit taken, waiter.dispatched),
+    the generator starts and is cancelled before it observes the dispatch."""
+    from llm_queue.routes.data import _stream_waiting_then_proxy
+    from llm_queue.scheduler import Waiter
+
+    st = await _state(tmp_path)
+    try:
+        mq = st.registry.queue_for("qwen36-27b")
+        w = Waiter(id="race1", key="k", model="qwen36-27b", cls=st.policy.classify("k"), seq=1)
+        await st.registry.reserve_connection("race1", "qwen36-27b")
+        await mq.enqueue(w)
+        assert w.dispatched is True
+        gen = _stream_waiting_then_proxy(None, st, mq, w, "http://u", "/v1/chat/completions",
+                                         {}, b"{}", "race1")
+        task = asyncio.ensure_future(gen.__anext__())
+        await asyncio.sleep(0)  # the generator is now parked in asyncio.wait
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await gen.aclose()
+        assert await _settled(st) == {"held": 0, "in_flight": 0}
+    finally:
+        await st.stop()
+
+
+async def test_body_never_started_still_releases(tmp_path):
+    """Spec 2.3: the disconnect is already pending when the response starts, so Starlette's task
+    group cancels the streaming child task before it takes its first step - the body generator never
+    runs and its `finally` never runs. The response wrapper must release the permit and the slot."""
+    from llm_queue.routes.data import _admit_and_proxy
+
+    st = await _state(tmp_path)
+    try:
+        body = json.dumps({"model": "qwen36-27b", "stream": True,
+                           "messages": [{"role": "user", "content": "x"}]}).encode()
+
+        class _Req:
+            headers: dict = {}
+
+            async def body(self):
+                return body
+
+        req = _Req()
+        req.app = app
+        resp = await _admit_and_proxy(req, "/v1/chat/completions")  # permit + slot taken
+        mq = st.registry.queue_for("qwen36-27b")
+        assert st.registry.held_total == 1 and mq.held() == 1
+        steps = {"n": 0}
+        inner = resp.body_iterator
+
+        async def counting():
+            steps["n"] += 1  # first step of the body
+            async for c in inner:
+                yield c
+
+        resp.body_iterator = counting()
+
+        async def receive():
+            return {"type": "http.disconnect"}  # pending before the response starts
+
+        sent = []
+
+        async def send(msg):
+            await asyncio.sleep(0)  # a transport write is a checkpoint; the cancel lands here
+            sent.append(msg["type"])
+
+        await resp(_scope("2.3"), receive, send)
+        assert steps["n"] == 0  # the body generator never took a step  # the body really never ran
+        assert await _settled(st) == {"held": 0, "in_flight": 0}
+    finally:
+        await st.stop()
