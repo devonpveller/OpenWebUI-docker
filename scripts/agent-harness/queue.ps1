@@ -1139,6 +1139,26 @@ function Invoke-OracleOnStall([string]$i) {
     try { & python $mod check $QueueDir $i --repo $repo } finally { $ErrorActionPreference = $prev }
 }
 
+function Get-AnchorPredecessor($anchorObj, [string]$selfId) {
+    # REOPENED ITEMS (vwm-p1b). A rejected item cannot be reopened; its work continues under a
+    # new id, whose own history shows no return. The anchor names what it continues
+    # (`"continues": "<id>"`) and this writes it to the item as `predecessor`, so the
+    # learning-record gate counts the predecessor's returns too. "none" declares there is no
+    # predecessor (it switches off the gate's name-based inference). "" = not stated.
+    if ($null -eq $anchorObj -or -not ($anchorObj.PSObject.Properties.Name -contains "continues")) { return "" }
+    $p = $anchorObj.continues
+    if ($null -eq $p) { return "" }
+    if (-not ($p -is [string])) { Die "the anchor's 'continues' must be a string: the id of the queue item this one continues, or 'none'" }
+    $p = $p.Trim()
+    if (-not $p -or $p -eq "none") { return "" }
+    if ($p -eq $selfId) { Die ("the anchor's 'continues' names '{0}' itself" -f $p) }
+    if (-not (Test-Path -LiteralPath (ItemPath $p))) {
+        Die (("the anchor's 'continues' names '{0}', which is not a queue item. Name the item this one continues " +
+              "(its returns count toward this item's learning record), or 'none'. Nothing has been recorded.") -f $p)
+    }
+    return $p
+}
+
 function Assert-LearningRecord($item, [string]$mergeSha, [string]$reviewer) {
     # Read-only: learning_records.py never writes a record, an item or the plan store. Its
     # exit code is the verdict - 0 accepted or not required, 1 refused, 3 refused because it
@@ -1600,6 +1620,7 @@ if ($Propose) {
     if (Test-Path (ItemPath $Id)) { Die "queue item '$Id' already exists (use a new -Id, or -Show it)" }
     try { $anchorObj = Read-AnchorFile $Anchor } catch { Die $_.Exception.Message }
     $anchorTier = Assert-AnchorTier $anchorObj
+    $predecessor = Get-AnchorPredecessor $anchorObj $Id
     # Copy it beside the item, for the same reason the test plan is copied: the developer's
     # worktree is deleted at the end, and a tester or reviewer reading a dangling path is
     # exactly the failure this whole mechanism exists to prevent.
@@ -1615,9 +1636,14 @@ if ($Propose) {
         tier = $anchorTier
         line_mergeable = $true
         submitted_sha = ""; tested_at_sha = ""; merged_sha = ""
+        # The item this one continues (anchor `continues`; vwm-p1b) - "" when none.
+        predecessor = $predecessor
         results = @(); history = @()
     }
     Add-History $item "anchor proposed" $(if ($Developer) { $Developer } else { "unknown" })
+    if ($predecessor) {
+        Add-History $item ("continues '{0}' (its returns count toward this item's learning record)" -f $predecessor) $(if ($Developer) { $Developer } else { "unknown" })
+    }
     Write-Item $item
     Write-Host ("Anchor PROPOSED for '{0}'. Nothing may be built yet." -f $Id) -ForegroundColor Cyan
     Write-Host ""
@@ -1641,9 +1667,11 @@ if ($ConfirmAnchor) {
     if ($Anchor) {
         try { $anchorObj = Read-AnchorFile $Anchor } catch { Die $_.Exception.Message }
         $anchorTier = Assert-AnchorTier $anchorObj
+        $predecessor = Get-AnchorPredecessor $anchorObj $Id
         Copy-IntoQueue $Anchor $item.anchor_file "-Anchor" "anchor file for this item"
         $item.anchor = $anchorObj
         Set-Field $item "tier" $anchorTier
+        Set-Field $item "predecessor" $predecessor
         Add-History $item "anchor amended on confirmation" $By
     }
     $was = $item.state
@@ -1681,9 +1709,11 @@ if ($AmendAnchor) {
     if ($item.state -eq "anchor-draft") { Die "'$Id' is not confirmed yet - amend it on -ConfirmAnchor instead" }
     try { $anchorObj = Read-AnchorFile $Anchor } catch { Die $_.Exception.Message }
     $anchorTier = Assert-AnchorTier $anchorObj
+    $predecessor = Get-AnchorPredecessor $anchorObj $Id
     Copy-IntoQueue $Anchor $item.anchor_file "-Anchor" "anchor file for this item"
     Set-Field $item "anchor" $anchorObj
     Set-Field $item "tier" $anchorTier
+    Set-Field $item "predecessor" $predecessor
     Set-Field $item "anchor_confirmed_by" $By
     Set-Field $item "anchor_confirmed_at" (Now)
     $was = $item.state

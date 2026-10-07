@@ -376,27 +376,48 @@ with named reasons and "Nothing has been recorded":
 - `record-missing`, `sink-missing`, and `schema:<path>` (validated against the schema file itself);
 - `item-mismatch` (`source_ref.queue_item_id` is not this item) and `iterations-mismatch`
   (`iterations` must equal the count of ALL returns; it is history, not a limit);
+- `predecessor-returns`: an item that continues a rejected one (`X` -> `X2`) carries `X`'s returns.
+  Declare the link in the anchor as `"continues": "<X>"` (`-Propose` checks that `X` is queued
+  and writes it to the item as `predecessor`). An undeclared `X2` beside a REJECTED `X` is
+  linked anyway (inferred); `"continues": "none"` declares there is no predecessor. The record
+  is then required, and `iterations` counts the whole chain;
+- `return-reason-mismatch`: `red` carries each return's reason from the queue, and carries the
+  numbered list `draft` prints (`1) tester-fail ... by <who>: <reason>`). With each queue reason
+  taken out as one exact span (case, whitespace, quotes and punctuation ignored; once per return),
+  the return-kind names and numbered entries left must match the queue's returns kind for kind,
+  in order;
 - `green-not-genuine`: `outcome.kind` is green only when the queue's last verdict is a tester PASS
   at the `tested_at_sha` being merged, recorded by someone other than the developer, with its
-  evidence file present;
+  evidence file present. That file is checked too: `evidence-not-pass` (it is not THAT pass's
+  `<id>.attempt<N>.evidence.md` in the queue, e.g. an earlier FAIL's file; an inline or relative
+  evidence string is never looked up in the current directory), `evidence-empty` (the file is read
+  as `-Pass` reads it: UTF-8, or UTF-16/UTF-32 by its byte-order mark), and
+  `evidence-verdict-mismatch` (a case heading that does not end in PASS, no case heading at all,
+  or case verdicts that differ from the ones `-Pass` recorded);
 - `countersign-missing`: `reviewer_check.checked` is true and `reviewer_check.by` is you, the
   reviewer, never the developer;
 - `range-unresolved` / `range-head-mismatch`: `source_ref.merge_range` is `base..head`, both ends
   are commits, base is an ancestor of head, and head is the tested commit or the merge;
-- `evidence-sha-unresolved` / `evidence-path-missing`: every SHA-shaped and path-shaped token in
-  `outcome.evidence[]` and `hypotheses_refuted[].evidence` resolves. The rest is prose: the check
-  cannot verify it and prints that blind spot on every acceptance;
+- `evidence-sha-unresolved` / `evidence-path-missing` / `evidence-path-outside`: every SHA-shaped
+  (lowercase or UPPERCASE hex) and path-shaped (`/` or `\`) token in `outcome.evidence[]` and
+  `hypotheses_refuted[].evidence` resolves, and a path resolves only inside the code repo or the
+  plan store. An absolute path crosses a space only into an existing directory, so a file name
+  with a space must be quoted (`` `X:\dir\a b.md` ``); an extensionless span that does not exist
+  is prose unless its parent directory lies outside the repo and the store. The rest is prose: the
+  check cannot verify it and prints that blind spot on every acceptance;
 - `placeholder-unfilled`: a `<FILL:` marker from `draft` is still there.
 
-A store, record, schema or queue item the check cannot read, or a git error, is refused as
-INDETERMINATE. That is never a pass, and the message says it is not the same as a missing record.
+A store, record, schema or queue item the check cannot read, a git error (a `--repo` that is not
+the top of a working tree included), or a crash of the check itself is refused as INDETERMINATE
+(exit 3). That is never a pass, and the message says it is not the same as a missing record.
 Run the same check yourself before you merge (read-only), and generate the factual fields rather
-than typing them:
+than typing them. Before the merge exists there is no merge sha: leave `--merge-sha` out, and
+the range head is the tested commit. `-Merged` runs it again with the merge sha.
 
 ```powershell
-python scripts/agent-harness/learning_records.py check --item <id> --merge-sha <merge sha> --reviewer <your-id>
-python scripts/agent-harness/learning_records.py draft --item <id> --merge-sha <merge sha>   # prints, writes nothing
-python scripts/agent-harness/learning_records.py audit                                        # every record in the store
+python scripts/agent-harness/learning_records.py check --item <id> --reviewer <your-id>
+python scripts/agent-harness/learning_records.py draft --item <id>          # prints, writes nothing
+python scripts/agent-harness/learning_records.py audit                      # every record in the store
 ```
 
 `draft` prints the derived skeleton: `source_ref` with the merge range, `iterations`, each return

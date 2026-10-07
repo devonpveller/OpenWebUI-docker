@@ -58,7 +58,12 @@ def _no_state_env(monkeypatch):
 
 @pytest.fixture
 def world(tmp_path):
-    """A code repo with base -> w1 (failed) -> w2 (tested) merged --no-ff as M; a store; a queue."""
+    """A code repo with base -> w1 (failed) -> w2 (tested) merged --no-ff as M; a store; a queue.
+
+    Everything sits under a root whose name contains a SPACE, like the real checkout
+    (vwm-p1b round 2, F3: absolute paths were cut at the space)."""
+    tmp_path = tmp_path / "spaced root"
+    tmp_path.mkdir()
     repo = tmp_path / "code"
     repo.mkdir()
     git(repo, "init", "-q", "-b", "line")
@@ -140,7 +145,7 @@ def good_record(w):
         "source_ref": {"queue_item_id": ID, "anchor_id": ID, "merge_range": f"{w['base'][:10]}..{w['merge'][:10]}"},
         "domains": ["drill"],
         "steer": "Anchor lrx: the thing works",
-        "red": "attempt 1 failed T1 on a cold cache",
+        "red": "1) tester-fail at attempt 1 by t-lrx: T1 fails on a cold cache",
         "iterations": 1,
         "hypotheses_refuted": [{"hypothesis": "warm cache is enough", "why_refuted": "cold start differs",
                                 "evidence": f"test-evidence/lrx.attempt2.md; commit {w['w2'][:8]}"}],
@@ -348,6 +353,7 @@ def test_green_must_be_genuine(world, reason, how):
         # the record is otherwise right about the returns, so only genuineness can refuse it
         rec = good_record(w)
         rec["iterations"] = 2
+        rec["red"] += " 2) tester-fail at attempt 3 by t3-lrx: regressed"
         write_record(w, rec)
     elif how == "dev-pass":
         item["results"][-1]["by"] = "lrx"  # == wt-lrx once normalised
@@ -559,3 +565,527 @@ def test_the_schema_fixture_matches_the_store_schema_when_present():
     if not live.is_file():
         pytest.skip("plan store not beside this checkout - drift not checked")
     assert json.loads(live.read_text(encoding="utf-8")) == json.loads(SCHEMA_FIXTURE.read_text(encoding="utf-8"))
+
+
+
+# =============================================================================== vwm-p1b
+# Each test below is RED against the vwm-p1 gate (development 40f14673) and GREEN at the tip,
+# and each has a GOOD TWIN that stays accepted. Named refusals: evidence-empty,
+# evidence-not-pass, evidence-verdict-mismatch, evidence-path-outside, predecessor-returns,
+# return-reason-mismatch; indeterminate internal-error.
+
+def _accepted(w, **kw):
+    code, out = run(w, **kw)
+    assert code == 0, "good twin must be accepted: " + out
+    return out
+
+
+def _refused(w, reason, **kw):
+    code, out = run(w, **kw)
+    assert code == 1, out
+    assert reason in reasons(out), out
+    return out
+
+
+def _set_item(w, item):
+    (w["queue"] / f"{item['id']}.json").write_text(json.dumps(item, indent=2), encoding="utf-8")
+
+
+# ---- (1) the pass's evidence must be genuine, not just present
+def test_p1b_1_empty_pass_evidence_is_refused(world):
+    w = world
+    make_item(w)
+    write_record(w, good_record(w))
+    _accepted(w)
+    (w["queue"] / f"{ID}.attempt2.evidence.md").write_text("  \n\n", encoding="utf-8")
+    _refused(w, "evidence-empty")
+
+
+def test_p1b_1_pass_evidence_pointing_at_the_fail_file_is_refused(world):
+    w = world
+    item = make_item(w)
+    write_record(w, good_record(w))
+    _accepted(w)
+    item["results"][-1]["evidence"] = item["results"][0]["evidence"]  # attempt 1's FAIL file
+    _set_item(w, item)
+    out = _refused(w, "evidence-not-pass")
+    assert "evidence-verdict-mismatch" in reasons(out), out  # and it reads FAIL besides
+
+
+def test_p1b_1_pass_evidence_outside_the_queue_is_refused(world):
+    w = world
+    item = make_item(w)
+    write_record(w, good_record(w))
+    (w["queue"] / f"{ID}.attempt2.evidence.md").unlink()
+    elsewhere = w["store"] / "implementation-guide" / "feat" / "test-evidence" / f"{ID}.attempt2.md"
+    item["results"][-1]["evidence"] = str(elsewhere)  # reads "## T1 PASS", but is no pass's file
+    _set_item(w, item)
+    _refused(w, "evidence-not-pass")
+
+
+@pytest.mark.parametrize("body", [
+    "## T1 - the thing works   PASS\n## T2 - cold cache   PASS (scoped - read the caveat)\n",
+    "## T1 - the thing works   FAIL\n",
+    "## T1 - the thing works\n",
+    "ran everything, all good\n",
+])
+def test_p1b_1_pass_evidence_must_read_pass_on_every_case(world, body):
+    w = world
+    make_item(w)
+    write_record(w, good_record(w))
+    (w["queue"] / f"{ID}.attempt2.evidence.md").write_text(
+        "## T1 - the thing works   PASS\n```\n## T2 FAIL (quoted)\n```\n", encoding="utf-8")
+    _accepted(w)  # good twin: a fenced FAIL is a quotation, not a verdict
+    (w["queue"] / f"{ID}.attempt2.evidence.md").write_text(body, encoding="utf-8")
+    _refused(w, "evidence-verdict-mismatch")
+
+
+def test_p1b_1_pass_evidence_must_match_the_cases_pass_recorded(world):
+    w = world
+    item = make_item(w)
+    item["results"][-1]["cases"] = [{"case": "T1", "verdict": "PASS", "line": "## T1 PASS"}]
+    _set_item(w, item)
+    write_record(w, good_record(w))
+    _accepted(w)
+    item["results"][-1]["cases"].append({"case": "T2", "verdict": "PASS", "line": "## T2 PASS"})
+    _set_item(w, item)  # -Pass read two cases; the file now carries one (edited after the pass)
+    _refused(w, "evidence-verdict-mismatch")
+
+
+def test_p1b_1_inline_evidence_is_never_resolved_against_the_cwd(world, monkeypatch):
+    w = world
+    item = make_item(w)
+    write_record(w, good_record(w))
+    (w["queue"] / f"{ID}.attempt2.evidence.md").unlink()
+    item["results"][-1]["evidence"] = "README.md"  # exists in the cwd below, is not evidence
+    _set_item(w, item)
+    monkeypatch.chdir(w["repo"])
+    out = _refused(w, "green-not-genuine")
+    assert "no evidence file" in out
+    # good twin: the same pass with its spilled file in the queue
+    (w["queue"] / f"{ID}.attempt2.evidence.md").write_text("## T1 PASS\n", encoding="utf-8")
+    _accepted(w)
+
+
+# ---- (2) a reopened item carries its predecessor's returns
+def _predecessor(w, pid, state="rejected"):
+    _set_item(w, {"id": pid, "state": state, "developer": "wt-lrx", "results": [],
+                  "history": [{"at": 5, "who": "r-old", "what": "claimed as reviewer"},
+                              {"at": 6, "who": "r-old", "what": "rejected: misfits the module"}]})
+
+
+def _first_try_green(w, iid=ID, anchor_extra=None):
+    (w["queue"] / f"{iid}.attempt1.evidence.md").write_text("## T1 PASS\n", encoding="utf-8")
+    item = make_item(w, results=[{"at": 300, "by": "t2-lrx", "verdict": "pass", "attempt": 1, "sha": w["w2"],
+                                  "evidence": str(w["queue"] / f"{iid}.attempt1.evidence.md")}],
+                     history=[{"at": 30, "who": "wt-lrx", "what": "submitted for testing"},
+                              {"at": 300, "who": "t2-lrx", "what": "tests PASSED (attempt 1)"},
+                              {"at": 500, "who": "r-lrx", "what": "claimed as reviewer"}])
+    item["id"] = iid
+    item["anchor"].update(anchor_extra or {})
+    if iid != ID:
+        (w["queue"] / f"{ID}.json").unlink()
+    _set_item(w, item)
+    return item
+
+
+def _chain_record(w, iid=ID, iterations=1, pred="lrx-old"):
+    rec = good_record(w)
+    rec["source_ref"]["queue_item_id"] = iid
+    rec["iterations"] = iterations
+    rec["red"] = f"DERIVED RETURNS (queue): 1) reviewer-reject on {pred} by r-old: misfits the module"
+    return rec
+
+
+def test_p1b_2_a_declared_predecessor_makes_the_record_required(world):
+    w = world
+    _predecessor(w, "lrx-old")
+    _first_try_green(w, anchor_extra={"continues": "lrx-old"})
+    out = _refused(w, "record-missing")
+    assert "continues 'lrx-old' (declared)" in out
+    write_record(w, _chain_record(w, iterations=0))
+    _refused(w, "predecessor-returns")
+    write_record(w, _chain_record(w, iterations=1))
+    _accepted(w)  # good twin: the chain's return counted and its reason carried
+
+
+def test_p1b_2_the_queue_link_written_at_propose_counts_too(world):
+    w = world
+    _predecessor(w, "lrx-old")
+    item = _first_try_green(w)
+    item["predecessor"] = "lrx-old"
+    _set_item(w, item)
+    _refused(w, "record-missing")
+    write_record(w, _chain_record(w, iterations=1))
+    _accepted(w)
+
+
+def test_p1b_2_an_undeclared_successor_of_a_rejected_item_is_inferred(world):
+    w = world
+    iid = "lrx2"                    # the continuation, which declares nothing
+    _first_try_green(w, iid=iid)
+    _predecessor(w, "lrx")          # the rejected original (written after: make_item writes lrx.json)
+    args = ["check", "--item", iid, "--queue-dir", str(w["queue"]), "--repo", str(w["repo"]),
+            "--merge-sha", w["merge"], "--reviewer", "r-lrx"]
+
+    def go():
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(io.StringIO()):
+            c = lr.main(args)
+        return c, buf.getvalue()
+    code, out = go()
+    assert code == 1 and "record-missing" in reasons(out) and "(inferred)" in out, out
+    rp = w["findings"] / f"{iid}{lr.RECORD_SUFFIX}"
+    (w["findings"] / f"{ID}.md").write_text("findings\n")  # the good record cites findings/lrx.md
+    rp.write_text(json.dumps(_chain_record(w, iid=iid, iterations=0, pred="lrx")), encoding="utf-8")
+    code, out = go()
+    assert code == 1 and "predecessor-returns" in reasons(out), out
+    rp.write_text(json.dumps(_chain_record(w, iid=iid, iterations=1, pred="lrx")), encoding="utf-8")
+    code, out = go()
+    assert code == 0, out
+    # good twin of the inference: an anchor that DECLARES no predecessor is not linked
+    item = json.loads((w["queue"] / f"{iid}.json").read_text(encoding="utf-8"))
+    item["anchor"]["continues"] = "none"
+    _set_item(w, item)
+    rp.unlink()
+    code, out = go()
+    assert code == 0 and "NOT REQUIRED" in out, out
+
+
+def test_p1b_2_a_declared_predecessor_the_queue_lacks_is_indeterminate(world):
+    w = world
+    _first_try_green(w, anchor_extra={"continues": "never-queued"})
+    code, out = run(w)
+    assert code == 3 and "queue-unreadable" in out, out
+
+
+# ---- (3) return reasons are compared, not only the count
+@pytest.mark.parametrize("red", [
+    "attempt 1 failed on something else entirely",                                       # reason missing
+    "attempt 1 failed: T1 fails on a cold cache; then a reviewer-reject for style",       # invented kind
+    "DERIVED RETURNS (queue): 1) developer-requeue by wt-lrx: T1 fails on a cold cache",  # wrong kind listed
+])
+def test_p1b_3_return_reasons_must_match_the_queue(world, red):
+    w = world
+    make_item(w)
+    write_record(w, good_record(w))
+    _accepted(w)
+    rec = good_record(w)
+    rec["red"] = red
+    write_record(w, rec)
+    _refused(w, "return-reason-mismatch")
+
+
+# ---- (4) evidence tokens
+@pytest.mark.parametrize("token,reason", [
+    ("ABSOLUTE-OUTSIDE", "evidence-path-outside"),
+    ("RELATIVE-ESCAPE", "evidence-path-outside"),
+    ("journal\\evidence\\lrx\\never-written.md", "evidence-path-missing"),
+    ("commit 1234567ABC", "evidence-sha-unresolved"),
+])
+def test_p1b_4_evidence_tokens(world, token, reason):
+    w = world
+    make_item(w)
+    outside = w["tmp"] / "outside.md"
+    outside.write_text("not evidence\n", encoding="utf-8")
+    if token == "ABSOLUTE-OUTSIDE":
+        token = str(outside)
+    elif token == "RELATIVE-ESCAPE":
+        token = "../../../outside.md"  # from the feature dir, up past the store root
+    good = good_record(w)
+    good["outcome"]["evidence"] += [str(w["store"] / "journal" / "evidence" / "lrx" / "run.log"),
+                                    "journal\\evidence\\lrx\\run.log", f"commit {w['w2'][:10].upper()}"]
+    write_record(w, good)
+    _accepted(w)  # good twins: an absolute path in the store, a backslash path, an uppercase sha
+    bad = copy.deepcopy(good)
+    bad["outcome"]["evidence"].append(token)
+    write_record(w, bad)
+    _refused(w, reason)
+
+
+# ---- (5) iterations 1.0; a --repo that is not a repo
+def test_p1b_5_iterations_one_point_zero_is_one(world):
+    w = world
+    make_item(w)
+    p = write_record(w, good_record(w))
+    p.write_text(p.read_text(encoding="utf-8").replace('"iterations": 1,', '"iterations": 1.0,'), encoding="utf-8")
+    assert '"iterations": 1.0' in p.read_text(encoding="utf-8")
+    _accepted(w)
+    p.write_text(p.read_text(encoding="utf-8").replace('"iterations": 1.0,', '"iterations": 2.0,'), encoding="utf-8")
+    _refused(w, "iterations-mismatch")
+
+
+def test_p1b_5_a_repo_arg_that_is_not_a_repo_is_a_git_error(world):
+    w = world
+    make_item(w)
+    write_record(w, good_record(w))
+    home = w["tmp"] / "home"           # a directory with a .git above the non-repo, like C:\Users\<me>
+    home.mkdir()
+    git(home, "init", "-q")
+    notarepo = home / "projects" / "not-a-repo"
+    notarepo.mkdir(parents=True)
+    args = ["check", "--item", ID, "--queue-dir", str(w["queue"]), "--repo", str(notarepo),
+            "--merge-sha", w["merge"], "--reviewer", "r-lrx"]
+    buf = io.StringIO()
+    with redirect_stdout(buf), redirect_stderr(io.StringIO()):
+        code = lr.main(args)
+    assert code == 3 and "git-error" in buf.getvalue(), buf.getvalue()
+    _accepted(w)  # good twin: the real repo top
+
+
+# ---- (6) an uncaught exception is indeterminate (3), never "refused" (1)
+def test_p1b_6_a_crash_is_indeterminate_not_refused(world):
+    w = world
+    item = make_item(w)
+    write_record(w, good_record(w))
+    _accepted(w)
+    item["history"].append({"at": "soon", "who": "r-lrx", "what": "rejected: x"})  # int("soon") raises
+    _set_item(w, item)
+    out = subprocess.run([sys.executable, str(HERE / "learning_records.py"), "check", "--item", ID,
+                          "--queue-dir", str(w["queue"]), "--repo", str(w["repo"]),
+                          "--merge-sha", w["merge"], "--reviewer", "r-lrx"],
+                         capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert out.returncode == 3, (out.returncode, out.stdout, out.stderr)
+    assert "internal-error" in out.stdout
+
+
+def test_p1b_6_main_returns_3_on_any_exception(world, monkeypatch):
+    w = world
+    make_item(w)
+
+    def boom(_args):
+        raise RuntimeError("simulated crash")
+    monkeypatch.setattr(lr, "run_check", boom)
+    code, out = run(w)
+    assert code == 3 and "internal-error" in out
+
+
+# ---- (7) MERGE-PROTOCOL: the pre-merge command has no --merge-sha
+def test_p1b_7_the_pre_merge_check_command_names_no_merge_sha():
+    doc = HERE.parent.parent / "documentation" / "implementation-guide" / "multi-agent-concurrency" / "MERGE-PROTOCOL.md"
+    lines = [x for x in doc.read_text(encoding="utf-8").splitlines()
+             if x.startswith("python scripts/agent-harness/learning_records.py check")]
+    assert lines, "MERGE-PROTOCOL Step 4 shows no check command"
+    assert all("--merge-sha" not in x for x in lines), lines
+
+
+# =============================================================================== vwm-p1b round 2
+# The tester's attempt-1 FAIL: three GENUINE records the round-1 gate refused. Each test below
+# FAILS at d1bcbf06 (round 1) and passes at the tip; the refusal halves stay refused.
+
+def _fail_reason_item(w, reason):
+    item = make_item(w)
+    item["results"][0]["reason"] = reason
+    item["history"][4]["what"] = f"tests FAILED (attempt 1): {reason}"
+    _set_item(w, item)
+    return item
+
+
+def _filled_draft(w):
+    buf, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(buf), redirect_stderr(err):
+        assert lr.main(["draft", "--item", ID, "--merge-sha", w["merge"], "--reviewer", "r-lrx",
+                        "--queue-dir", str(w["queue"]), "--repo", str(w["repo"])]) == 0
+    d = json.loads(buf.getvalue())
+    # filled honestly: only the lesson fields and the countersign; the derived parts untouched
+    d["domains"] = ["drill"]
+    d["red"] = d["red"].split(lr.PLACEHOLDER)[0] + "the failing state"
+    d["outcome"]["summary"] = "x = 2"
+    d["mental_model"]["claim"] = "WORKER'S CLAIM: caches lie"
+    d.pop("skill_candidate")
+    d["reviewer_check"] = {"checked": True, "by": "r-lrx", "note": "checked"}
+    return d
+
+
+@pytest.mark.parametrize("reason", [
+    "Case 1: the reviewer-reject path leaves WORK.md empty",
+    "T2: developer-requeue after a pass loses the plan hash",
+    "T3: a reviewer-requeue is not counted",
+    "steps 1) tester-fail 2) reviewer-requeue then the record is wrong",
+    "T1 fails on a cold cache",  # control: no kind word
+])
+def test_p1b_r2_f1_a_draft_built_record_passes_whatever_the_reason_says(world, reason):
+    w = world
+    _fail_reason_item(w, reason)
+    d = _filled_draft(w)
+    write_record(w, d)
+    _accepted(w)
+    # the padded twin stays refused: an extra numbered return the queue does not have
+    d["red"] = d["red"] + " 2) tester-fail by t9: an invented second failure"
+    write_record(w, d)
+    _refused(w, "return-reason-mismatch")
+
+
+def test_p1b_r2_f1_an_invented_kind_outside_the_quoted_reason_is_still_refused(world):
+    w = world
+    _fail_reason_item(w, "Case 1: the reviewer-reject path leaves WORK.md empty")
+    d = _filled_draft(w)
+    d["red"] = d["red"] + "; then a developer-requeue for style"
+    write_record(w, d)
+    _refused(w, "return-reason-mismatch")
+
+
+PASS_BODY = "## T1 - the thing works   PASS\r\nran it\r\n"
+
+
+@pytest.mark.parametrize("enc,bom", [
+    ("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff"), ("utf-8", b"\xef\xbb\xbf"), ("utf-8", b""),
+])
+def test_p1b_r2_f2_pass_evidence_is_read_like_pass_reads_it(world, enc, bom):
+    w = world
+    make_item(w)
+    write_record(w, good_record(w))
+    ev = w["queue"] / f"{ID}.attempt2.evidence.md"
+    ev.write_bytes(bom + PASS_BODY.encode(enc))
+    _accepted(w)
+    # the same encoding carrying a FAIL case is still refused
+    ev.write_bytes(bom + "## T1 - the thing works   PASS\r\n## T2 - cold   FAIL\r\n".encode(enc))
+    _refused(w, "evidence-verdict-mismatch")
+
+
+def test_p1b_r2_f3_absolute_paths_with_spaces_resolve(world):
+    w = world
+    make_item(w)
+    assert " " in str(w["repo"])
+    thing = w["repo"] / "src" / "thing.py"
+    runlog = w["store"] / "journal" / "evidence" / "lrx" / "run.log"
+    good = good_record(w)
+    good["outcome"]["evidence"] += [
+        str(thing),                                   # backslash form (Windows str)
+        thing.as_posix(),                             # forward-slash form
+        f"see {thing}:1 at the merge",                # with a line suffix and prose around it
+        f"log {runlog.as_posix()}, then prose",       # inside the plan store
+    ]
+    write_record(w, good)
+    _accepted(w)
+    outside = w["tmp"] / "out side" / "x.md"
+    outside.parent.mkdir()
+    outside.write_text("not evidence\n", encoding="utf-8")
+    for token, reason in [(str(outside), "evidence-path-outside"),
+                          (outside.as_posix(), "evidence-path-outside"),
+                          (str(w["repo"] / "src" / "never-written.py"), "evidence-path-missing")]:
+        bad = copy.deepcopy(good)
+        bad["outcome"]["evidence"].append(token)
+        write_record(w, bad)
+        _refused(w, reason)
+
+
+# =============================================================================== vwm-p1b round 3
+# The attempt-2 FAIL: two round-2 heuristics replaced by deterministic rules.
+# R2-A: an absolute path crosses a space only into an EXISTING DIRECTORY; no extension lookahead.
+# R2-B: each queue reason is blanked as ONE exact span, once per return, never cutting a kind
+#       token or a numbered entry; then kind tokens and numbered entries must equal the queue's.
+
+def _r3_record_with(w, extra):
+    make_item(w)
+    good = good_record(w)
+    good["outcome"]["evidence"] += list(extra)
+    write_record(w, good)
+    return good
+
+
+@pytest.mark.parametrize("tail", ["was renamed in v0.11.0", "is gone, e.g. moved", "see notes.md for why",
+                                  "was renamed"])
+def test_p1b_r3_a_a_dead_directory_never_absorbs_the_prose_after_it(world, tail):
+    """The tester's repro (attempt 2, qdead): truthful prose naming a directory that no longer exists."""
+    w = world
+    dead = w["repo"] / "olddir"
+    _r3_record_with(w, [f"{dead} {tail}"])
+    _accepted(w)
+    shas, paths, prose = lr.tokens_of(f"{dead} {tail}")
+    assert not any(" " in p.rsplit("/", 1)[-1] for p in paths), paths  # nothing after the dir was taken in
+
+
+def test_p1b_r3_a_spaced_paths_inside_and_outside(world):
+    w = world
+    assert " " in str(w["repo"])
+    thing = w["repo"] / "src" / "thing.py"
+    readme = w["repo"] / "README.md"
+    two = f"{thing} and {readme.as_posix()} both changed"            # two paths on one line
+    quoted = f"`{thing}` and \"{readme}\""                            # quoted forms, taken whole
+    good = _r3_record_with(w, [two, quoted])
+    _accepted(w)
+    shas, paths, _ = lr.tokens_of(two)
+    assert sorted(paths) == sorted([thing.as_posix(), readme.as_posix()]), paths
+    outside = w["tmp"] / "out side" / "x.md"
+    outside.parent.mkdir()
+    outside.write_text("not evidence\n", encoding="utf-8")
+    for token, reason in [(str(outside), "evidence-path-outside"),
+                          (f"{outside.as_posix()} was checked", "evidence-path-outside"),
+                          (str(w["repo"] / "src" / "never-written.py"), "evidence-path-missing"),
+                          (f"{w['repo'] / 'src' / 'never-written.py'} in v0.11.0", "evidence-path-missing")]:
+        bad = copy.deepcopy(good)
+        bad["outcome"]["evidence"].append(token)
+        write_record(w, bad)
+        _refused(w, reason)
+
+
+def _draft_for_reasons(w, reasons):
+    """An item whose returns are tester FAILs with these reasons, and its honest draft record."""
+    results, history = [], []
+    for n, reason in enumerate(reasons, 1):
+        results.append({"at": 100 * n, "by": f"t{n}-lrx", "verdict": "fail", "attempt": n, "sha": w["w1"],
+                        "evidence": str(w["queue"] / f"{ID}.attempt1.evidence.md"), "reason": reason})
+        history.append({"at": 100 * n, "who": f"t{n}-lrx", "what": f"tests FAILED (attempt {n}): {reason}"})
+    k = len(reasons) + 1
+    (w["queue"] / f"{ID}.attempt{k}.evidence.md").write_text("## T1 PASS\n", encoding="utf-8")
+    results.append({"at": 100 * k, "by": "tp-lrx", "verdict": "pass", "attempt": k, "sha": w["w2"],
+                    "evidence": str(w["queue"] / f"{ID}.attempt{k}.evidence.md"), "reason": ""})
+    history += [{"at": 100 * k, "who": "tp-lrx", "what": f"tests PASSED (attempt {k})"},
+                {"at": 100 * k + 50, "who": "r-lrx", "what": "claimed as reviewer"}]
+    make_item(w, results=results, history=history)
+    return _filled_draft(w)
+
+
+@pytest.mark.parametrize("reasons,forge", [
+    # the tester's qsmug: the reason ends in a digit; the forged entry starts right after it
+    (["Case 1 fails on attempt 2"], lambda red, r: red.replace(r[0], r[0] + ") tester-fail by t9: invented", 1)),
+    # reason == "reviewer": blanking it must not eat the word inside a forged "reviewer-reject"
+    (["reviewer"], lambda red, r: red.replace(r[0], r[0] + " 2) reviewer-reject by r9: style", 1)),
+    # a reason starting with a kind name hides a duplicate of itself
+    (["reviewer-reject path broken"], lambda red, r: red + " 2) reviewer-reject path broken"),
+    # the same reason twice in the queue, a padded third entry repeating it
+    (["T1 fails", "T1 fails"], lambda red, r: red + " 3) tester-fail by t9: T1 fails"),
+])
+def test_p1b_r3_b_a_forged_return_is_refused(world, reasons, forge):
+    w = world
+    d = _draft_for_reasons(w, reasons)
+    write_record(w, d)
+    _accepted(w)  # good twin: the honest draft
+    d["red"] = forge(d["red"], reasons)
+    write_record(w, d)
+    _refused(w, "return-reason-mismatch")
+
+
+@pytest.mark.parametrize("reasons", [
+    ["Case 1: the reviewer-reject path leaves WORK.md empty"],
+    ["steps 1) tester-fail 2) reviewer-requeue then the record is wrong"],
+    ["T1: 2) reviewer-requeue later", "tester-fail"],
+    ["Case 1 fails on attempt 2", "Case 1 fails on attempt 2"],
+    ["reviewer", "x"],
+])
+def test_p1b_r3_b_honest_drafts_stay_accepted(world, reasons):
+    w = world
+    d = _draft_for_reasons(w, reasons)
+    write_record(w, d)
+    _accepted(w)
+
+
+@pytest.mark.parametrize("quoted", [
+    "  T1   fails\r\non a  cold cache",
+    "'T1 fails on a cold cache.'",
+    "“T1 fails on a cold cache”!",
+    "T1 FAILS ON A COLD CACHE",
+])
+def test_p1b_r3_b_a_hand_quoted_reason_with_the_numbered_entry_is_accepted(world, quoted):
+    """Whitespace, CRLF, quotes, punctuation and case around the quoted reason do not matter;
+    the numbered entry `1) tester-fail` (one per return, outside the reason) is required."""
+    w = world
+    make_item(w)
+    rec = good_record(w)
+    rec["red"] = "1) tester-fail by t-lrx: " + quoted
+    write_record(w, rec)
+    _accepted(w)
+    rec["red"] = "attempt 1 failed: " + quoted  # no numbered entry, no kind token
+    write_record(w, rec)
+    _refused(w, "return-reason-mismatch")
