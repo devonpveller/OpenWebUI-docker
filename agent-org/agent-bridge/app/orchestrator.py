@@ -6434,6 +6434,11 @@ class Orchestrator:
             res = await self.grounding.ground(request)
             if res.grounded and (res.claims or res.summary):
                 body = "# GROUNDED CONTEXT (openbrain-research — verify before relying)\n"
+                if getattr(res, "outcome", "") == "unfiled":
+                    # C5: the research FINISHED but the engine could not file it into Open Brain.
+                    # The content is real; say where it is NOT, so nobody goes looking for it there.
+                    body += (f"_(research job {res.job_id} finished but was NOT saved to Open "
+                             f"Brain - this context exists only here)_\n")
                 if res.summary:
                     body += res.summary.strip() + "\n"
                 for c in res.claims[:20]:
@@ -8917,6 +8922,9 @@ class Orchestrator:
         if not (res.grounded and (res.claims or res.summary)):
             return False
         body = "# RESEARCHED FIX CONTEXT (openbrain-research — the stall's likely cause + fix)\n"
+        if getattr(res, "outcome", "") == "unfiled":   # C5: real report, filing failed
+            body += (f"_(research job {res.job_id} finished but was NOT saved to Open Brain - "
+                     f"this context exists only here)_\n")
         if res.summary:
             body += res.summary.strip() + "\n"
         for c in res.claims[:15]:
