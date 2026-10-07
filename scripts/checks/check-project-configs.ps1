@@ -71,7 +71,12 @@ $ymlStaged = @($staged | Where-Object { $_ -match '\.(yml|yaml)$' })
 # OB1/docker/docker-compose.yml (and the scheduled file it includes) change
 # wholesale underneath. Treat it as a compose change - see the header note.
 $gitlinkStaged = @($staged | Where-Object { $_ -eq 'OB1' })
-if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0) {
+# The published-port healthcheck rule (1a below) is also re-run when ITS OWN inputs are
+# staged - the rule, its allow-list, or this file. Otherwise an allow-list edit alone
+# (adding a row, dropping a reason) would never be verified against any render.
+$hcRuleStaged = @($staged | Where-Object {
+        $_ -match '^scripts/checks/(check_port_healthcheck\.py|published-port-healthcheck-allowlist\.json|check-project-configs\.ps1)$' })
+if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0 -or $hcRuleStaged.Count -gt 0) {
     $dockerOk = $true
     try { docker compose version | Out-Null } catch { $dockerOk = $false }
     if (-not $dockerOk -or $LASTEXITCODE -ne 0) {
@@ -122,6 +127,67 @@ if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0) {
             }
         }
         if ($failed -eq 0) { Write-Host "  [configs] all $($projects.Count) compose projects render clean" }
+
+        # --- 1a. a published port needs a healthcheck (oh-health, 2026-10-07) --
+        # SERVICE-LIFECYCLE row 5, by machine. `stack.ps1 health` and the watchdog
+        # read docker's health state, so a container with no healthcheck can never
+        # be reported unhealthy: openbrain-curator crash-looped for a day (09-05)
+        # with a published port and no healthcheck, and nothing noticed. The rule
+        # and its allow-list live in check_port_healthcheck.py (unit-tested there);
+        # this block only hands it every render. SAME renders as above, plus OB1
+        # and agent-org with every profile where their gitignored env exists - and
+        # a NOT VERIFIED line where it does not, never a silent narrowing.
+        $hcTargets = @($projects)
+        if (Test-Path 'OB1\docker\.env') {
+            $hcTargets += @{ N = 'open-brain'; F = 'OB1\docker\docker-compose.yml';
+                             A = @('--profile', 'research', '--profile', 'wiki', '--profile', 'notebook',
+                                   '--profile', 'idea-refinery', '--profile', 'pantry') }
+        } else {
+            Write-Host "  [configs] NOT VERIFIED: open-brain published-port healthchecks (OB1\docker\.env absent)" -ForegroundColor Yellow
+        }
+        if (Test-Path 'agent-org\docker\.env') {
+            $hcTargets += @{ N = 'agent-org'; F = 'agent-org\docker\docker-compose.yml';
+                             A = @('--profile', 'workers', '--profile', 'cloud') }
+        } else {
+            Write-Host "  [configs] NOT VERIFIED: agent-org published-port healthchecks (agent-org\docker\.env absent)" -ForegroundColor Yellow
+        }
+        $hcPy = (Get-Command $script:PyName -ErrorAction SilentlyContinue)
+        if (-not $hcPy) {
+            Write-Host "  [configs] python not found - published-port healthcheck rule NOT verified (this is a gap, not a pass)" -ForegroundColor Yellow
+        } else {
+            $hcDir = Join-Path ([System.IO.Path]::GetTempPath()) ("hc-render-" + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $hcDir | Out-Null
+            $hcArgs = @()
+            $hcIdx = 0
+            foreach ($t in $hcTargets) {
+                $hcIdx++
+                $out = Join-Path $hcDir "render$hcIdx.json"
+                $argStr = (($t.A | ForEach-Object { ConvertTo-NativePath $_ }) -join ' ')
+                Invoke-HostShell "docker compose -f $(ConvertTo-NativePath $t.F) $argStr config --format json > `"$(ConvertTo-NativePath $out)`" 2>$script:NullDev" | Out-Null
+                if ($LASTEXITCODE -ne 0 -or -not (Test-Path $out) -or (Get-Item $out).Length -eq 0) {
+                    # Already reported as COMPOSE INVALID above for the plane renders; an
+                    # OB1/agent-org render failing here is new, so it counts.
+                    Write-Host "  [configs] published-port rule: render produced nothing for $($t.N) - not verified" -ForegroundColor Red
+                    $failed++
+                    continue
+                }
+                $hcArgs += @('--render', "$($t.N)=$out")
+            }
+            if ($hcArgs.Count -gt 0) {
+                $prev = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
+                $hcOut = & $script:PyName 'scripts/checks/check_port_healthcheck.py' @hcArgs 2>&1
+                $hcCode = $LASTEXITCODE
+                $ErrorActionPreference = $prev
+                foreach ($line in $hcOut) {
+                    $color = if ("$line" -match '^(PUBLISHED PORT|STALE|ALLOW-LIST UNREADABLE|RENDER UNREADABLE)') { 'Red' }
+                             elseif ("$line" -match '^NOT VERIFIED') { 'Yellow' } else { 'Gray' }
+                    Write-Host ("  [configs] " + ("$line").TrimEnd()) -ForegroundColor $color
+                }
+                if ($hcCode -ne 0) { $failed++ }
+            }
+            Remove-Item -Recurse -Force $hcDir -ErrorAction SilentlyContinue
+        }
 
         # --- stack-services.json drift verifier (D-12, 2026-08-22) -----------
         # The inventory's curated fields (critical/host_health/notes) stay

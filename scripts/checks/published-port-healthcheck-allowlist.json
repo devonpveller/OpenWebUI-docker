@@ -1,0 +1,50 @@
+{
+  "_about": "Read by check_port_healthcheck.py (the project-configs pre-commit gate, check-project-configs.ps1). A service that publishes a host port must have a healthcheck (compose or its Dockerfile) or a row here. kind 'exception' = a probe would be wrong or impossible for this service; kind 'gap' = it should have one and does not yet - a known debt, recorded so the rule can be on today, removed when the healthcheck lands (the rule refuses a row a render shows is no longer needed). Seeded 2026-10-07 (oh-health) from the renders of every plane with every profile.",
+  "services": {
+    "open_notebook": {
+      "kind": "gap",
+      "project": "open-brain (profile notebook)",
+      "reason": "Third-party Open Notebook UI (8503) + API (5055) image, no HEALTHCHECK in compose or image (inspected 2026-10-07). Needs a probe that does not depend on surrealdb being warm; not chosen in oh-health."
+    },
+    "openbrain-chunk-worker": {
+      "kind": "gap",
+      "project": "open-brain",
+      "reason": "Deno worker with an HTTP port (8817) and no healthcheck. Its Dockerfile now runs deno check (oh-health); the runtime probe is the remaining half."
+    },
+    "openbrain-entity-worker": {
+      "kind": "gap",
+      "project": "open-brain",
+      "reason": "Deno worker with an HTTP port (8810) and no healthcheck. Its Dockerfile now runs deno check (oh-health); the runtime probe is the remaining half."
+    },
+    "openbrain-grounding-backfiller": {
+      "kind": "gap",
+      "project": "open-brain",
+      "reason": "Deno worker with an HTTP port (8819) and no healthcheck. Its Dockerfile now runs deno check (oh-health); the runtime probe is the remaining half."
+    },
+    "openbrain-suggestion-worker": {
+      "kind": "gap",
+      "project": "open-brain",
+      "reason": "Deno worker with an HTTP port (8813) and no healthcheck. Its Dockerfile now runs deno check (oh-health); the runtime probe is the remaining half."
+    },
+    "openbrain-rest": {
+      "kind": "gap",
+      "project": "open-brain",
+      "reason": "caddy:2-alpine reverse proxy in front of PostgREST (3001), no healthcheck. A probe through the proxy would also test postgrest; choosing what it should report is left to a follow-up."
+    },
+    "openbrain-wiki": {
+      "kind": "gap",
+      "project": "open-brain (profile wiki)",
+      "reason": "Wiki compiler/scheduler with an HTTP trigger port (8811), no healthcheck. Long compiles must not read as unhealthy, so the probe needs choosing with that in mind."
+    },
+    "openbrain-wiki-viewer": {
+      "kind": "gap",
+      "project": "open-brain (profile wiki)",
+      "reason": "Quartz viewer (8812), no healthcheck. A cold build serves nothing for minutes (see the wiki cold-build notes), so start_period has to be chosen with that in mind."
+    },
+    "surrealdb": {
+      "kind": "gap",
+      "project": "open-brain (profile notebook)",
+      "reason": "Pinned third-party SurrealDB image (8003), no healthcheck in compose or image (inspected 2026-10-07). A probe must use a binary present in that image; not chosen in oh-health."
+    }
+  }
+}
