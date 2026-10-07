@@ -102,6 +102,20 @@ def _flail_key(cmd: str) -> str:
 _WS_RE = re.compile(r"\s+")
 # A lens's finding line (the `echo 'FINDING: ...' >> <findings file>` the review prompts require).
 _FINDING_RE = re.compile(r"\bFINDING:")
+# ...and only when the command WRITES it (an append/redirect or tee). Round 2: a
+# `grep -c 'FINDING:' /tmp/lens-findings.txt` read-back contains the text but writes nothing.
+_WRITES_RE = re.compile(r">>|\btee\b|(?<![0-9&])>(?!&|\s*/dev/)")
+
+
+def _writes_finding(key: str) -> bool:
+    return bool(_FINDING_RE.search(key) and _WRITES_RE.search(key))
+
+
+# FakeHarness only: the fake's model of the daemon's `workspace_marker` (the real daemon fingerprints
+# the workspace files; a fake has no files, so it treats a write-shaped command as changing them).
+_FAKE_WRITE_RE = re.compile(
+    r"\bsed\s+(?:-[a-zA-Z]*\s+)*-i|\bcat\s*>|\btee\b|>\s*(?!/tmp/|/dev/)[\w./-]+\.\w+|"
+    r"open\([^)]*['\"][wa]['\"]|write_text\(|\bgit\s+(?:commit|apply|am)\b|\bpatch\b")
 
 
 def _loop_key(cmd: str) -> str:
@@ -125,11 +139,15 @@ class LoopGuard:
         (alternation / a short cycle);
       - review turns only (`kind="review"`): `first_finding_by` (no FINDING line in the first N
         commands) and `finding_gap` (N commands since the last FINDING line).
-    PROGRESS resets the repetition window: a NEW finding line (review) or a file edit the daemon
-    reports (work). So a turn that keeps producing findings or edits is never stopped by the
-    window rules - the threat model is a false stop of a productive turn.
-    `kind="work"` (a coding/other turn) needs the daemon's edit count to see progress; the real
-    harness keeps the guard inert on a daemon that does not report one."""
+    PROGRESS resets the repetition window: a NEW finding line written by the turn (review) or a
+    change the daemon reports - an edit/write tool call (`edits`) or a change to the workspace's
+    files (`workspace_marker`, which also sees `sed -i` / heredoc / script writes) (work). So a
+    turn that keeps producing findings or edits is never stopped by the window rules - the threat
+    model is a false stop of a productive turn.
+    Kinds: `review` (lens sweep, Mode B), `work` (coding/fix turns: needs the daemon's progress
+    fields; the real harness keeps it inert on a daemon that reports neither), and `readonly`
+    (change-nothing turns: QA, verify, plan - the router gives them the identical-run rule only,
+    because re-running the product's own read command between inputs is how they work)."""
 
     __slots__ = ("kind", "identical_run", "window", "window_distinct", "window_repeats",
                  "first_finding_by", "finding_gap")
@@ -189,7 +207,7 @@ class LoopWatch:
         g = self.g
         self.n += 1
         key = _loop_key(cmd or "")
-        if g.kind == "review" and key and _FINDING_RE.search(key):
+        if g.kind == "review" and key and _writes_finding(cmd or ""):
             # Progress only when the finding is NEW: a turn echoing the same line forever is a loop.
             if key not in self._seen_findings:
                 self._seen_findings.add(key)
@@ -417,6 +435,7 @@ class LittleCoderHarness:
             guard = _guard_for(loop_guard, max_repeat)
             watch = LoopWatch(guard) if guard else None
             edits_seen: int | None = None   # ao-loopguard — the daemon's edit count at the last poll
+            marker_seen: str | None = None  # ...and its workspace fingerprint
             while waited < self.poll_timeout:
                 await asyncio.sleep(self.poll_interval)
                 waited += self.poll_interval
@@ -424,19 +443,25 @@ class LittleCoderHarness:
                 ran = _ran_model(s)
                 activity = s.get("activity") or []
                 # A work-kind guard can only tell a loop from edit-then-test progress if the daemon
-                # reports its edit count; without one it stays inert (never a blind false stop).
-                # A snapshot that is already terminal is not stopped: the turn ended on its own
-                # and its answer is the deliverable.
-                watching = (watch is not None and (guard.kind == "review" or "edits" in s)
+                # reports a progress signal (`edits` and/or `workspace_marker`); without one it stays
+                # inert (never a blind false stop). A snapshot that is already terminal is not
+                # stopped: the turn ended on its own and its answer is the deliverable.
+                has_signal = "edits" in s or "workspace_marker" in s
+                watching = (watch is not None and (guard.kind != "work" or has_signal)
                             and s.get("status", "") in ("queued", "running", "pending", ""))
                 if watching and guard.kind == "work":
                     try:
                         edits_now = int(s.get("edits") or 0)
                     except (TypeError, ValueError):
-                        edits_now, watching = 0, False
-                    if edits_seen is not None and edits_now > edits_seen:
-                        watch.progress()          # an edit since the last poll: the turn moved on
+                        edits_now = 0
+                    marker_now = s.get("workspace_marker")
+                    if ((edits_seen is not None and edits_now > edits_seen)
+                            or (marker_seen is not None and marker_now is not None
+                                and marker_now != marker_seen)):
+                        watch.progress()          # the workspace changed since the last poll
                     edits_seen = edits_now
+                    if marker_now is not None:
+                        marker_seen = marker_now
                 if len(activity) > seen:
                     for item in activity[seen:]:
                         if on_update:
@@ -674,6 +699,8 @@ class FakeHarness:
         # ao-loopguard — whether this fake daemon reports its edit count (a little-coder older than
         # ao-loopguard does not; a work-kind loop guard is then inert).
         self.reports_edits = True
+        # The daemon's answer text at the moment a non-work guard stops a turn (default: none yet).
+        self.flail_answer = ""
 
     async def wake(
         self, base_url: str, session_id: str, prompt: str, *,
@@ -700,7 +727,7 @@ class FakeHarness:
         # F31.4 / ao-loopguard — mirror the real harness's loop guard (the same `LoopWatch`) so
         # tests exercise it: stop at the tripping command and return a "flail" result.
         guard = _guard_for(loop_guard, max_repeat)
-        if guard is not None and (guard.kind == "review" or self.reports_edits):
+        if guard is not None and (guard.kind != "work" or self.reports_edits):
             watch = LoopWatch(guard)
             streamed: list[str] = []
             for cmd in stream:
@@ -709,12 +736,14 @@ class FakeHarness:
                     continue
                 streamed.append(cmd)
                 trip = watch.feed(cmd)
+                if trip is None and guard.kind == "work" and _FAKE_WRITE_RE.search(cmd):
+                    watch.progress()            # the fake's workspace_marker moved
                 if trip is None:
                     continue
                 if on_update:
                     for c in streamed:
                         await on_update("command", {"command": c, "ok": True})
-                answer = ("" if guard.kind == "review" else
+                answer = (self.flail_answer if guard.kind != "work" else
                           f"LOOP-GUARD: stopped after {trip.commands} commands - {trip.reason}")
                 res = WorkResult("flail", task_id=f"fake-{len(self.wakes)}",
                                  output=answer, commands=streamed)

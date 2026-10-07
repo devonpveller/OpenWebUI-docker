@@ -320,6 +320,7 @@ class _ReplayDaemon:
 
     def __init__(self, cmds, edits_after=None) -> None:
         self.cmds, self.edits_after = cmds, edits_after
+        self.markers: list[str] | None = None   # round 2: workspace_marker per shown command
         self.shown = 0
         self.cancelled: list[str] = []
         app = FastAPI()
@@ -338,6 +339,8 @@ class _ReplayDaemon:
                  "activity": [{"command": c, "ok": True} for c in self.cmds[:self.shown]]}
             if self.edits_after is not None:
                 v["edits"] = self.edits_after[self.shown - 1]
+            if self.markers is not None:
+                v["workspace_marker"] = self.markers[self.shown - 1]
             return v
 
         @app.post("/tasks/{tid}/cancel")

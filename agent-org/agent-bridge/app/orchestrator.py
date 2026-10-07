@@ -12181,16 +12181,24 @@ class Orchestrator:
             log.debug("QA evaluation wake failed for %s: %s", effort_id, exc)
             return "", []
         out = (result.output or "") if result else ""
-        if not out.strip():
+        # ao-loopguard round 2 — a QA turn the loop guard stopped did NOT exercise the product to
+        # the end. It must say so ("could not complete"), never fall through to "exercised cleanly",
+        # and keep any defects it had already reported.
+        trip = getattr(result, "loop_trip", None) if result else None
+        if not out.strip() and trip is None:
             return "", []
         defects = _qa_items(_qa_block(out, "DEFECTS"))
         followups = _qa_items(_qa_block(out, "FOLLOWUPS"))
         verdict = " ".join(_qa_block(out, "VERDICT").split())[:300]
         await self.audit.log("qa_evaluation", effort_id=effort_id,
                              payload={"defects": len(defects), "followups": len(followups),
-                                      "verdict": verdict[:120]})
+                                      "verdict": verdict[:120],
+                                      "incomplete": (trip.guard if trip is not None else None)})
         lines = ["## 🔎 QA evaluation\n_A differently-goaled agent exercised the running product "
                  "(not just the tests)._"]
+        if trip is not None:
+            lines.append(f"**QA could not complete (loop guard: {trip.reason}).** What follows is "
+                         f"only what it reported before it was stopped.")
         if verdict:
             lines.append(f"**Verdict:** {verdict}")
         if defects:
@@ -12199,7 +12207,7 @@ class Orchestrator:
         if followups:
             lines.append("**Follow-ups (out of scope — your call):**\n"
                          + "\n".join(f"- {d}" for d in followups))
-        if not defects and not followups:
+        if not defects and not followups and trip is None:
             lines.append("_No defects or follow-ups surfaced — the product exercised cleanly._")
         # ── Lens 2 (governance §4.4): a distinct reviewer reads the SOURCE for craftsmanship &
         # documentation — the class of gaps the run-the-product lens above cannot see. Its defects
@@ -12271,7 +12279,8 @@ class Orchestrator:
             log.debug("QA code-review lens wake failed for %s: %s", effort_id, exc)
             return None
         out = (result.output or "") if result else ""
-        if not out.strip():
+        trip = getattr(result, "loop_trip", None) if result else None   # ao-loopguard round 2
+        if not out.strip() and trip is None:
             return None
         defects = _qa_items(_qa_block(out, "DEFECTS"))
         followups = _qa_items(_qa_block(out, "FOLLOWUPS"))
@@ -12281,6 +12290,8 @@ class Orchestrator:
                                       "followups": len(followups), "verdict": verdict[:120]})
         block = ["### 🧹 Code review — craftsmanship & documentation\n_A second, differently-goaled "
                  "reviewer audited the SOURCE (SOLID, naming, docstrings, type hints, packaging)._"]
+        if trip is not None:
+            block.append(f"**Code review could not complete (loop guard: {trip.reason}).**")
         if verdict:
             block.append(f"**Verdict:** {verdict}")
         if defects:
@@ -12289,7 +12300,7 @@ class Orchestrator:
         if followups:
             block.append("**Refactor follow-ups (out of scope — your call):**\n"
                          + "\n".join(f"- {d}" for d in followups))
-        if not defects and not followups:
+        if not defects and not followups and trip is None:
             block.append("_Code reads clean — no craftsmanship gaps surfaced._")
         return verdict, defects, followups, "\n\n".join(block)
 
@@ -12981,11 +12992,14 @@ class Orchestrator:
             # raise_concern posts the in-thread escalation + #mgmt CONCERN + freezes + sets card.
             await self.raise_concern(effort_id, Trigger.refusal, concern, actor="bridge")
             return
-        await self.comms.post(
-            Intent.escalation,
-            f"❌ worker ended **{result.status}** — {head}\n↑ raised to the PM/operator.",
-            effort_id=effort_id,
-        )
+        if getattr(result, "loop_trip", None) is None:
+            # ao-loopguard round 2: a loop-guard stop already has its ONE thread line (router);
+            # #management still gets the notice below.
+            await self.comms.post(
+                Intent.escalation,
+                f"❌ worker ended **{result.status}** — {head}\n↑ raised to the PM/operator.",
+                effort_id=effort_id,
+            )
         await self.router.update_effort_card(effort_id, "error")
         await self.comms.post(
             Intent.operator_reply,
@@ -13374,7 +13388,8 @@ class Orchestrator:
             msg = (f"⛔ **{effort_id}** — the worker flailed again after a fresh plan-first "
                    f"restart ({head}). It can't converge on this goal without help — steer it "
                    f"(what should the approach be?) or say “re-run it”.")
-            await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
+            if getattr(result, "loop_trip", None) is None:   # ao-loopguard: one thread line
+                await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
             await self.comms.post(Intent.operator_reply, msg,
                                   thread_id=self._mgmt_thread_of(effort_id))
             await self.router.update_effort_card(effort_id, "needs-attention")
@@ -13396,7 +13411,10 @@ class Orchestrator:
                 f"({head}). I stopped it, and I'm **forking a fresh session from the original "
                 f"goal and re-asking in plan mode** so it commits to an approach before touching "
                 f"code. No action needed.")
-        await self.comms.post(Intent.worker_activity, note, effort_id=effort_id)
+        if getattr(result, "loop_trip", None) is None:
+            # ao-loopguard round 2: a loop-guard stop's ONE thread line is the router's guard line;
+            # the replan notice goes to #management only.
+            await self.comms.post(Intent.worker_activity, note, effort_id=effort_id)
         await self.comms.post(Intent.operator_reply, note,
                               thread_id=self._mgmt_thread_of(effort_id))
         # Queued (not spawned) — delegate's finally launches it AFTER this run fully closes,

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import itertools
 import json as _json
 import os
@@ -835,6 +836,64 @@ def count_tool_calls(path: str, cache: dict) -> tuple[int, int]:
     return total, edits
 
 
+# Directories the workspace fingerprint skips: VCS internals (a fetch/checkout is not an edit) and
+# caches/build output a test run rewrites without anyone editing the project.
+_MARKER_SKIP_DIRS = frozenset({
+    ".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox",
+    "node_modules", ".venv", "venv", "dist", "build", "bin", "obj", ".gradle", "target",
+})
+_MARKER_SKIP_SUFFIXES = (".pyc", ".pyo")
+_MARKER_MAX_FILES = 20000      # past this the fingerprint is not computed (None): bounded cost
+_MARKER_TTL_S = 2.0            # a poll storm reuses one scan
+_MARKER_LOCK = threading.Lock()
+
+
+def workspace_marker(root: str, cache: dict, *, now: float | None = None,
+                     max_files: int = _MARKER_MAX_FILES, ttl: float = _MARKER_TTL_S) -> str | None:
+    """A fingerprint of the workspace's files (path, size, mtime_ns), for the live task view
+    (ao-loopguard round 2). The agent-org bridge's loop guard must tell an edit-then-test turn from
+    a loop, and edits made through bash (`sed -i`, `cat > f <<EOF`, a `python3 -c` write) never
+    show up as edit/write tool calls - but they do change a file's size or mtime here.
+
+    Pure stat walk of the shared volume (no git, no file reads), skipping VCS internals and caches.
+    Bounded: at most `max_files` files (else None - "unknown", never a false "unchanged"), and
+    cached for `ttl` seconds per root. None when the root is missing or unreadable."""
+    now = time.monotonic() if now is None else now
+    with _MARKER_LOCK:
+        hit = cache.get(root)
+        if hit is not None and now - hit[0] < ttl:
+            return hit[1]
+    h = hashlib.blake2b(digest_size=12)
+    n = 0
+    result: str | None
+    try:
+        stack = [root]
+        while stack:
+            d = stack.pop()
+            with os.scandir(d) as it:
+                entries = sorted(it, key=lambda e: e.name)
+            for e in entries:
+                if e.is_dir(follow_symlinks=False):
+                    if e.name not in _MARKER_SKIP_DIRS:
+                        stack.append(e.path)
+                    continue
+                if e.name.endswith(_MARKER_SKIP_SUFFIXES):
+                    continue
+                n += 1
+                if n > max_files:
+                    raise OverflowError
+                st = e.stat(follow_symlinks=False)
+                h.update(f"{e.path}\0{st.st_size}\0{st.st_mtime_ns}\n".encode("utf-8", "replace"))
+        result = f"{n}:{h.hexdigest()}"
+    except (OSError, OverflowError):
+        result = None
+    with _MARKER_LOCK:
+        cache[root] = (now, result)
+        while len(cache) > 16:
+            cache.pop(next(iter(cache)), None)
+    return result
+
+
 def build_app(daemon: LittleCoderDaemon) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -865,6 +924,7 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
         return {"tasks": [t.public() for t in daemon.tasks.values()]}
 
     _tool_count_cache: dict = {}
+    _marker_cache: dict = {}
 
     @app.get("/tasks/{task_id}")
     def get_task(task_id: str) -> dict:
@@ -886,6 +946,10 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
                         state.events_path, _tool_count_cache)
                 except OSError:
                     pass
+            # ao-loopguard round 2: changes made through bash. Omitted when unknown.
+            marker = workspace_marker(daemon.cfg.workspace.path, _marker_cache)
+            if marker is not None:
+                data["workspace_marker"] = marker
         return data
 
     _event_cache: dict = {}

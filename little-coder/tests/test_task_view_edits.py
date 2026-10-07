@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from littlecoder.config import Config
-from littlecoder.daemon import LittleCoderDaemon, build_app, count_tool_calls
+from littlecoder.daemon import LittleCoderDaemon, build_app, count_tool_calls, workspace_marker
 from littlecoder.tasks import TaskState, TaskStatus
 
 
@@ -96,3 +96,73 @@ def test_running_task_view_reports_edits(tmp_path):
     # a finished task's view is unchanged (no live counters)
     st.status = TaskStatus.DONE
     assert "edits" not in client.get("/tasks/t1").json()
+
+
+# ── round 2: edits made through bash are visible as a workspace fingerprint change ───────────
+
+
+def _ws(tmp_path):
+    ws = tmp_path / "ws"
+    (ws / "tests").mkdir(parents=True)
+    (ws / "todo.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+    (ws / "tests" / "test_todo.py").write_text("import todo\n", encoding="utf-8")
+    (ws / ".git").mkdir()
+    (ws / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    return ws
+
+
+def _bump(p):
+    """A file rewrite the way `sed -i` does it: new content, newer mtime."""
+    import os
+    st = os.stat(p)
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+
+
+def test_marker_changes_on_sed_heredoc_and_new_files_only(tmp_path):
+    ws = _ws(tmp_path)
+    m0 = workspace_marker(str(ws), {}, ttl=0)
+    assert m0 and m0 == workspace_marker(str(ws), {}, ttl=0)        # stable when nothing changed
+    # sed -i: same path, same size possible - the mtime moves
+    p = ws / "todo.py"
+    p.write_text("def main():\n    return 1\n", encoding="utf-8")
+    _bump(p)
+    m1 = workspace_marker(str(ws), {}, ttl=0)
+    assert m1 != m0
+    # heredoc `cat > todo_filter.py <<EOF`: a new file
+    (ws / "todo_filter.py").write_text("def keep(i, c):\n    return True\n", encoding="utf-8")
+    m2 = workspace_marker(str(ws), {}, ttl=0)
+    assert m2 != m1
+    # NOT edits: git internals, bytecode caches
+    (ws / ".git" / "FETCH_HEAD").write_text("abc\n", encoding="utf-8")
+    (ws / "__pycache__").mkdir()
+    (ws / "__pycache__" / "todo.cpython-312.pyc").write_bytes(b"\x00")
+    (ws / "tests" / "x.pyc").write_bytes(b"\x00")
+    assert workspace_marker(str(ws), {}, ttl=0) == m2
+
+
+def test_marker_is_bounded_and_cached(tmp_path):
+    ws = _ws(tmp_path)
+    assert workspace_marker(str(ws), {}, max_files=1, ttl=0) is None     # over the cap: unknown
+    assert workspace_marker(str(tmp_path / "missing"), {}, ttl=0) is None
+    cache: dict = {}
+    m0 = workspace_marker(str(ws), cache, now=100.0, ttl=2.0)
+    (ws / "new.py").write_text("x = 1\n", encoding="utf-8")
+    assert workspace_marker(str(ws), cache, now=101.0, ttl=2.0) == m0   # within the ttl: reused
+    assert workspace_marker(str(ws), cache, now=103.0, ttl=2.0) != m0   # after it: rescanned
+
+
+def test_running_task_view_reports_the_workspace_marker(tmp_path):
+    ws = _ws(tmp_path)
+    cfg = Config()
+    cfg.journals.dir = str(tmp_path / "journals")
+    cfg.workspace.path = str(ws)
+    d = LittleCoderDaemon(cfg)
+    d.workspace = SimpleNamespace(is_focused=lambda: True)
+    ot = tmp_path / "ot.jsonl"
+    _append(ot, json.dumps({"command": "sed -i s/0/1/ todo.py", "exit_code": 0}) + "\n")
+    st = TaskState(task_id="t1", session_id="s", channel="batch", user_id="u", prompt="p")
+    st.status = TaskStatus.RUNNING
+    st.event_stream_path = str(ot)
+    d.tasks["t1"] = st
+    v = TestClient(build_app(d)).get("/tasks/t1").json()
+    assert v["workspace_marker"] == workspace_marker(str(ws), {}, ttl=0)
