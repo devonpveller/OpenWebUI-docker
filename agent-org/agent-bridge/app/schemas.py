@@ -257,6 +257,10 @@ class GroundingResult(BaseModel):
     claims: list[str] = Field(default_factory=list)
     summary: str = ""
     job_id: str | None = None
+    # How the research job ended, so a caller can tell a CRASH from a real report the engine
+    # failed to FILE into Open Brain (C5): "" (not reached) | "filed" | "unfiled" (grounded, but
+    # NOT saved to Open Brain) | "gap" | "crashed" | "cancelled" | "timeout" | "unreachable".
+    outcome: str = ""
 
 
 # ── Project-lifecycle plan (autonomous-project-lifecycle P-APL.2) ────────────
@@ -300,8 +304,10 @@ class AdvisoryAnswer(BaseModel):
     sources: list[str] = Field(default_factory=list)  # cited source URLs/titles for the answer
     job_id: str | None = None
     # WHY grounding is absent, so the fallback message is truthful (state-aware, not a guess):
-    # "" | "failed" (job errored/cancelled) | "unreachable" (engine down) | "empty" (done, no
-    # synthesis) | "backstop" (runaway cap hit while the job still claimed to be alive)
+    # "" | "failed" (job crashed/cancelled) | "unreachable" (engine down) | "empty" (done, no
+    # synthesis) | "backstop" (runaway cap hit while the job still claimed to be alive) |
+    # "unfiled" (grounded=True: the run FINISHED and its report is returned, but the engine could
+    # not file it into Open Brain - the answer carries a "Not saved to Open Brain" line)
     reason: str = ""
 
 

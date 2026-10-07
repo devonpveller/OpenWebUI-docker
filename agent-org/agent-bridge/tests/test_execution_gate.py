@@ -126,3 +126,19 @@ async def test_routine_prepare_skips_grounding_and_dry_run(db_url):
         assert not orch.grounding.calls  # routine → no grounding spend
     finally:
         await db.dispose()
+
+
+async def test_prepare_execution_marks_unfiled_grounding_as_not_saved(db_url):
+    """C5 (oh-health): a research job that FINISHED but was not filed into Open Brain still grounds
+    the effort - and the injected context says it is NOT in Open Brain."""
+    orch, chat, db = await _orch(db_url, grounding=FakeGrounding(GroundingResult(
+        grounded=True, claims=["use bcrypt for password hashing"], summary="auth notes",
+        job_id="job-9", outcome="unfiled")))
+    try:
+        eid, _, _ = await orch.router.open_effort("unfiled1")
+        await orch.prepare_execution(eid, "add a password reset flow", risk="irreversible")
+        steering = await orch.charters.current_steering(eid)
+        assert "bcrypt" in steering
+        assert "NOT saved to Open Brain" in steering and "job-9" in steering
+    finally:
+        await db.dispose()
