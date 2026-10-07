@@ -50,6 +50,21 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
 - ✅ `secrets/google/portal-alerter/credentials.json` and `token.json` gitignored
 - ✅ `portal/config/authelia/.healthcheck.env` is a runtime-populated bind mount (also fine to track since Authelia overwrites at startup)
 - ⚠️ Tailscale auth key rotation cadence: check expiry in Tailscale admin; rotate proactively
+- **agent-bridge HTTP tokens (ao-auth, 2026-10-07)** - `AO_OPERATOR_TOKEN` and `AO_WORKER_TOKEN`
+  in `agent-org/docker/.env`. Before them every route on `agent-bridge:8000` (operator verbs via
+  `POST /nl`, gate decisions, the kill switch, lane moves) answered anyone who could reach it,
+  the worker command sandboxes `ao-ot-1/2` included.
+
+  | Token | Accepted on | Held by | Unset / wrong |
+  |---|---|---|---|
+  | `AO_OPERATOR_TOKEN` | every bridge route except `GET /health` (the one table: `ROUTE_ACCESS` in `agent-org/agent-bridge/app/main.py`) | `agent-bridge`; host tooling on `127.0.0.1:8830` (gym runner, `issue_ops.py`, `disk-guard.ps1`, curl) as `Authorization: Bearer` | unset: those routes refuse **503** (fail closed); wrong/missing: **401**; the worker token there: **403** |
+  | `AO_WORKER_TOKEN` | `POST /hook/floor-check` only | `agent-bridge`, `ao-worker-1/2` - never an `ao-ot` sandbox | the floor hook blocks irreversible actions (fail closed) |
+
+  Equal values are refused (both discarded). `ao-ot-1/2` are also off `ai-stack_llm-net`, so a
+  worker command cannot open a connection to the bridge at all.
+  **Key rotation:** both tokens are on the rotation list - new values in `agent-org/docker/.env`,
+  `--force-recreate` `agent-bridge` + `ao-worker-1/2`, then any copy host tooling holds; rotate
+  at once if either is ever seen in a log, a chat post, or an `ao-ot` environment.
 
 ### Container Security (portal slice)
 - ✅ Every portal container: `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges: true`, `tmpfs /tmp`, non-root UID (10000–10007)

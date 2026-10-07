@@ -22,12 +22,17 @@ import time
 DONE = {"delivery_pr_opened", "effort_undelivered", "closure_invariant_failed",
         "org_build_unverifiable", "effort_abandoned"}
 
+# Runs INSIDE agent-bridge (docker exec), so the operator bearer the bridge requires (ao-auth) is
+# its own AO_OPERATOR_TOKEN env - read there, never passed on a command line or printed.
 PROBE = r"""
-import urllib.request, json
+import urllib.request, json, os
 eid = %r
-d = json.load(urllib.request.urlopen('http://localhost:8000/audit?effort_id=' + eid + '&limit=400'))
+H = {'Authorization': 'Bearer ' + os.environ.get('AO_OPERATOR_TOKEN', '')}
+def get(u):
+    return json.load(urllib.request.urlopen(urllib.request.Request(u, headers=H)))
+d = get('http://localhost:8000/audit?effort_id=' + eid + '&limit=400')
 ev = d.get('events', d) if isinstance(d, dict) else d
-s = json.load(urllib.request.urlopen('http://localhost:8000/scheduler'))
+s = get('http://localhost:8000/scheduler')
 inst = [i for i in s['instances'] if i.get('effort_id') == eid]
 print(json.dumps({
     'kinds': [e.get('kind') for e in ev],

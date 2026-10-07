@@ -308,7 +308,8 @@ async def run(args) -> dict:
         print("  Cloud judge recommended — build Pc, then flip judgment profiles to cloud:")
         for role in ("pm", "po", "planner", "reviewer-ethics", "reviewer-correctness",
                      "reviewer-security", "reviewer-scope"):
-            print(f'    curl -X POST http://127.0.0.1:8830/profiles/lane -d \'{{"name":"{role}","lane":"cloud"}}\'')
+            print(f'    curl -X POST http://127.0.0.1:8830/profiles/lane -H "Authorization: Bearer $AO_OPERATOR_TOKEN"'
+                  f' -H "Content-Type: application/json" -d \'{{"name":"{role}","lane":"cloud"}}\'')
         print("  (Workers ALWAYS stay local. Set AO_CLOUD_ENABLED=true after Pc is up.)")
         print("  If you stay local anyway, the Human Operator must carry more judgment (§2.1).")
     print("=" * 72)

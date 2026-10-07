@@ -13,6 +13,9 @@ is down, so ordinary work is never wedged by a bridge blip.
 Env:
   AO_BRIDGE_URL   e.g. http://agent-bridge:8000
   AO_SUBJECT      the worker/role id (scope-ledger subject)
+  AO_WORKER_TOKEN the worker bearer token (ao-auth): /hook/floor-check refuses a call without it,
+                  and a refused or token-less check BLOCKS the irreversible action (fail closed).
+                  Set only in ao-worker-1/2, never in the ao-ot command sandboxes.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 
 # Mirror of app.modules.floor_guard.IRREVERSIBLE_PATTERNS so the hook can classify offline
@@ -64,11 +68,17 @@ def main() -> int:
         print(f"[floor] BLOCKED '{cls}': no bridge configured, failing closed", file=sys.stderr)
         return 2
 
+    token = os.environ.get("AO_WORKER_TOKEN", "").strip()
+    if not token:
+        print(f"[floor] BLOCKED '{cls}': no AO_WORKER_TOKEN, the floor cannot be consulted; "
+              "failing closed", file=sys.stderr)
+        return 2
+
     try:
         req = urllib.request.Request(
             f"{bridge}/hook/floor-check",
             data=json.dumps({"subject": subject, "action": action}).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -76,6 +86,12 @@ def main() -> int:
         if data.get("allowed"):
             return 0
         print(f"[floor] {data.get('reason', 'blocked by floor (hard-rule #4)')}", file=sys.stderr)
+        return 2
+    except urllib.error.HTTPError as exc:
+        # 401/403/503 = the bridge refused the check (bad/missing token, auth not configured):
+        # the floor was not consulted, so fail closed. Only the status goes out, never the token.
+        print(f"[floor] BLOCKED '{cls}': floor check refused (HTTP {exc.code}); failing closed",
+              file=sys.stderr)
         return 2
     except Exception as exc:
         # Fail closed on an irreversible action if the floor can't be consulted.

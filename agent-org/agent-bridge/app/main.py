@@ -2,7 +2,8 @@
 
 The HTTP surface is the operator/hook/test control plane. The *primary* runtime surface is
 the chat bus (Mattermost) consumed by the event-gateway; these endpoints are for the floor
-hook (P3.3), operator actions from tooling, and deterministic tests.
+hook (P3.3), operator actions from tooling, and deterministic tests. Every route but
+GET /health needs a bearer token (ROUTE_ACCESS below; app/auth.py).
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from . import auth
 from .adapters.chat import FakeChatAdapter
 from .adapters.mattermost import MattermostAdapter
 from .config import get_settings
@@ -25,6 +27,40 @@ from .schemas import Concern, Decision, Trigger
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("agent_bridge")
+
+
+# ── route access classes (ao-auth) — THE one table; app/auth.py enforces it ─────────────────────
+# Every route the app serves MUST appear here (create_app refuses to build otherwise). `worker`
+# routes are only those the worker side really calls: the PreToolUse floor hook
+# (hooks/pretooluse_floor.py -> /hook/floor-check). Nothing on the worker side (little-coder,
+# ao-ot, the hook) calls /lateral-concern, /handoff or /suggestion - the orchestrator raises those
+# in-process - so they are operator routes like every other control and read route.
+ROUTE_ACCESS: dict[tuple[str, str], str] = {
+    ("GET", "/health"): auth.PUBLIC,                      # liveness probes; says nothing else
+    ("POST", "/hook/floor-check"): auth.WORKER,           # the floor hook in ao-worker-1/2
+    ("POST", "/effort"): auth.OPERATOR,
+    ("POST", "/nl"): auth.OPERATOR,                       # any operator verb - the big one
+    ("GET", "/state/{effort_id}"): auth.OPERATOR,
+    ("POST", "/concern"): auth.OPERATOR,
+    ("POST", "/decision"): auth.OPERATOR,
+    ("POST", "/kill-switch"): auth.OPERATOR,
+    ("GET", "/scheduler"): auth.OPERATOR,
+    ("GET", "/audit"): auth.OPERATOR,
+    ("GET", "/profiles"): auth.OPERATOR,
+    ("POST", "/profiles/lane"): auth.OPERATOR,
+    ("POST", "/effort/risk"): auth.OPERATOR,
+    ("POST", "/effort/dry-run"): auth.OPERATOR,
+    ("POST", "/effort/prepare"): auth.OPERATOR,
+    ("GET", "/execution/{effort_id}"): auth.OPERATOR,
+    ("GET", "/projects"): auth.OPERATOR,
+    ("POST", "/projects"): auth.OPERATOR,
+    ("GET", "/egress"): auth.OPERATOR,
+    ("POST", "/egress"): auth.OPERATOR,
+    ("POST", "/lateral-concern"): auth.OPERATOR,
+    ("POST", "/handoff"): auth.OPERATOR,
+    ("POST", "/suggestion"): auth.OPERATOR,
+    ("GET", "/suggestions"): auth.OPERATOR,
+}
 
 
 # Request-body models MUST live at module scope: with `from __future__ import annotations`
@@ -141,8 +177,13 @@ def create_app(orch: Orchestrator | None = None) -> FastAPI:
         await orch.chat.stop()
         await orch.db.dispose()
 
-    app = FastAPI(title="agent-bridge", version="0.1.0", lifespan=lifespan)
+    # No /docs, /redoc or /openapi.json: they would be unauthenticated surface (ao-auth).
+    app = FastAPI(title="agent-bridge", version="0.1.0", lifespan=lifespan,
+                  docs_url=None, redoc_url=None, openapi_url=None)
     app.state.orch = orch
+    # Tokens come from the orchestrator's own settings (env AO_OPERATOR_TOKEN / AO_WORKER_TOKEN).
+    app.add_middleware(auth.AuthMiddleware, router=app.router, table=ROUTE_ACCESS,
+                       tokens=auth.load_tokens(orch.s))
 
     # ── health ────────────────────────────────────────────────────────────────
     @app.get("/health")
@@ -166,7 +207,7 @@ def create_app(orch: Orchestrator | None = None) -> FastAPI:
     async def operator_nl(body: OperatorNlIn) -> dict:
         """Inject an operator natural-language message — drives the org EXACTLY like a chat message
         from the operator (nl_intake → classify → govern → dispatch → the same governance gates).
-        An INTERNAL control inlet (the bridge is not internet-exposed): operator tooling, automation,
+        An INTERNAL control inlet, operator token only (ROUTE_ACCESS): operator tooling, automation,
         deterministic tests. The org's reply lands in #mgmt like any operator turn."""
         mgmt = await orch.mgmt_channel_id()
         if not mgmt:
@@ -330,6 +371,7 @@ def create_app(orch: Orchestrator | None = None) -> FastAPI:
     async def suggestions() -> dict:
         return {"pool": await orch.learning.pool()}
 
+    auth.verify_table(app, ROUTE_ACCESS)
     return app
 
 

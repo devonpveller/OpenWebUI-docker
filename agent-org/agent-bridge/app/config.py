@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "info"
+
+    # ── HTTP control-plane auth (ao-auth, app/auth.py) ──────────────────────
+    # Two bearer tokens, env only (agent-org/docker/.env). OPERATOR drives every control/read route;
+    # WORKER is accepted only on the worker routes (the floor check) and is set only in ao-worker-1/2.
+    # Unset operator token => every operator route refuses (503): fail closed, never open.
+    operator_token: SecretStr = SecretStr("")
+    worker_token: SecretStr = SecretStr("")
 
     # ── State store (fail-safe persistence — governance §3.0 invariant i) ───
     # SQLAlchemy async URL. Postgres in prod (asyncpg); SQLite default for
