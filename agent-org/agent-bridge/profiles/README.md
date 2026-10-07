@@ -17,11 +17,13 @@ governance §2.1 "default everything local").
 edit, no code change (Pc.3 done-when):
 
 ```bash
-# after Pc stands up llm-gateway-cloud (+ ao-egress + OpenRouter models):
-curl -X POST http://agent-bridge:8000/profiles/lane -d '{"name":"pm","lane":"cloud"}'
-curl -X POST http://agent-bridge:8000/profiles/lane -d '{"name":"po","lane":"cloud"}'
-curl -X POST http://agent-bridge:8000/profiles/lane -d '{"name":"planner","lane":"cloud"}'
-curl -X POST http://agent-bridge:8000/profiles/lane -d '{"name":"reviewer-ethics","lane":"cloud"}'
+# after Pc stands up llm-gateway-cloud (+ ao-egress + OpenRouter models), from the host, with the
+# operator bearer (AO_OPERATOR_TOKEN in agent-org/docker/.env; every route but /health needs it):
+H=(-H "Authorization: Bearer $AO_OPERATOR_TOKEN" -H "Content-Type: application/json")
+curl -X POST http://127.0.0.1:8830/profiles/lane "${H[@]}" -d '{"name":"pm","lane":"cloud"}'
+curl -X POST http://127.0.0.1:8830/profiles/lane "${H[@]}" -d '{"name":"po","lane":"cloud"}'
+curl -X POST http://127.0.0.1:8830/profiles/lane "${H[@]}" -d '{"name":"planner","lane":"cloud"}'
+curl -X POST http://127.0.0.1:8830/profiles/lane "${H[@]}" -d '{"name":"reviewer-ethics","lane":"cloud"}'
 # workers ALWAYS stay local.
 ```
 
