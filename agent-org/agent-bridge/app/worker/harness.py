@@ -62,17 +62,22 @@ def _command_texts(activity: list) -> list[str]:
     "cannot tell", never "ran nothing" — every caller has to treat it that way."""
     out: list[str] = []
     for item in activity or []:
-        if isinstance(item, dict):
-            cmd = (item.get("command") or "").strip()
-            if cmd:
-                out.append(cmd)
+        cmd = _one_command_text(item)
+        if cmd:
+            out.append(cmd)
     return out
 
 
 def _one_command_text(item) -> str:
     """The command string of a single daemon activity `item` (same shape-tolerance as
-    `_command_texts`). "" when the item carries no command (e.g. a non-command activity line)."""
-    return (item.get("command") or "").strip() if isinstance(item, dict) else ""
+    `_command_texts`). "" when the item carries no command (e.g. a non-command activity line).
+
+    ao-checks: prefers `command_full` (little-coder's whole, redacted command) over `command`, which
+    the daemon cuts at 240 chars for display - the org reads these as DATA (claims, findings, flail
+    keys), and a command cut mid-token is not what ran. An older daemon sends only `command`."""
+    if not isinstance(item, dict):
+        return ""
+    return (item.get("command_full") or item.get("command") or "").strip()
 
 
 # F31.4b (gym-038) — a scratch-file path under a temp dir, the volatile token a flailing lens varies.

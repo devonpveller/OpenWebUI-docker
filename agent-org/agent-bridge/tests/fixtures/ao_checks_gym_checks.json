@@ -1,0 +1,122 @@
+{
+ "ac-88038a4c1f0d": {
+  "body": "python -c \"import todo,tempfile,os,json,sys,io,contextlib; tmp=tempfile.mktemp(); os.environ[\\\"TODO_DB\\\"]=tmp; todo.main([\\\"add\\\",\\\"task1\\\"]); todo.main([\\\"add\\\",\\\"task2\\\"]); buf=io.StringIO(); contextlib.redirect_stdout(buf)._",
+  "active": false,
+  "parse_exit": 2,
+  "parse_out": "sh: 1: Syntax error: Unterminated quoted string",
+  "run_exit": 2,
+  "run_out": "sh: 1: Syntax error: Unterminated quoted string"
+ },
+ "ac-7b96f8711316": {
+  "body": "python -c \"import todo,os,tempfile; tmp=tempfile.mkdtemp(); os.environ['\"'\"'TODO_DB",
+  "active": false,
+  "parse_exit": 0,
+  "parse_out": "",
+  "run_exit": 1,
+  "run_out": "  File \"<string>\", line 1\n    import todo,os,tempfile; tmp=tempfile.mkdtemp(); os.environ['\"TODO_DB\n                                                                ^\nSyntaxError: unterminated string literal (detected at line 1)"
+ },
+ "ac-de3b17e95346": {
+  "body": "python3 -c \"import todo,os,tempfile,jso",
+  "active": false,
+  "parse_exit": 2,
+  "parse_out": "sh: 1: Syntax error: Unterminated quoted string",
+  "run_exit": 2,
+  "run_out": "sh: 1: Syntax error: Unterminated quoted string"
+ },
+ "ac-a6ccfd62fac5": {
+  "body": "python3 -c \"import todo,os,tempfile,json; tmp=tempfile.mkdtemp(); db=os.path.join",
+  "active": false,
+  "parse_exit": 2,
+  "parse_out": "sh: 1: Syntax error: Unterminated quoted string",
+  "run_exit": 2,
+  "run_out": "sh: 1: Syntax error: Unterminated quoted string"
+ },
+ "ac-0fe70c72b7a0": {
+  "body": "python3 -c \"import todo,os,tempfile,json; tm",
+  "active": false,
+  "parse_exit": 2,
+  "parse_out": "sh: 1: Syntax error: Unterminated quoted string",
+  "run_exit": 2,
+  "run_out": "sh: 1: Syntax error: Unterminated quoted string"
+ },
+ "ac-08b6150c465b": {
+  "body": "python3 -c \"import os,todo; os.e",
+  "active": false,
+  "parse_exit": 2,
+  "parse_out": "sh: 1: Syntax error: Unterminated quoted string",
+  "run_exit": 2,
+  "run_out": "sh: 1: Syntax error: Unterminated quoted string"
+ },
+ "ac-2fdd54ece2db": {
+  "body": "TODO_DB=/tmp/nonexistent_dir_12345/todos.json py",
+  "active": false,
+  "parse_exit": 0,
+  "parse_out": "",
+  "run_exit": 127,
+  "run_out": "sh: 1: py: not found"
+ },
+ "ac-fcccc7b5c311": {
+  "body": "chmod 000 /tmp/test-unreadable.json 2>/dev/null; TODO",
+  "active": false,
+  "parse_exit": 0,
+  "parse_out": "",
+  "run_exit": 127,
+  "run_out": "sh: 1: TODO: not found"
+ },
+ "ac-15d90bab10da": {
+  "body": "TODO_DB=/tmp/test-dir-db python3 /workspace/todo.py add \"x",
+  "active": false,
+  "parse_exit": 2,
+  "parse_out": "sh: 1: Syntax error: Unterminated quoted string",
+  "run_exit": 2,
+  "run_out": "sh: 1: Syntax error: Unterminated quoted string"
+ },
+ "ac-d68351dd7627": {
+  "body": "echo '\\''{\"next_id\":1,\"items\":[{\"id\":1,\"text\":\"a\",\"done\":false,\"priority\":\"medium\",\"du",
+  "active": false,
+  "parse_exit": 2,
+  "parse_out": "sh: 1: Syntax error: Unterminated quoted string",
+  "run_exit": 2,
+  "run_out": "sh: 1: Syntax error: Unterminated quoted string"
+ },
+ "ac-f74f723c000c": {
+  "body": "echo '\\''{}'\\'' > /tmp/test_np.json && chmod 000 /tmp/test_np.json && TODO_DB=/tmp/test_np.json p",
+  "active": false,
+  "parse_exit": 2,
+  "parse_out": "sh: 1: Syntax error: Unterminated quoted string",
+  "run_exit": 2,
+  "run_out": "sh: 1: Syntax error: Unterminated quoted string"
+ },
+ "ac-377e1081ffed": {
+  "body": "echo '\\''[{\"id\":1,\"text\":\"a\"},\"bad\"]'\\'' > /tmp/test_nd.json && TODO_DB=/tmp/tes",
+  "active": false,
+  "parse_exit": 2,
+  "parse_out": "sh: 1: Syntax error: Unterminated quoted string",
+  "run_exit": 2,
+  "run_out": "sh: 1: Syntax error: Unterminated quoted string"
+ },
+ "ac-8d7256454bff": {
+  "body": "mkdir -p /tmp/test_dir_db2 && TODO_DB=/tmp/test_dir_db2 python3 /workspace/todo.py list 2>",
+  "active": false,
+  "parse_exit": 2,
+  "parse_out": "sh: 1: Syntax error: end of file unexpected",
+  "run_exit": 2,
+  "run_out": "sh: 1: Syntax error: end of file unexpected"
+ },
+ "ac-b787a7e8e235": {
+  "body": "TODO_DB=/tmp/test_ef.json python3 /workspace/todo.py add \"\" && grep -q \"\\\"text\\",
+  "active": false,
+  "parse_exit": 2,
+  "parse_out": "sh: 1: Syntax error: Unterminated quoted string",
+  "run_exit": 2,
+  "run_out": "sh: 1: Syntax error: Unterminated quoted string"
+ },
+ "ac-e01b73c72ed7": {
+  "body": "python3 todo.py reopen --help",
+  "active": true,
+  "parse_exit": 0,
+  "parse_out": "",
+  "run_exit": 2,
+  "run_out": "python3: can't open file '/tmp/aochk-t/ws/todo.py': [Errno 2] No such file or directory"
+ }
+}
