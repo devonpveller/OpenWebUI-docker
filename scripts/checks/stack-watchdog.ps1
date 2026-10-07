@@ -2811,6 +2811,346 @@ function Test-PortalAlertDelivery {
 }
 # === END PORTAL ALERT DELIVERY ================================================
 
+# === HOST MEMORY (hm-watchdog, 2026-10-07) ====================================
+# Nothing watched host memory. 2026-07-05: com.docker.backend leaked to 83.9 GB
+# private and vmmemWSL to 122 GB, commit charge reached 224.7 of 244 GB,
+# available RAM 0, and WSL wedged at the Hyper-V layer until a reboot.
+# 2026-10-07: vmmemWSL held 112.3 GiB of the 127.7 GiB host with 24.3 GiB
+# available, and no alert fired. The .wslconfig cap is now 64GB; this check
+# catches what the cap does not (a Docker backend leak, Windows-side growth,
+# commit charge, a cap that is not holding).
+#
+# Runs FIRST in Invoke-HealthCheck, before the Docker-engine step, because it
+# needs no Docker and matters most when Docker is wedged; pages through the
+# catastrophe path (Telegram first - Docker-independent - plus the Mattermost
+# mirror). ALERT ONLY: it reads and reports, never kills or restarts anything.
+#
+# How it reads (no WMI: on 07-05 WMI hung first, while perf counters and
+# Get-Process kept answering): total physical via
+# Microsoft.VisualBasic ComputerInfo (GlobalMemoryStatusEx, no compile);
+# Available Bytes, Committed Bytes and Commit Limit via in-process PDH
+# counters; private bytes of vmmemWSL and com.docker.backend (all instances,
+# summed) via Get-Process. A counter that cannot be read is an UNKNOWN in the
+# status line and its own page (hostmem-unreadable), never silence.
+#
+# Thresholds (GiB = 2^30 bytes). A key pages when its line is crossed, re-pages
+# at most every $HostMemAlertCooldownHours while it stays crossed, and sends its
+# all-clear only once the value is $HostMemClearMarginPercent back on the safe
+# side of the line (hysteresis, so a value hovering on the line cannot page
+# ALERT + RESOLVED every 10-minute pass).
+#   available  < max(16 GiB, 12.5% of physical). 16 GiB = 12.5% of this 128 GiB
+#              host; Windows starts hard paging near there, and 07-05 died at 0.
+#   commit     >= 85% of the commit limit, or < 24 GiB of commit headroom.
+#              07-05 reached 92% (224.7/244); allocations fail at 100%, and the
+#              pagefile only grows the limit after the pressure has started.
+#   vmmemWSL   >= 80 GiB private. The cap is 64GB (64 GiB); on 10-07 private
+#              bytes ran ~16 GiB past the then-96GB cap (112.3), so 64 + 16:
+#              above 80 the cap is not holding or has been raised.
+#   backend    com.docker.backend >= 12 GiB private (measured 0.31 GiB for its
+#              two processes on 10-07; 07-05 leaked to 83.9 GB), or GROWTH of
+#              >= 4 GiB within 6 h for the same set of PIDs (a restart is a new
+#              baseline). Growth is the 07-05 leak signal: it pages long before
+#              the absolute ceiling. Samples: logs\.watchdog-hostmem-state.json.
+$HostMemAvailableFloorGiB = 16
+$HostMemAvailableFloorPercent = 12.5
+$HostMemCommitMaxPercent = 85
+$HostMemCommitHeadroomFloorGiB = 24
+$HostMemVmmemMaxGiB = 80
+$HostMemBackendMaxGiB = 12
+$HostMemBackendGrowthGiB = 4
+$HostMemBackendGrowthWindowHours = 6
+$HostMemClearMarginPercent = 10
+$HostMemAlertCooldownHours = 2
+# Test seam: a scriptblock returning one sample in Get-HostMemorySample's shape.
+# $null (always, in production) reads the real counters.
+$HostMemReader = $null
+
+function Format-HostMemGiB {
+    param([double]$Bytes, [int]$Decimals = 1)
+    return ([double]$Bytes / 1GB).ToString(('F' + $Decimals), [cultureinfo]::InvariantCulture)
+}
+
+function ConvertTo-HostMemReason {
+    param([string]$Text)
+    if (-not $Text) { return 'unreadable' }
+    $s = ($Text -replace '[\r\n]+', ' ') -replace '[^\x20-\x7E]', '?'
+    if ($s.Length -gt 120) { $s = $s.Substring(0, 120) }
+    return $s
+}
+
+# Private bytes of every process with this name, summed. State: present /
+# absent (not running - not an error) / unknown (could not be read).
+function Get-HostMemProcess {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+    $r = [ordered]@{ State = 'absent'; PrivateBytes = $null; Id = ''; Count = 0; Error = $null }
+    try {
+        $procs = @(Get-Process -Name $Name -ErrorAction SilentlyContinue)
+        if ($procs.Count -eq 0) { return [pscustomobject]$r }
+        $sum = [double]0
+        $ids = @()
+        foreach ($p in $procs) {
+            $pm = [double]$p.PrivateMemorySize64
+            if ($pm -le 0) { throw "private bytes read as 0 for PID $($p.Id) (access denied?)" }
+            $sum += $pm
+            $ids += [int]$p.Id
+        }
+        $r.State = 'present'
+        $r.PrivateBytes = $sum
+        $r.Id = (($ids | Sort-Object) -join ',')
+        $r.Count = $procs.Count
+    } catch {
+        $r.State = 'unknown'
+        $r.PrivateBytes = $null
+        $r.Error = $_.Exception.Message
+    }
+    return [pscustomobject]$r
+}
+
+function Get-HostMemorySample {
+    [CmdletBinding()]
+    param()
+    if ($HostMemReader) { return (& $HostMemReader) }
+    $s = [ordered]@{ TotalBytes = $null; AvailBytes = $null; CommitBytes = $null; CommitLimitBytes = $null
+                     Vmmem = $null; Backend = $null; Errors = @{} }
+    try {
+        Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop
+        $s.TotalBytes = [double](New-Object Microsoft.VisualBasic.Devices.ComputerInfo).TotalPhysicalMemory
+    } catch { $s.Errors['total'] = $_.Exception.Message }
+    foreach ($c in @(@('AvailBytes', 'Available Bytes', 'available'), @('CommitBytes', 'Committed Bytes', 'commit'), @('CommitLimitBytes', 'Commit Limit', 'commit-limit'))) {
+        $pc = $null
+        try {
+            $pc = New-Object System.Diagnostics.PerformanceCounter('Memory', $c[1], $true)
+            $s[$c[0]] = [double]$pc.RawValue
+        } catch {
+            $s.Errors[$c[2]] = $_.Exception.Message
+        } finally {
+            if ($pc) { $pc.Dispose() }
+        }
+    }
+    $s.Vmmem = Get-HostMemProcess -Name 'vmmemWSL'
+    $s.Backend = Get-HostMemProcess -Name 'com.docker.backend'
+    if ($s.Vmmem.State -eq 'unknown') { $s.Errors['vmmemWSL'] = $s.Vmmem.Error }
+    if ($s.Backend.State -eq 'unknown') { $s.Errors['com.docker.backend'] = $s.Backend.Error }
+    return [pscustomobject]$s
+}
+
+# One key's paging state. Breach pages (at most once per cooldown); Clear sends
+# the all-clear for a key that paged and re-arms it; neither is HOLDING. The
+# .hostmem-alert-<key> sentinel means "paged and not yet cleared". Returns
+# 'firing' / 'holding' / 'cleared' / 'ok'.
+function Update-HostMemAlert {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Key,
+        [bool]$Breach,
+        [bool]$Clear,
+        [string]$Message,
+        [string]$ClearMessage
+    )
+    $sentinel = Join-Path $PROJECT_DIR "logs\.hostmem-alert-$Key"
+    $wasFiring = Test-Path -LiteralPath $sentinel
+    if ($Breach) {
+        $send = $true
+        if ($wasFiring) {
+            try {
+                if (((Get-Date) - (Get-Item -LiteralPath $sentinel).LastWriteTime).TotalHours -lt $HostMemAlertCooldownHours) { $send = $false }
+            } catch { }
+        }
+        if ($send) {
+            Send-CatastropheAlert -Key $Key -Message $Message
+            try { (Get-Date -Format o) | Out-File -LiteralPath $sentinel -Encoding ascii -Force } catch { }
+        } else {
+            Write-LogEntry "HOSTMEM [$Key] still firing; not re-paged inside the ${HostMemAlertCooldownHours}h cooldown: $Message" "WARN"
+        }
+        return 'firing'
+    }
+    if (-not $wasFiring) { return 'ok' }
+    if ($Clear) {
+        Resolve-Catastrophe -Key $Key -Message $ClearMessage
+        # Re-arm: drop this check's sentinel AND the catastrophe path's 1h
+        # Telegram throttle, so a relapse after the all-clear pages at once.
+        $rearm = @($sentinel, (Join-Path $PROJECT_DIR "logs\.tg-alert-$Key"))
+        foreach ($p in $rearm) {
+            Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+        }
+        Write-LogEntry "HOSTMEM [$Key] cleared: $ClearMessage" "SUCCESS"
+        return 'cleared'
+    }
+    return 'holding'
+}
+
+# com.docker.backend growth: samples for the same PID set within the window.
+# Returns the growth in bytes since the lowest sample in the window ($null when
+# there is no earlier sample), and records the current sample.
+function Get-HostMemBackendGrowth {
+    [CmdletBinding()]
+    param($Backend)
+    $path = Join-Path $PROJECT_DIR 'logs\.watchdog-hostmem-state.json'
+    $now = Get-LoopNowUtc
+    $samples = @()
+    $id = ''
+    try {
+        if (Test-Path -LiteralPath $path) {
+            $st = [IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
+            $id = [string]$st.backend_id
+            $samples = @($st.backend_samples)
+        }
+    } catch {
+        Write-LogEntry "hostmem: growth state unreadable ($(ConvertTo-HostMemReason $_.Exception.Message)) - starting a new baseline" "WARN"
+        $samples = @(); $id = ''
+    }
+    if ($Backend.State -ne 'present') {
+        if ($Backend.State -eq 'absent') { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+        return $null
+    }
+    if ($id -ne [string]$Backend.Id) { $samples = @() }
+    $cutoff = $now.AddHours(-$HostMemBackendGrowthWindowHours)
+    $kept = @()
+    foreach ($x in $samples) {
+        $t = ConvertTo-UtcInstant ([string]$x.t)
+        $b = 0.0
+        if ($t -and $t -ge $cutoff -and $t -le $now -and [double]::TryParse([string]$x.b, [Globalization.NumberStyles]::Float, [cultureinfo]::InvariantCulture, [ref]$b)) {
+            $kept += [pscustomobject]@{ t = $t.ToString('o'); b = $b }
+        }
+    }
+    $growth = $null
+    if ($kept.Count -gt 0) {
+        $min = ($kept | Measure-Object -Property b -Minimum).Minimum
+        $growth = [double]$Backend.PrivateBytes - [double]$min
+    }
+    $kept += [pscustomobject]@{ t = $now.ToString('o'); b = [double]$Backend.PrivateBytes }
+    try {
+        $out = [pscustomobject]@{ backend_id = [string]$Backend.Id; backend_samples = @($kept) } | ConvertTo-Json -Depth 4
+        [IO.File]::WriteAllText($path, $out)
+    } catch { Write-LogEntry "hostmem: growth state not written ($(ConvertTo-HostMemReason $_.Exception.Message))" "WARN" }
+    return $growth
+}
+
+# The check. Writes ONE status line per pass (INFO when all is well, WARN
+# otherwise) and pages per key. Returns $true only when nothing is firing,
+# holding or unknown. Never throws.
+function Test-HostMemory {
+    [CmdletBinding()]
+    param()
+    try {
+        $s = Get-HostMemorySample
+        $gib = [double]1GB
+        $m = [double]$HostMemClearMarginPercent / 100.0
+        $errs = @{}
+        if ($s.Errors) { foreach ($k in @($s.Errors.Keys)) { $errs[[string]$k] = [string]$s.Errors[$k] } }
+        $total = $s.TotalBytes; $avail = $s.AvailBytes; $commit = $s.CommitBytes; $limit = $s.CommitLimitBytes
+        foreach ($pair in @(@('available', $avail), @('commit', $commit), @('commit-limit', $limit))) {
+            if ($null -eq $pair[1] -and -not $errs.ContainsKey($pair[0])) { $errs[$pair[0]] = 'no value' }
+        }
+        $vm = $s.Vmmem; $be = $s.Backend
+        if (-not $vm) { $vm = [pscustomobject]@{ State = 'unknown'; PrivateBytes = $null; Id = ''; Count = 0; Error = 'no value' } }
+        if (-not $be) { $be = [pscustomobject]@{ State = 'unknown'; PrivateBytes = $null; Id = ''; Count = 0; Error = 'no value' } }
+        if ($vm.State -eq 'unknown' -and -not $errs.ContainsKey('vmmemWSL')) { $errs['vmmemWSL'] = [string]$vm.Error }
+        if ($be.State -eq 'unknown' -and -not $errs.ContainsKey('com.docker.backend')) { $errs['com.docker.backend'] = [string]$be.Error }
+
+        # --- the status line's fields
+        $fAvail = if ($null -ne $avail) {
+            $tx = if ($null -ne $total) { "{0}GiB of {1}GiB ({2}%)" -f (Format-HostMemGiB $avail), (Format-HostMemGiB $total), ((100.0 * $avail / $total).ToString('F1', [cultureinfo]::InvariantCulture)) } else { "{0}GiB of UNKNOWN({1})" -f (Format-HostMemGiB $avail), (ConvertTo-HostMemReason $errs['total']) }
+            $tx
+        } else { "UNKNOWN($(ConvertTo-HostMemReason $errs['available']))" }
+        $commitPct = $null
+        $fCommit = if ($null -ne $commit -and $null -ne $limit -and $limit -gt 0) {
+            $commitPct = 100.0 * $commit / $limit
+            "{0}/{1}GiB ({2}%)" -f (Format-HostMemGiB $commit), (Format-HostMemGiB $limit), ($commitPct.ToString('F1', [cultureinfo]::InvariantCulture))
+        } else {
+            $why = if ($errs.ContainsKey('commit')) { $errs['commit'] } else { $errs['commit-limit'] }
+            "UNKNOWN($(ConvertTo-HostMemReason $why))"
+        }
+        $fVm = switch ($vm.State) { 'present' { "$(Format-HostMemGiB $vm.PrivateBytes)GiB" } 'absent' { 'absent' } default { "UNKNOWN($(ConvertTo-HostMemReason $errs['vmmemWSL']))" } }
+        $growth = $null
+        if ($be.State -ne 'unknown') { $growth = Get-HostMemBackendGrowth -Backend $be }
+        $fBe = switch ($be.State) {
+            'present' {
+                $g = if ($null -ne $growth) { "+$(Format-HostMemGiB ([math]::Max([double]0, $growth)) 2)GiB/${HostMemBackendGrowthWindowHours}h" } else { 'baseline' }
+                "$(Format-HostMemGiB $be.PrivateBytes 2)GiB x$($be.Count) ($g)"
+            }
+            'absent' { 'absent' }
+            default { "UNKNOWN($(ConvertTo-HostMemReason $errs['com.docker.backend']))" }
+        }
+        $ctx = "Now: available $fAvail, commit $fCommit, vmmemWSL $fVm, com.docker.backend $fBe."
+        $tail = "Nothing was killed or restarted (alert only); the 2026-07-05 OOM wedged WSL until a reboot."
+
+        # --- per-key decisions
+        $states = [ordered]@{}
+
+        $floor = [double]$HostMemAvailableFloorGiB * $gib
+        if ($null -ne $total) { $floor = [math]::Max($floor, ([double]$HostMemAvailableFloorPercent / 100.0) * $total) }
+        if ($null -ne $avail) {
+            $states['hostmem-available'] = Update-HostMemAlert -Key 'hostmem-available' -Breach ($avail -lt $floor) -Clear ($avail -ge $floor * (1 + $m)) `
+                -Message ("HOST MEMORY LOW: {0} GiB available (floor {1} GiB). {2} {3}" -f (Format-HostMemGiB $avail), (Format-HostMemGiB $floor), $ctx, $tail) `
+                -ClearMessage ("host memory available is back above the floor: {0} GiB." -f (Format-HostMemGiB $avail))
+        }
+
+        if ($null -ne $commitPct) {
+            $headroom = $limit - $commit
+            $hFloor = [double]$HostMemCommitHeadroomFloorGiB * $gib
+            $breach = ($commitPct -ge $HostMemCommitMaxPercent) -or ($headroom -lt $hFloor)
+            $clear = ($commitPct -le $HostMemCommitMaxPercent * (1 - $m)) -and ($headroom -ge $hFloor * (1 + $m))
+            $states['hostmem-commit'] = Update-HostMemAlert -Key 'hostmem-commit' -Breach $breach -Clear $clear `
+                -Message ("COMMIT CHARGE HIGH: {0} of {1} GiB ({2}%; alert at {3}% or under {4} GiB headroom). Allocations fail at 100%. {5} {6}" -f (Format-HostMemGiB $commit), (Format-HostMemGiB $limit), $commitPct.ToString('F1', [cultureinfo]::InvariantCulture), $HostMemCommitMaxPercent, $HostMemCommitHeadroomFloorGiB, $ctx, $tail) `
+                -ClearMessage ("commit charge is back down: {0}." -f $fCommit)
+        }
+
+        if ($vm.State -ne 'unknown') {
+            $vmMax = [double]$HostMemVmmemMaxGiB * $gib
+            $vmB = ($vm.State -eq 'present') -and ($vm.PrivateBytes -ge $vmMax)
+            $vmC = ($vm.State -eq 'absent') -or ($vm.PrivateBytes -le $vmMax * (1 - $m))
+            $states['hostmem-vmmem'] = Update-HostMemAlert -Key 'hostmem-vmmem' -Breach $vmB -Clear $vmC `
+                -Message ("HOST MEMORY: vmmemWSL holds {0} GiB private (alert at {1} GiB; the .wslconfig cap is 64GB, so the cap is not holding). {2} {3}" -f (Format-HostMemGiB $vm.PrivateBytes), $HostMemVmmemMaxGiB, $ctx, $tail) `
+                -ClearMessage ("vmmemWSL is back under {0} GiB (now {1})." -f $HostMemVmmemMaxGiB, $fVm)
+        }
+
+        if ($be.State -ne 'unknown') {
+            $beMax = [double]$HostMemBackendMaxGiB * $gib
+            $beB = ($be.State -eq 'present') -and ($be.PrivateBytes -ge $beMax)
+            $beC = ($be.State -eq 'absent') -or ($be.PrivateBytes -le $beMax * (1 - $m))
+            $states['hostmem-backend'] = Update-HostMemAlert -Key 'hostmem-backend' -Breach $beB -Clear $beC `
+                -Message ("HOST MEMORY: com.docker.backend holds {0} GiB private (alert at {1} GiB; on 2026-07-05 it leaked to 83.9 GB). {2} {3}" -f (Format-HostMemGiB $be.PrivateBytes), $HostMemBackendMaxGiB, $ctx, $tail) `
+                -ClearMessage ("com.docker.backend is back under {0} GiB (now {1})." -f $HostMemBackendMaxGiB, $fBe)
+
+            $gMax = [double]$HostMemBackendGrowthGiB * $gib
+            $gB = ($be.State -eq 'present') -and ($null -ne $growth) -and ($growth -ge $gMax)
+            $gC = ($be.State -eq 'absent') -or (($null -ne $growth) -and ($growth -le $gMax * (1 - $m))) -or ($null -eq $growth)
+            $states['hostmem-backend-growth'] = Update-HostMemAlert -Key 'hostmem-backend-growth' -Breach $gB -Clear $gC `
+                -Message ("HOST MEMORY: com.docker.backend GREW {0} GiB within {1} h (alert at {2} GiB) - the 2026-07-05 leak signal. {3} {4}" -f (Format-HostMemGiB ([math]::Max([double]0, [double]$growth))), $HostMemBackendGrowthWindowHours, $HostMemBackendGrowthGiB, $ctx, $tail) `
+                -ClearMessage ("com.docker.backend is no longer growing (now {0})." -f $fBe)
+        }
+
+        $unknownKeys = @($errs.Keys | Sort-Object)
+        $states['hostmem-unreadable'] = Update-HostMemAlert -Key 'hostmem-unreadable' -Breach ($unknownKeys.Count -gt 0) -Clear ($unknownKeys.Count -eq 0) `
+            -Message ("HOST MEMORY watchdog cannot read: {0}. Memory pressure is NOT fully watched until this clears. {1}" -f (($unknownKeys | ForEach-Object { "$_ ($(ConvertTo-HostMemReason $errs[$_]))" }) -join '; '), $ctx) `
+            -ClearMessage "the host memory counters are readable again."
+
+        # --- the one status line
+        $firing = @($states.Keys | Where-Object { $states[$_] -eq 'firing' -and $_ -ne 'hostmem-unreadable' })
+        $holding = @($states.Keys | Where-Object { $states[$_] -eq 'holding' })
+        $verdict = @()
+        if ($firing.Count -gt 0) { $verdict += "ALERT $($firing -join ',')" }
+        if ($holding.Count -gt 0) { $verdict += "HOLDING $($holding -join ',') (back under the line, not yet past the all-clear line)" }
+        if ($unknownKeys.Count -gt 0) { $verdict += "UNKNOWN $($unknownKeys -join ',')" }
+        $ok = ($verdict.Count -eq 0)
+        $v = if ($ok) { 'OK' } else { $verdict -join '; ' }
+        $level = if ($ok) { 'INFO' } else { 'WARN' }
+        Write-LogEntry ("hostmem: avail={0} commit={1} vmmemWSL={2} com.docker.backend={3} -> {4}" -f $fAvail, $fCommit, $fVm, $fBe, $v) $level
+        return $ok
+    } catch {
+        $why = ConvertTo-HostMemReason $_.Exception.Message
+        Write-LogEntry "hostmem: UNKNOWN - the host memory check failed: $why" "WARN"
+        try {
+            $null = Update-HostMemAlert -Key 'hostmem-unreadable' -Breach $true -Clear $false `
+                -Message "HOST MEMORY watchdog failed to run: $why. Memory pressure is NOT watched until this clears."
+        } catch { }
+        return $false
+    }
+}
+# === END HOST MEMORY ==========================================================
+
 function Invoke-HealthCheck {
     Write-LogEntry "Starting comprehensive health check..."
     # Faults found this cycle. Checks RECORD into this and carry on rather
@@ -2825,7 +3165,14 @@ function Invoke-HealthCheck {
     # Change to project directory
     Set-Location $PROJECT_DIR
 
-    # --- Docker ENGINE liveness FIRST: every check below issues `docker ...` and
+    # --- HOST memory, before anything touches Docker (hm-watchdog, 2026-10-07):
+    # it needs no Docker and matters most when the WSL VM or the Docker backend
+    # is eating the host. Alert only; see the HOST MEMORY section.
+    if (-not [bool](@(Test-HostMemory) | Select-Object -Last 1)) {
+        $script:HealthIssues += 'host-memory'
+    }
+
+    # --- Docker ENGINE liveness FIRST (after the read-only memory check): every check below issues `docker ...` and
     # needs the daemon. If it is down (a compaction stranded it, or a crash), try
     # to restart it autonomously and alert out-of-band. Then short-circuit: with
     # no daemon there is nothing container-side to check -- but the HOST lifelines
