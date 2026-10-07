@@ -13,6 +13,7 @@ from .events import EventSink
 from .logging import get_logger
 from .policy import PriorityPolicy, build_policy
 from .registry import Registry
+from .shedding import ShedMonitor
 from .transport import Upstream
 
 log = get_logger("llm_queue.app_state")
@@ -27,11 +28,47 @@ class AppState:
             settings.policy_json, settings.default_acceptable_wait_s
         )
         self.events = EventSink(settings.events_db_path)
+        self.shed = ShedMonitor(
+            cap=settings.max_total_connections,
+            alert_ratio=settings.shed_alert_ratio,
+            clear_ratio=settings.shed_clear_ratio,
+            clear_quiet_s=settings.shed_clear_quiet_s,
+        )
         self._seq = itertools.count()
         self._reaper_task: asyncio.Task | None = None
+        self.permits_reaped_total = 0
 
     def next_seq(self) -> int:
         return next(self._seq)
+
+    async def note_shed(self, *, refused: bool = False) -> str | None:
+        """Fold the current held count (and a capacity refusal, if this is one) into the shedding
+        episode state. A transition is logged ONCE and recorded as an event; see shedding.py."""
+        self.shed.cap = self.settings.max_total_connections
+        held = self.registry.held_total
+        transition = self.shed.observe(held, refused=refused)
+        if transition == "started":
+            ep = self.shed.current
+            log.warning(
+                "inference_shedding_started",
+                episode=ep.id, trigger=ep.trigger, held=held, cap=self.shed.cap,
+                alert_at=self.shed.alert_at,
+            )
+            await self.events.emit(
+                "shed_start", ts=time.time(), status=503 if refused else None,
+                reason=ep.trigger, depth=held,
+            )
+        elif transition == "cleared":
+            ep = self.shed.last
+            log.info(
+                "inference_shedding_cleared",
+                episode=ep.id, refusals=ep.refusals, peak_held=ep.peak_held, held=held,
+                duration_s=round((ep.cleared_at or 0) - ep.started_at, 1),
+            )
+            await self.events.emit(
+                "shed_clear", ts=time.time(), reason=f"episode {ep.id}", depth=held,
+            )
+        return transition
 
     async def start(self) -> None:
         await self.events.start()
@@ -52,6 +89,26 @@ class AppState:
         await self.events.stop()
         await self.upstream.aclose()
 
+    async def _reap_permits(self, ttl: float) -> int:
+        """Permit backstop (ao-queue round 2): a model permit held by a request that made no
+        progress for `ttl` is returned, LOGGED at WARNING and counted on /healthz
+        (`permits_reaped_total`), so a wedge of lost permits is both bounded and visible."""
+        n = 0
+        for name, mq in self.registry.queues().items():
+            reaped = await mq.reap_stale_running(ttl)
+            if reaped:
+                n += len(reaped)
+                log.warning(
+                    "permit_reaper reclaimed stuck model permit(s)",
+                    model=name, count=len(reaped), request_ids=[w.id for w in reaped][:20],
+                    ttl_s=ttl,
+                )
+                await self.events.emit(
+                    "permit_reaped", ts=time.time(), model=name, depth=len(reaped),
+                )
+        self.permits_reaped_total += n
+        return n
+
     async def _reap_loop(self) -> None:
         """Periodically reclaim leaked held connections. Any reap is LOGGED
         (WARNING) + emitted as an
@@ -62,6 +119,9 @@ class AppState:
             try:
                 await asyncio.sleep(interval)
                 reclaimed = await self.registry.reap_stale_connections(ttl)
+                await self._reap_permits(ttl)
+                # Time-based all-clear: an episode clears on a quiet tick, not only on traffic.
+                await self.note_shed()
                 if reclaimed:
                     log.warning(
                         "conn_reaper reclaimed leaked held connection(s)",

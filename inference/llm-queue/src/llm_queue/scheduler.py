@@ -37,6 +37,7 @@ class Waiter:
         "rank",
         "enqueued_monotonic",
         "started_monotonic",
+        "last_progress_monotonic",
         "dispatched_event",
         "dispatched",
         "cancelled",
@@ -54,6 +55,8 @@ class Waiter:
         self.rank = cls.rank
         self.enqueued_monotonic = time.monotonic()
         self.started_monotonic: float | None = None
+        # ao-queue round 2: last upstream byte relayed (or dispatch) - the permit reaper's clock.
+        self.last_progress_monotonic: float | None = None
         self.dispatched_event = asyncio.Event()
         self.dispatched = False
         self.cancelled = False
@@ -225,6 +228,7 @@ class ModelQueue:
             self._permits -= 1
             w.dispatched = True
             w.started_monotonic = time.monotonic()
+            w.last_progress_monotonic = w.started_monotonic
             w.wait_seconds = w.started_monotonic - w.enqueued_monotonic
             self._running[wid] = w
             self._inflight_by_key[w.key] = self._inflight_by_key.get(w.key, 0) + 1
@@ -245,6 +249,31 @@ class ModelQueue:
                 if record_duration and waiter.started_monotonic is not None:
                     self._t.record(time.monotonic() - waiter.started_monotonic)
                 self._try_dispatch_locked()
+
+    async def reap_stale_running(self, ttl_s: float) -> list[Waiter]:
+        """ao-queue round 2 BACKSTOP: return the permit of a running request that has made no
+        progress (no upstream byte relayed) for `ttl_s`. A live stream cannot be that quiet - the
+        upstream read timeout (600 s) ends it first and its cleanup releases - so such a permit
+        belongs to a request whose release path never ran. Without this, a lost permit was lost
+        until restart (the connection reaper only reclaims held slots). Returns the reaped waiters
+        so the caller logs them; a reap is a defect signal, never routine."""
+        cutoff = time.monotonic() - ttl_s
+        async with self._lock:
+            stale = [
+                w for w in self._running.values()
+                if (w.last_progress_monotonic or w.started_monotonic or 0.0) < cutoff
+            ]
+            for w in stale:
+                self._running.pop(w.id, None)
+                n = self._inflight_by_key.get(w.key, 0) - 1
+                if n > 0:
+                    self._inflight_by_key[w.key] = n
+                else:
+                    self._inflight_by_key.pop(w.key, None)
+                self._permits += 1
+            if stale:
+                self._try_dispatch_locked()
+        return stale
 
     async def cancel_waiting(self, waiter: Waiter) -> bool:
         """Evict a still-waiting request (client disconnect / operator cancel,

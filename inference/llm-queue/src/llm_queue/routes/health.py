@@ -19,4 +19,11 @@ async def healthz(request: Request) -> dict[str, object]:
         "status": "ok",
         "held_total": state.registry.held_total,
         "models": list(state.registry.queues().keys()),
+        # ao-queue: the shedding episode state the host watchdog pages on (shedding.py).
+        "shedding": state.shed.snapshot(state.registry.held_total),
+        # ao-queue round 2: model permits in use and permits the backstop had to reclaim.
+        "running_total": sum(
+            len(mq.snapshot()["running"]) for mq in state.registry.queues().values()
+        ),
+        "permits_reaped_total": state.permits_reaped_total,
     }
