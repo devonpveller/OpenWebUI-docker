@@ -759,6 +759,29 @@ def _parse_ts(ts: str) -> float:
 # --------------------------------------------------------------------------
 
 
+def read_event_lines(path: str, offset: int, cache: dict) -> list[str]:
+    """Lines `offset`.. of the events file, newline-stripped. Probe cost is O(new bytes): `cache`
+    remembers (complete_lines, byte_pos) per file, so a poller whose offset is at or past the
+    cached line count reads only the bytes appended since (the stall watchdog re-read a 761 MB
+    file on every probe). An offset behind the cache, or a shrunk file, falls back to a full read."""
+    offset = max(0, offset)
+    ent = cache.get(path)
+    with open(path, "rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
+        if ent is not None and offset >= ent[0] and size >= ent[1]:
+            base_lines, base_pos = ent
+        else:
+            base_lines, base_pos = 0, 0
+        fh.seek(base_pos)
+        raw = fh.readlines()
+    complete = [ln for ln in raw if ln.endswith(b"\n")]
+    cache[path] = (base_lines + len(complete), base_pos + sum(len(ln) for ln in complete))
+    if len(cache) > 64:
+        cache.pop(next(iter(cache)))
+    skip = max(0, offset - base_lines)
+    return [ln.decode("utf-8", errors="replace").rstrip("\n") for ln in raw[skip:]]
+
+
 def build_app(daemon: LittleCoderDaemon) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -802,6 +825,8 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
             data["commands"] = len(live)
         return data
 
+    _event_cache: dict = {}
+
     @app.get("/tasks/{task_id}/events")
     def task_events(task_id: str, offset: int = 0) -> dict:
         """Live pi `--mode json` event stream, from line `offset` onward —
@@ -812,9 +837,7 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
         events: list[str] = []
         if state.events_path:
             try:
-                with open(state.events_path, encoding="utf-8") as fh:
-                    lines = fh.readlines()
-                events = [ln.rstrip("\n") for ln in lines[offset:]]
+                events = read_event_lines(state.events_path, offset, _event_cache)
             except OSError:
                 events = []
         return {

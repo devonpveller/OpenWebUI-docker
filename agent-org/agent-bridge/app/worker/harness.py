@@ -200,7 +200,7 @@ class WorkerHarness(Protocol):
         ...
 
     async def running_task_progress(
-        self, base_url: str, since_offset: int = 0,
+        self, base_url: str, since_offset: int = 0, since_task_id: str | None = None,
     ) -> tuple[str, int] | None:
         """LIVENESS (register #25): `(task_id, event_offset)` for the daemon's running task, else None.
         The offset advances on every agent-loop step, so a FROZEN offset across ticks = a hung turn —
@@ -401,7 +401,7 @@ class LittleCoderHarness:
             return False
 
     async def running_task_progress(
-        self, base_url: str, since_offset: int = 0,
+        self, base_url: str, since_offset: int = 0, since_task_id: str | None = None,
     ) -> tuple[str, int] | None:
         """Worker-LIVENESS signal (register #25): `(task_id, event_offset)` for this daemon's running
         task, or `None` if it reports no running task. The offset is the daemon's per-agent-step event
@@ -409,7 +409,10 @@ class LittleCoderHarness:
         shell-only `activity` array, so a FROZEN offset across ticks is the true signature of a hung
         turn (the stall sweep decides silence from the delta over time). `since_offset` is the last
         offset the caller saw, so the daemon returns only the new events; the returned offset is still
-        the running total."""
+        the running total. `since_task_id` is the task that offset belongs to: an offset is only
+        meaningful for ITS task, so when the daemon's running task is a different one the probe starts
+        from 0 (ao-wd-offset: a new task used to inherit the previous task's offset, read as frozen,
+        and was cancelled as "silent"). `since_task_id=None` keeps the legacy "trust the offset"."""
         try:
             async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=15.0) as c:
                 r = await c.get("/tasks")
@@ -420,6 +423,8 @@ class LittleCoderHarness:
                 tid = running and running.get("task_id")
                 if not tid:
                     return None
+                if since_task_id is not None and tid != since_task_id:
+                    since_offset = 0                # the offset belongs to another task
                 e = await c.get(f"/tasks/{tid}/events", params={"offset": max(0, int(since_offset))})
                 if e.status_code != 200:            # daemon without the /events route → offset unknown
                     # FAIL-SAFE: report as advancing so an unobservable-but-running daemon is never
@@ -485,6 +490,8 @@ class FakeHarness:
         # it to simulate progress. Defaults: offset 0, task id "fake-task".
         self.progress_offsets: dict[str, int] = {}
         self.progress_task_ids: dict[str, str] = {}
+        self.progress_totals: dict[str, int] = {}     # if set: emulate the daemon's line-count semantics
+        self.progress_calls: list[tuple[str, str, int]] = []   # (url, task_id, effective since_offset)
         # Optional answer text streamed via on_update (default "ok") — set long text to exercise
         # the answer-chunking path.
         self.answer_text: str | None = None
@@ -590,11 +597,17 @@ class FakeHarness:
         return base_url in getattr(self, "busy_urls", set())
 
     async def running_task_progress(
-        self, base_url: str, since_offset: int = 0,
+        self, base_url: str, since_offset: int = 0, since_task_id: str | None = None,
     ) -> tuple[str, int] | None:
         # register #25: (task_id, event_offset) for a busy worker; None if idle. A test freezes the
         # offset to simulate a hang or bumps it to simulate progress.
         if base_url not in getattr(self, "busy_urls", set()):
             return None
         tid = self.progress_task_ids.get(base_url, "fake-task")
+        if since_task_id is not None and tid != since_task_id:
+            since_offset = 0                        # same rule as the real client
+        self.progress_calls.append((base_url, tid, since_offset))
+        total = self.progress_totals.get(base_url)
+        if total is not None:                       # emulate the daemon: next_offset = offset + len(lines[offset:])
+            return (tid, since_offset + max(0, total - since_offset))
         return (tid, self.progress_offsets.get(base_url, 0))
