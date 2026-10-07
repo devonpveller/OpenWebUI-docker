@@ -1,5 +1,8 @@
 # test-watchdog-host-memory.ps1 - the test for stack-watchdog.ps1's HOST MEMORY
-# check (Test-HostMemory). Item hm-watchdog, 2026-10-07.
+# check (Test-HostMemory). Items hm-watchdog and hm-wset, 2026-10-07.
+# hm-wset: the vmmemWSL key pages on WORKING SET against a line derived from the
+# .wslconfig cap (cap + 6 GiB, default 70); private bytes are information only.
+# -Vmmem in New-Sample is the WORKING SET, -VmmemPriv the private bytes.
 #
 # Nothing watched host memory: on 2026-10-07 vmmemWSL held 112.3 GiB of the
 # 127.7 GiB host with 24.3 GiB available and no alert fired (the 2026-07-05 OOM
@@ -120,15 +123,18 @@ $script:Loader = {
 # unreadable counter; State 'absent' is a process that is not running.
 function New-Sample {
     param([object]$Total = 127.7, [object]$Avail = 90.0, [object]$Commit = 40.0, [object]$Limit = 199.7,
-          [object]$Vmmem = 30.0, [string]$VmmemState = 'present',
+          [object]$Vmmem = 30.0, [object]$VmmemPriv = -1, [string]$VmmemState = 'present',
+          [object]$LineGiB = 70, [string]$LineNote = 'cap 64 GiB + 6', [bool]$NoLine = $false,
           [object]$Backend = 0.31, [string]$BackendIds = '5424,19648', [string]$BackendState = 'present',
           [hashtable]$Errors = @{})
     $g = [double]1GB
     $b = { param($v) if ($null -eq $v) { $null } else { [double]$v * $g } }
+    if ($VmmemPriv -is [int] -and $VmmemPriv -eq -1) { $VmmemPriv = if ($null -eq $Vmmem) { $null } else { [double]$Vmmem + 20.0 } }
     return [pscustomobject]@{
         TotalBytes = (& $b $Total); AvailBytes = (& $b $Avail)
         CommitBytes = (& $b $Commit); CommitLimitBytes = (& $b $Limit)
-        Vmmem = [pscustomobject]@{ State = $VmmemState; PrivateBytes = (& $b $Vmmem); Id = '30036'; Count = 1; Error = $Errors['vmmemWSL'] }
+        Vmmem = [pscustomobject]@{ State = $VmmemState; PrivateBytes = (& $b $VmmemPriv); WorkingSetBytes = (& $b $Vmmem); Id = '30036'; Count = 1; Error = $Errors['vmmemWSL'] }
+        VmmemLine = $(if ($NoLine) { $null } else { [pscustomobject]@{ LineGiB = $LineGiB; CapGiB = 64; Note = $LineNote } })
         Backend = [pscustomobject]@{ State = $BackendState; PrivateBytes = (& $b $Backend); Id = $BackendIds; Count = 2; Error = $Errors['com.docker.backend'] }
         Errors = $Errors
     }
@@ -169,7 +175,7 @@ if ($ChildHang) {
 }
 
 $sbx = $null; $sbx2 = $null; $sbx3 = $null; $sbx4 = $null; $sbx5 = $null; $sbx6 = $null
-$sbx7 = $null; $sbx8 = $null; $sbx9 = $null; $sbx10 = $null
+$sbx7 = $null; $sbx8 = $null; $sbx9 = $null; $sbx10 = $null; $sbx11 = $null; $sbx12 = $null; $sbx13 = $null; $sbx14 = $null
 $sbx = New-Sandbox
 Write-Host "sandbox $sbx ; DOCKER_HOST=$env:DOCKER_HOST ; script $Script"
 try {
@@ -185,7 +191,7 @@ try {
     $r = Invoke-Rule
     $t = Get-Transport $sbx
     $log = Get-Log $sbx
-    $okLine = @($log | Where-Object { $_ -match '\[INFO\] hostmem: avail=90\.0GiB of 127\.7GiB.*commit=40\.0/199\.7GiB.*vmmemWSL=30\.0GiB.*com\.docker\.backend=0\.31GiB.*-> OK$' })
+    $okLine = @($log | Where-Object { $_ -match '\[INFO\] hostmem: avail=90\.0GiB of 127\.7GiB.*commit=40\.0/199\.7GiB.*vmmemWSL=ws=30\.0GiB priv=50\.0GiB line=70GiB \(cap 64 GiB \+ 6\).*com\.docker\.backend=0\.31GiB.*-> OK$' })
     Write-Case 'H1' 'healthy sample -> true, nothing sent, one OK status line' (($r -eq $true) -and $t.Telegram.Count -eq 0 -and $t.Mattermost.Count -eq 0 -and $okLine.Count -eq 1) "result=$r err=$script:RuleError`n$($log -join "`n")"
 
     # H2 - the measured 2026-10-07 state: vmmemWSL 112.3 of 127.7, 24.3 available
@@ -195,7 +201,7 @@ try {
     $m = Measure-Alerts $t 'vmmemWSL'
     $other = @($t.Telegram | Where-Object { $_ -notmatch 'vmmemWSL holds' }).Count
     $warnLine = @(Get-Log $sbx | Where-Object { $_ -match '\[WARN\] hostmem: .*-> ALERT hostmem-vmmem' }).Count
-    Write-Case 'H2' 'crossing (the 10-07 replay: vmmemWSL 112.3 GiB) -> false, ONE page on Telegram + MM mirror, WARN status line' (($r -eq $false) -and $m -eq 'tg=1 mm=1' -and $other -eq 0 -and $warnLine -eq 1) "result=$r $m other=$other err=$script:RuleError`n$(@($t.Telegram) -join "`n")"
+    Write-Case 'H2' 'crossing (working set 112.3 GiB vs the 70 GiB line) -> false, ONE page on Telegram + MM mirror, WARN status line' (($r -eq $false) -and $m -eq 'tg=1 mm=1' -and $other -eq 0 -and $warnLine -eq 1) "result=$r $m other=$other err=$script:RuleError`n$(@($t.Telegram) -join "`n")"
 
     # H3 - staying high next pass: false, no second page (cooldown), logged
     $r = Invoke-Rule
@@ -214,8 +220,8 @@ try {
     $m = Measure-Alerts $t 'vmmemWSL holds'
     Write-Case 'H3b' 'still high after the cooldown -> paged again (once)' (($r -eq $false) -and $m -eq 'tg=2 mm=2') "result=$r $m"
 
-    # H4 - inside the hysteresis band (below 80, above the 72 all-clear line): no RESOLVED
-    Use-Sample (New-Sample -Vmmem 75.0)
+    # H4 - inside the hysteresis band (below 70, above the 63 all-clear line): no RESOLVED
+    Use-Sample (New-Sample -Vmmem 66.0)
     $r = Invoke-Rule
     $t = Get-Transport $sbx
     $res = Measure-Alerts $t 'RESOLVED'
@@ -320,11 +326,11 @@ try {
                      'Remove-Item', 'ConvertFrom-Json', 'ConvertTo-Json', 'Measure-Object', 'Sort-Object', 'Where-Object',
                      'ForEach-Object', 'Select-Object', 'Write-LogEntry', 'Send-CatastropheAlert', 'Resolve-Catastrophe',
                      'Get-LoopNowUtc', 'ConvertTo-UtcInstant', 'Format-HostMemGiB', 'ConvertTo-HostMemReason',
-                     'Get-HostMemProcess', 'Get-HostMemorySample', 'Update-HostMemAlert', 'Get-HostMemBackendGrowth',
+                     'Get-HostMemProcess', 'Get-HostMemVmmemLine', 'Get-HostMemorySample', 'Update-HostMemAlert', 'Get-HostMemBackendGrowth',
                      'Get-HostMemorySampleBounded', 'New-HostMemUnknownSample')
     $allowedMembers = @('Dispose', 'ToString', 'Max', 'Substring', 'ReadAllText', 'WriteAllText', 'AddHours', 'TryParse', 'ContainsKey', 'Keys',
                         'CreateRunspace', 'CreateDefault2', 'Open', 'SetVariable', 'Create', 'AddScript', 'BeginInvoke', 'WaitOne',
-                        'BeginStop', 'EndInvoke', 'Trim')
+                        'BeginStop', 'EndInvoke', 'Trim', 'ReadAllLines', 'Parse', 'ToLowerInvariant', 'ToUpperInvariant')
     $hits = @()
     $removeTargets = @()
     foreach ($f in $hmFns) {
@@ -462,7 +468,7 @@ try {
     $script:FakeNow = [datetime]::new(2026, 10, 7, 12, 0, 0, [DateTimeKind]::Utc)
     for ($i = 0; $i -lt 12; $i++) {
         $av = if ($i % 2 -eq 0) { 15.5 } else { 17.8 }
-        $vm = if ($i % 2 -eq 0) { 80.5 } else { 71.5 }
+        $vm = if ($i % 2 -eq 0) { 70.5 } else { 62.0 }
         Use-Sample (New-Sample -Avail $av -Vmmem $vm)
         $null = Invoke-Rule
         $script:FakeNow = $script:FakeNow.AddMinutes(10)
@@ -473,10 +479,10 @@ try {
     $vmA = Measure-Alerts $t 'vmmemWSL holds'
     $vmR = Measure-Alerts $t 'RESOLVED.*vmmemWSL'
     $ok19 = ($avA -eq 'tg=1 mm=1') -and ($avR -eq 'tg=0 mm=0') -and ($vmA -eq 'tg=1 mm=1') -and ($vmR -match '^tg=[01] mm=0$')
-    Write-Case 'H19' '12 passes (2 h) of 15.5<->17.8 GiB available and 80.5<->71.5 GiB vmmemWSL -> one page each, at most one RESOLVED' $ok19 "available: alert $avA resolved $avR ; vmmemWSL: alert $vmA resolved $vmR"
+    Write-Case 'H19' '12 passes (2 h) of 15.5<->17.8 GiB available and 70.5<->62.0 GiB vmmemWSL -> one page each, at most one RESOLVED' $ok19 "available: alert $avA resolved $avR ; vmmemWSL: alert $vmA resolved $vmR"
 
     # H19b - the cooldown is per page, not a mute: the next swing after 2 h pages again
-    Use-Sample (New-Sample -Avail 15.5 -Vmmem 80.5)
+    Use-Sample (New-Sample -Avail 15.5 -Vmmem 70.5)
     foreach ($k in @('hostmem-available', 'hostmem-vmmem')) {
         $f = Join-Path $sbx10 "logs\.tg-alert-$k"
         if (Test-Path $f) { (Get-Item $f).LastWriteTime = (Get-Date).AddHours(-2) }
@@ -485,6 +491,98 @@ try {
     $t = Get-Transport $sbx10
     Write-Case 'H19b' 'at 2 h after the first page, still swinging -> paged once more' (((Measure-Alerts $t 'HOST MEMORY LOW') -eq 'tg=2 mm=2') -and ((Measure-Alerts $t 'vmmemWSL holds') -eq 'tg=2 mm=2')) "available $(Measure-Alerts $t 'HOST MEMORY LOW') vmmemWSL $(Measure-Alerts $t 'vmmemWSL holds')"
     . $script:Loader $sbx
+
+    # --- hm-wset: working set vs the cap-derived line; private bytes informational
+    $sbx11 = New-Sandbox
+    . $script:Loader $sbx11
+    Set-Stubs
+    $script:FakeNow = [datetime]::new(2026, 10, 7, 13, 0, 0, [DateTimeKind]::Utc)
+
+    # H20 - the first live alert: private 84 GiB, working set 55 GiB -> no page
+    Use-Sample (New-Sample -Vmmem 55.0 -VmmemPriv 84.0)
+    $r = Invoke-Rule
+    $t = Get-Transport $sbx11
+    $ln = @(Get-Log $sbx11 | Where-Object { $_ -match '\[INFO\] hostmem: .*vmmemWSL=ws=55\.0GiB priv=84\.0GiB line=70GiB.*-> OK$' }).Count
+    Write-Case 'H20' 'private 84 GiB + working set 55 GiB -> true, no page, status line shows ws and priv' (($r -eq $true) -and $t.Telegram.Count -eq 0 -and $t.Mattermost.Count -eq 0 -and $ln -eq 1) "result=$r tg=$($t.Telegram.Count) line=$ln err=$script:RuleError`n$((Get-Log $sbx11) -join "`n")"
+
+    # H21 - working set 71 GiB (over the 70 line) pages, whatever private is
+    Use-Sample (New-Sample -Vmmem 71.0 -VmmemPriv 72.0)
+    $r = Invoke-Rule
+    $t = Get-Transport $sbx11
+    $m = Measure-Alerts $t 'vmmemWSL holds 71\.0 GiB of physical RAM'
+    $other = @($t.Telegram | Where-Object { $_ -notmatch 'vmmemWSL holds' }).Count
+    Write-Case 'H21' 'working set 71 GiB -> false, ONE vmmem page (message names working set), nothing else' (($r -eq $false) -and $m -eq 'tg=1 mm=1' -and $other -eq 0) "result=$r $m other=$other`n$(@($t.Telegram) -join "`n")"
+
+    # H21b - the edge: just under the line does not page (fresh sandbox)
+    $sbx12 = New-Sandbox
+    . $script:Loader $sbx12
+    Set-Stubs
+    Use-Sample (New-Sample -Vmmem 69.9 -VmmemPriv 110.0)
+    $r = Invoke-Rule
+    $t = Get-Transport $sbx12
+    Write-Case 'H21b' 'working set 69.9 GiB with private 110 GiB -> true, no page' (($r -eq $true) -and $t.Telegram.Count -eq 0) "result=$r tg=$($t.Telegram.Count)"
+
+    # H22 - recovery: one all-clear once the working set is under 63 GiB, private still high
+    . $script:Loader $sbx11   # the loader points PROJECT_DIR at one sandbox at a time
+    Set-Stubs
+    # (the catastrophe path keeps a 1 h Telegram floor per key; age it as H3b does)
+    $tgb = Join-Path $sbx11 'logs\.tg-alert-hostmem-vmmem'
+    if (Test-Path $tgb) { (Get-Item $tgb).LastWriteTime = (Get-Date).AddHours(-3) }
+    Use-Sample (New-Sample -Vmmem 55.0 -VmmemPriv 84.0)
+    $r1 = Invoke-Rule
+    $r2 = Invoke-Rule
+    $t = Get-Transport $sbx11
+    $res = Measure-Alerts $t 'RESOLVED ai-stack: .*vmmemWSL'
+    Write-Case 'H22' 'working set back to 55 GiB (private still 84) -> true, ONE RESOLVED, then silent' (($r1 -eq $true) -and ($r2 -eq $true) -and $res -match '^tg=1 ') "r1=$r1 r2=$r2 $res`n$((Get-Log $sbx11) -join "`n")"
+
+    # H23 - unreadable working set -> UNKNOWN page (hostmem-unreadable), no vmmem breach
+    $sbx13 = New-Sandbox
+    . $script:Loader $sbx13
+    Set-Stubs
+    $u = New-Sample -Vmmem $null -VmmemPriv 84.0 -VmmemState 'unknown' -Errors @{ vmmemWSL = 'working set read as 0 for PID 1 (access denied?)' }
+    Use-Sample $u
+    $r = Invoke-Rule
+    $t = Get-Transport $sbx13
+    $unk = Measure-Alerts $t 'cannot read: vmmemWSL'
+    $vmPage = Measure-Alerts $t 'vmmemWSL holds'
+    $ul = @(Get-Log $sbx13 | Where-Object { $_ -match '\[WARN\] hostmem: .*vmmemWSL=UNKNOWN\(working set read as 0.*-> UNKNOWN vmmemWSL' }).Count
+    Write-Case 'H23' 'unreadable working set -> false, UNKNOWN vmmemWSL line and one cannot-read page, no vmmem breach page' (($r -eq $false) -and $unk -eq 'tg=1 mm=1' -and $vmPage -eq 'tg=0 mm=0' -and $ul -eq 1) "result=$r $unk $vmPage line=$ul`n$((Get-Log $sbx13) -join "`n")"
+
+    # H24 - cap parsing (Get-HostMemVmmemLine on temp .wslconfig files)
+    $cfgDir = Join-Path ([IO.Path]::GetTempPath()) ("hmwd-cfg-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+    $hasCapFn = [bool](Get-Command Get-HostMemVmmemLine -ErrorAction SilentlyContinue)
+    function Test-Cap { param([string]$Name, [string]$Body)
+        $f = Join-Path $cfgDir $Name
+        if ($null -ne $Body) { [IO.File]::WriteAllText($f, $Body) }
+        if (-not $hasCapFn) { return [pscustomobject]@{ LineGiB = $null; Note = 'Get-HostMemVmmemLine missing' } }
+        return Get-HostMemVmmemLine -Path $f -DefaultGiB 70 -MarginGiB 6
+    }
+    $c1 = Test-Cap 'a.wslconfig' "# comment`n[wsl2]`nmemory=64GB`n`nswap=16GB`n"
+    $c2 = Test-Cap 'b.wslconfig' "[wsl2]`nmemory = 32GB  # trimmed`n"
+    $c3 = Test-Cap 'c.wslconfig' "[wsl2]`nmemory=65536MB`n"
+    $c4 = Test-Cap 'd.wslconfig' "[experimental]`nmemory=999GB`n[wsl2]`nswap=1GB`n"
+    $c5 = Test-Cap 'e.wslconfig' "[wsl2]`nmemory=lots`n"
+    $c6 = Test-Cap 'missing.wslconfig' $null
+    $c7 = Test-Cap 'g.wslconfig' "[wsl2]`nmemory=0GB`n"
+    $c8 = Test-Cap 'h.wslconfig' "A[[[=`n=memory=`n"
+    Write-Case 'H24' 'memory=64GB -> 70 GiB line; 32GB -> 38; 65536MB -> 70; other sections ignored' (($c1.LineGiB -eq 70) -and ($c2.LineGiB -eq 38) -and ($c3.LineGiB -eq 70) -and ($c4.LineGiB -eq 70 -and $c4.Note -match '^default - no memory=')) "c1=$($c1.LineGiB) c2=$($c2.LineGiB) c3=$($c3.LineGiB) c4=$($c4.LineGiB)/$($c4.Note)"
+    $okDef = @(@($c5, $c6, $c7, $c8) | Where-Object { $_.LineGiB -eq 70 -and $_.Note -match '^default - \S' }).Count -eq 4
+    Write-Case 'H24b' 'garbled / missing / zero / no-key .wslconfig -> 70 GiB default with a visible note, never a throw' $okDef "notes: $($c5.Note) | $($c6.Note) | $($c7.Note) | $($c8.Note)"
+    Remove-Item $cfgDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    # H25 - the line is part of the status line and the page: a 32GB cap pages at 38 GiB; no cap info -> default with a note
+    $sbx14 = New-Sandbox
+    . $script:Loader $sbx14
+    Set-Stubs
+    Use-Sample (New-Sample -Vmmem 40.0 -LineGiB 38 -LineNote 'cap 32 GiB + 6')
+    $r = Invoke-Rule
+    $t = Get-Transport $sbx14
+    $m = Measure-Alerts $t 'vmmemWSL holds 40\.0 GiB .*alert at 38 GiB'
+    Use-Sample (New-Sample -Vmmem 30.0 -NoLine $true)
+    $null = Invoke-Rule
+    $nl = @(Get-Log $sbx14 | Where-Object { $_ -match '\[INFO\] hostmem: .*ws=30\.0GiB priv=50\.0GiB line=70GiB \(default - no cap info' }).Count
+    Write-Case 'H25' 'cap 32GB -> pages at 40 GiB working set (line 38); a sample without cap info -> 70 GiB line with a visible note' (($r -eq $false) -and $m -eq 'tg=1 mm=1' -and $nl -eq 1) "result=$r $m note=$nl`n$((Get-Log $sbx14) -join "`n")"
 
     # H15 - live: the REAL counters, read-only, senders stubbed by the sandbox
     if ($Live) {
@@ -496,11 +594,11 @@ try {
         $r = Invoke-Rule
         $ms = "$($sw.ElapsedMilliseconds) cpu_ms=$([int](($me.Refresh(), $me.TotalProcessorTime)[1] - $cpu0).TotalMilliseconds) ws_delta_mb=$([int](($me.WorkingSet64 - $ws0) / 1MB))"
         $line = @(Get-Log $sbx | Where-Object { $_ -match 'hostmem: avail=' } | Select-Object -Last 1)
-        $real = ($line.Count -eq 1) -and ($line[0] -match 'avail=\d+\.\dGiB of \d+\.\dGiB') -and ($line[0] -match 'commit=\d+\.\d/\d+\.\dGiB')
+        $real = ($line.Count -eq 1) -and ($line[0] -match 'avail=\d+\.\dGiB of \d+\.\dGiB') -and ($line[0] -match 'commit=\d+\.\d/\d+\.\dGiB') -and ($line[0] -match 'vmmemWSL=(ws=\d+\.\dGiB priv=(\d+\.\dGiB|UNKNOWN) line=\d+GiB|absent)')
         Write-Case 'H15' 'live read-only pass prints real current values (no alert leaves the sandbox)' ($real -and -not $script:RuleError) "result=$r ms=$ms err=$script:RuleError`n$($line -join '')"
     }
 } finally {
-    foreach ($d in @($sbx, $sbx2, $sbx3, $sbx4, $sbx5, $sbx6, $sbx7, $sbx8, $sbx9, $sbx10)) { if ($d -and (Test-Path $d)) { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue } }
+    foreach ($d in @($sbx, $sbx2, $sbx3, $sbx4, $sbx5, $sbx6, $sbx7, $sbx8, $sbx9, $sbx10, $sbx11, $sbx12, $sbx13, $sbx14)) { if ($d -and (Test-Path $d)) { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue } }
 }
 
 Write-Host ""

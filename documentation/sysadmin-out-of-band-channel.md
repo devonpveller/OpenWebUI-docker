@@ -243,8 +243,9 @@ available 0, and WSL wedged until a reboot; 2026-10-07: vmmemWSL 112.3 of
 it never kills, restarts or reconfigures anything. Reads use no WMI (it hung
 first on 07-05): physical total via `Microsoft.VisualBasic` `ComputerInfo`,
 Available Bytes / Committed Bytes / Commit Limit via in-process perf counters,
-and the private bytes of `vmmemWSL` and `com.docker.backend` (all instances,
-summed) via `Get-Process`. Measured cost of one pass (2026-10-07, developer and
+the working set and private bytes of `vmmemWSL` and the private bytes of
+`com.docker.backend` (all instances, summed) via `Get-Process`, and the WSL cap
+from `%USERPROFILE%\.wslconfig` (`[wsl2] memory=`). Measured cost of one pass (2026-10-07, developer and
 tester, cold `powershell.exe` passes included): 1.7-6.5 s wall (the slow end is
 a cold perf-counter load), 1.3-1.9 s CPU, +9 to +21 MB working set - about 0.3%
 of one core at the 10-minute cadence.
@@ -267,14 +268,14 @@ and WARN otherwise. A real one (2026-10-07, the first pass, so the backend's
 growth reads `baseline`; later passes show `+N.NNGiB/6h`):
 
 ```text
-[INFO] hostmem: avail=68.9GiB of 127.7GiB (54.0%) commit=72.0/199.7GiB (36.1%) vmmemWSL=36.9GiB com.docker.backend=0.30GiB x2 (baseline) -> OK
+[INFO] hostmem: avail=68.9GiB of 127.7GiB (54.0%) commit=72.0/199.7GiB (36.1%) vmmemWSL=ws=36.9GiB priv=48.0GiB line=70GiB (cap 64 GiB + 6) com.docker.backend=0.30GiB x2 (baseline) -> OK
 ```
 
 | Key | Fires when (config value in `stack-watchdog.ps1`) | Why that line |
 |---|---|---|
 | `hostmem-available` | available < max(16 GiB, 12.5% of physical) (`$HostMemAvailableFloorGiB`, `$HostMemAvailableFloorPercent`) | 12.5% of this host is 16 GiB; Windows pages hard near there, and 07-05 died at 0 |
 | `hostmem-commit` | commit >= 85% of the commit limit, or headroom < 24 GiB (`$HostMemCommitMaxPercent`, `$HostMemCommitHeadroomFloorGiB`) | 07-05 reached 92%; allocations fail at 100% |
-| `hostmem-vmmem` | vmmemWSL private >= 80 GiB (`$HostMemVmmemMaxGiB`) | the cap is 64GB, and on 10-07 private bytes ran ~16 GiB past the then-96GB cap; above 80 the cap is not holding |
+| `hostmem-vmmem` | vmmemWSL **working set** >= the cap line = `.wslconfig` `memory=` + 6 GiB (`$HostMemVmmemMarginGiB`); `memory=64GB` -> 70 GiB. Missing or garbled `.wslconfig` -> `$HostMemVmmemMaxGiB` (70), and the status line says `line=70GiB (default - <why>)` | the working set is the physical RAM the VM holds, which is what the cap governs. **Private bytes never page** (hm-wset, 10-07): they include ~20 GB Windows charges to WSL for GPU allocations while a model is loaded (the first live alert, 82.2 GiB private, fired with the VM inside its cap: working set 54.8 vs private 84.3 GiB), so they trip on every model load. They stay in the status line as `priv=` for information. Available and commit already count the GPU charge and protect Windows, so they are unchanged |
 | `hostmem-backend` | com.docker.backend private >= 12 GiB (`$HostMemBackendMaxGiB`) | 0.31 GiB normal (10-07), 83.9 GB on 07-05 |
 | `hostmem-backend-growth` | com.docker.backend grew >= 4 GiB within 6 h for the same PIDs (`$HostMemBackendGrowthGiB`, `$HostMemBackendGrowthWindowHours`) | the 07-05 leak signal; a restart (new PIDs) is a new baseline. Samples: `logs/.watchdog-hostmem-state.json` |
 | `hostmem-unreadable` | a counter or process could not be read, or the check itself failed | the status line shows `UNKNOWN(<reason>)` for that field; never silence |
@@ -287,11 +288,11 @@ all-clear does NOT reset it: the all-clear clears only the "firing" marker
 (`logs/.hostmem-alert-<key>`) and the catastrophe path's 1 h Telegram floor
 (`logs/.tg-alert-<key>`) stay, as `Resolve-Catastrophe` keeps it. The RESOLVED
 arrives only once the value is back past the all-clear line: 10% on the safe side
-(`$HostMemClearMarginPercent`; vmmemWSL at or under 72 GiB), and for available
+(`$HostMemClearMarginPercent`; vmmemWSL working set at or under 63 GiB with the 70 GiB line), and for available
 memory at least 4 GiB above the floor (`$HostMemAvailableClearMinGiB`; it clears
 at 20 GiB, not 17.6). In between, the status line says `HOLDING <key>` and
 nothing is sent. Measured with stubbed counters: available swinging 15.5 <-> 17.8
-GiB and vmmemWSL 80.5 <-> 71.5 GiB every pass for 2 h page once each, with one
+GiB and vmmemWSL working set 70.5 <-> 62.0 GiB every pass for 2 h page once each, with one
 RESOLVED for vmmemWSL and none for available. **Accepted trade-off** (the same
 one as 2026-09-16): a genuine relapse inside 2 h of a page is logged and appears
 in `WITH ISSUES`, but is not paged again until the 2 h are up.

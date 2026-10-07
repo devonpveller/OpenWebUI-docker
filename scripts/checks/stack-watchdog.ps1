@@ -2845,9 +2845,16 @@ function Test-PortalAlertDelivery {
 #   commit     >= 85% of the commit limit, or < 24 GiB of commit headroom.
 #              07-05 reached 92% (224.7/244); allocations fail at 100%, and the
 #              pagefile only grows the limit after the pressure has started.
-#   vmmemWSL   >= 80 GiB private. The cap is 64GB (64 GiB); on 10-07 private
-#              bytes ran ~16 GiB past the then-96GB cap (112.3), so 64 + 16:
-#              above 80 the cap is not holding or has been raised.
+#   vmmemWSL   WORKING SET >= the cap line: %USERPROFILE%\.wslconfig memory= plus
+#              $HostMemVmmemMarginGiB (6) GiB (64GB -> 70 GiB); 70 ($HostMemVmmemMaxGiB)
+#              with a visible note when the file or the key is missing or garbled.
+#              hm-wset 2026-10-07: the first live page fired at 82.2 GiB PRIVATE
+#              while the VM was inside its cap (in-VM used 33.5 of 64 GB; working
+#              set 54.8 GiB vs private 84.3 GiB). Private bytes include ~20 GiB
+#              Windows charges to WSL for GPU allocations while a model is loaded,
+#              so they trip on every model load. Working set is the physical RAM
+#              the VM really holds - what the cap governs. Private bytes stay in
+#              the status line (priv=) for information only and never page.
 #   backend    com.docker.backend >= 12 GiB private (measured 0.31 GiB for its
 #              two processes on 10-07; 07-05 leaked to 83.9 GB), or GROWTH of
 #              >= 4 GiB within 6 h for the same set of PIDs (a restart is a new
@@ -2857,7 +2864,10 @@ $HostMemAvailableFloorGiB = 16
 $HostMemAvailableFloorPercent = 12.5
 $HostMemCommitMaxPercent = 85
 $HostMemCommitHeadroomFloorGiB = 24
-$HostMemVmmemMaxGiB = 80
+$HostMemVmmemMaxGiB = 70
+$HostMemVmmemMarginGiB = 6
+# Test seam: $null (production) reads %USERPROFILE%\.wslconfig.
+$HostMemWslConfigPath = $null
 $HostMemBackendMaxGiB = 12
 $HostMemBackendGrowthGiB = 4
 $HostMemBackendGrowthWindowHours = 6
@@ -2903,36 +2913,88 @@ function ConvertTo-HostMemReason {
 # absent (not running - not an error) / unknown (could not be read).
 function Get-HostMemProcess {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Name)
-    $r = [ordered]@{ State = 'absent'; PrivateBytes = $null; Id = ''; Count = 0; Error = $null }
+    param([Parameter(Mandatory)][string]$Name, [switch]$NeedWorkingSet)
+    $r = [ordered]@{ State = 'absent'; PrivateBytes = $null; WorkingSetBytes = $null; Id = ''; Count = 0; Error = $null }
     try {
         $procs = @(Get-Process -Name $Name -ErrorAction SilentlyContinue)
         if ($procs.Count -eq 0) { return [pscustomobject]$r }
         $sum = [double]0
+        $wsSum = [double]0
+        $privOk = $true
         $ids = @()
         foreach ($p in $procs) {
             $pm = [double]$p.PrivateMemorySize64
-            if ($pm -le 0) { throw "private bytes read as 0 for PID $($p.Id) (access denied?)" }
+            $ws = [double]$p.WorkingSet64
+            if ($NeedWorkingSet) {
+                # The working set is what pages; private bytes are information only.
+                if ($ws -le 0) { throw "working set read as 0 for PID $($p.Id) (access denied?)" }
+                if ($pm -le 0) { $privOk = $false }
+            } elseif ($pm -le 0) { throw "private bytes read as 0 for PID $($p.Id) (access denied?)" }
             $sum += $pm
+            $wsSum += $ws
             $ids += [int]$p.Id
         }
         $r.State = 'present'
-        $r.PrivateBytes = $sum
+        $r.PrivateBytes = if ($privOk) { $sum } else { $null }
+        $r.WorkingSetBytes = $wsSum
         $r.Id = (($ids | Sort-Object) -join ',')
         $r.Count = $procs.Count
     } catch {
         $r.State = 'unknown'
         $r.PrivateBytes = $null
+        $r.WorkingSetBytes = $null
         $r.Error = $_.Exception.Message
     }
     return [pscustomobject]$r
+}
+
+# The vmmemWSL working-set line, in GiB: .wslconfig [wsl2] memory= + margin, or
+# the default with a note saying why. Never throws. Accepts 64GB / 64G / 64GiB /
+# 65536MB / a bare byte count. Runs inside the bounded reader.
+function Get-HostMemVmmemLine {
+    [CmdletBinding()]
+    param([string]$Path, [double]$DefaultGiB = 70, [double]$MarginGiB = 6)
+    $why = $null
+    $capGiB = $null
+    try {
+        if (-not $Path) { $Path = Join-Path ([string]$env:USERPROFILE) '.wslconfig' }
+        $raw = $null
+        if (-not (Test-Path -LiteralPath $Path)) {
+            $why = ".wslconfig not found at $Path"
+        } else {
+            $sec = ''
+            foreach ($ln in [IO.File]::ReadAllLines($Path)) {
+                $x = ($ln -replace '[#;].*$', '').Trim()
+                if ($x -match '^\[(.+)\]$') { $sec = $Matches[1].Trim().ToLowerInvariant(); continue }
+                if ($sec -eq 'wsl2' -and $x -match '^memory\s*=\s*(.+)$') { $raw = $Matches[1].Trim() }
+            }
+            if ($null -eq $raw) {
+                $why = 'no memory= under [wsl2]'
+            } elseif ($raw -notmatch '^(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB|GiB|MiB|T|G|M|K|B)?$') {
+                $why = "memory=$raw not understood"
+            } else {
+                $n = [double]::Parse($Matches[1], [cultureinfo]::InvariantCulture)
+                $unit = if ($Matches[2]) { $Matches[2].ToUpperInvariant() } else { 'B' }
+                $gib = switch -Regex ($unit) {
+                    '^T' { $n * 1024 } '^G' { $n } '^M' { $n / 1024 } '^K' { $n / 1048576 } default { $n / 1GB }
+                }
+                if ($gib -lt 1 -or $gib -gt 4096) { $why = "memory=$raw out of range" } else { $capGiB = $gib }
+            }
+        }
+    } catch {
+        $why = ".wslconfig unreadable ($($_.Exception.Message))"
+    }
+    if ($null -ne $capGiB) {
+        return [pscustomobject]@{ LineGiB = ($capGiB + $MarginGiB); CapGiB = $capGiB; Note = "cap $capGiB GiB + $MarginGiB" }
+    }
+    return [pscustomobject]@{ LineGiB = $DefaultGiB; CapGiB = $null; Note = "default - $why" }
 }
 
 function Get-HostMemorySample {
     [CmdletBinding()]
     param()
     $s = [ordered]@{ TotalBytes = $null; AvailBytes = $null; CommitBytes = $null; CommitLimitBytes = $null
-                     Vmmem = $null; Backend = $null; Errors = @{} }
+                     Vmmem = $null; Backend = $null; VmmemLine = $null; Errors = @{} }
     try {
         Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop
         $s.TotalBytes = [double](New-Object Microsoft.VisualBasic.Devices.ComputerInfo).TotalPhysicalMemory
@@ -2948,7 +3010,8 @@ function Get-HostMemorySample {
             if ($pc) { $pc.Dispose() }
         }
     }
-    $s.Vmmem = Get-HostMemProcess -Name 'vmmemWSL'
+    $s.Vmmem = Get-HostMemProcess -Name 'vmmemWSL' -NeedWorkingSet
+    $s.VmmemLine = Get-HostMemVmmemLine -Path $HostMemWslConfigPath -DefaultGiB $HostMemVmmemMaxGiB -MarginGiB $HostMemVmmemMarginGiB
     $s.Backend = Get-HostMemProcess -Name 'com.docker.backend'
     if ($s.Vmmem.State -eq 'unknown') { $s.Errors['vmmemWSL'] = $s.Vmmem.Error }
     if ($s.Backend.State -eq 'unknown') { $s.Errors['com.docker.backend'] = $s.Backend.Error }
@@ -2962,7 +3025,8 @@ function New-HostMemUnknownSample {
     $e = @{}
     foreach ($k in @('available', 'commit', 'commit-limit', 'vmmemWSL', 'com.docker.backend')) { $e[$k] = $Reason }
     return [pscustomobject]@{ TotalBytes = $null; AvailBytes = $null; CommitBytes = $null; CommitLimitBytes = $null
-                              Vmmem = [pscustomobject]@{ State = 'unknown'; PrivateBytes = $null; Id = ''; Count = 0; Error = $Reason }
+                              Vmmem = [pscustomobject]@{ State = 'unknown'; PrivateBytes = $null; WorkingSetBytes = $null; Id = ''; Count = 0; Error = $Reason }
+                              VmmemLine = $null
                               Backend = [pscustomobject]@{ State = 'unknown'; PrivateBytes = $null; Id = ''; Count = 0; Error = $Reason }
                               Errors = $e }
 }
@@ -2991,6 +3055,7 @@ function Get-HostMemorySampleBounded {
         $code = $HostMemReader.ToString()
     } else {
         $code = "function Get-HostMemProcess {`n" + ${function:Get-HostMemProcess}.ToString() + "`n}`n" +
+                "function Get-HostMemVmmemLine {`n" + ${function:Get-HostMemVmmemLine}.ToString() + "`n}`n" +
                 "function Get-HostMemorySample {`n" + ${function:Get-HostMemorySample}.ToString() + "`n}`n" +
                 "Get-HostMemorySample"
     }
@@ -2999,6 +3064,9 @@ function Get-HostMemorySampleBounded {
         $rs = [runspacefactory]::CreateRunspace([System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault2())
         $rs.Open()
         $rs.SessionStateProxy.SetVariable('HostMemReaderInput', $HostMemReaderInput)
+        $rs.SessionStateProxy.SetVariable('HostMemWslConfigPath', $HostMemWslConfigPath)
+        $rs.SessionStateProxy.SetVariable('HostMemVmmemMaxGiB', $HostMemVmmemMaxGiB)
+        $rs.SessionStateProxy.SetVariable('HostMemVmmemMarginGiB', $HostMemVmmemMarginGiB)
         $ps = [powershell]::Create()
         $ps.Runspace = $rs
         $null = $ps.AddScript($code)
@@ -3160,7 +3228,7 @@ function Test-HostMemory {
             if ($null -eq $pair[1] -and -not $errs.ContainsKey($pair[0])) { $errs[$pair[0]] = 'no value' }
         }
         $vm = $s.Vmmem; $be = $s.Backend
-        if (-not $vm) { $vm = [pscustomobject]@{ State = 'unknown'; PrivateBytes = $null; Id = ''; Count = 0; Error = 'no value' } }
+        if (-not $vm) { $vm = [pscustomobject]@{ State = 'unknown'; PrivateBytes = $null; WorkingSetBytes = $null; Id = ''; Count = 0; Error = 'no value' } }
         if (-not $be) { $be = [pscustomobject]@{ State = 'unknown'; PrivateBytes = $null; Id = ''; Count = 0; Error = 'no value' } }
         if ($vm.State -eq 'unknown' -and -not $errs.ContainsKey('vmmemWSL')) { $errs['vmmemWSL'] = [string]$vm.Error }
         if ($be.State -eq 'unknown' -and -not $errs.ContainsKey('com.docker.backend')) { $errs['com.docker.backend'] = [string]$be.Error }
@@ -3178,7 +3246,19 @@ function Test-HostMemory {
             $why = if ($errs.ContainsKey('commit')) { $errs['commit'] } else { $errs['commit-limit'] }
             "UNKNOWN($(ConvertTo-HostMemReason $why))"
         }
-        $fVm = switch ($vm.State) { 'present' { "$(Format-HostMemGiB $vm.PrivateBytes)GiB" } 'absent' { 'absent' } default { "UNKNOWN($(ConvertTo-HostMemReason $errs['vmmemWSL']))" } }
+        # The vmmemWSL line (GiB): cap + margin from .wslconfig, or the default + a note.
+        $vl = $s.VmmemLine
+        $vmLineGiB = if ($vl -and $null -ne $vl.LineGiB -and [double]$vl.LineGiB -gt 0) { [double]$vl.LineGiB } else { [double]$HostMemVmmemMaxGiB }
+        $vmNote = if ($vl -and $vl.Note) { [string]$vl.Note } else { 'default - no cap info in the sample' }
+        $fVmLine = "line=$(Format-HostMemGiB ($vmLineGiB * $gib) 0)GiB ($(ConvertTo-HostMemReason $vmNote))"
+        $fVm = switch ($vm.State) {
+            'present' {
+                $pv = if ($null -ne $vm.PrivateBytes) { "$(Format-HostMemGiB $vm.PrivateBytes)GiB" } else { 'UNKNOWN' }
+                "ws=$(Format-HostMemGiB $vm.WorkingSetBytes)GiB priv=$pv $fVmLine"
+            }
+            'absent' { 'absent' }
+            default { "UNKNOWN($(ConvertTo-HostMemReason $errs['vmmemWSL']))" }
+        }
         $growth = $null
         if ($be.State -ne 'unknown') { $growth = Get-HostMemBackendGrowth -Backend $be }
         $fBe = switch ($be.State) {
@@ -3215,12 +3295,13 @@ function Test-HostMemory {
         }
 
         if ($vm.State -ne 'unknown') {
-            $vmMax = [double]$HostMemVmmemMaxGiB * $gib
-            $vmB = ($vm.State -eq 'present') -and ($vm.PrivateBytes -ge $vmMax)
-            $vmC = ($vm.State -eq 'absent') -or ($vm.PrivateBytes -le $vmMax * (1 - $m))
+            # Pages on WORKING SET only; private bytes are information (hm-wset).
+            $vmMax = $vmLineGiB * $gib
+            $vmB = ($vm.State -eq 'present') -and ($vm.WorkingSetBytes -ge $vmMax)
+            $vmC = ($vm.State -eq 'absent') -or ($vm.WorkingSetBytes -le $vmMax * (1 - $m))
             $states['hostmem-vmmem'] = Update-HostMemAlert -Key 'hostmem-vmmem' -Breach $vmB -Clear $vmC `
-                -Message ("HOST MEMORY: vmmemWSL holds {0} GiB private (alert at {1} GiB; the .wslconfig cap is 64GB, so the cap is not holding). {2} {3}" -f (Format-HostMemGiB $vm.PrivateBytes), $HostMemVmmemMaxGiB, $ctx, $tail) `
-                -ClearMessage ("vmmemWSL is back under {0} GiB (now {1})." -f $HostMemVmmemMaxGiB, $fVm)
+                -Message ("HOST MEMORY: vmmemWSL holds {0} GiB of physical RAM (working set; alert at {1} GiB = the .wslconfig cap plus {2} GiB - {3} - so the cap is not holding). {4} {5}" -f (Format-HostMemGiB $vm.WorkingSetBytes), (Format-HostMemGiB $vmMax 0), $HostMemVmmemMarginGiB, (ConvertTo-HostMemReason $vmNote), $ctx, $tail) `
+                -ClearMessage ("vmmemWSL working set is back under {0} GiB (now {1})." -f (Format-HostMemGiB $vmMax 0), $fVm)
         }
 
         if ($be.State -ne 'unknown') {
