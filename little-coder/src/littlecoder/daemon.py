@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import os
 import signal
+import threading
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -759,13 +761,23 @@ def _parse_ts(ts: str) -> float:
 # --------------------------------------------------------------------------
 
 
+_EVENT_CACHE_LOCK = threading.Lock()
+
+
 def read_event_lines(path: str, offset: int, cache: dict) -> list[str]:
     """Lines `offset`.. of the events file, newline-stripped. Probe cost is O(new bytes): `cache`
     remembers (complete_lines, byte_pos) per file, so a poller whose offset is at or past the
     cached line count reads only the bytes appended since (the stall watchdog re-read a 761 MB
-    file on every probe). An offset behind the cache, or a shrunk file, falls back to a full read."""
+    file on every probe). An offset behind the cache, or a shrunk file, falls back to a full read.
+
+    Only the LEADING run of newline-terminated lines is counted and returned. A journal being
+    appended can make `readlines()` yield one line split in two (EOF mid-line, then the writer's
+    tail as its own element); counting that tail as a line would leave the cached byte position
+    mid-line for the rest of the task. Everything from the first unterminated element on is left
+    for the next probe, and the cache advances by exactly the bytes of the complete lines."""
     offset = max(0, offset)
-    ent = cache.get(path)
+    with _EVENT_CACHE_LOCK:
+        ent = cache.get(path)
     with open(path, "rb") as fh:
         size = os.fstat(fh.fileno()).st_size
         if ent is not None and offset >= ent[0] and size >= ent[1]:
@@ -774,12 +786,13 @@ def read_event_lines(path: str, offset: int, cache: dict) -> list[str]:
             base_lines, base_pos = 0, 0
         fh.seek(base_pos)
         raw = fh.readlines()
-    complete = [ln for ln in raw if ln.endswith(b"\n")]
-    cache[path] = (base_lines + len(complete), base_pos + sum(len(ln) for ln in complete))
-    if len(cache) > 64:
-        cache.pop(next(iter(cache)))
+    complete = list(itertools.takewhile(lambda ln: ln.endswith(b"\n"), raw))
+    with _EVENT_CACHE_LOCK:
+        cache[path] = (base_lines + len(complete), base_pos + sum(len(ln) for ln in complete))
+        while len(cache) > 64:
+            cache.pop(next(iter(cache)), None)
     skip = max(0, offset - base_lines)
-    return [ln.decode("utf-8", errors="replace").rstrip("\n") for ln in raw[skip:]]
+    return [ln.decode("utf-8", errors="replace").rstrip("\n") for ln in complete[skip:]]
 
 
 def build_app(daemon: LittleCoderDaemon) -> FastAPI:
