@@ -451,6 +451,15 @@ _LENS_PROJECT_DOCUMENTATION = (
     "descriptions clear with intent focused and enough to grasp an evolving projects history? how "
     "does is the information helpful and how could the information be better written for you to be "
     "able to pick up the project where it left off?"
+    # ao-loopguard (gym-002) — the operator's question above stays verbatim; this bounds it to
+    # something checkable. Open-ended, it sent a small model into old commits counting test
+    # functions, then into a two-command loop (117 commands, 0 findings).
+    "\nSCOPE (keep to this): run `git log -n 20 --format='%h %s%n%b'` once, and read the README. "
+    "Then answer exactly these three, one FINDING per problem: (1) which of those commits have a "
+    "title or body that does not say what changed and why (name each by hash)? (2) could a "
+    "newcomer tell from the README and those 20 messages what the project does now and what is "
+    "unfinished - what is missing? (3) for the single worst message, how should it have been "
+    "written? Do not inspect old file contents or count tests; judge the messages and docs."
 )
 # The KEY of the only goal-aware lens. Named because it is load-bearing in two coupled places:
 # `_gap_analysis` consumes this report and nothing else, and `_drain_round` refuses to call a round
@@ -461,6 +470,15 @@ _LENS_GOAL_ALIGNMENT_KEY = "goal_alignment"
 # still yields what it had found. Outside the repo tree (`/tmp`, not `/workspace`) so it can never
 # be committed by a later turn or show up in a diff.
 _LENS_FINDINGS_PATH = "/tmp/lens-findings.txt"
+# ao-loopguard (gym-002) — a review turn's EXPLICIT budget and stopping point. The lens prompts had
+# none ("do not spend your last budget", but no budget was ever stated): the goal lens ran 382 commands
+# / 48 min with 0 findings, another 221 with its first finding at command 211. The bridge enforces a
+# hard stop ABOVE this (`review_first_finding_by` / `review_finding_gap`), so a model that follows
+# this text finishes and reports on its own.
+_REVIEW_BUDGET = (
+    "BUDGET: at most ~40 commands for this whole review. Write each finding as you go (the echo "
+    "line below), the moment you establish it. If you have found nothing after 15 commands, write "
+    "what you checked and stop. The org stops a review that runs on without writing findings.")
 # Order is the sweep order; `goal_alignment` runs first because P10.2 consumes its report.
 _LENSES: tuple[tuple[str, str], ...] = (
     (_LENS_GOAL_ALIGNMENT_KEY, _LENS_GOAL_ALIGNMENT),
@@ -7240,7 +7258,9 @@ class Orchestrator:
         # prompt and re-ask in plan mode"). The daemon killed a turn that kept reading without a
         # single edit — the context itself is the poison, so don't retry INTO it: fork a fresh
         # session from the original goal and re-enter through the plan gate. Bounded to once.
-        if result is not None and _FLAIL_MARKER in (result.output or ""):
+        if result is not None and (_FLAIL_MARKER in (result.output or "")
+                                   or getattr(result, "loop_trip", None) is not None):
+            # ao-loopguard — the bridge's loop guard stopping a coding turn is the same signal.
             await self._flail_replan(effort_id, result)
             return None
         # P8 #3 — the worker asserted its checkout is NOT rooted on the expected base and honestly
@@ -11074,6 +11094,7 @@ class Orchestrator:
                 f"git writes; this is an evaluative turn). First check out the DELIVERED branch:\n"
                 f"  git fetch origin {delivery.branch} && git checkout -f {delivery.branch}\n"
                 f"{changed}{focus}\n"
+                f"{_REVIEW_BUDGET}\n\n"
                 f"{prompt}\n\n"
                 f"Answer every question above, in order, and assess against those criteria AS "
                 f"WRITTEN. Do not decide a different standard for the project because it is small, "
@@ -11130,10 +11151,12 @@ class Orchestrator:
                     # THE DEBIAS, enforced at the wake: withholding the goal from the instruction
                     # is worthless if the standing context preamble injects it anyway.
                     withhold_goal=True,
-                    # F31.4 — bridge-side flail-guard: a lens is read-only, so the daemon's
-                    # read-without-edit guard can't police it; stop a turn stuck repeating one
-                    # command (findings so far are salvaged below).
-                    max_repeat=self.s.lens_flail_repeats,
+                    # F31.4 / ao-loopguard — bridge-side loop guard: a lens is read-only, so the
+                    # daemon's read-without-edit guard can't police it; stop a turn that loops (one
+                    # command, or a short cycle) or writes no FINDING (findings so far are salvaged
+                    # below).
+                    loop_guard=self.router.review_loop_guard(),
+                    turn_label=f"{lens} lens review",
                 )
             except NoCapacityError:
                 # NEVER swallow this. A saturated worker pool means the sweep DIDN'T HAPPEN, and a
@@ -11727,13 +11750,17 @@ class Orchestrator:
             f"{_LENS_FINDINGS_PATH}\n"
             "The REPRO is a CHECK: it must exit NON-ZERO on THIS code (proving the defect exists now) and "
             "would exit 0 once the defect is fixed. Only report a defect whose REPRO you actually ran and "
-            "saw fail. Echo as you go — those lines ARE your report."
+            "saw fail. Echo as you go — those lines ARE your report.\n"
+            + _REVIEW_BUDGET
         )
         try:
             result = await self.router.wake(
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
                 session_id=lens_session, instruction=instr,
-                repo=repo, repo_token=token, withhold_goal=True)
+                repo=repo, repo_token=token, withhold_goal=True,
+                # ao-loopguard — the same review guard as the lens sweep (it had none).
+                loop_guard=self.router.review_loop_guard(),
+                turn_label="adversarial (Mode B) review")
         except Exception as exc:  # noqa: BLE001 — Mode B never blocks the effort
             log.debug("mode-b lens failed for %s: %s", effort_id, exc)
             return {"findings": 0, "reproduced": 0, "checks_added": 0}
@@ -13363,7 +13390,9 @@ class Orchestrator:
         if not base_goal:
             await self.router.update_effort_card(effort_id, "needs-attention")
             return
-        note = (f"🌀 The worker was spinning — reading and thinking without a single edit "
+        what = ("looping on the same commands" if getattr(result, "loop_trip", None) is not None
+                else "reading and thinking without a single edit")
+        note = (f"🌀 The worker was spinning — {what} "
                 f"({head}). I stopped it, and I'm **forking a fresh session from the original "
                 f"goal and re-asking in plan mode** so it commits to an approach before touching "
                 f"code. No action needed.")

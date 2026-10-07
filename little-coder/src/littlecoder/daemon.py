@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import itertools
+import json as _json
 import os
 import signal
 import threading
@@ -24,7 +25,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from . import __version__
-from .agent import AgentRunner, TaskTimeout, kill_process_group, read_activity_file
+from .agent import _EDIT_TOOLS, AgentRunner, TaskTimeout, kill_process_group, read_activity_file
 from .audit import AuditLog
 from .config import Config, load_config
 from .journals import Journals, utc_now
@@ -795,6 +796,45 @@ def read_event_lines(path: str, offset: int, cache: dict) -> list[str]:
     return [ln.decode("utf-8", errors="replace").rstrip("\n") for ln in complete[skip:]]
 
 
+_TOOL_COUNT_LOCK = threading.Lock()
+
+
+def count_tool_calls(path: str, cache: dict) -> tuple[int, int]:
+    """(tool calls, edit/write calls) so far in a task's pi `--mode json` events file, for the live
+    task view (ao-loopguard). The agent-org bridge's loop guard sees only the bash `activity`
+    stream, where an edit-then-test loop (edit, run tests, edit, run tests) looks like the same
+    test command over and over; the edit count is how it tells progress from a loop.
+
+    O(new bytes) per call, like `read_event_lines`: `cache[path]` holds (byte_pos, total, edits)
+    and only the complete lines appended since are parsed (a lens journal reached 761 MB). A
+    shrunk file starts over."""
+    with _TOOL_COUNT_LOCK:
+        ent = cache.get(path)
+    with open(path, "rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
+        pos, total, edits = ent if ent is not None and size >= ent[0] else (0, 0, 0)
+        fh.seek(pos)
+        raw = fh.readlines()
+    for ln in itertools.takewhile(lambda b: b.endswith(b"\n"), raw):
+        pos += len(ln)
+        if b'"tool_execution_start"' not in ln:
+            continue
+        try:
+            ev = _json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict) or ev.get("type") != "tool_execution_start":
+            continue
+        total += 1
+        if str(ev.get("toolName", "")).lower() in _EDIT_TOOLS:
+            edits += 1
+    with _TOOL_COUNT_LOCK:
+        cache[path] = (pos, total, edits)
+        while len(cache) > 64:
+            cache.pop(next(iter(cache)), None)
+    return total, edits
+
+
 def build_app(daemon: LittleCoderDaemon) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -824,6 +864,8 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
     def list_tasks() -> dict:
         return {"tasks": [t.public() for t in daemon.tasks.values()]}
 
+    _tool_count_cache: dict = {}
+
     @app.get("/tasks/{task_id}")
     def get_task(task_id: str) -> dict:
         state = daemon.tasks.get(task_id)
@@ -836,6 +878,14 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
             live = read_activity_file(state.event_stream_path)
             data["activity"] = live
             data["commands"] = len(live)
+            # ao-loopguard: edits so far (edit/write tools never appear in `activity`). Omitted
+            # when unreadable, so a consumer reads "unknown", never "zero edits".
+            if state.events_path:
+                try:
+                    data["tool_calls"], data["edits"] = count_tool_calls(
+                        state.events_path, _tool_count_cache)
+                except OSError:
+                    pass
         return data
 
     _event_cache: dict = {}
