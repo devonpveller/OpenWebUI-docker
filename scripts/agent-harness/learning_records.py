@@ -13,20 +13,29 @@ needs an `iterative` learning record beside its anchor's findings_sink. The reco
   - validate against the schema FILE in the plan store (read from disk, never a copy);
   - name this item (source_ref.queue_item_id);
   - carry iterations == the number of ALL returns (operator D2: history, not a limit);
+  - count the returns of the item's PREDECESSORS too: an item that continues a rejected one
+    (X -> X2) names it in its anchor (`continues`; queue.ps1 -Propose writes the queue's
+    `predecessor` link), and a rejected `X` beside an undeclared `X2` is inferred (vwm-p1b);
+  - carry every return's REASON from the queue in `red`, and name no return kind the queue
+    does not have (vwm-p1b);
   - claim green only when green is GENUINE (operator D4): the queue's last verdict is a
     tester PASS at the exact tested_at_sha, recorded by someone other than the developer,
-    with its evidence file present;
+    whose evidence file is THAT pass's file in the queue (not an earlier FAIL's, never a
+    path resolved against the current directory), is not empty, and reads PASS on every
+    case heading, matching the per-case verdicts -Pass recorded (vwm-p1b);
   - be countersigned by the item's reviewer (reviewer_check.checked and .by);
   - give a merge_range whose ends are commits, base an ancestor of head, and head the
     tested commit or the merge;
-  - cite only SHAs and paths that resolve. Anything else in the evidence is prose, which
-    this check cannot verify; it says so on every acceptance (the declared blind spot).
+  - cite only SHAs and paths that resolve, paths inside the code repo or the plan store
+    (backslash paths and UPPERCASE hex are tokens too). Anything else in the evidence is
+    prose, which this check cannot verify; it says so on every acceptance (the declared
+    blind spot).
 
 READ-ONLY. Nothing here writes, edits or fixes a record, a queue item or the plan store,
 and nothing touches the plan store's git state. The only git calls are object and ancestry
 reads against the CODE repository. An indeterminate read (store missing, record unreadable,
-git error) is a refusal with its own reason, never a pass, and is reported apart from a
-missing record.
+git error, or any unexpected exception) is a refusal with its own reason, never a pass,
+and is reported apart from a missing record.
 
     python scripts/agent-harness/learning_records.py check --item <id> [--merge-sha <sha>] [--reviewer <id>]
     python scripts/agent-harness/learning_records.py audit [--store <path>]
@@ -59,15 +68,21 @@ REASONS = (
     "record-missing", "schema", "sink-missing", "item-mismatch", "iterations-mismatch",
     "range-unresolved", "range-head-mismatch", "evidence-sha-unresolved",
     "evidence-path-missing", "green-not-genuine", "countersign-missing", "placeholder-unfilled",
+    # vwm-p1b
+    "evidence-empty", "evidence-not-pass", "evidence-verdict-mismatch", "evidence-path-outside",
+    "predecessor-returns", "return-reason-mismatch",
 )
 INDETERMINATE = (
     "store-unreadable", "record-unreadable", "queue-unreadable", "schema-unreadable", "git-error",
+    "internal-error",
 )
 
 #: The marker `draft` puts where a person must write. A record still carrying one is not done.
 PLACEHOLDER = "<FILL:"
 
-SHA_RE = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{7,40}(?![0-9A-Za-z])")
+# All-lowercase or all-UPPERCASE hex (vwm-p1b: uppercase used to pass as prose). Mixed case is
+# a word, not a hash. A token is looked up lowercased.
+SHA_RE = re.compile(r"(?<![0-9A-Za-z])(?:[0-9a-f]{7,40}|[0-9A-F]{7,40})(?![0-9A-Za-z])")
 PATH_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,10}$")
 LINE_SUFFIX_RE = re.compile(r":\d+(?:[-:]\d+)?$")
 STRIP_LEAD = "([{<\"'`"
@@ -186,6 +201,43 @@ def main_checkout(start: Path) -> Path:
     return Path(out.stdout.strip()).parent
 
 
+def _within(p: Path, base: Path) -> bool:
+    try:
+        Path(os.path.normcase(os.path.realpath(str(p)))).relative_to(os.path.normcase(os.path.realpath(str(base))))
+        return True
+    except ValueError:
+        return False
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    return os.path.normcase(os.path.realpath(str(a))) == os.path.normcase(os.path.realpath(str(b)))
+
+
+def resolve_repo(repo_arg: str) -> Path:
+    """The main checkout of the code repository.
+
+    An explicit --repo must BE the top of a git working tree. `git -C <dir>` walks up from a
+    directory that is not a repository and finds whatever .git is above it - a home
+    directory's, say - so a --repo that is not a repo used to be checked against an
+    unrelated repository (vwm-p1b). That is a git error (indeterminate), never a verdict.
+    With no --repo, the repository is the one this file lives in, not the current directory.
+    """
+    if not repo_arg:
+        return main_checkout(Path(__file__).resolve().parent)
+    p = Path(repo_arg)
+    if not p.is_dir():
+        raise Indeterminate("git-error", f"--repo '{p}' is not a directory")
+    out = subprocess.run(["git", "-C", str(p), "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True, encoding="utf-8", errors="replace")
+    top = out.stdout.strip()
+    if out.returncode != 0 or not top:
+        raise Indeterminate("git-error", f"--repo '{p}' is not a git repository: {out.stderr.strip()}")
+    if not _same_path(Path(top), p):
+        raise Indeterminate("git-error", f"--repo '{p}' is not the top of a git working tree "
+                                         f"(git walked up to '{top}', which is a different repository)")
+    return main_checkout(p)
+
+
 def default_queue_dir(repo: Path) -> Path:
     state = os.environ.get("AI_STACK_WORKTREE_STATE")
     if state:
@@ -252,12 +304,91 @@ def returns_of(item: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
-def derived_iterations(item: Dict[str, Any]) -> int:
-    return len(returns_of(item))
+#: The anchor value that DECLARES "this item continues nothing" (it turns off the inference).
+NO_PREDECESSOR = "none"
+RETURN_KINDS = ("tester-fail", "reviewer-requeue", "developer-requeue", "reviewer-reject")
 
 
-def record_required(item: Dict[str, Any]) -> bool:
-    return derived_iterations(item) > 0
+def predecessor_of(item: Dict[str, Any], item_id: str, queue_dir: Optional[Path]) -> Tuple[str, str]:
+    """(predecessor id, how) - how is 'declared', 'inferred' or '' (none).
+
+    REOPENED ITEMS (vwm-p1b). A rejected item cannot be reopened; its work continues under a
+    new id (amp-owui-deny -> amp-owui-deny2, mm-retire -> mm-retire2), whose own queue shows
+    no return. Without a link the gate read "first-try green, no record needed" and the
+    predecessor's returns vanished from the cache. The link is DECLARED in the anchor
+    (`"continues": "<id>"`, which queue.ps1 -Propose checks and copies to the item's
+    `predecessor`). When nothing is declared, a REJECTED item named like this one minus its
+    trailing number is taken as the predecessor (inferred: fail closed); an anchor that says
+    `"continues": "none"` declares there is none.
+    """
+    anchor = item.get("anchor") if isinstance(item.get("anchor"), dict) else {}
+    declared = [str(v).strip() for v in (item.get("predecessor"), anchor.get("continues"))
+                if isinstance(v, str) and v.strip()]
+    named = [v for v in declared if v.lower() != NO_PREDECESSOR]
+    if len(set(named)) > 1:
+        raise Indeterminate("queue-unreadable", f"'{item_id}' names two different predecessors: {', '.join(sorted(set(named)))}")
+    if named:
+        return named[0], "declared"
+    if declared or queue_dir is None:
+        return "", ""
+    m = re.match(r"^(.*?[A-Za-z])[-_]?(\d+)$", item_id)
+    if not m:
+        return "", ""
+    stem, n = m.group(1), int(m.group(2))
+    cands = [f"{stem}{k}" for k in range(n - 1, 1, -1)] + [f"{stem}-{k}" for k in range(n - 1, 1, -1)] + [stem]
+    for c in cands:
+        if c == item_id:
+            continue
+        p = Path(queue_dir) / f"{c}.json"
+        if not p.is_file():
+            continue
+        try:
+            d = json.loads(p.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict) and str(d.get("state", "")) == "rejected":
+            return c, "inferred"
+    return "", ""
+
+
+def chain_returns(item: Dict[str, Any], item_id: str, queue_dir: Optional[Path]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Every return of this item AND of the items it continues, oldest item first.
+
+    Returns (returns, chain notes). Each return carries `item`. A declared predecessor the
+    queue does not hold is indeterminate (the history cannot be read), never "no returns".
+    """
+    out: List[Dict[str, Any]] = []
+    notes: List[str] = []
+    seen = {item_id}
+    links: List[Tuple[str, Dict[str, Any]]] = []
+    cur, cur_id = item, item_id
+    while True:
+        pid, how = predecessor_of(cur, cur_id, queue_dir)
+        if not pid:
+            break
+        if pid in seen or len(seen) > 50:
+            raise Indeterminate("queue-unreadable", f"the predecessor chain of '{item_id}' loops at '{pid}'")
+        seen.add(pid)
+        pred = load_item(Path(queue_dir), pid) if queue_dir is not None else {}
+        notes.append(f"'{cur_id}' continues '{pid}' ({how})")
+        links.append((pid, pred))
+        cur, cur_id = pred, pid
+    for pid, pred in reversed(links):
+        for r in returns_of(pred):
+            out.append({**r, "item": pid})
+    for r in returns_of(item):
+        out.append({**r, "item": item_id})
+    return out, notes
+
+
+def derived_iterations(item: Dict[str, Any], item_id: str = "", queue_dir: Optional[Path] = None) -> int:
+    if queue_dir is None:
+        return len(returns_of(item))
+    return len(chain_returns(item, item_id or str(item.get("id") or ""), queue_dir)[0])
+
+
+def record_required(item: Dict[str, Any], item_id: str = "", queue_dir: Optional[Path] = None) -> bool:
+    return derived_iterations(item, item_id, queue_dir) > 0
 
 
 def reviewer_of(item: Dict[str, Any], explicit: str = "") -> str:
@@ -434,11 +565,12 @@ def tokens_of(text: str) -> Tuple[List[str], List[str], bool]:
         if "://" in tok:
             prose = True
             continue
-        cand = LINE_SUFFIX_RE.sub("", tok.split("#", 1)[0])
+        # A backslash path is a path (vwm-p1b: `scripts\x.py` and `C:\...` used to be prose).
+        cand = LINE_SUFFIX_RE.sub("", tok.split("#", 1)[0]).replace("\\", "/")
         if "/" in cand and PATH_EXT_RE.search(cand):
             paths.append(cand)
             continue
-        found = [m for m in SHA_RE.findall(tok) if re.search(r"\d", m)]
+        found = [m.lower() for m in SHA_RE.findall(tok) if re.search(r"\d", m)]
         if found:
             shas += found
             rest = SHA_RE.sub("", tok).strip(".")
@@ -472,6 +604,188 @@ def _strings(node: Any, where: str = "") -> Iterable[Tuple[str, str]]:
     elif isinstance(node, list):
         for i, v in enumerate(node):
             yield from _strings(v, f"{where}/{i}")
+
+
+# ------------------------------------------------------------------- pass evidence
+# The SAME reading queue.ps1 -Pass applies (Get-FenceWalk / Get-EvidenceVerdicts): a case is a
+# Markdown H2 that starts with the case id; it reads PASS only when its heading line ENDS in
+# the bare, case-sensitive token PASS; fenced blocks count for nothing.
+CASE_HEADING_RE = re.compile(r"^##\s+(T\d+|Case\s+\d+)\b", re.IGNORECASE)
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+VERDICT_WORD_RE = re.compile(r"(^|\s)(PASS|FAIL|FAILED|SKIP|SKIPPED|SCOPED|PARTIAL|BLOCKED|DEFERRED|NOT RUN|N/A)\b.*$")
+
+
+def _normalize_case_id(raw: str) -> str:
+    r = re.sub(r"\s+", " ", raw).strip()
+    m = re.match(r"^[Tt](\d+)$", r)
+    if m:
+        return "T" + m.group(1)
+    m = re.match(r"^[Cc][Aa][Ss][Ee] (\d+)$", r)
+    if m:
+        return "Case " + m.group(1)
+    return r
+
+
+def evidence_verdicts(text: str) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    fence = ""
+    for line in re.split(r"\r?\n", text):
+        fm = FENCE_RE.match(line)
+        if fm:
+            marker = fm.group(1)[0]
+            if not fence:
+                fence = marker
+                continue
+            if fence == marker:
+                fence = ""
+                continue
+        if fence:
+            continue
+        m = CASE_HEADING_RE.match(line)
+        if not m:
+            continue
+        trimmed = line.rstrip()
+        verdict = "(no verdict on the heading line)"
+        if re.search(r"(^|\s)PASS$", trimmed):
+            verdict = "PASS"
+        else:
+            vm = VERDICT_WORD_RE.search(trimmed)
+            if vm:
+                verdict = vm.group(0).strip()
+        rows.append({"case": _normalize_case_id(m.group(1)), "verdict": verdict})
+    return rows
+
+
+def _attempt_no(v: Any) -> Optional[int]:
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    if isinstance(v, str) and v.strip().isdigit():
+        return int(v.strip())
+    return None
+
+
+def check_pass_evidence(item: Dict[str, Any], item_id: str, p: Dict[str, Any], queue_dir: Path,
+                        label: str) -> List[Finding]:
+    """Is the pass's evidence THAT pass's, non-empty, and PASS on every case? (vwm-p1b)
+
+    Where it is: `results[].evidence` when that is an ABSOLUTE path to a file, else the
+    queue's `<id>.attempt<N>.evidence.md` for the pass's attempt. A relative or inline string
+    is never resolved against the current directory: -Pass stores an absolute path into the
+    queue for every file it was given, so a relative string was prose.
+    """
+    qd = Path(queue_dir).resolve()
+    att = _attempt_no(p.get("attempt"))
+    ev = str(p.get("evidence") or "")
+    cand: Optional[Path] = None
+    if ev and "\n" not in ev and len(ev) < 1024:
+        try:
+            pe = Path(ev)
+            if pe.is_absolute() and pe.is_file():
+                cand = pe.resolve()
+        except (OSError, ValueError):
+            cand = None
+    if cand is None and att is not None:
+        q = qd / f"{item_id}.attempt{att}.evidence.md"
+        if q.is_file():
+            cand = q
+    if cand is None:
+        return [Finding("green-not-genuine", f"the pass at {label} has no evidence file "
+                                             f"(neither '{ev[:80]}' nor {item_id}.attempt{att}.evidence.md)")]
+    out: List[Finding] = []
+    # BOUND TO THIS PASS. -Pass copies the evidence into the queue as <id>.attempt<N>.evidence.md.
+    if not _same_path(cand.parent, qd):
+        out.append(Finding("evidence-not-pass", f"the pass's evidence {cand} is not in the queue directory; "
+                                                "-Pass copies a pass's evidence beside the item"))
+    m = re.match(r"^" + re.escape(item_id) + r"\.attempt(\d+)\.evidence\.md$", cand.name, re.IGNORECASE)
+    if not m:
+        out.append(Finding("evidence-not-pass", f"the pass's evidence {cand.name} is not one of this item's "
+                                                f"attempt evidence files ({item_id}.attempt<N>.evidence.md)"))
+    else:
+        k = int(m.group(1))
+        if att is not None and k != att:
+            out.append(Finding("evidence-not-pass", f"the pass is attempt {att} but its evidence is attempt {k}'s file ({cand.name})"))
+        for r in (item.get("results") or []):
+            if not isinstance(r, dict) or r is p or str(r.get("verdict", "")).lower() == "pass":
+                continue
+            rev = str(r.get("evidence") or "")
+            same = False
+            try:
+                same = bool(rev) and "\n" not in rev and len(rev) < 1024 and Path(rev).is_absolute() and _same_path(Path(rev), cand)
+            except (OSError, ValueError):
+                same = False
+            if same or _attempt_no(r.get("attempt")) == k:
+                out.append(Finding("evidence-not-pass", f"{cand.name} is the evidence of a '{r.get('verdict')}' verdict "
+                                                        f"(attempt {r.get('attempt')}, by {r.get('by')}), not of the pass"))
+                break
+    try:
+        text = cand.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        raise Indeterminate("queue-unreadable", f"cannot read the pass's evidence {cand}: {exc}") from exc
+    if not text.strip():
+        out.append(Finding("evidence-empty", f"the pass's evidence {cand.name} is empty"))
+        return out
+    rows = evidence_verdicts(text)
+    if not rows:
+        out.append(Finding("evidence-verdict-mismatch", f"the pass's evidence {cand.name} carries no case heading "
+                                                        "('## T1 - ...   PASS'), so nothing in it says a case passed"))
+        return out
+    bad = [f"{r['case']}: {r['verdict']}" for r in rows if r["verdict"] != "PASS"]
+    if bad:
+        out.append(Finding("evidence-verdict-mismatch", f"the pass's evidence {cand.name} does not read PASS on every case: "
+                                                        + "; ".join(bad[:6]) + (" ..." if len(bad) > 6 else "")))
+    recorded = p.get("cases")
+    if isinstance(recorded, list) and recorded:
+        rec_rows = [(_normalize_case_id(str(c.get("case", ""))), str(c.get("verdict", "")))
+                    for c in recorded if isinstance(c, dict)]
+        file_rows = [(r["case"], r["verdict"]) for r in rows]
+        if rec_rows != file_rows:
+            out.append(Finding("evidence-verdict-mismatch",
+                               f"the case verdicts in {cand.name} ({', '.join(f'{c} {v}' for c, v in file_rows[:6])}) "
+                               f"are not the ones -Pass recorded ({', '.join(f'{c} {v}' for c, v in rec_rows[:6])})"))
+    return out
+
+
+# ------------------------------------------------------------------- return reasons
+def _norm_text(s: str) -> str:
+    return re.sub(r"[^0-9a-z]+", " ", str(s).lower()).strip()
+
+
+REASON_PREFIX = 160
+ENUM_RETURN_RE = re.compile(r"(?:^|\s)(\d+)\)\s+(" + "|".join(RETURN_KINDS) + r")\b")
+
+
+def check_return_reasons(rec: Dict[str, Any], rets: List[Dict[str, Any]]) -> List[Finding]:
+    """`red` must carry each return's reason from the queue, and name no return the queue
+    does not have (vwm-p1b). `draft` writes them as `N) <kind> ... by <who>: <reason>`.
+
+    Compared after normalising (lowercase, any run of non-alphanumerics is one space), on
+    the first REASON_PREFIX characters of each reason. Free prose that invents a return in
+    other words is the declared blind spot; the canonical kind names and the numbered list
+    are checked.
+    """
+    red = str(rec.get("red") or "")
+    nred = " " + _norm_text(red) + " "
+    out: List[Finding] = []
+    for i, r in enumerate(rets, 1):
+        reason = _norm_text(r.get("reason") or "")[:REASON_PREFIX].strip()
+        if reason and (" " + reason) not in nred:
+            out.append(Finding("return-reason-mismatch",
+                               f"return {i} ({r['kind']} by {r.get('by')} on '{r.get('item')}') has the queue reason "
+                               f"'{str(r.get('reason'))[:100]}', which `red` does not carry"))
+    have = {k: sum(1 for r in rets if r["kind"] == k) for k in RETURN_KINDS}
+    for k in RETURN_KINDS:
+        if have[k] == 0 and re.search(r"(?<![a-z-])" + re.escape(k) + r"(?![a-z-])", red.lower()):
+            out.append(Finding("return-reason-mismatch", f"`red` names a {k} return; the queue shows none"))
+    listed = [k for _, k in ENUM_RETURN_RE.findall(red)]
+    if listed and listed != [r["kind"] for r in rets]:
+        out.append(Finding("return-reason-mismatch",
+                           f"`red` lists the returns as ({', '.join(listed)}); the queue shows "
+                           f"({', '.join(r['kind'] for r in rets) or 'none'})"))
+    return out
 
 
 # ------------------------------------------------------------------------------ check
@@ -522,14 +836,27 @@ def check_record(rec: Dict[str, Any], rec_path: Path, item: Dict[str, Any], item
         f.append(Finding("item-mismatch", "a harness merge record is fidelity 'iterative', producer 'harness' "
                                           f"(got {json.dumps(rec.get('fidelity'))}, {json.dumps(rec.get('producer'))})"))
 
-    rets = returns_of(item)
-    want = derived_iterations(item)
+    rets, chain_notes = chain_returns(item, item_id, queue_dir)
+    info["chain"] = chain_notes
+    own = [r for r in rets if r.get("item") == item_id]
+    want = len(rets)
     got = rec.get("iterations")
+    # 1.0 is the integer 1 in JSON Schema (and the schema validated it), so it counts as 1.
+    if isinstance(got, float) and not isinstance(got, bool) and got.is_integer():
+        got = int(got)
     if not (isinstance(got, int) and not isinstance(got, bool) and got == want):
         kinds = ", ".join(r["kind"] for r in rets) or "none"
-        f.append(Finding("iterations-mismatch",
-                         f"record says {json.dumps(got)}, the queue shows {want} return(s) ({kinds}); "
-                         "iterations counts ALL returns, improvement send-backs included (D2/D3)"))
+        if len(own) != want and got == len(own):
+            f.append(Finding("predecessor-returns",
+                             f"record says {json.dumps(got)}, which counts only '{item_id}'s own returns; "
+                             f"{'; '.join(chain_notes)}, so the queue shows {want} return(s) across the chain "
+                             f"({kinds}); a continued item carries its predecessor's returns"))
+        else:
+            f.append(Finding("iterations-mismatch",
+                             f"record says {json.dumps(got)}, the queue shows {want} return(s) ({kinds})"
+                             + (f" across the chain ({'; '.join(chain_notes)})" if chain_notes else "")
+                             + "; iterations counts ALL returns, improvement send-backs included (D2/D3)"))
+    f += check_return_reasons(rec, rets)
 
     tested = str(item.get("tested_at_sha") or "")
     merge = merge_sha or str(item.get("merged_sha") or "")
@@ -560,18 +887,7 @@ def check_record(rec: Dict[str, Any], rec_path: Path, item: Dict[str, Any], item
                 if normalize_id(p.get("by")) == normalize_id(developer):
                     gproblems.append(f"the pass at {tested[:12]} was recorded by '{p.get('by')}', "
                                      f"the developer identity ('{developer}')")
-                ev = str(p.get("evidence") or "")
-                ev_ok = False
-                if ev and "\n" not in ev and len(ev) < 1024:
-                    try:
-                        ev_ok = Path(ev).is_file()
-                    except OSError:
-                        ev_ok = False
-                if not ev_ok:
-                    ev_ok = (Path(queue_dir) / f"{item_id}.attempt{p.get('attempt')}.evidence.md").is_file()
-                if not ev_ok:
-                    gproblems.append(f"the pass at {tested[:12]} has no evidence file "
-                                     f"(neither '{ev[:80]}' nor {item_id}.attempt{p.get('attempt')}.evidence.md)")
+                f += check_pass_evidence(item, item_id, p, queue_dir, tested[:12])
         if tested and merge and git.full_commit(merge) and git.full_commit(tested):
             if not git.is_ancestor(tested, merge):
                 gproblems.append(f"tested_at_sha {tested[:12]} is not an ancestor of the merge {merge[:12]}")
@@ -642,18 +958,36 @@ def check_record(rec: Dict[str, Any], rec_path: Path, item: Dict[str, Any], item
                 info["resolved_shas"] += 1
             else:
                 f.append(Finding("evidence-sha-unresolved", f"{s} (in {', '.join(all_shas[s])}) is not an object in this repo"))
+    # A path resolves only INSIDE the code repo or the plan store (vwm-p1b: an absolute path
+    # anywhere on disk - C:/Windows/notepad.exe - used to count as resolved evidence).
+    bases = [b for b in (repo_root, store_root or feature_dir) if b]
     missing_paths = []
     for p in all_paths:
         pp = Path(p)
+        absolute = pp.is_absolute() or p.startswith("/") or bool(re.match(r"^[A-Za-z]:", p))
+        cands = [pp] if absolute else [r / pp for r in roots]
         ok = False
-        if pp.is_absolute():
-            ok = pp.exists()
-        else:
-            ok = any((r / pp).exists() for r in roots)
-        if not ok:
-            missing_paths.append(p)
-        else:
+        outside = False
+        for c in cands:
+            try:
+                rc = Path(os.path.realpath(str(c)))
+                exists = rc.exists()
+            except (OSError, ValueError):
+                continue
+            if not any(_within(rc, b) for b in bases):
+                outside = outside or exists or absolute
+                continue
+            if exists:
+                ok = True
+                break
+        if ok:
             info["resolved_paths"] += 1
+        elif outside:
+            f.append(Finding("evidence-path-outside",
+                             f"{p} (in {', '.join(all_paths[p])}) is outside the code repo and the plan store; "
+                             "evidence must point at something the next reader of this record can open"))
+        else:
+            missing_paths.append(p)
     if missing_paths and revs:
         tree = git.object_types([f"{r}:{p}" for r in revs for p in missing_paths])
         still = []
@@ -678,18 +1012,20 @@ def _blind_spot_line(info: Dict[str, Any]) -> str:
 
 
 def run_check(args) -> int:
-    repo = main_checkout(Path(args.repo or os.getcwd()))
+    repo = resolve_repo(args.repo)
     queue_dir = Path(args.queue_dir) if args.queue_dir else default_queue_dir(repo)
     print(f"learning-record check: {args.item}")
     try:
         item = load_item(queue_dir, args.item)
-        rets = returns_of(item)
+        rets, chain_notes = chain_returns(item, args.item, queue_dir)
+        for n in chain_notes:
+            print(f"  CHAIN: {n}; its returns count toward this item's record")
         if not rets:
             print("  NOT REQUIRED: the queue shows no return (no tester fail, no reviewer reject/requeue, "
-                  "no send-back after a pass). Accepted.")
+                  "no send-back after a pass" + (", none on the predecessor chain" if chain_notes else "") + "). Accepted.")
             return 0
         print(f"  REQUIRED: {len(rets)} return(s): " + "; ".join(
-            f"{r['kind']} by {r['by']}" for r in rets))
+            f"{r['kind']} by {r['by']}" + (f" (on '{r['item']}')" if r.get("item") != args.item else "") for r in rets))
         anchor = item.get("anchor") if isinstance(item.get("anchor"), dict) else {}
         sink = str(anchor.get("findings_sink") or "").strip()
         if not sink:
@@ -730,7 +1066,7 @@ def run_check(args) -> int:
 
 # ------------------------------------------------------------------------------ audit
 def run_audit(args) -> int:
-    repo = main_checkout(Path(args.repo or os.getcwd()))
+    repo = resolve_repo(args.repo)
     queue_dir = Path(args.queue_dir) if args.queue_dir else default_queue_dir(repo)
     store = Path(args.store).resolve() if args.store else (repo / DEFAULT_STORE_REL).resolve()
     print(f"learning-record AUDIT (read-only)\n  store: {store}\n  queue: {queue_dir}\n  repo : {repo}")
@@ -781,7 +1117,13 @@ def run_audit(args) -> int:
                 found.append(Finding("item-mismatch", f"record sits at {rel}; the anchor's sink puts it at {want}"))
         state = str(item.get("state", ""))
         merged = state in ("merged", "deployed")
-        if not record_required(item):
+        try:
+            required = record_required(item, item_id, queue_dir)
+        except Indeterminate as exc:
+            bad_records += 1
+            emit(rel, exc.reason, exc.detail)
+            continue
+        if not required:
             print(f"NOTE {rel}: the queue shows no return for '{item_id}' (record not required); checked anyway")
         try:
             more, info = check_record(rec, rp, item, item_id, git=git, schema=schema, queue_dir=queue_dir,
@@ -801,7 +1143,7 @@ def run_audit(args) -> int:
                 emit(rel, x.reason, x.detail)
         else:
             clean += 1
-            print(f"CLEAN {rel} (iterations {derived_iterations(item)}; {len(info['prose'])} prose evidence string(s) unverified)")
+            print(f"CLEAN {rel} (iterations {derived_iterations(item, item_id, queue_dir)}; {len(info['prose'])} prose evidence string(s) unverified)")
 
     # Items that needed a record and have none, merged since the rule existed.
     since = int(_dt.datetime.fromisoformat(args.since).replace(tzinfo=_dt.timezone.utc).timestamp())
@@ -818,11 +1160,18 @@ def run_audit(args) -> int:
         iid = str(item.get("id") or qp.stem)
         if iid in seen_ids or str(item.get("state")) not in ("merged", "deployed"):
             continue
-        if merged_at(item) < since or not record_required(item):
+        if merged_at(item) < since:
+            continue
+        try:
+            n_ret = derived_iterations(item, iid, queue_dir)
+        except Indeterminate as exc:
+            emit(f"(queue item {iid})", exc.reason, exc.detail)
+            continue
+        if not n_ret:
             continue
         missing += 1
         emit(f"(queue item {iid})", "record-missing",
-             f"merged with {derived_iterations(item)} return(s) and no learning record in the store")
+             f"merged with {n_ret} return(s) and no learning record in the store")
 
     nviol = sum(totals.values())
     print(f"TOTALS: {len(records)} record(s); {clean} clean; {bad_records} with violations; "
@@ -835,7 +1184,7 @@ def run_audit(args) -> int:
 # ------------------------------------------------------------------------------ draft
 def run_draft(args) -> int:
     """Print the record's derived skeleton. Writes NOTHING."""
-    repo = main_checkout(Path(args.repo or os.getcwd()))
+    repo = resolve_repo(args.repo)
     queue_dir = Path(args.queue_dir) if args.queue_dir else default_queue_dir(repo)
     try:
         item = load_item(queue_dir, args.item)
@@ -843,7 +1192,11 @@ def run_draft(args) -> int:
     except Indeterminate as exc:
         print(f"draft INDETERMINATE: {exc.reason}: {exc.detail}", file=sys.stderr)
         return 3
-    rets = returns_of(item)
+    try:
+        rets, chain_notes = chain_returns(item, args.item, queue_dir)
+    except Indeterminate as exc:
+        print(f"draft INDETERMINATE: {exc.reason}: {exc.detail}", file=sys.stderr)
+        return 3
     tested = str(item.get("tested_at_sha") or "")
     merge = args.merge_sha or str(item.get("merged_sha") or "")
     if merge:
@@ -861,7 +1214,8 @@ def run_draft(args) -> int:
     lines = []
     for n, r in enumerate(rets, 1):
         at = f" at attempt {r['attempt']}" if r.get("attempt") else ""
-        lines.append(f"{n}) {r['kind']}{at} by {r['by']}: {r['reason'] or '(no reason recorded)'}")
+        on = f" on {r['item']}" if r.get("item") != args.item else ""
+        lines.append(f"{n}) {r['kind']}{on}{at} by {r['by']}: {r['reason'] or '(no reason recorded)'}")
     green = bool(last_pass and results and str(results[-1].get("verdict", "")).lower() == "pass")
     evidence = []
     for r in results:
@@ -892,6 +1246,8 @@ def run_draft(args) -> int:
         "created_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     print(json.dumps(skeleton, indent=2, ensure_ascii=False))
+    for n in chain_notes:
+        print(f"# chain: {n}; its returns are counted and listed in `red`", file=sys.stderr)
     print(f"# draft for '{args.item}': {len(rets)} return(s); green genuine: {green}; nothing was written. "
           f"Fill every {PLACEHOLDER} marker; the check refuses a record that still carries one.", file=sys.stderr)
     return 0
@@ -923,6 +1279,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         return run_draft(args)
     except Indeterminate as exc:
         print(f"REFUSED, INDETERMINATE: {exc.reason}: {exc.detail}")
+        return 3
+    except Exception as exc:  # noqa: BLE001 - the point: an unexpected crash is never a verdict
+        # vwm-p1b: an uncaught exception exited 1, which queue.ps1 labels "refused" (a
+        # verdict on the record). It is not one: the check did not finish. Indeterminate.
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        print(f"REFUSED, INDETERMINATE: internal-error: {type(exc).__name__}: {exc} "
+              "(the check crashed; this is NOT a verdict on the record)")
         return 3
 
 

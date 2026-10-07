@@ -98,7 +98,9 @@
 #       record-missing, iterations-mismatch, range-unresolved and an unreadable store
 #       (INDETERMINATE, never a pass); accepted for a compliant record, accepted with NO
 #       record for a first-try green, and accepted WITH ADVICE when
-#       pipeline.learning_record.enforce_at_merged is false (the off switch).
+#       pipeline.learning_record.enforce_at_merged is false (the off switch). vwm-p1b adds:
+#       -Propose refuses an anchor whose `continues` names no queue item, writes the
+#       `predecessor` link otherwise, and -Merged counts a rejected predecessor's returns.
 
 [CmdletBinding()]
 param(
@@ -1731,18 +1733,20 @@ function New-LrStore([string]$name) {
     New-Item -ItemType Directory -Force -Path (Join-Path $store "implementation-guide\feat\findings") | Out-Null
     return $store
 }
-function New-LrAnchor([string]$name, [string]$sinkPath) {
+function New-LrAnchor([string]$name, [string]$sinkPath, [string]$continues = "") {
     $a = Join-Path $Root ("lr-anchor-" + $name + ".json")
     $sinkJson = ($sinkPath -replace '\\', '/')
-    Set-Content -Path $a -Encoding ascii -Value @(
-        '{',
+    $contLine = @()
+    if ($continues) { $contLine = @(('  "continues": "' + $continues + '",')) }
+    Set-Content -Path $a -Encoding ascii -Value (@(
+        '{') + $contLine + @(
         '  "goal": "WORK.md states what the work was, unambiguously.",',
         '  "artifact": "WORK.md - a one-line note produced by the drill fixture.",',
         '  "audience": "The next agent to read the file with no other context.",',
         '  "acceptance": ["WORK.md exists on the branch. Fail: it is absent."],',
         '  "out_of_scope": ["Anything outside WORK.md."],',
         ('  "findings_sink": "' + $sinkJson + '"'),
-        '}')
+        '}'))
     return $a
 }
 function Initialize-LrReviewing($fix, [string]$id, [string]$anchor, [switch]$WithFail) {
@@ -1772,13 +1776,13 @@ function Initialize-LrReviewing($fix, [string]$id, [string]$anchor, [switch]$Wit
     } finally { Pop-Location }
     return @{ merge = $m; base = $b }
 }
-function Write-LrRecord([string]$store, [string]$id, [string]$range, [int]$iterations) {
+function Write-LrRecord([string]$store, [string]$id, [string]$range, [int]$iterations, [string]$red = "attempt 1 failed: Case 1 fails on a cold cache") {
     $rec = [ordered]@{
         schema_version = 1; fidelity = "iterative"; producer = "harness"
         source_ref = [ordered]@{ queue_item_id = $id; anchor_id = $id; merge_range = $range }
         domains = @("drill")
         steer = "Anchor ${id}: WORK.md states what the work was."
-        red = "attempt 1 failed Case 1 on a cold cache"
+        red = $red
         iterations = $iterations
         hypotheses_refuted = @()
         outcome = [ordered]@{ kind = "green"; summary = "WORK.md carries the one-line note."; evidence = @("findings/$id.md") }
@@ -1855,6 +1859,51 @@ finally { $env:AI_STACK_HARNESS_CONFIG = $prevCfg }
 Check "LR: enforce_at_merged=false -> accepted WITH ADVICE (exit 0, merged, record-missing printed as advice)" `
     (($r.code -eq 0) -and ((Get-QItem $lf7 "qlr7").state -eq "merged") -and ($r.out -match "ADVICE") -and ($r.out -match "record-missing")) `
     ("exit=" + $r.code)
+
+# LR8 - vwm-p1b: an anchor that `continues` an item the queue does not hold is refused at -Propose.
+$lf8 = New-Fixture "lr8"; $ls8 = New-LrStore "lr8"
+$la8 = New-LrAnchor "lr8" (Join-Path $ls8 "implementation-guide\feat\findings\qlr8.md") "qlr-never"
+$r = Invoke-Q $lf8 @("-Propose", "-Id", "qlr8", "-Anchor", $la8, "-Developer", "qdev")
+Check "LR: -Propose REFUSES an anchor whose 'continues' names no queue item (vwm-p1b)" `
+    (($r.code -ne 0) -and ($r.out -match "is not a queue item") -and -not (Test-Path (Join-Path $lf8.state "queue\qlr8.json"))) ("exit=" + $r.code + " | " + (First-Line $r.out))
+
+# LR9 - vwm-p1b: a REJECTED item continued under a new id. -Propose writes the predecessor link;
+# the successor's own history is a first-try green, yet -Merged requires the record and counts
+# the predecessor's returns (one FAIL + the reject), reasons included.
+$lf9 = New-Fixture "lr9"; $ls9 = New-LrStore "lr9"
+$la9 = New-LrAnchor "lr9" (Join-Path $ls9 "implementation-guide\feat\findings\qlr9.md")
+$evF9 = Join-Path $Root "lr-qlr9-fail.md"
+Set-Content -Path $evF9 -Encoding ascii -Value @("## Case 1 - WORK.md exists   FAIL", "WORK.md was empty.")
+$evP9 = Join-Path $Root "lr-qlr9-pass.md"
+Set-Content -Path $evP9 -Encoding ascii -Value @($case1Pass, "ran case 1.")
+Invoke-Q $lf9 @("-Propose", "-Id", "qlr9", "-Anchor", $la9, "-Developer", "qdev") | Out-Null
+Invoke-Q $lf9 @("-ConfirmAnchor", "-Id", "qlr9", "-By", "qoperator") | Out-Null
+Invoke-Q $lf9 @("-Submit", "-Id", "qlr9", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planV1) | Out-Null
+Invoke-Q $lf9 @("-Claim", "-Id", "qlr9", "-Role", "tester", "-By", "qtester") | Out-Null
+Invoke-Q $lf9 @("-Fail", "-Id", "qlr9", "-By", "qtester", "-Evidence", $evF9, "-PlanAdequate", "-Reason", "Case 1 WORK.md was empty") | Out-Null
+Invoke-Q $lf9 @("-Resubmit", "-Id", "qlr9", "-By", "qdev") | Out-Null
+Invoke-Q $lf9 @("-Claim", "-Id", "qlr9", "-Role", "tester", "-By", "qtester2") | Out-Null
+Invoke-Q $lf9 @("-Pass", "-Id", "qlr9", "-By", "qtester2", "-Evidence", $evP9, "-PlanAdequate") | Out-Null
+Invoke-Q $lf9 @("-Approve", "-Id", "qlr9", "-By", "qoperator") | Out-Null
+Invoke-Q $lf9 @("-Claim", "-Id", "qlr9", "-Role", "reviewer", "-By", "qrev") | Out-Null
+Invoke-Q $lf9 @("-Reject", "-Id", "qlr9", "-By", "qrev", "-Misfits", "-Reason", "the note belongs in the module README") | Out-Null
+$la9b = New-LrAnchor "lr9b" (Join-Path $ls9 "implementation-guide\feat\findings\qlr9b.md") "qlr9"
+$mg9 = Initialize-LrReviewing $lf9 "qlr9b" $la9b
+$i9b = Get-QItem $lf9 "qlr9b"
+Check "LR: -Propose wrote the predecessor link from the anchor's 'continues' (vwm-p1b)" `
+    (((Get-QItem $lf9 "qlr9").state -eq "rejected") -and ([string]$i9b.predecessor -eq "qlr9")) ("pred=" + $i9b.predecessor + " qlr9=" + (Get-QItem $lf9 "qlr9").state)
+$r = Invoke-Q $lf9 @("-Merged", "-Id", "qlr9b", "-By", "qrev", "-Sha", $mg9.merge, "-FitsCodebase")
+Check "LR: a first-try green that continues a rejected item is REFUSED record-missing (predecessor's returns count)" `
+    (($r.code -eq 1) -and ((Get-QItem $lf9 "qlr9b").state -eq "reviewing") -and ($r.out -match "record-missing") -and ($r.out -match "continues 'qlr9'")) `
+    ("exit=" + $r.code + " | " + (First-Line $r.out))
+Write-LrRecord $ls9 "qlr9b" ($mg9.base + ".." + $mg9.merge) 0 "a fresh start"
+$r = Invoke-Q $lf9 @("-Merged", "-Id", "qlr9b", "-By", "qrev", "-Sha", $mg9.merge, "-FitsCodebase")
+Check "LR: a record that counts only the successor's own returns is REFUSED predecessor-returns" `
+    (($r.code -eq 1) -and ((Get-QItem $lf9 "qlr9b").state -eq "reviewing") -and ($r.out -match "predecessor-returns") -and ($r.out -match "return-reason-mismatch")) ("exit=" + $r.code)
+Write-LrRecord $ls9 "qlr9b" ($mg9.base + ".." + $mg9.merge) 2 "qlr9: Case 1 WORK.md was empty; then rejected: the note belongs in the module README"
+$r = Invoke-Q $lf9 @("-Merged", "-Id", "qlr9b", "-By", "qrev", "-Sha", $mg9.merge, "-FitsCodebase")
+Check "LR: the chain-counted record with the queue's reasons is ACCEPTED (exit 0, merged)" `
+    (($r.code -eq 0) -and ((Get-QItem $lf9 "qlr9b").state -eq "merged") -and ($r.out -match "ACCEPTED")) ("exit=" + $r.code + " | " + (First-Line $r.out))
 
 # --- verdict --------------------------------------------------------------------------
 $fail = @($results | Where-Object { -not $_.pass })
