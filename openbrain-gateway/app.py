@@ -28,10 +28,15 @@ NOT exposed by this gateway: those datasets are personal-by-design and
 have no cloud surface. If a cloud-allowed extension is added later, give
 it the same metadata_filter / metadata_extra treatment and add it here.
 """
+import hashlib
 import json
 import math
 import os
 import re
+import sys
+import threading
+import time
+from datetime import datetime, timezone
 
 import httpx
 from starlette.applications import Starlette
@@ -127,6 +132,9 @@ def _force_write_extra(args: dict) -> dict:
     # per-tool constant, exactly as for a call that never sent one.
     md.pop("source", None)
     md["origin"] = WRITE_ORIGIN
+    # The `share` stamp is also what confines openbrain-mcp's source DEDUP to rows this
+    # door can read (eh-ingest R1: OB1 ingest-egress.ts dedupShareScope). Without it a
+    # cloud ingest would dedup against - and reveal the id of - a private row.
     md[WRITE_STAMP_FIELD] = WRITE_STAMP_VALUE
     args["metadata_extra"] = md
     return args
@@ -494,26 +502,211 @@ async def _read_capped(request) -> bytes:
             raise _TooLarge()
     return bytes(buf)
 
+# --- AUDIT LOG (egress-hardening item eh-ingest, 2026-10-07) ----------------
+#
+# An append-only JSONL record of what clients DO through this door: one line per
+# HTTP request to /mcp, allowed or refused. It records WHO (the key id - a label
+# plus a short SHA-256 fingerprint of the configured key, NEVER the key - and the
+# client address), WHAT (the JSON-RPC method names and tool names), the DECISION
+# (allowed / refused and why, as a fixed code), the RESULT (HTTP status, upstream
+# status, ok / error / unknown) and the SIZE (request and response bytes, time).
+#
+# IT NEVER RECORDS ARGUMENTS OR PAYLOADS. No argument value, no body text, no
+# result text and no error message reaches the line. A tool name is logged only when
+# it is on this door's allow-list (ALLOWED_TOOLS) and a method name only when it is a
+# known MCP method (_KNOWN_METHODS); anything else - a refused tool included - is
+# logged as "<unknown>", never verbatim, so a caller-chosen "name" cannot carry a
+# payload (or a secret) into the record. The record is built from a fixed set of
+# fields, never by copying the request.
+#
+# Bounded: the file rotates at GATEWAY_AUDIT_LOG_MAX_BYTES (default 5 MiB) into
+# GATEWAY_AUDIT_LOG_BACKUPS numbered files (default 4: <path>.1 .. <path>.4, oldest
+# dropped), so the log never holds more than (backups + 1) x max bytes.
+#
+# GATEWAY_AUDIT_LOG unset or empty = OFF (the unit tests and a bare `docker run`).
+# Set = ON, and a path that cannot be opened for append STOPS THE GATEWAY AT START
+# (a door that was told to keep a record and cannot is a deploy bug, not something
+# to discover later). A write that fails at RUN time (disk full) is reported on
+# stderr and the request is still served: the record is evidence, not the gate.
+# Compose binds the directory under the backups tree, which the NAS sync mirrors.
+AUDIT_LOG_PATH = os.environ.get("GATEWAY_AUDIT_LOG", "").strip()
+AUDIT_MAX_BYTES = int(os.environ.get("GATEWAY_AUDIT_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+AUDIT_BACKUPS = int(os.environ.get("GATEWAY_AUDIT_LOG_BACKUPS", "4"))
+if AUDIT_MAX_BYTES <= 0 or AUDIT_BACKUPS < 0:
+    raise ValueError("GATEWAY_AUDIT_LOG_MAX_BYTES must be > 0 and GATEWAY_AUDIT_LOG_BACKUPS >= 0")
+KEY_ID = (os.environ.get("GATEWAY_KEY_ID", "").strip()
+          or f"{GATEWAY_PROFILE}-{hashlib.sha256(GATEWAY_KEY.encode()).hexdigest()[:8]}")
+
+_KNOWN_METHODS = frozenset((
+    "initialize", "ping", "tools/list", "tools/call",
+    "resources/list", "resources/read", "resources/templates/list",
+    "resources/subscribe", "resources/unsubscribe",
+    "prompts/list", "prompts/get", "completion/complete", "logging/setLevel",
+    "roots/list", "sampling/createMessage", "elicitation/create",
+    "notifications/initialized", "notifications/cancelled", "notifications/progress",
+    "notifications/roots/list_changed", "notifications/message",
+))
+_AUDIT_LIST_CAP = 50
+
+
+def _known(v, known):
+    """v itself only if it is one of the known names; else "<unknown>"."""
+    return v if isinstance(v, str) and v in known else "<unknown>"
+
+
+class AuditLog:
+    """Append-only, size-rotated JSONL file. Pure stdlib; one lock per file."""
+
+    def __init__(self, path: str, max_bytes: int, backups: int):
+        self.path = path
+        self.max_bytes = max_bytes
+        self.backups = backups
+        self._lock = threading.Lock()
+        if path:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            with open(path, "a", encoding="utf-8"):
+                pass  # raises here, at start, if it cannot be appended to
+
+    def _rotate(self):
+        if self.backups == 0:
+            os.remove(self.path)
+            return
+        oldest = f"{self.path}.{self.backups}"
+        if os.path.exists(oldest):
+            os.remove(oldest)
+        for i in range(self.backups - 1, 0, -1):
+            src = f"{self.path}.{i}"
+            if os.path.exists(src):
+                os.replace(src, f"{self.path}.{i + 1}")
+        os.replace(self.path, f"{self.path}.1")
+
+    def write(self, record: dict):
+        if not self.path:
+            return
+        line = json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n"
+        try:
+            with self._lock:
+                try:
+                    size = os.path.getsize(self.path)
+                except OSError:
+                    size = 0
+                if size and size + len(line) > self.max_bytes:
+                    self._rotate()
+                with open(self.path, "a", encoding="utf-8") as f:
+                    f.write(line)
+        except OSError as e:
+            print(f"openbrain-gateway: audit log write failed ({e.__class__.__name__}); "
+                  "request served without a record", file=sys.stderr, flush=True)
+
+
+AUDIT = AuditLog(AUDIT_LOG_PATH, AUDIT_MAX_BYTES, AUDIT_BACKUPS)
+
+
+def _audit_calls(msg):
+    """(methods, tools) named by a parsed body - names only, never arguments."""
+    msgs = msg if isinstance(msg, list) else [msg]
+    methods, tools = [], []
+    for m in msgs[:_AUDIT_LIST_CAP]:
+        if not isinstance(m, dict):
+            continue
+        meth = m.get("method")
+        methods.append(_known(meth, _KNOWN_METHODS))
+        if meth == "tools/call":
+            params = m.get("params")
+            tools.append(_known(params.get("name") if isinstance(params, dict) else None,
+                                ALLOWED_TOOLS))
+    return methods, tools
+
+
+def _audit_result(body: bytes, content_type: str) -> str:
+    """ok / error / unknown for a JSON or SSE reply, read for STRUCTURE only."""
+    msgs = []
+    try:
+        if "text/event-stream" in content_type.lower():
+            for line in _SSE_EOL.split(body.decode("utf-8", "replace")):
+                if line.startswith("data:"):
+                    try:
+                        msgs.append(json.loads(line[5:].strip()))
+                    except ValueError:
+                        pass
+        elif body:
+            v = json.loads(body.decode("utf-8", "replace"))
+            msgs = v if isinstance(v, list) else [v]
+    except ValueError:
+        return "unknown"
+    seen_result = False
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        if "error" in m:
+            return "error"
+        r = m.get("result")
+        if isinstance(r, dict) and r.get("isError") is True:
+            return "error"
+        if "result" in m:
+            seen_result = True
+    return "ok" if seen_result else "unknown"
+
 
 async def health(_request):
     return PlainTextResponse("ok")
 
 
 async def mcp(request):
+    """The door, with its audit record: exactly one line per request."""
+    au = {"key_ok": False, "methods": [], "tools": [], "refusal": None,
+          "upstream_status": None, "req_bytes": 0}
+    t0 = time.monotonic()
+    status, resp_bytes, result = 500, 0, "exception"
+    try:
+        resp = await _mcp_inner(request, au)
+        status = resp.status_code
+        body = getattr(resp, "body", b"") or b""
+        resp_bytes = len(body)
+        result = ("refused" if au["refusal"] else
+                  _audit_result(body, resp.headers.get("content-type", "")))
+        return resp
+    finally:
+        AUDIT.write({
+            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "profile": GATEWAY_PROFILE,
+            "key_id": KEY_ID if au["key_ok"] else None,
+            "client": request.client.host if request.client else None,
+            "http_method": request.method,
+            "methods": au["methods"],
+            "tools": au["tools"],
+            "decision": "refused" if au["refusal"] else "allowed",
+            "refusal": au["refusal"],
+            "status": status,
+            "upstream_status": au["upstream_status"],
+            "result": result,
+            "req_bytes": au["req_bytes"],
+            "resp_bytes": resp_bytes,
+            "ms": int((time.monotonic() - t0) * 1000),
+        })
+
+
+async def _mcp_inner(request, au):
     # Authenticate the cloud client against the gateway key.
     auth = request.headers.get("authorization", "")
     if auth != f"Bearer {GATEWAY_KEY}":
+        au["refusal"] = "unauthorized"
         return _json_response({"error": "unauthorized"}, status_code=401)
+    au["key_ok"] = True
 
     method = request.method
     try:
         body = await _read_capped(request)
     except _TooLarge:
+        au["refusal"] = "too_large"
+        declared = request.headers.get("content-length", "")
+        au["req_bytes"] = int(declared) if declared.strip().isdigit() else None
         return _json_response(
             _rpc_error(None, -32600,
                        f"Request refused by the gateway: body larger than "
                        f"{MAX_BODY_BYTES} bytes."),
             status_code=413)
+    au["req_bytes"] = len(body)
     up_headers = _upstream_headers(request)
 
     short_circuit = None
@@ -522,16 +715,20 @@ async def mcp(request):
     list_id = None
 
     if body and method != "POST":
+        au["refusal"] = "body_refused"
         return _refuse(f"{method} with a body")
     if method == "POST":
         try:
             msg = _parse_body(body)
         except _BodyRefused as e:
+            au["refusal"] = "body_refused"
             return _refuse(str(e))
+        au["methods"], au["tools"] = _audit_calls(msg)
         if isinstance(msg, list):  # JSON-RPC batch
             # tools/list is filtered on the way back only for a single request,
             # so inside a batch it is refused rather than answered unfiltered.
             if any(m.get("method") == "tools/list" for m in msg):
+                au["refusal"] = "body_refused"
                 return _refuse("tools/list inside a batch")
             mutated, sc = [], None
             for m in msg:
@@ -554,6 +751,8 @@ async def mcp(request):
                 out_body = json.dumps(mm).encode()
 
     if short_circuit is not None:
+        code = (short_circuit.get("error") or {}).get("code")
+        au["refusal"] = "tool_not_allowed" if code == -32601 else "bad_arguments"
         return _json_response(short_circuit)
 
     up_headers.pop("content-length", None)
@@ -564,6 +763,7 @@ async def mcp(request):
             content=out_body,
             headers=up_headers,
             params=dict(request.query_params))
+        au["upstream_status"] = upstream.status_code
 
         ct = upstream.headers.get("content-type", "")
         # tools/list: filter advertised tools to the cloud allow-list, FAIL
