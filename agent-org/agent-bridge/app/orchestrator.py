@@ -279,16 +279,35 @@ _SHELL_BROKEN_RE = re.compile(
     r"(?:^|\s)(?:/\S*/)?(?:ba|da)?sh: (?:-c: )?(?:line )?(?:\d+: )?"
     r"(?:syntax error|unexpected EOF|[^\n:]+: (?:command )?not found)",
     re.I | re.M)
-# Exit codes that mean the command never ran as a test of anything: 2 = shell misuse / parse error,
-# 126 = not executable, 127 = command not found.
-_SHELL_BROKEN_EXITS = frozenset({2, 126, 127})
+# ao-checks round 2 (gym check ac-7b96f8711316) - the INLINE interpreter code of the check itself does not
+# compile: `python -c "...os.environ['"'"'TODO_DB` parses as shell, runs, and Python reports
+#   File "<string>", line 1 ... SyntaxError: unterminated string literal
+# with NO "Traceback (most recent call last):" header (a compile error of `-c`/stdin code has none). A
+# product eval()/import error HAS the header and product frames, so it stays a genuine failure.
+_INLINE_FRAME_RE = re.compile(r'^\s*File "<(?:string|stdin)>", line \d+', re.M)
+_INLINE_COMPILE_RE = re.compile(r"^(?:SyntaxError|IndentationError|TabError)\b", re.M)
+_TRACEBACK_HDR = "Traceback (most recent call last):"
+# Exit codes that ALWAYS mean the command never ran as a test of anything: 126 = not executable,
+# 127 = command not found. Exit 2 is NOT here: argparse usage errors, pytest collection errors and make
+# failures exit 2 for genuine product reasons (the only genuine gym check, `python3 todo.py reopen
+# --help`, is that class). An exit 2 is refused only when its output is the shell's own error message.
+_SHELL_BROKEN_EXITS = frozenset({126, 127})
 # The failing-log header of a burn-down the acceptance corpus started (ao-checks).
 _CORPUS_LOG_PREFIX = "acceptance corpus failing:\n"
 
 
+def _inline_compile_error(output: str) -> bool:
+    """ao-checks round 2 — the check's own inline interpreter code (`python -c`, `python -`) failed to
+    COMPILE: a `File "<string>"`/`File "<stdin>"` frame + SyntaxError/IndentationError/TabError, and no
+    traceback header (which a runtime error, including a product eval() error, always has)."""
+    return (bool(output) and _TRACEBACK_HDR not in output
+            and bool(_INLINE_FRAME_RE.search(output)) and bool(_INLINE_COMPILE_RE.search(output)))
+
+
 def _shell_broken(output: str) -> bool:
-    """True when `output` carries the shell's own parse-error / command-not-found message (ao-checks)."""
-    return bool(output) and bool(_SHELL_BROKEN_RE.search(output))
+    """True when `output` says the CHECK itself could not run (ao-checks): the shell's own parse-error /
+    command-not-found message, or a compile error of the check's inline interpreter code."""
+    return bool(output) and (bool(_SHELL_BROKEN_RE.search(output)) or _inline_compile_error(output))
 
 
 # A monitor/PM CONCERN whose subject is an ENVIRONMENT/WORKSPACE symptom — the org can self-heal it
@@ -1106,6 +1125,10 @@ class Orchestrator:
         # re-run every round, each with its latest error output. The burn-down used to re-check only
         # the BUILD, which passed, so it declared green after one round while these checks stayed red.
         self._burndown_corpus: dict[str, list[tuple[dict, str]]] = {}
+        # Round 2: a corpus check set queued for a burn-down that has not started yet (a deferred
+        # one waits for delegate's single-flight). The loop moves it into `_burndown_corpus` when it
+        # starts and clears that on EVERY exit, so a later build-red burn-down never re-runs stale checks.
+        self._burndown_corpus_pending: dict[str, list[tuple[dict, str]]] = {}
         # effort → branch head the ORG itself verified green (its own build run + log, not a
         # worker's word) — the finish path skips a duplicate composition check and the closure is
         # labelled "org-verified". Cleared on every fresh dispatch.
@@ -3734,20 +3757,49 @@ class Orchestrator:
                     channel_id, "That acceptance check needs a command to run — `accept check for "
                     "<project>: <command> :: <note>`.", thread_id=thread_id)
             return
-        # RETIRE durable acceptance checks by id (ao-checks) — the operator's one-line answer to a
-        # "the check itself is broken" escalation. Deterministic, operator-issued; the org never
-        # retires a check on its own. Retiring keeps the row and its audit trail (active=false).
-        m_rc = re.match(r"^\s*retire\s+(?:acceptance\s+)?checks?\s+(?P<ids>ac-[0-9a-f]{12}"
-                        r"(?:[\s,]+ac-[0-9a-f]{12})*)\s*\.?\s*$", message.strip(), re.I)
-        if m_rc:
-            ids = re.findall(r"ac-[0-9a-f]{12}", m_rc.group("ids").lower())
-            done = [i for i in ids if await self.projects.set_acceptance_check_active(i, False)]
-            unknown = [i for i in ids if i not in done]
-            body = (f"📐 Retired {len(done)} acceptance check(s): "
-                    + (", ".join(f"`{i}`" for i in done) or "none")
-                    + (f". Unknown id(s): {', '.join(f'`{i}`' for i in unknown)}." if unknown else ".")
-                    + " They no longer gate deliveries; the record and its audit trail are kept.")
-            await self.chat.post(channel_id, body, thread_id=thread_id)
+        # RETIRE durable acceptance checks (ao-checks) — the operator's one-line answer to a "the check
+        # itself is broken" escalation. Deterministic, operator-issued; the org never retires a check on
+        # its own. Grammar: `retire check <project> ac-<12 hex> [ac-…]`. The PROJECT IS REQUIRED: a check
+        # id is only retired when it belongs to the named project (a stray or pasted id cannot retire
+        # another project's standard). Retiring keeps the row + audit trail (active=false) and the audit
+        # records WHO retired it. A line that starts like a retire but does not parse gets the grammar
+        # back — it never falls through to the PO model.
+        _RETIRE_GRAMMAR = ("`retire check <project> ac-<id> [ac-<id> …]` — e.g. "
+                           "`retire check gym ac-0123456789ab`")
+        if re.match(r"^\s*retire\s+(?:acceptance\s+)?checks?\b", message.strip(), re.I):
+            m_rc = re.match(r"^\s*retire\s+(?:acceptance\s+)?checks?\s+(?:for\s+|in\s+)?"
+                            r"(?P<proj>[A-Za-z0-9][\w.-]*)\s*:?\s+(?P<ids>ac-[0-9a-fA-F]{12}"
+                            r"(?:[\s,]+ac-[0-9a-fA-F]{12})*)\s*\.?\s*$", message.strip(), re.I)
+            p = await self.projects.resolve(m_rc.group("proj")) if m_rc else None
+            if not m_rc or p is None or m_rc.group("proj").lower().startswith("ac-"):
+                why = (f"I don't know a project `{m_rc.group('proj')}`. "
+                       if m_rc and p is None and not m_rc.group("proj").lower().startswith("ac-")
+                       else "")
+                await self.chat.post(channel_id, f"{why}To retire acceptance checks say "
+                                     f"{_RETIRE_GRAMMAR}.", thread_id=thread_id)
+                return
+            ids = list(dict.fromkeys(re.findall(r"ac-[0-9a-f]{12}", m_rc.group("ids").lower())))
+            rows = {c["id"]: c for c in
+                    await self.projects.list_acceptance_checks(p["slug"], active_only=False)}
+            retired, already, foreign = [], [], []
+            for i in ids:
+                if i not in rows:
+                    foreign.append(i)
+                elif not rows[i]["active"]:
+                    already.append(i)
+                elif await self.projects.set_acceptance_check_active(
+                        i, False, actor=user_id or "operator"):
+                    retired.append(i)
+            parts = [f"📐 **`{p['slug']}`**: retired {len(retired)} acceptance check(s)"
+                     + (": " + ", ".join(f"`{i}`" for i in retired) if retired else "") + "."]
+            if already:
+                parts.append("Already retired (no change): " + ", ".join(f"`{i}`" for i in already) + ".")
+            if foreign:
+                parts.append(f"Not a check of `{p['slug']}` (unknown, or another project's — not "
+                             f"retired): " + ", ".join(f"`{i}`" for i in foreign) + ".")
+            if retired:
+                parts.append("They no longer gate deliveries; the record and its audit trail are kept.")
+            await self.chat.post(channel_id, " ".join(parts), thread_id=thread_id)
             return
         # EXPLICIT NEW-EFFORT idiom — deterministic, immune to the board/hygiene classifiers
         # (gym finding ⑤, 2026-07-15: "start effort gym-003-…: <goal>" whose goal text mentioned
@@ -8268,7 +8320,7 @@ class Orchestrator:
         red came from the corpus — the burn-down re-runs exactly these each round and is green only
         when they pass, not merely when the build does."""
         if checks:
-            self._burndown_corpus[effort_id] = list(checks)
+            self._burndown_corpus_pending[effort_id] = list(checks)
         self._spawn(self._record_constraint(effort_id, failing_log, origin=origin or "burn-down"))
         if effort_id in self._delegating:
             self._burndown_after[effort_id] = failing_log
@@ -8600,7 +8652,8 @@ class Orchestrator:
         lines = "\n".join(f"- `{c['id']}` ({(c.get('origin_note') or '')[:80]}): `{c['body'][:120]}`\n"
                           f"    → {((t or '').strip().splitlines() or ['(no output)'])[-1][:200]}"
                           for c, t in broken)
-        retire = f"retire check {' '.join(ids)}"
+        proj = await self._effort_project(effort_id) or "<project>"
+        retire = f"retire check {proj} {' '.join(ids)}"
         msg = (f"🧰 **{effort_id}: the check itself is broken** — {len(ids)} durable acceptance "
                f"check(s) fail because the SHELL cannot run them (a parse error or a missing "
                f"command), not because of the delivered code:\n{lines}\n"
@@ -8628,9 +8681,14 @@ class Orchestrator:
             return
         # ABORTED IS FINAL — a burn-down must never start on (or resurrect) an archived effort.
         if await self._is_aborted(effort_id):
+            self._burndown_corpus_pending.pop(effort_id, None)
             await self.audit.log("aborted_dispatch_suppressed", effort_id=effort_id,
                                  payload={"loop": "burndown"})
             return
+        # ao-checks — this loop OWNS the corpus checks queued for it (cleared in the finally).
+        _pend = self._burndown_corpus_pending.pop(effort_id, None)
+        if _pend:
+            self._burndown_corpus[effort_id] = _pend
         self._delegating.add(effort_id)
         # Bound BEFORE the try: the finally drains a queued drain iteration and must not itself
         # raise NameError on the early-return paths below.
@@ -8822,6 +8880,9 @@ class Orchestrator:
         finally:
             self._delegating.discard(effort_id)
             self._burndown_researched.discard(effort_id)   # a fresh burn-down may research again
+            # ao-checks round 2 — every exit (green, broken-check escalation, stall, cap, archive,
+            # missing thread) drops this loop's corpus; a re-queued corpus burn-down brings its own.
+            self._burndown_corpus.pop(effort_id, None)
             # a red queued DURING this loop (e.g. the finish path's D2 disagreed) re-enters —
             # bounded: every loop's stall detector elevates after 2 rounds without progress
             queued = self._burndown_after.pop(effort_id, None)
@@ -10074,7 +10135,7 @@ class Orchestrator:
         if not fails and broken_ids:
             return await _withhold_for_broken()
         if not fails:
-            self._burndown_corpus.pop(effort_id, None)
+            self._burndown_corpus_pending.pop(effort_id, None)
             await self.audit.log("acceptance_corpus_passed", effort_id=effort_id,
                                  payload={"total": total})
             return (f"\n📐 **Acceptance corpus passed** — {total} durable check(s) from prior "
@@ -10112,7 +10173,7 @@ class Orchestrator:
             if not fails and broken_ids:
                 return await _withhold_for_broken()
             if not fails:
-                self._burndown_corpus.pop(effort_id, None)
+                self._burndown_corpus_pending.pop(effort_id, None)
                 await self.audit.log("acceptance_corpus_passed", effort_id=effort_id,
                                      payload={"total": total, "after_fix": True})
                 return (f"\n📐 **Acceptance corpus passed after one fix round** — {total} "
@@ -11349,7 +11410,8 @@ class Orchestrator:
                 f"is one observation it had established and written down before stopping.\n\n"
                 + "\n".join(lines))
 
-    async def _read_lens_findings_file(self, effort_id: str, *, round_no: int) -> str:
+    async def _read_lens_findings_file(self, effort_id: str, *, round_no: int,
+                                       session_id: str | None = None) -> str:
         """ao-checks — the lens findings FILE, read whole and then removed: the `FINDING:` and `REPRO:`
         lines exactly as the lens wrote them. A COMPLETE source (the shell already resolved the echo's
         quoting), unlike the worker's command stream, which is display-truncated. '' when the file is
@@ -11358,7 +11420,7 @@ class Orchestrator:
                f"rm -f {_LENS_FINDINGS_PATH} 2>/dev/null; echo SALVAGE-DONE")
         try:
             _exit, out, _timed = await self.router.exec_check(
-                effort_id, command=cmd, session_id=f"{effort_id}~salvage{round_no}",
+                effort_id, command=cmd, session_id=session_id or f"{effort_id}~salvage{round_no}",
                 repo=None, repo_token=None, timeout=120)
         except Exception as exc:  # noqa: BLE001 — an unreadable file leaves the answer text
             log.debug("lens findings file read failed for %s: %s", effort_id, exc)
@@ -11366,14 +11428,15 @@ class Orchestrator:
         return "\n".join(ln.strip() for ln in (out or "").splitlines()
                          if ln.strip().startswith(("FINDING:", "REPRO:")))
 
-    async def _clear_lens_findings(self, effort_id: str, *, round_no: int) -> None:
+    async def _clear_lens_findings(self, effort_id: str, *, round_no: int,
+                                   session_id: str | None = None) -> None:
         """Drop any findings file left over before a lens runs. Without this, a lens that finishes
         cleanly leaves its file behind and the NEXT lens's salvage would pick it up — attributing
         one lens's observations to another, which is worse than losing them."""
         try:
             await self.router.exec_check(
                 effort_id, command=f"rm -f {_LENS_FINDINGS_PATH} 2>/dev/null; echo CLEARED",
-                session_id=f"{effort_id}~salvage{round_no}",
+                session_id=session_id or f"{effort_id}~salvage{round_no}",
                 repo=None, repo_token=None, timeout=120)
         except Exception as exc:  # noqa: BLE001
             log.debug("lens findings clear failed for %s: %s", effort_id, exc)
@@ -11643,7 +11706,13 @@ class Orchestrator:
         proj = await self._effort_project(effort_id) or ""
         token = await self._project_token(effort_id)
         self._verify_seq += 1
-        await self._clear_lens_findings(effort_id, round_no=0)
+        # WORKER AFFINITY (ao-checks round 2): the findings file lives in the container of the worker
+        # that ran the lens. Clearing it under the LENS session binds that session to a worker; the
+        # lens wake (same session) is then routed back to it by the scheduler's session affinity, and
+        # so is the read after the turn. A separate `~salvage` session could read the OTHER worker's
+        # (empty) file and silently lose every complete REPRO.
+        lens_session = f"{effort_id}~modeb{self._verify_seq}"
+        await self._clear_lens_findings(effort_id, round_no=0, session_id=lens_session)
         instr = (
             "ADVERSARIAL REVIEW — you did NOT build this and you will CHANGE NOTHING (read-only; no "
             "edits, no git writes). Your ONE job is to BREAK this product: find a bug, an unhandled edge "
@@ -11663,7 +11732,7 @@ class Orchestrator:
         try:
             result = await self.router.wake(
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
-                session_id=f"{effort_id}~modeb{self._verify_seq}", instruction=instr,
+                session_id=lens_session, instruction=instr,
                 repo=repo, repo_token=token, withhold_goal=True)
         except Exception as exc:  # noqa: BLE001 — Mode B never blocks the effort
             log.debug("mode-b lens failed for %s: %s", effort_id, exc)
@@ -11675,7 +11744,8 @@ class Orchestrator:
         # worker's activity record, which little-coder cut at 240 chars, so a long `echo 'REPRO: ...'`
         # arrived cut mid-token (`python3 -c "import os,todo; os.e`) and was banked as a permanent check
         # that failed with a shell syntax error on every later delivery (14 of 15 gym checks).
-        file_txt = await self._read_lens_findings_file(effort_id, round_no=0)
+        file_txt = await self._read_lens_findings_file(effort_id, round_no=0,
+                                                        session_id=lens_session)
         pairs: list[tuple[str, str]] = []
         for src in (file_txt, text):
             for pr in self._mode_b_pairs(src):
@@ -11700,12 +11770,18 @@ class Orchestrator:
                 _pexit, _pout, _ptimed = await self.router.exec_check(
                     effort_id, command=f"sh -n -c {shlex.quote(repro)}",
                     session_id=f"{effort_id}~modebrepro", repo=None, repo_token=None, timeout=60)
-            except Exception:  # noqa: BLE001 — cannot confirm it parses ⇒ fail closed, bank nothing
-                _pexit, _pout, _ptimed = None, "", False
+            except Exception as exc:  # noqa: BLE001 — cannot confirm it parses ⇒ fail closed
+                # its OWN reason: no capacity / a busy worker is not a syntax verdict on the REPRO
+                await self.audit.log("mode_b_finding_unreproduced", effort_id=effort_id,
+                                     payload={"desc": desc[:200], "exit": None, "timed_out": False,
+                                              "reason": "parse_check_unavailable",
+                                              "detail": str(exc)[:200]})
+                continue
             if _ptimed or _pexit != 0:
                 await self.audit.log("mode_b_finding_unreproduced", effort_id=effort_id,
                                      payload={"desc": desc[:200], "exit": _pexit, "timed_out": _ptimed,
-                                              "reason": "shell_syntax", "detail": (_pout or "")[:200]})
+                                              "reason": "parse_check_timed_out" if _ptimed
+                                              else "shell_syntax", "detail": (_pout or "")[:200]})
                 continue
             # REPRODUCIBILITY GATE (§6) — keep only a REPRO that FAILS on the current code: a real break,
             # and a check meaningful enough to red-gate future deliveries. Runs it on the delivered branch.
@@ -11722,9 +11798,11 @@ class Orchestrator:
                                      payload={"desc": desc[:200], "exit": _exit, "timed_out": _timed,
                                               "reason": "timed_out" if _timed else "passed"})
                 continue
-            # A reproduction must FAIL FOR THE DEFECT'S REASON (ao-checks). Exit 2/126/127 or the shell's
-            # own syntax / command-not-found message means the command never exercised the product -
-            # gym-002's checks "reproduced" exactly this way. Only a failure the program produced counts.
+            # A reproduction must FAIL FOR THE DEFECT'S REASON (ao-checks). Exit 126/127, the shell's own
+            # syntax / command-not-found message (at any exit, incl. 2), or a compile error of the
+            # REPRO's inline interpreter code means the command never exercised the product - gym-002's
+            # checks "reproduced" exactly this way. A plain exit 2 (argparse, pytest collection, make)
+            # is the program's own failure and counts.
             if _exit in _SHELL_BROKEN_EXITS or _shell_broken(_out or ""):
                 await self.audit.log("mode_b_finding_unreproduced", effort_id=effort_id,
                                      payload={"desc": desc[:200], "exit": _exit, "timed_out": False,

@@ -325,7 +325,7 @@ async def test_t4_parse_error_check_escalates_instead_of_dispatching(db_url, tmp
         assert "acceptance_check_broken" in kinds
         msgs = "\n".join(p["message"] for p in orch.chat.posted)
         assert "check itself is broken" in msgs and cid in msgs
-        assert "set_acceptance_check_active" in msgs                # the one-line way to retire it
+        assert f"retire check gym {cid}" in msgs                    # the one-line way to retire it
         assert f"merge-{eid}" not in orch._pending_merge           # a broken check is not a pass
         assert [c["id"] for c in await orch.projects.list_acceptance_checks("gym")] == [cid]
     finally:
@@ -380,7 +380,7 @@ async def test_t5_fix_tasks_carry_each_checks_error_output(db_url, tmp_path):
 
 
 async def test_t4_operator_retires_broken_checks_in_one_line(db_url, tmp_path):
-    """The one-line way the escalation names: `retire check <id> ...` - deterministic, operator-issued,
+    """The one-line way the escalation names: `retire check <project> <id> ...` - deterministic, operator-issued,
     dispatches no work, keeps the row (active=false) and its audit trail."""
     orch, db, eid, chan, root = await _corpus_orch(db_url, tmp_path)
     try:
@@ -388,11 +388,11 @@ async def test_t4_operator_retires_broken_checks_in_one_line(db_url, tmp_path):
         b = await orch.projects.add_acceptance_check("gym", "mode_b: broken 2", BROKEN + "x",
                                                      created_by="mode_b")
         keep = await orch.projects.add_acceptance_check("gym", "operator: due-before", GENUINE)
-        await orch.nl_intake(f"retire check {a} {b}", channel_id="c1", user_id="operator-api")
+        await orch.nl_intake(f"retire check gym {a} {b}", channel_id="c1", user_id="operator-api")
         assert [c["id"] for c in await orch.projects.list_acceptance_checks("gym")] == [keep]
         assert len(await orch.projects.list_acceptance_checks("gym", active_only=False)) == 3
         assert orch.harness.wakes == []
-        assert any("Retired 2 acceptance check" in p["message"] for p in orch.chat.posted)
+        assert any("retired 2 acceptance check" in p["message"] for p in orch.chat.posted)
     finally:
         await _shutdown(orch, db)
 
@@ -420,5 +420,300 @@ async def test_t3_burndown_stops_rerunning_a_check_the_operator_retired(db_url, 
         assert await orch._rerun_corpus_checks(eid, [check], repo="https://github.com/demoowner/gym")
         await orch.projects.set_acceptance_check_active(cid, False)
         assert await orch._rerun_corpus_checks(eid, [check], repo="https://github.com/demoowner/gym") == []
+    finally:
+        await _shutdown(orch, db)
+
+
+# ══ Round 2 (tester attempt 1) ══════════════════════════════════════════════════════════════════════
+# Fixture: the REAL 15 `gym` acceptance-check rows (bodies read read-only from the live bridge DB by the
+# tester, 2026-10-07) with the REAL dash 0.5.12 `sh -n` and run results (Ubuntu WSL, clean PATH, no product
+# checkout). 14 are the retired broken checks; ac-e01b73c72ed7 (`python3 todo.py reopen --help`) is the
+# one genuine check.
+import json  # noqa: E402
+
+GYM = json.loads((Path(__file__).parent / "fixtures" / "ao_checks_gym_checks.json").read_text("utf-8"))
+GYM_BROKEN = {k: v for k, v in GYM.items() if not v["active"]}
+INLINE_ERR = GYM["ac-7b96f8711316"]["run_out"]      # File "<string>", line 1 ... SyntaxError, no header
+
+
+def test_r2_fixture_is_the_real_corpus():
+    assert len(GYM_BROKEN) == 14 and GYM["ac-e01b73c72ed7"]["active"]
+
+
+@pytest.mark.parametrize("cid", sorted(GYM_BROKEN))
+async def test_r2_t9_no_real_broken_gym_body_is_banked_by_mode_b(db_url, cid):
+    """Each of the 14 real broken bodies, offered to Mode B as a complete REPRO with dash's real parse and
+    run result: none is banked (ac-7b96f8711316 parses and exits 1 with an inline SyntaxError)."""
+    fx = GYM_BROKEN[cid]
+    orch, db, eid, chan, root = await _mode_b_orch(db_url)
+    try:
+        orch.harness.output_queue.append(f"{FINDING}\nREPRO: {fx['body']}")
+        _stub_checks(orch.harness, _mode_b_rules(
+            "", (fx["run_exit"], fx["run_out"], False),
+            parse_result=(fx["parse_exit"], fx["parse_out"], False)))
+        r = await orch._mode_b_phase(eid, chan, root, REPO, _delivery())
+        assert r["checks_added"] == 0, (cid, fx["run_exit"], fx["run_out"][-120:])
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_r2_t9_all_14_real_broken_gym_checks_escalate_none_dispatched(db_url, tmp_path):
+    """All 14 real broken checks active in one corpus, each failing with dash's real output: all 14 are
+    escalated as broken, none reaches a fix prompt, no burn-down starts."""
+    orch, db, eid, chan, root = await _corpus_orch(db_url, tmp_path)
+    try:
+        ids = {}
+        for cid, fx in GYM_BROKEN.items():
+            ids[await orch.projects.add_acceptance_check("gym", "mode_b: x", fx["body"],
+                                                         created_by="mode_b")] = cid
+        # longest body first, so a body that contains another as a substring answers with its own result
+        _stub_checks(orch.harness, [(fx["body"], (fx["run_exit"], fx["run_out"], False))
+                                    for fx in sorted(GYM_BROKEN.values(), key=lambda f: -len(f["body"]))])
+        orch.harness.output_queue = ["did the work", "pushed"]
+        await orch.delegate(eid, chan, root, "due dates", plan_steps=["work"])
+        await _drain(orch)
+        ev = await orch.audit.replay(eid)
+        broken = set()
+        for e in ev:
+            if e["kind"] == "acceptance_check_broken":
+                broken |= set(e["payload"]["ids"])
+        fix = [w["prompt"] for w in orch.harness.wakes if "DURABLE ACCEPTANCE CHECKS FAILED" in w["prompt"]]
+        assert broken == set(ids)
+        assert [i for i in ids if any(i in p for p in fix)] == []
+        assert "burndown_started" not in [e["kind"] for e in ev]
+    finally:
+        await _shutdown(orch, db)
+
+
+@pytest.mark.parametrize("out", [
+    "Traceback (most recent call last):\n  File \"/workspace/todo.py\", line 12, in parse_due\n"
+    "    return eval(expr)\n  File \"<string>\", line 1\n    2026-10-\n            ^\n"
+    "SyntaxError: invalid syntax",                                      # product eval() error: has header
+    "  File \"/workspace/todo.py\", line 3\n    def f(:\nSyntaxError: invalid syntax",  # product source
+])
+def test_r2_t9_product_syntax_errors_stay_genuine(out):
+    from app.orchestrator import _shell_broken
+    assert not _shell_broken(out)
+
+
+def test_r2_t9_inline_compile_error_is_broken():
+    from app.orchestrator import _shell_broken
+    assert _shell_broken(INLINE_ERR)
+    assert _shell_broken('  File "<stdin>", line 4\n    x = (\nIndentationError: unexpected indent')
+
+
+@pytest.mark.parametrize("out", [
+    "usage: todo.py [-h] {add,list,done}\ntodo.py: error: argument cmd: invalid choice: 'reopen'",
+    "ERROR collecting tests/test_todo.py\nImportError: cannot import name 'due_before'\n"
+    "Interrupted: 1 error during collection",
+    "make: *** [Makefile:3: check] Error 1",
+])
+async def test_r2_t10_genuine_exit_2_is_banked(db_url, out):
+    """Exit 2 from the program (argparse usage error - the class of the only genuine gym check -, pytest
+    collection error, make) is a genuine reproduction and IS banked."""
+    orch, db, eid, chan, root = await _mode_b_orch(db_url)
+    try:
+        orch.harness.output_queue.append(f"{FINDING}\nREPRO: python3 todo.py reopen --help")
+        _stub_checks(orch.harness, _mode_b_rules("", (2, out, False)))
+        r = await orch._mode_b_phase(eid, chan, root, REPO, _delivery())
+        assert r["checks_added"] == 1
+    finally:
+        await _shutdown(orch, db)
+
+
+@pytest.mark.parametrize("exit_code,out", [
+    (2, "sh: 1: Syntax error: \"(\" unexpected"),
+    (127, "python3: some text without a shell prefix"),
+    (126, ""),
+])
+async def test_r2_t10_shell_exit_2_and_126_127_still_refused(db_url, exit_code, out):
+    orch, db, eid, chan, root = await _mode_b_orch(db_url)
+    try:
+        orch.harness.output_queue.append(f"{FINDING}\nREPRO: python3 todo.py reopen --help")
+        _stub_checks(orch.harness, _mode_b_rules("", (exit_code, out, False)))
+        r = await orch._mode_b_phase(eid, chan, root, REPO, _delivery())
+        assert r["checks_added"] == 0
+    finally:
+        await _shutdown(orch, db)
+
+
+async def _toggled(orch):
+    from sqlalchemy import select
+
+    from app.models import Event
+    async with orch.db.session_factory() as s:
+        rows = (await s.execute(select(Event).where(Event.kind == "acceptance_check_toggled"))
+                ).scalars().all()
+    return [(r.actor, r.payload) for r in rows]
+
+
+async def test_r2_t11_retire_records_actor_is_project_scoped_and_idempotent(db_url, tmp_path):
+    orch, db, eid, chan, root = await _corpus_orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("other", "https://github.com/demoowner/other")
+        foreign = await orch.projects.add_acceptance_check("other", "op", "true")
+        mine = await orch.projects.add_acceptance_check("gym", "op", BROKEN)
+        await orch.nl_intake(f"retire check gym {mine} {foreign}", channel_id="c1", user_id="op-user")
+        msg = orch.chat.posted[-1]["message"]
+        assert "retired 1 acceptance check" in msg and mine in msg
+        assert foreign in msg and "Not a check of `gym`" in msg
+        assert [c["id"] for c in await orch.projects.list_acceptance_checks("other")] == [foreign]
+        assert await _toggled(orch) == [("op-user", {"id": mine, "active": False})]   # WHO retired it
+        await orch.nl_intake(f"retire check gym {mine}", channel_id="c1", user_id="op-user")
+        msg = orch.chat.posted[-1]["message"]
+        assert "retired 0" in msg and "Already retired" in msg and mine in msg
+        assert len(await _toggled(orch)) == 1                                       # no second toggle
+        # the foreign id retires only when ITS project is named
+        await orch.nl_intake(f"retire check other {foreign}", channel_id="c1", user_id="op-user")
+        assert await orch.projects.list_acceptance_checks("other") == []
+        assert orch.harness.wakes == []
+    finally:
+        await _shutdown(orch, db)
+
+
+@pytest.mark.parametrize("line", [
+    "retire check ac-0123456789ab",            # no project
+    "retire check gym",                        # no id
+    "retire check gym ac-12",                  # malformed id
+    "retire checks nope ac-0123456789ab",      # unknown project
+])
+async def test_r2_t11_malformed_retire_answers_with_the_grammar(db_url, tmp_path, line):
+    orch, db, eid, chan, root = await _corpus_orch(db_url, tmp_path)
+    try:
+        cid = await orch.projects.add_acceptance_check("gym", "op", BROKEN)
+        n_posts, n_wakes = len(orch.chat.posted), len(orch.harness.wakes)
+        await orch.nl_intake(line, channel_id="c1", user_id="op-user")
+        await _drain(orch)
+        new = [p["message"] for p in orch.chat.posted[n_posts:]]
+        assert len(new) == 1 and "retire check <project> ac-" in new[0], new
+        assert len(orch.harness.wakes) == n_wakes                     # no fall-through to the PO model
+        assert [c["id"] for c in await orch.projects.list_acceptance_checks("gym")] == [cid]
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_r2_t12_corpus_cleared_after_broken_escalation_in_burndown(db_url, tmp_path):
+    """The check turns broken mid-burn-down: escalated, and the loop's corpus is cleared on that return."""
+    orch, db, eid, chan, root = await _corpus_orch(db_url, tmp_path)
+    try:
+        await orch.projects.add_acceptance_check("gym", "operator: due-before", GENUINE)
+        n = {"n": 0}
+
+        async def run_check(base_url, command, *, cwd=None, timeout=600):
+            orch.harness.checks.append({"command": command})
+            if GENUINE in command:
+                n["n"] += 1
+                return ((2, "sh: 1: Syntax error: Unterminated quoted string", False) if n["n"] >= 3
+                        else (1, GENUINE_ERR, False))
+            return (0, "", False)
+        orch.harness.run_check = run_check
+        orch.harness.output_queue = ["did the work", "pushed"]
+        await orch.delegate(eid, chan, root, "due dates", plan_steps=["work"])
+        await _drain(orch)
+        kinds = [e["kind"] for e in await orch.audit.replay(eid)]
+        assert "burndown_started" in kinds and "acceptance_check_broken" in kinds
+        assert not orch._burndown_corpus.get(eid)
+        assert not getattr(orch, "_burndown_corpus_pending", {}).get(eid)
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_r2_t12_corpus_cleared_after_stall_and_after_archive(db_url, tmp_path):
+    orch, db, eid, chan, root = await _corpus_orch(db_url, tmp_path)
+    try:
+        await orch.projects.add_acceptance_check("gym", "operator: due-before", GENUINE)
+        _stub_checks(orch.harness, [(GENUINE, (1, GENUINE_ERR, False))])
+        orch.harness.output_queue = ["did the work", "pushed"]
+        await orch.delegate(eid, chan, root, "due dates", plan_steps=["work"])
+        await _drain(orch)
+        kinds = [e["kind"] for e in await orch.audit.replay(eid)]
+        assert "burndown_started" in kinds and "burndown_green" not in kinds   # stalled / capped out
+        assert not orch._burndown_corpus.get(eid)
+        # archive path: a corpus queued for an archived effort is dropped, never run
+        check = (await orch.projects.list_acceptance_checks("gym"))[0]
+
+        async def aborted(_eid):
+            return True
+        orch._is_aborted = aborted
+        orch._queue_burndown(eid, "acceptance corpus failing:\n- x", checks=[(check, GENUINE_ERR)])
+        await _drain(orch)
+        assert not orch._burndown_corpus.get(eid)
+        assert not getattr(orch, "_burndown_corpus_pending", {}).get(eid)
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_r2_t13_parse_check_exception_has_its_own_reason(db_url):
+    orch, db, eid, chan, root = await _mode_b_orch(db_url)
+    try:
+        orch.harness.output_queue.append(f"{FINDING}\nREPRO: {FULL_REPRO}")
+        rules = _mode_b_rules("", (1, "AssertionError", False))
+
+        async def run_check(base_url, command, *, cwd=None, timeout=600):
+            orch.harness.checks.append({"command": command})
+            if "sh -n -c" in command:
+                raise RuntimeError("409 busy")
+            for sub, res in rules:
+                if sub in command:
+                    return res
+            return (0, "", False)
+        orch.harness.run_check = run_check
+        await orch._mode_b_phase(eid, chan, root, REPO, _delivery())
+        ev = [e for e in await orch.audit.replay(eid) if e["kind"] == "mode_b_finding_unreproduced"]
+        assert ev and ev[-1]["payload"]["reason"] == "parse_check_unavailable"
+        assert await orch.projects.list_acceptance_checks("gym") == []
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_r2_t14_findings_file_is_read_from_the_lens_worker(db_url):
+    """Worker affinity: with two workers, the findings-file clear and read use the LENS session, so they
+    land on the worker that ran the lens and its complete REPRO is recovered."""
+    settings = Settings(
+        _env_file=None, chat_adapter="fake",
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"), database_url=db_url, project_survey_enabled=False,
+        review_mode="off", plan_approval="off", mode_b=True,
+        worker_instance_urls="http://w1:8090,http://w2:8090", max_concurrent_workers=2)
+    db = Database(db_url)
+    orch = Orchestrator(settings, db, FakeChatAdapter(), model_client=FakeModelClient(),
+                        harness=FakeHarness())
+    await orch.setup()
+    try:
+        await orch.projects.add("gym", REPO)
+        eid, chan, root = await orch.router.open_effort("feat", project="gym")
+        sessions: list[tuple[str, str]] = []
+        orig = orch.router.exec_check
+
+        async def exec_check(effort_id, *, command, session_id, **kw):
+            sessions.append((command, session_id))
+            return await orig(effort_id, command=command, session_id=session_id, **kw)
+        orch.router.exec_check = exec_check
+        lens_url: dict[str, str] = {}
+        orig_wake = orch.harness.wake
+
+        async def wake(base_url, session_id, prompt, **kw):
+            lens_url["url"] = base_url
+            return await orig_wake(base_url, session_id, prompt, **kw)
+        orch.harness.wake = wake
+
+        async def run_check(base_url, command, *, cwd=None, timeout=600):
+            orch.harness.checks.append({"base_url": base_url, "command": command})
+            if "cat /tmp/lens-findings.txt" in command:      # only the lens worker has the file
+                txt = f"{FINDING}\nREPRO: {FULL_REPRO}" if base_url == lens_url.get("url") else ""
+                return (0, f"{txt}\nSALVAGE-DONE", False)
+            if "git checkout -f agent/feat" in command:
+                return (1, "AssertionError: due-before kept a later task", False)
+            return (0, "", False)
+        orch.harness.run_check = run_check
+        orch.harness.output_queue.append("done - see the findings file")
+        r = await orch._mode_b_phase(eid, chan, root, REPO, _delivery())
+        lens_session = orch.harness.wakes[-1]["session_id"]
+        read = [sid for cmd, sid in sessions if "cat /tmp/lens-findings.txt" in cmd]
+        clear = [sid for cmd, sid in sessions if "echo CLEARED" in cmd]
+        assert read == [lens_session] and clear == [lens_session]
+        reads = [c["base_url"] for c in orch.harness.checks if "cat /tmp/lens" in c["command"]]
+        assert reads == [lens_url["url"]]
+        assert r["checks_added"] == 1
     finally:
         await _shutdown(orch, db)
