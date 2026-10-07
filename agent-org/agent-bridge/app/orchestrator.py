@@ -2334,8 +2334,12 @@ class Orchestrator:
                 url = w["base_url"]
                 prev = self._worker_progress.get(url)
                 try:
+                    # the stored offset is only valid for the task it was read from: pass the task id so
+                    # a NEW task is probed from 0 (ao-wd-offset: it used to inherit the old task's
+                    # offset, look frozen, and be cancelled as "silent")
                     prog = await self.harness.running_task_progress(
-                        url, since_offset=(prev[1] if prev else 0))
+                        url, since_offset=(prev[1] if prev else 0),
+                        since_task_id=(prev[0] if prev else None))
                 except Exception:  # noqa: BLE001 — a probe failure must not stall the sweep
                     prog = None
                 if prog is None:                              # idle daemon (no running task)
