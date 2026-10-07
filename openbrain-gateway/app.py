@@ -132,6 +132,9 @@ def _force_write_extra(args: dict) -> dict:
     # per-tool constant, exactly as for a call that never sent one.
     md.pop("source", None)
     md["origin"] = WRITE_ORIGIN
+    # The `share` stamp is also what confines openbrain-mcp's source DEDUP to rows this
+    # door can read (eh-ingest R1: OB1 ingest-egress.ts dedupShareScope). Without it a
+    # cloud ingest would dedup against - and reveal the id of - a private row.
     md[WRITE_STAMP_FIELD] = WRITE_STAMP_VALUE
     args["metadata_extra"] = md
     return args
