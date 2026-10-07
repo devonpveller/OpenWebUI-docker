@@ -1784,7 +1784,7 @@ function Initialize-LrReviewing($fix, [string]$id, [string]$anchor, [switch]$Wit
     } finally { Pop-Location }
     return @{ merge = $m; base = $b }
 }
-function Write-LrRecord([string]$store, [string]$id, [string]$range, [int]$iterations, [string]$red = "attempt 1 failed: Case 1 fails on a cold cache") {
+function Write-LrRecord([string]$store, [string]$id, [string]$range, [int]$iterations, [string]$red = "1) tester-fail by qtester: Case 1 fails on a cold cache") {
     $rec = [ordered]@{
         schema_version = 1; fidelity = "iterative"; producer = "harness"
         source_ref = [ordered]@{ queue_item_id = $id; anchor_id = $id; merge_range = $range }
@@ -1908,7 +1908,7 @@ Write-LrRecord $ls9 "qlr9b" ($mg9.base + ".." + $mg9.merge) 0 "a fresh start"
 $r = Invoke-Q $lf9 @("-Merged", "-Id", "qlr9b", "-By", "qrev", "-Sha", $mg9.merge, "-FitsCodebase")
 Check "LR: a record that counts only the successor's own returns is REFUSED predecessor-returns" `
     (($r.code -eq 1) -and ((Get-QItem $lf9 "qlr9b").state -eq "reviewing") -and ($r.out -match "predecessor-returns") -and ($r.out -match "return-reason-mismatch")) ("exit=" + $r.code)
-Write-LrRecord $ls9 "qlr9b" ($mg9.base + ".." + $mg9.merge) 2 "qlr9: Case 1 WORK.md was empty; then rejected: the note belongs in the module README"
+Write-LrRecord $ls9 "qlr9b" ($mg9.base + ".." + $mg9.merge) 2 "1) tester-fail on qlr9 by qtester: Case 1 WORK.md was empty 2) reviewer-reject on qlr9 by qrev: the note belongs in the module README"
 $r = Invoke-Q $lf9 @("-Merged", "-Id", "qlr9b", "-By", "qrev", "-Sha", $mg9.merge, "-FitsCodebase")
 Check "LR: the chain-counted record with the queue's reasons is ACCEPTED (exit 0, merged)" `
     (($r.code -eq 0) -and ((Get-QItem $lf9 "qlr9b").state -eq "merged") -and ($r.out -match "ACCEPTED")) ("exit=" + $r.code + " | " + (First-Line $r.out))

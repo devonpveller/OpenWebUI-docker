@@ -566,7 +566,7 @@ $lrRefusal = Invoke-QueueChild @("-Merged", "-Id", "drill-a", "-By", "wt-reviewe
 Check "-Merged refuses drill-a while its learning record is missing (reason: record-missing)" `
     (((Get-QueueState "drill-a") -eq "reviewing") -and ($lrRefusal.code -eq 1) -and ($lrRefusal.out -match "record-missing") -and ($lrRefusal.out -notmatch "INDETERMINATE")) `
     ("exit=" + $lrRefusal.code)
-Write-DrillLearningRecord "drill-a" $mergeSha "attempt 1 failed - case 2: the note does not state the unit"
+Write-DrillLearningRecord "drill-a" $mergeSha "1) tester-fail by wt-tester: case 2: the note does not state the unit"
 & $queue -Merged -Id drill-a -By wt-reviewer -Sha $mergeSha -FitsCodebase | Out-Null
 Check "drill-a merged by the reviewer" ((Get-QueueState "drill-a") -eq "merged")
 Check "the verdict recorded is fits_codebase, not the retired fits_anchor" (
@@ -626,7 +626,7 @@ $lrRefusal = Invoke-QueueChild @("-Merged", "-Id", "drill-b", "-By", "wt-reviewe
 Check "-Merged refuses drill-b while its learning record is missing (reason: record-missing)" `
     (((Get-QueueState "drill-b") -eq "reviewing") -and ($lrRefusal.code -eq 1) -and ($lrRefusal.out -match "record-missing") -and ($lrRefusal.out -notmatch "INDETERMINATE")) `
     ("exit=" + $lrRefusal.code)
-Write-DrillLearningRecord "drill-b" $mergeB "stale pass, returned to test: rebase onto A's merge changed the file; the pass no longer describes it"
+Write-DrillLearningRecord "drill-b" $mergeB "1) reviewer-requeue by wt-reviewer: rebase onto A's merge changed the file; the pass no longer describes it"
 & $queue -Merged -Id drill-b -By wt-reviewer -Sha $mergeB -FitsCodebase | Out-Null
 Check "drill-b merged after re-test" ((Get-QueueState "drill-b") -eq "merged")
 

@@ -553,8 +553,9 @@ def read_record(path: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------- tokens
-ABS_START_RE = re.compile(r"^[A-Za-z]:[\\/]")
-ABS_MAX_WORDS = 12
+ABS_START_RE = re.compile(r"(?<![^\s(\[{<])[A-Za-z]:[\\/]")
+QUOTED_ABS_RE = re.compile(r"""([`"'])([A-Za-z]:[\\/][^`"'\r\n]*?)\1""")
+PATH_SEPS = "\\/"
 
 
 def _clean_path(cand: str) -> str:
@@ -562,43 +563,102 @@ def _clean_path(cand: str) -> str:
     return LINE_SUFFIX_RE.sub("", c.split("#", 1)[0]).replace("\\", "/")
 
 
-def _absolute_spans(text: str) -> Tuple[List[str], List[str]]:
-    """(the remaining whitespace tokens, absolute drive paths taken out whole).
+def _isdir(text: str) -> bool:
+    if not text or text[-1].isspace():
+        return False
+    try:
+        return Path(text).is_dir()
+    except (OSError, ValueError):
+        return False
 
-    vwm-p1b round 2 (F3): the repo and the store may live under a directory whose name has a space, so splitting on
-    whitespace first cut every absolute path in two. A token that starts a drive path
-    (`C:\\` or `C:/`) is extended over the following words: the LONGEST extension that exists
-    on disk is the path; when none exists, the SHORTEST one whose last segment carries a file
-    extension (it is then judged missing/outside); otherwise the token stays as it was.
+
+def _classify_abs(span: str) -> Optional[str]:
+    """An absolute span is a PATH token when it exists or its last segment has a file
+    extension (the rule every other path token follows); otherwise it is prose."""
+    c = _clean_path(span)
+    if not c:
+        return None
+    try:
+        if Path(c).exists():
+            return c
+    except (OSError, ValueError):
+        pass
+    return c if PATH_EXT_RE.search(c.rsplit("/", 1)[-1]) else None
+
+
+def _absolute_spans(text: str) -> Tuple[str, List[str], bool, List[Tuple[str, str]]]:
+    r"""(the text with absolute drive paths blanked out, those paths, whether a blanked span was prose).
+
+    vwm-p1b round 3 (R2-A), a DETERMINISTIC rule. The repo and the store may live under a
+    directory whose name has a space, so a whitespace split cut absolute paths in two.
+      - A drive path in backticks or quotes (`...`, "...", '...') is taken whole.
+      - Otherwise the path starts at `X:\` / `X:/` and runs to the next whitespace. It crosses
+        that whitespace ONLY when the text up to the next separator after it is an existing
+        DIRECTORY (`C:\Some` is not, `C:\Some Dir` is), and then keeps walking. The last
+        component ends at the next whitespace. Nothing is guessed from file extensions or a
+        word window. (A FILE name containing a space is therefore cut at the space.)
+    The span is then a path token if it exists or ends in a file extension, else prose. A prose
+    span whose PARENT directory exists is returned with that parent (4th value), so the caller
+    can still refuse it when the parent lies outside the repo and the store.
     """
-    toks = list(re.finditer(r"\S+", text))
-    rest: List[str] = []
+    buf = list(text)
     found: List[str] = []
-    i = 0
-    while i < len(toks):
-        first = toks[i].group(0).lstrip(STRIP_LEAD)
-        if not ABS_START_RE.match(first):
-            rest.append(toks[i].group(0))
-            i += 1
-            continue
-        best_exist, first_ext = None, None
-        for j in range(i, min(len(toks), i + ABS_MAX_WORDS)):
-            cand = _clean_path(text[toks[i].start():toks[j].end()])
-            try:
-                if Path(cand).exists():
-                    best_exist = (j, cand)
-            except (OSError, ValueError):
-                pass
-            if first_ext is None and PATH_EXT_RE.search(cand.rsplit("/", 1)[-1]):
-                first_ext = (j, cand)
-        pick = best_exist or first_ext
-        if pick is None:
-            rest.append(toks[i].group(0))
-            i += 1
-            continue
-        found.append(pick[1])
-        i = pick[0] + 1
-    return rest, found
+    parents: List[Tuple[str, str]] = []
+    prose = False
+
+    def take(i: int, j: int, span: str) -> None:
+        nonlocal prose
+        c = _classify_abs(span)
+        if c is None:
+            prose = True
+            cp = _clean_path(span)
+            if "/" in cp.rstrip("/"):
+                parent = cp.rstrip("/").rsplit("/", 1)[0]
+                if _isdir(parent + "/" if parent.endswith(":") else parent):
+                    parents.append((cp, parent))
+        else:
+            found.append(c)
+        for k in range(i, j):
+            buf[k] = " "
+
+    for m in QUOTED_ABS_RE.finditer(text):
+        take(m.start(), m.end(), m.group(2))
+    work = "".join(buf)
+    n = len(work)
+    pos = 0
+    while True:
+        m = ABS_START_RE.search(work, pos)
+        if not m:
+            break
+        i, j = m.start(), m.end()
+        while j < n:
+            ch = work[j]
+            if ch in PATH_SEPS:
+                j += 1
+                continue
+            if ch.isspace():
+                # (a) the text up to the next separator is an existing directory: cross
+                k = j
+                while k < n and work[k] not in PATH_SEPS and work[k] not in "\r\n":
+                    k += 1
+                if k < n and work[k] in PATH_SEPS and _isdir(work[i:k]):
+                    j = k
+                    continue
+                # (b) the next word ENDS an existing directory (the path's last component)
+                k = j
+                while k < n and work[k] in " \t":
+                    k += 1
+                while k < n and not work[k].isspace() and work[k] not in PATH_SEPS:
+                    k += 1
+                if k > j and _isdir(work[i:k].rstrip(STRIP_TRAIL)):
+                    j = k
+                    continue
+                break
+            j += 1
+        take(i, j, work[i:j])
+        work = "".join(buf)
+        pos = j
+    return "".join(buf), found, prose, parents
 
 
 def tokens_of(text: str) -> Tuple[List[str], List[str], bool]:
@@ -606,9 +666,10 @@ def tokens_of(text: str) -> Tuple[List[str], List[str], bool]:
     shas: List[str] = []
     paths: List[str] = []
     prose = False
-    raws, abs_paths = _absolute_spans(str(text))
+    rest_text, abs_paths, abs_prose, _parents = _absolute_spans(str(text))
     paths += abs_paths
-    for raw in raws:
+    prose = prose or abs_prose
+    for raw in rest_text.split():
         tok = raw.lstrip(STRIP_LEAD).rstrip(STRIP_TRAIL)
         if not tok:
             continue
@@ -828,44 +889,98 @@ REASON_PREFIX = 160
 ENUM_RETURN_RE = re.compile(r"(?:^|\s)(\d+)\)\s+(" + "|".join(RETURN_KINDS) + r")\b")
 
 
-def _reason_pattern(words: List[str]) -> Optional["re.Pattern[str]"]:
-    if not words:
-        return None
-    return re.compile(r"(?<!\w)" + r"[\W_]*".join(re.escape(w) for w in words) + r"(?!\w)", re.IGNORECASE)
+KIND_TOKEN_RE = re.compile(r"(?<![A-Za-z-])(" + "|".join(RETURN_KINDS) + r")(?![A-Za-z-])", re.IGNORECASE)
+ENTRY_RE = re.compile(r"(?<!\S)(\d+)\)\s+(" + "|".join(RETURN_KINDS) + r")(?![A-Za-z-])", re.IGNORECASE)
+REASON_PLACEHOLDER = " <reason> "
 
 
-def _without_reasons(red: str, rets: List[Dict[str, Any]]) -> str:
-    """`red` with every queue reason (and its first REASON_PREFIX normalised characters, for a
-    record that quoted only the start) blanked out. Words are matched case-insensitively with
-    any punctuation/whitespace between them, so a hand-quoted reason is found too."""
-    out = red
-    reasons = sorted({str(r.get("reason") or "").strip() for r in rets} - {""}, key=len, reverse=True)
-    for reason in reasons:
-        words = re.findall(r"\w+", reason)
-        pat = _reason_pattern(words)
-        if pat is not None:
-            out = pat.sub(" ", out)
-        # the prefix the presence check uses
-        acc, pre = 0, []
-        for w in words:
-            acc += len(w) + 1
-            pre.append(w)
-            if acc >= REASON_PREFIX:
+def _norm_with_map(s: str) -> Tuple[str, List[int]]:
+    """_norm_text(s) plus, for every character of it, the index in `s` it came from (-1 for a
+    separator space). Same rule as _norm_text: lowercase, any run of non [0-9a-z] is one space."""
+    out: List[str] = []
+    idx: List[int] = []
+    for i, ch in enumerate(s):
+        for c in ch.lower():
+            if ("0" <= c <= "9") or ("a" <= c <= "z"):
+                out.append(c)
+                idx.append(i)
+            elif out and out[-1] != " ":
+                out.append(" ")
+                idx.append(-1)
+    while out and out[-1] == " ":
+        out.pop()
+        idx.pop()
+    return "".join(out), idx
+
+
+def _reason_variants(reason: str) -> List[str]:
+    full = _norm_text(reason)
+    if not full:
+        return []
+    out = [full]
+    if len(full) > REASON_PREFIX:
+        cut = full[:REASON_PREFIX]
+        if full[REASON_PREFIX] != " " and " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        cut = cut.strip()
+        if cut:
+            out.append(cut)
+    return out
+
+
+def _blank_reasons(red: str, rets: List[Dict[str, Any]]) -> str:
+    """`red` with each queue return's reason replaced by REASON_PLACEHOLDER (vwm-p1b round 3,
+    R2-B), deterministically:
+      - one EXACT contiguous span per return (normalised as _norm_text: case, whitespace,
+        quotes and punctuation), aligned on word boundaries, at most once per return (a
+        reason the queue holds twice is blanked twice), first free occurrence wins;
+      - an occurrence that would cut a return-kind token or a numbered entry (`2) tester-fail`)
+        in part is not used: a reason may CONTAIN those whole, never share them with text
+        outside it;
+      - the placeholder keeps a space on both sides, so nothing fuses across it.
+    """
+    norm, idx = _norm_with_map(red)
+    protected = [(m.start(), m.end()) for m in KIND_TOKEN_RE.finditer(red)]
+    protected += [(m.start(), m.end()) for m in ENTRY_RE.finditer(red)]
+    chosen: List[Tuple[int, int]] = []
+    for r in rets:
+        for v in _reason_variants(str(r.get("reason") or "")):
+            placed = False
+            start = 0
+            while True:
+                p = norm.find(v, start)
+                if p < 0:
+                    break
+                start = p + 1
+                end = p + len(v)
+                if (p > 0 and norm[p - 1] != " ") or (end < len(norm) and norm[end] != " "):
+                    continue
+                rs, re_ = idx[p], idx[end - 1] + 1
+                if any(rs < ce and cs < re_ for cs, ce in chosen):
+                    continue
+                if any(rs < pe and ps < re_ and not (rs <= ps and pe <= re_) for ps, pe in protected):
+                    continue
+                chosen.append((rs, re_))
+                placed = True
                 break
-        pat = _reason_pattern(pre)
-        if pat is not None and len(pre) < len(words):
-            out = pat.sub(" ", out)
+            if placed:
+                break
+    out = red
+    for rs, re_ in sorted(chosen, reverse=True):
+        out = out[:rs] + REASON_PLACEHOLDER + out[re_:]
     return out
 
 
 def check_return_reasons(rec: Dict[str, Any], rets: List[Dict[str, Any]]) -> List[Finding]:
-    """`red` must carry each return's reason from the queue, and name no return the queue
-    does not have (vwm-p1b). `draft` writes them as `N) <kind> ... by <who>: <reason>`.
+    """`red` must carry each return's reason from the queue, and list exactly the queue's
+    returns (vwm-p1b). `draft` writes them as `N) <kind> ... by <who>: <reason>`.
 
-    Compared after normalising (lowercase, any run of non-alphanumerics is one space), on
-    the first REASON_PREFIX characters of each reason. Free prose that invents a return in
-    other words is the declared blind spot; the canonical kind names and the numbered list
-    are checked.
+    Presence: each reason's first REASON_PREFIX normalised characters appear in `red`.
+    Invariant (round 3): with the queue's reasons blanked out (_blank_reasons), the return-kind
+    tokens left in `red`, and the numbered entries `N) <kind>`, match the queue's returns kind
+    for kind (the entries in queue order) - `draft` writes exactly one of each per return,
+    outside the reason. Free prose that invents a return WITHOUT a kind name or a numbered
+    entry is the declared blind spot.
     """
     red = str(rec.get("red") or "")
     nred = " " + _norm_text(red) + " "
@@ -876,20 +991,21 @@ def check_return_reasons(rec: Dict[str, Any], rets: List[Dict[str, Any]]) -> Lis
             out.append(Finding("return-reason-mismatch",
                                f"return {i} ({r['kind']} by {r.get('by')} on '{r.get('item')}') has the queue reason "
                                f"'{str(r.get('reason'))[:100]}', which `red` does not carry"))
-    # The kind names and the numbered list are read from `red` with the queue's own reasons
-    # taken OUT first (vwm-p1b round 2, F1): `draft` copies each reason verbatim, and a
-    # tester's reason may itself say "reviewer-reject" or "1) tester-fail". Those words are
-    # the queue's, not a claimed return.
-    scan = _without_reasons(red, rets)
+    scan = _blank_reasons(red, rets)
     have = {k: sum(1 for r in rets if r["kind"] == k) for k in RETURN_KINDS}
+    named = {k: 0 for k in RETURN_KINDS}
+    for m in KIND_TOKEN_RE.finditer(scan):
+        named[m.group(1).lower()] += 1
     for k in RETURN_KINDS:
-        if have[k] == 0 and re.search(r"(?<![a-z-])" + re.escape(k) + r"(?![a-z-])", scan.lower()):
-            out.append(Finding("return-reason-mismatch", f"`red` names a {k} return; the queue shows none"))
-    listed = [k for _, k in ENUM_RETURN_RE.findall(scan)]
-    if listed and listed != [r["kind"] for r in rets]:
+        if named[k] != have[k]:
+            out.append(Finding("return-reason-mismatch",
+                               f"outside the queue's quoted reasons, `red` names {k} {named[k]} time(s); "
+                               f"the queue shows {have[k]} {k} return(s) (draft writes one per return)"))
+    listed = [m.group(2).lower() for m in ENTRY_RE.finditer(scan)]
+    if listed != [r["kind"] for r in rets]:
         out.append(Finding("return-reason-mismatch",
-                           f"`red` lists the returns as ({', '.join(listed)}); the queue shows "
-                           f"({', '.join(r['kind'] for r in rets) or 'none'})"))
+                           f"`red` lists the returns as ({', '.join(listed) or 'none'}); the queue shows "
+                           f"({', '.join(r['kind'] for r in rets) or 'none'}) - copy the numbered list `draft` prints"))
     return out
 
 
@@ -1048,7 +1164,11 @@ def check_record(rec: Dict[str, Any], rec_path: Path, item: Dict[str, Any], item
     revs = [x for x in (merge, tested, (_parse_range(str(sr.get("merge_range") or "")) or ("", ""))[1]) if x]
     all_shas: Dict[str, List[str]] = {}
     all_paths: Dict[str, List[str]] = {}
+    abs_outside: List[Tuple[str, str]] = []
     for where, text in evidence_strings(rec):
+        for span, parent in _absolute_spans(text)[3]:
+            if not any(_within(Path(parent), b) for b in [x for x in (repo_root, store_root or feature_dir) if x]):
+                abs_outside.append((span, where))
         shas, paths, prose = tokens_of(text)
         for s in shas:
             all_shas.setdefault(s, []).append(where)
@@ -1102,6 +1222,9 @@ def check_record(rec: Dict[str, Any], rec_path: Path, item: Dict[str, Any], item
             else:
                 still.append(p)
         missing_paths = still
+    for span, where in abs_outside:
+        f.append(Finding("evidence-path-outside",
+                         f"{span} (in {where}) lies in a directory outside the code repo and the plan store"))
     for p in missing_paths:
         f.append(Finding("evidence-path-missing",
                          f"{p} (in {', '.join(all_paths[p])}) exists under none of: feature dir, store root, "

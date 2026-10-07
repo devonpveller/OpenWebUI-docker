@@ -145,7 +145,7 @@ def good_record(w):
         "source_ref": {"queue_item_id": ID, "anchor_id": ID, "merge_range": f"{w['base'][:10]}..{w['merge'][:10]}"},
         "domains": ["drill"],
         "steer": "Anchor lrx: the thing works",
-        "red": "attempt 1 failed: T1 fails on a cold cache",
+        "red": "1) tester-fail at attempt 1 by t-lrx: T1 fails on a cold cache",
         "iterations": 1,
         "hypotheses_refuted": [{"hypothesis": "warm cache is enough", "why_refuted": "cold start differs",
                                 "evidence": f"test-evidence/lrx.attempt2.md; commit {w['w2'][:8]}"}],
@@ -353,7 +353,7 @@ def test_green_must_be_genuine(world, reason, how):
         # the record is otherwise right about the returns, so only genuineness can refuse it
         rec = good_record(w)
         rec["iterations"] = 2
-        rec["red"] += "; attempt 3 regressed"
+        rec["red"] += " 2) tester-fail at attempt 3 by t3-lrx: regressed"
         write_record(w, rec)
     elif how == "dev-pass":
         item["results"][-1]["by"] = "lrx"  # == wt-lrx once normalised
@@ -958,13 +958,134 @@ def test_p1b_r2_f3_absolute_paths_with_spaces_resolve(world):
     ]
     write_record(w, good)
     _accepted(w)
-    outside = w["tmp"] / "out side" / "x y.md"
+    outside = w["tmp"] / "out side" / "x.md"
     outside.parent.mkdir()
     outside.write_text("not evidence\n", encoding="utf-8")
     for token, reason in [(str(outside), "evidence-path-outside"),
                           (outside.as_posix(), "evidence-path-outside"),
-                          (str(w["repo"] / "src" / "never written.py"), "evidence-path-missing")]:
+                          (str(w["repo"] / "src" / "never-written.py"), "evidence-path-missing")]:
         bad = copy.deepcopy(good)
         bad["outcome"]["evidence"].append(token)
         write_record(w, bad)
         _refused(w, reason)
+
+
+# =============================================================================== vwm-p1b round 3
+# The attempt-2 FAIL: two round-2 heuristics replaced by deterministic rules.
+# R2-A: an absolute path crosses a space only into an EXISTING DIRECTORY; no extension lookahead.
+# R2-B: each queue reason is blanked as ONE exact span, once per return, never cutting a kind
+#       token or a numbered entry; then kind tokens and numbered entries must equal the queue's.
+
+def _r3_record_with(w, extra):
+    make_item(w)
+    good = good_record(w)
+    good["outcome"]["evidence"] += list(extra)
+    write_record(w, good)
+    return good
+
+
+@pytest.mark.parametrize("tail", ["was renamed in v0.11.0", "is gone, e.g. moved", "see notes.md for why",
+                                  "was renamed"])
+def test_p1b_r3_a_a_dead_directory_never_absorbs_the_prose_after_it(world, tail):
+    """The tester's repro (attempt 2, qdead): truthful prose naming a directory that no longer exists."""
+    w = world
+    dead = w["repo"] / "olddir"
+    _r3_record_with(w, [f"{dead} {tail}"])
+    _accepted(w)
+    shas, paths, prose = lr.tokens_of(f"{dead} {tail}")
+    assert not any(" " in p.rsplit("/", 1)[-1] for p in paths), paths  # nothing after the dir was taken in
+
+
+def test_p1b_r3_a_spaced_paths_inside_and_outside(world):
+    w = world
+    assert " " in str(w["repo"])
+    thing = w["repo"] / "src" / "thing.py"
+    readme = w["repo"] / "README.md"
+    two = f"{thing} and {readme.as_posix()} both changed"            # two paths on one line
+    quoted = f"`{thing}` and \"{readme}\""                            # quoted forms, taken whole
+    good = _r3_record_with(w, [two, quoted])
+    _accepted(w)
+    shas, paths, _ = lr.tokens_of(two)
+    assert sorted(paths) == sorted([thing.as_posix(), readme.as_posix()]), paths
+    outside = w["tmp"] / "out side" / "x.md"
+    outside.parent.mkdir()
+    outside.write_text("not evidence\n", encoding="utf-8")
+    for token, reason in [(str(outside), "evidence-path-outside"),
+                          (f"{outside.as_posix()} was checked", "evidence-path-outside"),
+                          (str(w["repo"] / "src" / "never-written.py"), "evidence-path-missing"),
+                          (f"{w['repo'] / 'src' / 'never-written.py'} in v0.11.0", "evidence-path-missing")]:
+        bad = copy.deepcopy(good)
+        bad["outcome"]["evidence"].append(token)
+        write_record(w, bad)
+        _refused(w, reason)
+
+
+def _draft_for_reasons(w, reasons):
+    """An item whose returns are tester FAILs with these reasons, and its honest draft record."""
+    results, history = [], []
+    for n, reason in enumerate(reasons, 1):
+        results.append({"at": 100 * n, "by": f"t{n}-lrx", "verdict": "fail", "attempt": n, "sha": w["w1"],
+                        "evidence": str(w["queue"] / f"{ID}.attempt1.evidence.md"), "reason": reason})
+        history.append({"at": 100 * n, "who": f"t{n}-lrx", "what": f"tests FAILED (attempt {n}): {reason}"})
+    k = len(reasons) + 1
+    (w["queue"] / f"{ID}.attempt{k}.evidence.md").write_text("## T1 PASS\n", encoding="utf-8")
+    results.append({"at": 100 * k, "by": "tp-lrx", "verdict": "pass", "attempt": k, "sha": w["w2"],
+                    "evidence": str(w["queue"] / f"{ID}.attempt{k}.evidence.md"), "reason": ""})
+    history += [{"at": 100 * k, "who": "tp-lrx", "what": f"tests PASSED (attempt {k})"},
+                {"at": 100 * k + 50, "who": "r-lrx", "what": "claimed as reviewer"}]
+    make_item(w, results=results, history=history)
+    return _filled_draft(w)
+
+
+@pytest.mark.parametrize("reasons,forge", [
+    # the tester's qsmug: the reason ends in a digit; the forged entry starts right after it
+    (["Case 1 fails on attempt 2"], lambda red, r: red.replace(r[0], r[0] + ") tester-fail by t9: invented", 1)),
+    # reason == "reviewer": blanking it must not eat the word inside a forged "reviewer-reject"
+    (["reviewer"], lambda red, r: red.replace(r[0], r[0] + " 2) reviewer-reject by r9: style", 1)),
+    # a reason starting with a kind name hides a duplicate of itself
+    (["reviewer-reject path broken"], lambda red, r: red + " 2) reviewer-reject path broken"),
+    # the same reason twice in the queue, a padded third entry repeating it
+    (["T1 fails", "T1 fails"], lambda red, r: red + " 3) tester-fail by t9: T1 fails"),
+])
+def test_p1b_r3_b_a_forged_return_is_refused(world, reasons, forge):
+    w = world
+    d = _draft_for_reasons(w, reasons)
+    write_record(w, d)
+    _accepted(w)  # good twin: the honest draft
+    d["red"] = forge(d["red"], reasons)
+    write_record(w, d)
+    _refused(w, "return-reason-mismatch")
+
+
+@pytest.mark.parametrize("reasons", [
+    ["Case 1: the reviewer-reject path leaves WORK.md empty"],
+    ["steps 1) tester-fail 2) reviewer-requeue then the record is wrong"],
+    ["T1: 2) reviewer-requeue later", "tester-fail"],
+    ["Case 1 fails on attempt 2", "Case 1 fails on attempt 2"],
+    ["reviewer", "x"],
+])
+def test_p1b_r3_b_honest_drafts_stay_accepted(world, reasons):
+    w = world
+    d = _draft_for_reasons(w, reasons)
+    write_record(w, d)
+    _accepted(w)
+
+
+@pytest.mark.parametrize("quoted", [
+    "  T1   fails\r\non a  cold cache",
+    "'T1 fails on a cold cache.'",
+    "“T1 fails on a cold cache”!",
+    "T1 FAILS ON A COLD CACHE",
+])
+def test_p1b_r3_b_a_hand_quoted_reason_with_the_numbered_entry_is_accepted(world, quoted):
+    """Whitespace, CRLF, quotes, punctuation and case around the quoted reason do not matter;
+    the numbered entry `1) tester-fail` (one per return, outside the reason) is required."""
+    w = world
+    make_item(w)
+    rec = good_record(w)
+    rec["red"] = "1) tester-fail by t-lrx: " + quoted
+    write_record(w, rec)
+    _accepted(w)
+    rec["red"] = "attempt 1 failed: " + quoted  # no numbered entry, no kind token
+    write_record(w, rec)
+    _refused(w, "return-reason-mismatch")

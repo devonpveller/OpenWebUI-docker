@@ -381,9 +381,11 @@ with named reasons and "Nothing has been recorded":
   and writes it to the item as `predecessor`). An undeclared `X2` beside a REJECTED `X` is
   linked anyway (inferred); `"continues": "none"` declares there is no predecessor. The record
   is then required, and `iterations` counts the whole chain;
-- `return-reason-mismatch`: `red` carries each return's reason from the queue (`draft` writes
-  them as a numbered list) and, outside those quoted reasons, names no return kind and lists no
-  return the queue does not have;
+- `return-reason-mismatch`: `red` carries each return's reason from the queue, and carries the
+  numbered list `draft` prints (`1) tester-fail ... by <who>: <reason>`). With each queue reason
+  taken out as one exact span (case, whitespace, quotes and punctuation ignored; once per return),
+  the return-kind names and numbered entries left must match the queue's returns kind for kind,
+  in order;
 - `green-not-genuine`: `outcome.kind` is green only when the queue's last verdict is a tester PASS
   at the `tested_at_sha` being merged, recorded by someone other than the developer, with its
   evidence file present. That file is checked too: `evidence-not-pass` (it is not THAT pass's
@@ -397,11 +399,12 @@ with named reasons and "Nothing has been recorded":
 - `range-unresolved` / `range-head-mismatch`: `source_ref.merge_range` is `base..head`, both ends
   are commits, base is an ancestor of head, and head is the tested commit or the merge;
 - `evidence-sha-unresolved` / `evidence-path-missing` / `evidence-path-outside`: every SHA-shaped
-  (lowercase or UPPERCASE hex) and path-shaped (`/` or `\`; an absolute `D:\...` path may contain
-  spaces) token in `outcome.evidence[]` and
+  (lowercase or UPPERCASE hex) and path-shaped (`/` or `\`) token in `outcome.evidence[]` and
   `hypotheses_refuted[].evidence` resolves, and a path resolves only inside the code repo or the
-  plan store. The rest is prose: the check cannot verify it and prints that blind spot on every
-  acceptance;
+  plan store. An absolute path crosses a space only into an existing directory, so a file name
+  with a space must be quoted (`` `X:\dir\a b.md` ``); an extensionless span that does not exist
+  is prose unless its parent directory lies outside the repo and the store. The rest is prose: the
+  check cannot verify it and prints that blind spot on every acceptance;
 - `placeholder-unfilled`: a `<FILL:` marker from `draft` is still there.
 
 A store, record, schema or queue item the check cannot read, a git error (a `--repo` that is not
