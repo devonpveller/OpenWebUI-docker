@@ -92,7 +92,8 @@ def test_refused_tool_is_logged_as_refused(audit, upstream):
     assert r.status_code == 200 and upstream["n"] == 0
     (rec,) = _lines(audit)
     assert rec["decision"] == "refused" and rec["refusal"] == "tool_not_allowed"
-    assert rec["tools"] == ["thought_stats"] and rec["upstream_status"] is None
+    # a refused tool is not on the allow-list, so its name is NOT logged (round 2, F4)
+    assert rec["tools"] == ["<unknown>"] and rec["upstream_status"] is None
     assert SECRET not in audit.read_text(encoding="utf-8")
 
 
@@ -135,7 +136,7 @@ def test_too_large_logged(audit, upstream, monkeypatch):
 def test_payload_cannot_ride_in_a_tool_name(audit, upstream):
     TestClient(gw.app).post("/mcp", content=_call(f"x {SECRET} y", {}), headers=AUTH)
     (rec,) = _lines(audit)
-    assert rec["tools"] == ["<invalid>"]
+    assert rec["tools"] == ["<unknown>"]
     assert SECRET not in audit.read_text(encoding="utf-8")
 
 
@@ -187,3 +188,40 @@ def test_unopenable_path_fails_at_start(tmp_path):
 
 def test_key_id_never_contains_the_key():
     assert GATEWAY_KEY not in gw.KEY_ID
+
+
+# -- round 2 (tester attempt 1, F4): identifier-shaped attacker names are not logged --
+IDENT_SECRET = "sk-PLANTEDSECRET999"
+
+
+def test_identifier_shaped_tool_name_not_logged(audit, upstream):
+    TestClient(gw.app).post("/mcp", content=_call(IDENT_SECRET, {}), headers=AUTH)
+    (rec,) = _lines(audit)
+    assert rec["tools"] == ["<unknown>"] and rec["decision"] == "refused"
+    assert IDENT_SECRET not in audit.read_text(encoding="utf-8")
+
+
+def test_unknown_method_name_not_logged(audit, upstream):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": IDENT_SECRET, "params": {}})
+    TestClient(gw.app).post("/mcp", content=body, headers=AUTH)
+    (rec,) = _lines(audit)
+    assert rec["methods"] == ["<unknown>"]
+    assert IDENT_SECRET not in audit.read_text(encoding="utf-8")
+
+
+def test_batch_of_unknown_names_not_logged(audit, upstream):
+    batch = [{"jsonrpc": "2.0", "id": i, "method": "tools/call",
+              "params": {"name": IDENT_SECRET, "arguments": {}}} for i in range(60)]
+    TestClient(gw.app).post("/mcp", content=json.dumps(batch), headers=AUTH)
+    (rec,) = _lines(audit)
+    assert IDENT_SECRET not in audit.read_text(encoding="utf-8")
+    assert set(rec["tools"]) == {"<unknown>"} and len(rec["tools"]) == 50
+
+
+def test_known_names_still_logged(audit, upstream):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    TestClient(gw.app).post("/mcp", content=body, headers=AUTH)
+    TestClient(gw.app).post("/mcp", content=_call("search_thoughts", {"query": "q"}), headers=AUTH)
+    a, b = _lines(audit)
+    assert a["methods"] == ["tools/list"]
+    assert b["methods"] == ["tools/call"] and b["tools"] == ["search_thoughts"]

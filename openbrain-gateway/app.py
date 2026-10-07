@@ -509,9 +509,11 @@ async def _read_capped(request) -> bytes:
 # status, ok / error / unknown) and the SIZE (request and response bytes, time).
 #
 # IT NEVER RECORDS ARGUMENTS OR PAYLOADS. No argument value, no body text, no
-# result text and no error message reaches the line; method and tool names are
-# logged only when they are short identifier-shaped strings, else "<invalid>", so
-# a "name" cannot smuggle a payload in. The record is built from a fixed set of
+# result text and no error message reaches the line. A tool name is logged only when
+# it is on this door's allow-list (ALLOWED_TOOLS) and a method name only when it is a
+# known MCP method (_KNOWN_METHODS); anything else - a refused tool included - is
+# logged as "<unknown>", never verbatim, so a caller-chosen "name" cannot carry a
+# payload (or a secret) into the record. The record is built from a fixed set of
 # fields, never by copying the request.
 #
 # Bounded: the file rotates at GATEWAY_AUDIT_LOG_MAX_BYTES (default 5 MiB) into
@@ -532,12 +534,21 @@ if AUDIT_MAX_BYTES <= 0 or AUDIT_BACKUPS < 0:
 KEY_ID = (os.environ.get("GATEWAY_KEY_ID", "").strip()
           or f"{GATEWAY_PROFILE}-{hashlib.sha256(GATEWAY_KEY.encode()).hexdigest()[:8]}")
 
-_SAFE_NAME = re.compile(r"[A-Za-z0-9_.:/-]{1,64}")
+_KNOWN_METHODS = frozenset((
+    "initialize", "ping", "tools/list", "tools/call",
+    "resources/list", "resources/read", "resources/templates/list",
+    "resources/subscribe", "resources/unsubscribe",
+    "prompts/list", "prompts/get", "completion/complete", "logging/setLevel",
+    "roots/list", "sampling/createMessage", "elicitation/create",
+    "notifications/initialized", "notifications/cancelled", "notifications/progress",
+    "notifications/roots/list_changed", "notifications/message",
+))
 _AUDIT_LIST_CAP = 50
 
 
-def _safe_name(v):
-    return v if isinstance(v, str) and _SAFE_NAME.fullmatch(v) else "<invalid>"
+def _known(v, known):
+    """v itself only if it is one of the known names; else "<unknown>"."""
+    return v if isinstance(v, str) and v in known else "<unknown>"
 
 
 class AuditLog:
@@ -596,10 +607,11 @@ def _audit_calls(msg):
         if not isinstance(m, dict):
             continue
         meth = m.get("method")
-        methods.append(_safe_name(meth))
+        methods.append(_known(meth, _KNOWN_METHODS))
         if meth == "tools/call":
             params = m.get("params")
-            tools.append(_safe_name(params.get("name") if isinstance(params, dict) else None))
+            tools.append(_known(params.get("name") if isinstance(params, dict) else None,
+                                ALLOWED_TOOLS))
     return methods, tools
 
 
