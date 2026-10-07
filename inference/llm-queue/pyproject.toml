@@ -7,6 +7,8 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "httpx>=0.27",
+    # ao-queue: the end-of-stream cleanup is shielded with anyio.CancelScope (Starlette's own dep).
+    "anyio>=4",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "structlog>=24.4",

@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import os
 import signal
+import threading
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -759,6 +761,40 @@ def _parse_ts(ts: str) -> float:
 # --------------------------------------------------------------------------
 
 
+_EVENT_CACHE_LOCK = threading.Lock()
+
+
+def read_event_lines(path: str, offset: int, cache: dict) -> list[str]:
+    """Lines `offset`.. of the events file, newline-stripped. Probe cost is O(new bytes): `cache`
+    remembers (complete_lines, byte_pos) per file, so a poller whose offset is at or past the
+    cached line count reads only the bytes appended since (the stall watchdog re-read a 761 MB
+    file on every probe). An offset behind the cache, or a shrunk file, falls back to a full read.
+
+    Only the LEADING run of newline-terminated lines is counted and returned. A journal being
+    appended can make `readlines()` yield one line split in two (EOF mid-line, then the writer's
+    tail as its own element); counting that tail as a line would leave the cached byte position
+    mid-line for the rest of the task. Everything from the first unterminated element on is left
+    for the next probe, and the cache advances by exactly the bytes of the complete lines."""
+    offset = max(0, offset)
+    with _EVENT_CACHE_LOCK:
+        ent = cache.get(path)
+    with open(path, "rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
+        if ent is not None and offset >= ent[0] and size >= ent[1]:
+            base_lines, base_pos = ent
+        else:
+            base_lines, base_pos = 0, 0
+        fh.seek(base_pos)
+        raw = fh.readlines()
+    complete = list(itertools.takewhile(lambda ln: ln.endswith(b"\n"), raw))
+    with _EVENT_CACHE_LOCK:
+        cache[path] = (base_lines + len(complete), base_pos + sum(len(ln) for ln in complete))
+        while len(cache) > 64:
+            cache.pop(next(iter(cache)), None)
+    skip = max(0, offset - base_lines)
+    return [ln.decode("utf-8", errors="replace").rstrip("\n") for ln in complete[skip:]]
+
+
 def build_app(daemon: LittleCoderDaemon) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -802,6 +838,8 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
             data["commands"] = len(live)
         return data
 
+    _event_cache: dict = {}
+
     @app.get("/tasks/{task_id}/events")
     def task_events(task_id: str, offset: int = 0) -> dict:
         """Live pi `--mode json` event stream, from line `offset` onward —
@@ -812,9 +850,7 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
         events: list[str] = []
         if state.events_path:
             try:
-                with open(state.events_path, encoding="utf-8") as fh:
-                    lines = fh.readlines()
-                events = [ln.rstrip("\n") for ln in lines[offset:]]
+                events = read_event_lines(state.events_path, offset, _event_cache)
             except OSError:
                 events = []
         return {

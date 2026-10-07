@@ -135,6 +135,21 @@ class Settings(BaseSettings):
         description="How often the connection-leak reaper sweeps the held set.",
     )
 
+    # --- Shedding episodes (ao-queue, see shedding.py) - observability only, never admission ---
+    shed_alert_ratio: float = Field(
+        0.75, alias="LLM_QUEUE_SHED_ALERT_RATIO", gt=0, le=1,
+        description="An episode starts at a capacity refusal, or when held connections reach "
+        "ceil(max_total_connections * this).",
+    )
+    shed_clear_ratio: float = Field(
+        0.5, alias="LLM_QUEUE_SHED_CLEAR_RATIO", ge=0, lt=1,
+        description="An episode clears once held <= max_total_connections * this ...",
+    )
+    shed_clear_quiet_s: float = Field(
+        300.0, alias="LLM_QUEUE_SHED_CLEAR_QUIET_S", ge=0,
+        description="... and no capacity refusal for this many seconds (hysteresis).",
+    )
+
     # --- Analytics (P3) ---
     events_db_path: str = Field(
         "",

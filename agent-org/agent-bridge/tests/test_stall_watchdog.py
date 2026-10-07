@@ -420,3 +420,106 @@ async def test_an_effort_stranded_after_an_abandoned_turn_is_recovered(db_url):
         assert await orch._event_count("effort-stranded", "stall_recovered") == 1
     finally:
         await db.dispose()
+
+
+async def _bind_busy(orch, eid, task_id, total):
+    async with orch.db.session_factory() as s:
+        wi = (await s.execute(
+            select(WorkerInstance).where(WorkerInstance.base_url == "http://w1:8090"))).scalar_one()
+        wi.effort_id = eid
+        await s.commit()
+    orch.harness.busy_urls = {"http://w1:8090"}
+    orch.harness.progress_task_ids = {"http://w1:8090": task_id}
+    orch.harness.progress_totals = {"http://w1:8090": total}   # daemon line-count semantics
+
+
+async def test_new_task_does_not_inherit_the_previous_tasks_offset(db_url):
+    """ao-wd-offset (gym-002 19:00:09): the stored offset 56,200 belonged to the PREVIOUS task; the
+    new task (9,000 lines) was probed from 56,200, read as frozen and cancelled as 'silent'. The new
+    task must be probed from 0 and judged alive."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _seed(orch, "effort-new", last_kind="worker_project_set", age_min=8)
+        await _bind_busy(orch, "effort-new", "task-new", 9000)
+        stale = datetime.now(timezone.utc) - timedelta(seconds=orch.s.worker_silence_s + 60)
+        orch._worker_progress = {"http://w1:8090": ("task-old", 56200, stale)}
+        await orch._sweep_stalled_efforts()
+        assert orch.harness.cancelled == []
+        assert orch.harness.progress_calls[-1][2] == 0               # probed from 0, not 56,200
+        assert orch._worker_progress["http://w1:8090"][:2] == ("task-new", 9000)   # state reset
+        assert await orch._event_count("effort-new", "stall_recovered") == 0
+    finally:
+        await db.dispose()
+
+
+async def test_genuinely_frozen_same_task_is_still_cancelled(db_url):
+    """Threat model: same task id, no growth for worker_silence_s -> still hung and cancelled."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _seed(orch, "effort-frozen", last_kind="worker_project_set", age_min=8)
+        await _bind_busy(orch, "effort-frozen", "task-z", 9000)
+        stale = datetime.now(timezone.utc) - timedelta(seconds=orch.s.worker_silence_s + 60)
+        orch._worker_progress = {"http://w1:8090": ("task-z", 9000, stale)}
+        await orch._sweep_stalled_efforts()
+        assert ("http://w1:8090", "task-z") in orch.harness.cancelled
+        assert await orch._event_count("effort-frozen", "stall_recovered") == 1
+    finally:
+        await db.dispose()
+
+
+def _mock_daemon(state):
+    """httpx MockTransport daemon with the REAL /events semantics: events = lines[offset:],
+    next_offset = offset + len(events). `state` = {"task": id, "lines": n, "cancelled": [...]}."""
+    import httpx
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/tasks":
+            return httpx.Response(200, json={"tasks": [{"task_id": state["task"], "status": "running"}]})
+        if path.endswith("/events"):
+            off = int(req.url.params.get("offset", 0))
+            ev = ["{}"] * max(0, state["lines"] - off)
+            return httpx.Response(200, json={"events": ev, "next_offset": off + len(ev)})
+        if path.endswith("/cancel"):
+            state["cancelled"].append(path.split("/")[2])
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json={})
+    return httpx.MockTransport(handler)
+
+
+async def test_two_tick_real_client_does_not_cancel_a_healthy_new_task(db_url, monkeypatch):
+    """T5 - ao-wd-offset, the full mechanism with the REAL LittleCoderHarness.running_task_progress:
+    tick 1 stores the new task's offset, tick 2 (past worker_silence_s, task grew 9,000 -> 9,100)
+    must find it alive. At base tick 1 probes from the old 56,200, stores it, and tick 2 reads it
+    as frozen -> the healthy turn is cancelled (gym-002 19:00:09)."""
+    import httpx
+    from app.worker import harness as hmod
+    from app.worker.harness import LittleCoderHarness
+
+    state = {"task": "task-new", "lines": 9000, "cancelled": []}
+    transport = _mock_daemon(state)
+    real = httpx.AsyncClient
+    monkeypatch.setattr(hmod.httpx, "AsyncClient",
+                        lambda **kw: real(transport=transport, **kw))
+    orch, chat, db = await _orch(db_url)
+    try:
+        orch.harness = LittleCoderHarness()
+        await _seed(orch, "effort-t5", last_kind="worker_project_set", age_min=8)
+        async with orch.db.session_factory() as s:
+            wi = (await s.execute(select(WorkerInstance).where(
+                WorkerInstance.base_url == "http://w1:8090"))).scalar_one()
+            wi.effort_id = "effort-t5"
+            await s.commit()
+        url = "http://w1:8090"
+        old = datetime.now(timezone.utc) - timedelta(seconds=orch.s.worker_silence_s + 60)
+        orch._worker_progress = {url: ("task-old", 56200, old)}
+        await orch._sweep_stalled_efforts()                       # tick 1
+        t, off, _ = orch._worker_progress[url]
+        orch._worker_progress[url] = (t, off, old)                # age past worker_silence_s
+        state["lines"] = 9100                                     # the healthy task keeps working
+        await orch._sweep_stalled_efforts()                       # tick 2
+        assert state["cancelled"] == []
+        assert orch._worker_progress[url][:2] == ("task-new", 9100)
+        assert await orch._event_count("effort-t5", "stall_recovered") == 0
+    finally:
+        await db.dispose()
