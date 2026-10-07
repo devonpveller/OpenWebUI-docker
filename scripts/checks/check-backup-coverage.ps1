@@ -78,6 +78,9 @@ try {
     @{ Path = '${OPEN_NOTEBOOK_DIR}\notebook_data';       Service = 'open_notebook'; Owner = 'open-notebook-backup' }
     @{ Path = '.\data\tailscale';                          Service = 'tailscale';    Owner = 'tailscale-backup' }
     @{ Path = '${LM_MODELS_DIR}';                          Service = 'llama-cpp-upstream'; Owner = 'lm-models-backup' }
+    # The OB1 gateways' audit logs (eh-ingest) are WRITTEN under ./backups/, so no sidecar
+    # copies them: backup-to-nas.ps1 mirrors the whole tree.
+    @{ Path = '${BACKUPS_DIR:-../../backups}/openbrain-gateway-audit'; Service = 'openbrain-gateway, openbrain-ops-gateway'; Owner = 'backup-to-nas (lives under ./backups/)' }
   )
 
   # ----- Volumes intentionally NOT backed up -------------------------
@@ -153,7 +156,8 @@ try {
     'tailscale', 'lm-models',
     'agent-bridge-db', 'mattermost-db',
     'ao-worker-1-journals', 'ao-worker-2-journals',
-    'config-secrets'
+    'config-secrets',
+    'openbrain-gateway-audit'
   )
   $missingDirs = @()
   foreach ($d in $expectedBackupDirs) {
