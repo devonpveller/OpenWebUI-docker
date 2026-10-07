@@ -11,6 +11,7 @@ So the last test asks PowerShell the same questions and compares answers.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -282,6 +283,7 @@ def test_powershell_and_python_readers_agree():
         + "$o.branch_prefix=(Get-HarnessSetting 'worktree.branch_prefix');"
         + "$o.env_files=@(Get-HarnessSetting 'worktree.env_files');"
         + "$o.reap_label=(Get-HarnessSetting 'reap.owner_label');"
+        + "$o.lr_enforce=[bool](Get-LearningRecordEnforced);"
         + "$o.profiles=@(Get-HarnessProfileNames);"
         + "$o.runners=@(Get-HarnessRunnerNames);"
         + "$lc=Get-HarnessRunner -Name 'little-coder';"
@@ -312,6 +314,8 @@ def test_powershell_and_python_readers_agree():
     # labelled under one name and reaped under another - a sweep that silently finds
     # nothing, which is the exact shape of failure reap.ps1 was written to end.
     assert ps["reap_label"] == config.get("reap.owner_label")
+    # The learning-record gate's off switch (vwm-p1): queue.ps1 reads it at -Merged.
+    assert ps["lr_enforce"] == config.learning_record_enforced()
     assert sorted(ps["profiles"]) == sorted(config.profile_names())
     # The RUNNER RECORD has to agree too, not just the policy answer. It is what a
     # dispatcher calls, and it is now the only place the transport is written down.
@@ -322,3 +326,40 @@ def test_powershell_and_python_readers_agree():
     for role in config.ROLES:
         t = config.resolve_role(role, surface="extension")
         assert ps["roles"][role] == "{0}/{1}".format(t["runner"], t["model"]), role
+
+
+def test_learning_record_gate_is_on_by_default_and_has_an_off_switch(monkeypatch, tmp_path):
+    """pipeline.learning_record.enforce_at_merged: shipped true; false is the off switch."""
+    assert config.learning_record_enforced() is True
+    cfg = json.loads((HERE / "harness.config.json").read_text(encoding="utf-8"))
+    assert cfg["pipeline"]["learning_record"]["enforce_at_merged"] is True
+    missing = tmp_path / "nope.json"
+    monkeypatch.setenv("AI_STACK_HARNESS_CONFIG", str(missing))
+    config.load(fresh=True)
+    assert config.learning_record_enforced() is True  # the built-in default is ON, not off
+    cfg["pipeline"]["learning_record"]["enforce_at_merged"] = False
+    off = tmp_path / "off.json"
+    off.write_text(json.dumps(cfg), encoding="utf-8")
+    monkeypatch.setenv("AI_STACK_HARNESS_CONFIG", str(off))
+    config.load(fresh=True)
+    assert config.learning_record_enforced() is False
+
+
+@pytest.mark.skipif(PS is None, reason="no PowerShell on PATH")
+def test_both_readers_agree_on_the_learning_record_off_switch(tmp_path):
+    cfg = json.loads((HERE / "harness.config.json").read_text(encoding="utf-8"))
+    for value in (True, False):
+        cfg["pipeline"]["learning_record"]["enforce_at_merged"] = value
+        p = tmp_path / f"cfg-{value}.json"
+        p.write_text(json.dumps(cfg), encoding="utf-8")
+        script = ("$env:AI_STACK_HARNESS_CONFIG='{0}'; . '{1}'; [bool](Get-LearningRecordEnforced)"
+                  .format(p, (HERE / "config.ps1").as_posix()))
+        out = subprocess.run([PS, "-NoProfile", "-NonInteractive", "-Command", script],
+                             capture_output=True, text=True, timeout=120)
+        assert out.returncode == 0, out.stderr
+        ps_value = out.stdout.strip() == "True"
+        env = dict(os.environ, AI_STACK_HARNESS_CONFIG=str(p))
+        py = subprocess.run([sys.executable, "-c", "import config; print(config.learning_record_enforced())"],
+                            capture_output=True, text=True, cwd=str(HERE), env=env, timeout=60)
+        assert py.returncode == 0, py.stderr
+        assert ps_value is value and (py.stdout.strip() == "True") is value

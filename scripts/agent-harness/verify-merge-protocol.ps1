@@ -169,6 +169,27 @@ Set-Content -Path $vagueAnchor -Encoding ascii -Value '{ "goal": "make it better
 & $queue -Propose -Id "drill-vague" -Anchor $vagueAnchor -Developer "wt-drilla" 2>&1 | Out-Null
 Check "an anchor missing its fields is refused" ($LASTEXITCODE -ne 0)
 
+# THE FINDINGS SINK IS A SCRATCH STORE (vwm-p1, 2026-10-06). -Merged now checks the learning
+# record beside the sink for an item that came back (drill-a: a FAIL; drill-b: a stale-pass -Requeue), so
+# the sink must be somewhere this drill may write - never the main checkout, never the plan store.
+$lrStore = Join-Path $env:TEMP ("drill-lr-store-" + $PID)
+$lrSchemaDir = Join-Path $lrStore "implementation-guide\research-workbench"
+New-Item -ItemType Directory -Force -Path (Join-Path $lrStore ".git"), (Join-Path $lrStore "findings"), $lrSchemaDir | Out-Null
+Copy-Item -LiteralPath (Join-Path $wtScripts "fixtures\learning-record\learning-record.schema.json") `
+    -Destination (Join-Path $lrSchemaDir "learning-record.schema.json")
+$lrSink = Join-Path $lrStore "findings\DRILL-FINDINGS.md"
+function Write-DrillLearningRecord([string]$id, [string]$merge, [string]$red) {
+    # A compliant record for a drill item that came back once (MERGE-PROTOCOL Step 4).
+    $rec = [ordered]@{
+        schema_version = 1; fidelity = "iterative"; producer = "harness"
+        source_ref = [ordered]@{ queue_item_id = $id; merge_range = ((Get-DrillGit -C $wtMerge rev-parse "$merge^1").Trim() + ".." + $merge) }
+        domains = @("drill"); steer = "DRILL-NOTE.md states one owner and one timeout."; red = $red; iterations = 1
+        outcome = [ordered]@{ kind = "green"; summary = "DRILL-NOTE.md as merged." }
+        reviewer_check = [ordered]@{ checked = $true; by = "wt-reviewer" }
+        created_at = "2026-10-06T00:00:00Z"
+    }
+    [System.IO.File]::WriteAllText((Join-Path $lrStore ("findings\" + $id + ".learning-record.json")), ($rec | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
+}
 foreach ($id in @("a", "b")) {
     Set-Content -Path $anchorFile -Encoding ascii -Value @(
         "{",
@@ -180,7 +201,7 @@ foreach ($id in @("a", "b")) {
         "    ""Exactly one owner is named; two contradictory owners is a failure.""",
         "  ],",
         "  ""out_of_scope"": [ ""Changing anything outside DRILL-NOTE.md."" ],",
-        "  ""findings_sink"": ""DRILL-FINDINGS.md""",
+        ("  ""findings_sink"": """ + ($lrSink -replace '\\', '/') + """"),
         "}")
     & $queue -Propose -Id "drill-$id" -Anchor $anchorFile -Developer "wt-drill$id" | Out-Null
 }
@@ -528,6 +549,10 @@ $bogus = "0000000000000000000000000000000000000000"
 & $queue -Merged -Id drill-a -By wt-reviewer -Sha $bogus -FitsCodebase 2>&1 | Out-Null
 Check "a nonexistent sha is refused, not recorded" ((Get-QueueState "drill-a") -ne "merged")
 
+# drill-a came back once (the Step 5 FAIL), so it owes a learning record (Step 4).
+& $queue -Merged -Id drill-a -By wt-reviewer -Sha $mergeSha -FitsCodebase 2>&1 | Out-Null
+Check "-Merged refuses drill-a while its learning record is missing" ((Get-QueueState "drill-a") -eq "reviewing")
+Write-DrillLearningRecord "drill-a" $mergeSha "case 2: the note did not state the unit"
 & $queue -Merged -Id drill-a -By wt-reviewer -Sha $mergeSha -FitsCodebase | Out-Null
 Check "drill-a merged by the reviewer" ((Get-QueueState "drill-a") -eq "merged")
 Check "the verdict recorded is fits_codebase, not the retired fits_anchor" (
@@ -581,7 +606,12 @@ Check "re-tested and re-released at the new content" ((Get-QueueState "drill-b")
 Step 10 "the reviewer lands the adapted work"
 & $queue -Claim -Id drill-b -Role reviewer -By wt-reviewer | Out-Null
 Invoke-DrillGit -C $wtMerge merge --no-ff work/drillb -m "merge drill B: per-caller override, A's default kept (evidence: drill)"
-& $queue -Merged -Id drill-b -By wt-reviewer -Sha ((Get-DrillGit -C $wtMerge rev-parse HEAD).Trim()) -FitsCodebase | Out-Null
+$mergeB = (Get-DrillGit -C $wtMerge rev-parse HEAD).Trim()
+# drill-b CAME BACK once (the stale-pass -Requeue), so it owes a learning record (Step 4).
+& $queue -Merged -Id drill-b -By wt-reviewer -Sha $mergeB -FitsCodebase 2>&1 | Out-Null
+Check "-Merged refuses drill-b while its learning record is missing" ((Get-QueueState "drill-b") -eq "reviewing")
+Write-DrillLearningRecord "drill-b" $mergeB "the rebase onto A's merge changed the tested file (stale pass)"
+& $queue -Merged -Id drill-b -By wt-reviewer -Sha $mergeB -FitsCodebase | Out-Null
 Check "drill-b merged after re-test" ((Get-QueueState "drill-b") -eq "merged")
 
 Step 11 "outcome: both intents survive, history readable, development untouched"
@@ -602,6 +632,7 @@ Invoke-DrillGit branch -D drill/verify-d
 Invoke-DrillGit worktree prune
 Clear-DrillQueue
 Get-ChildItem -Path $env:TEMP -Filter "drill-evidence-*.md" -ErrorAction SilentlyContinue | Remove-Item -Force
+Remove-Item -Recurse -Force $lrStore -ErrorAction SilentlyContinue
 # Scoped to the DRILL's own artifacts. These asserted the whole worktree directory was
 # empty, which failed the moment real agents had work in flight - the drill must not
 # require an idle repo to pass, and must never look like it cleaned up someone else's work.

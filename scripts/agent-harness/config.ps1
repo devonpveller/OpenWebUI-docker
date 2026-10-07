@@ -45,6 +45,7 @@ $script:Defaults = [ordered]@{
         claim_ttl_minutes = 60
         anchor_required   = $true
         gate_profile      = "attended"
+        learning_record   = [ordered]@{ enforce_at_merged = $true }
     }
     worktree        = [ordered]@{
         root               = ".claude/worktrees"
@@ -390,6 +391,14 @@ function Get-AndonBucket([string]$status, [string]$action) {
 function Test-AutoPrincipal {
     param([string]$Principal)
     return [bool]($Principal -and $Principal.StartsWith($script:AutoPrincipalPrefix))
+}
+
+function Get-LearningRecordEnforced {
+    # queue.ps1 -Merged runs learning_records.py check before any state change. True: a refusal
+    # stops the merge record. False (the module's off switch for this gate, MODULE.md): the
+    # check's result is printed as advice and the merge is recorded as before. Python twin:
+    # config.learning_record_enforced().
+    return [bool](Get-HarnessSetting "pipeline.learning_record.enforce_at_merged" $true)
 }
 
 function Get-GateProfileName {

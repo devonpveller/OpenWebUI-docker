@@ -508,6 +508,10 @@
     "claim_ttl_minutes": 60,
     "anchor_required": true,
     "gate_profile": "attended",
+    "learning_record": {
+      "enforce_at_merged": true,
+      "_note": "queue.ps1 -Merged runs learning_records.py check (MERGE-PROTOCOL Step 4) before any state change and refuses an item that came back at least once (tester fail, reviewer reject/requeue, send-back after a pass) unless its iterative learning record is present, schema-valid, genuine (tester PASS at the merged tested_at_sha, not by the developer) and countersigned by the reviewer. false = the check still runs and prints its result as advice, and the merge is recorded as before. There is no per-item override (operator D4, 2026-10-06)."
+    },
     "convergence": {
       "max_class1_rounds": 3,
       "reset_on": "class-1-only",
