@@ -244,7 +244,23 @@ it never kills, restarts or reconfigures anything. Reads use no WMI (it hung
 first on 07-05): physical total via `Microsoft.VisualBasic` `ComputerInfo`,
 Available Bytes / Committed Bytes / Commit Limit via in-process perf counters,
 and the private bytes of `vmmemWSL` and `com.docker.backend` (all instances,
-summed) via `Get-Process`. Measured cost of one pass: about 2 s wall, 1.5 s CPU.
+summed) via `Get-Process`. Measured cost of one pass (2026-10-07, developer and
+tester, cold `powershell.exe` passes included): 1.7-6.5 s wall (the slow end is
+a cold perf-counter load), 1.3-1.9 s CPU, +9 to +21 MB working set - about 0.3%
+of one core at the 10-minute cadence.
+
+**The read is bounded.** It runs in its own runspace under a hard deadline
+(`$HostMemReadTimeoutSeconds`, 15 s; the worst cold read measured 6.5 s). At the
+deadline the reader is abandoned, every field reads `UNKNOWN(timeout after 15s)`,
+`hostmem-unreadable` pages, and the pass carries straight on to the Docker-engine
+step. While that reader stays hung, later passes in the same process report
+`UNKNOWN(timeout: an earlier read is still hung ...)` without starting another
+(one at most). Because a hung reader's thread would keep `powershell.exe` alive
+after `exit` - and `StackWatchdog` is MultipleInstances IgnoreNew, so that would
+drop every later pass - `-Mode check` then ends the process with
+`[Environment]::Exit` (`Exit-WatchdogProcess`; a no-op otherwise). And the call in
+`Invoke-HealthCheck` is wrapped: a throw out of the memory check is logged and
+the pass still reaches `Confirm-DockerEngine`.
 
 Every pass writes one line to `logs/tailscale-health.log`, INFO when all is well
 and WARN otherwise. A real one (2026-10-07, the first pass, so the backend's
@@ -264,12 +280,21 @@ growth reads `baseline`; later passes show `+N.NNGiB/6h`):
 | `hostmem-unreadable` | a counter or process could not be read, or the check itself failed | the status line shows `UNKNOWN(<reason>)` for that field; never silence |
 
 A process that is not running (`absent`, e.g. WSL or Docker Desktop stopped) is
-reported as such and is not an error. Per key a page repeats at most every 2 h
-while the line stays crossed (`$HostMemAlertCooldownHours`). The RESOLVED arrives
-only once the value is 10% back on the safe side of the line
-(`$HostMemClearMarginPercent`; e.g. vmmemWSL at or under 72 GiB); in between, the
-status line says `HOLDING <key>` and nothing is sent, so a value hovering on the
-line cannot page ALERT + RESOLVED every pass. The RESOLVED re-arms the key.
+reported as such and is not an error. Per key there is at most one page every
+2 h (`$HostMemAlertCooldownHours`, timed from that key's last page), and an
+all-clear does NOT reset it: the all-clear clears only the "firing" marker
+(`logs/.hostmem-firing-<key>`), while the last-page time
+(`logs/.hostmem-alert-<key>`) and the catastrophe path's 1 h Telegram floor
+(`logs/.tg-alert-<key>`) stay, as `Resolve-Catastrophe` keeps it. The RESOLVED
+arrives only once the value is back past the all-clear line: 10% on the safe side
+(`$HostMemClearMarginPercent`; vmmemWSL at or under 72 GiB), and for available
+memory at least 4 GiB above the floor (`$HostMemAvailableClearMinGiB`; it clears
+at 20 GiB, not 17.6). In between, the status line says `HOLDING <key>` and
+nothing is sent. Measured with stubbed counters: available swinging 15.5 <-> 17.8
+GiB and vmmemWSL 80.5 <-> 71.5 GiB every pass for 2 h page once each, with one
+RESOLVED for vmmemWSL and none for available. **Accepted trade-off** (the same
+one as 2026-09-16): a genuine relapse inside 2 h of a page is logged and appears
+in `WITH ISSUES`, but is not paged again until the 2 h are up.
 Any finding also puts `host-memory` in the pass's `WITH ISSUES` summary. Test:
 `scripts/checks/test-watchdog-host-memory.ps1` (stubbed counters, sandboxed
 senders; `-Live` adds one read-only pass over the real counters).

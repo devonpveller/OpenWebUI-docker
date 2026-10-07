@@ -6,8 +6,9 @@
 # pattern, which wedged WSL until a reboot). This test loads the watchdog's
 # FUNCTIONS only (never its main block) into a sandbox whose PROJECT_DIR is a
 # temp directory, exactly as test-watchdog-portal-alerts.ps1 does:
-#   - the counters are STUBBED through $HostMemReader (a scriptblock returning
-#     one sample), and the clock through $WatchdogClock;
+#   - the counters are STUBBED through $HostMemReader (a scriptblock whose TEXT
+#     runs as the reader in its own runspace; the sample travels in
+#     $HostMemReaderInput), and the clock through $WatchdogClock;
 #   - Send-TelegramAlert runs <sandbox>\.venv\Scripts\python.exe, a compiled
 #     recorder that appends the message to transport-telegram.log; the real
 #     telegram_notify.py is never on its path;
@@ -21,12 +22,16 @@
 #   ... -Script <path to another stack-watchdog.ps1>   (e.g. the base, for RED)
 #   ... -Live   adds case H15: the REAL counters, read-only, senders still stubbed;
 #               prints the status line the scheduled pass would write.
-# Exit code = number of failed cases.
+#   ... -ChildHang  (internal) the H18 child: one pass with a reader stuck 60 s.
+# Exit code = number of failed cases. The run ends with [Environment]::Exit, as
+# the watchdog's check mode does when a reader is still hung (H16-H18 leave
+# readers blocked in an uninterruptible 60 s .NET sleep on purpose).
 
 [CmdletBinding()]
 param(
     [string]$Script = '',
-    [switch]$Live
+    [switch]$Live,
+    [switch]$ChildHang
 )
 
 $ErrorActionPreference = 'Stop'
@@ -131,9 +136,13 @@ function New-Sample {
 
 function Use-Sample {
     param($Sample)
-    $script:NextSample = $Sample
-    $script:HostMemReader = { $script:NextSample }
+    $script:HostMemReaderInput = $Sample
+    $script:HostMemReader = { $HostMemReaderInput }
 }
+
+# A reader stuck in an UNINTERRUPTIBLE call (a stop request cannot end it), as a
+# hung PDH or process read would be.
+$script:HangReader = { [Threading.Thread]::Sleep(60000) }
 
 function Invoke-Rule {
     $script:RuleError = $null
@@ -146,7 +155,21 @@ function Set-Stubs {
     $script:WatchdogClock = { $script:FakeNow }
 }
 
+# --- H18's child: one pass with a hung reader, then the check-mode exit path.
+if ($ChildHang) {
+    $c = New-Sandbox
+    . $script:Loader $c
+    $script:HostMemReadTimeoutSeconds = 3
+    $script:HostMemReader = $script:HangReader
+    $r = Invoke-Rule
+    Write-Host "CHILD result=$r err=$script:RuleError"
+    Remove-Item $c -Recurse -Force -ErrorAction SilentlyContinue
+    if (Get-Command Exit-WatchdogProcess -ErrorAction SilentlyContinue) { Exit-WatchdogProcess -Code 7 }
+    exit 7
+}
+
 $sbx = $null; $sbx2 = $null; $sbx3 = $null; $sbx4 = $null; $sbx5 = $null; $sbx6 = $null
+$sbx7 = $null; $sbx8 = $null; $sbx9 = $null; $sbx10 = $null
 $sbx = New-Sandbox
 Write-Host "sandbox $sbx ; DOCKER_HOST=$env:DOCKER_HOST ; script $Script"
 try {
@@ -178,12 +201,12 @@ try {
     $r = Invoke-Rule
     $t = Get-Transport $sbx
     $m = Measure-Alerts $t 'vmmemWSL holds'
-    $still = @(Get-Log $sbx | Where-Object { $_ -match 'HOSTMEM \[hostmem-vmmem\] still firing' }).Count
+    $still = @(Get-Log $sbx | Where-Object { $_ -match 'HOSTMEM \[hostmem-vmmem\] (still )?firing; not re-paged' }).Count
     Write-Case 'H3' 'staying high -> false, throttled (no second page), still-firing line' (($r -eq $false) -and $m -eq 'tg=1 mm=1' -and $still -ge 1) "result=$r $m still=$still"
 
     # H3b - the cooldown is a re-page interval, not a mute
-    $sent = Join-Path $sbx 'logs\.hostmem-alert-hostmem-vmmem'
-    if (Test-Path $sent) { (Get-Item $sent).LastWriteTime = (Get-Date).AddHours(-3) }
+    $sent = Join-Path $sbx 'logs\.hostmem-firing-hostmem-vmmem'
+    $script:FakeNow = $script:FakeNow.AddHours(3)
     $tga = Join-Path $sbx 'logs\.tg-alert-hostmem-vmmem'
     if (Test-Path $tga) { (Get-Item $tga).LastWriteTime = (Get-Date).AddHours(-3) }
     $r = Invoke-Rule
@@ -205,8 +228,8 @@ try {
     $r2 = Invoke-Rule
     $t = Get-Transport $sbx
     $res = Measure-Alerts $t 'RESOLVED ai-stack: .*vmmemWSL'
-    $gone = -not (Test-Path $sent)
-    Write-Case 'H5' 'recovering -> true, ONE RESOLVED (all-clear), then silent; alert re-armed' (($r1 -eq $true) -and ($r2 -eq $true) -and $res -match '^tg=1 ' -and $gone) "r1=$r1 r2=$r2 $res rearmed=$gone`n$(@($t.Telegram) -join "`n")"
+    $gone = (-not (Test-Path $sent)) -and (Test-Path $tga)
+    Write-Case 'H5' 'recovering -> true, ONE RESOLVED (all-clear), then silent; firing marker gone, 1 h Telegram floor kept' (($r1 -eq $true) -and ($r2 -eq $true) -and $res -match '^tg=1 ' -and $gone) "r1=$r1 r2=$r2 $res rearmed=$gone`n$(@($t.Telegram) -join "`n")"
 
     # H6 - an unreadable counter: a visible UNKNOWN line and a page, never silence
     $sbx2 = New-Sandbox
@@ -297,8 +320,11 @@ try {
                      'Remove-Item', 'ConvertFrom-Json', 'ConvertTo-Json', 'Measure-Object', 'Sort-Object', 'Where-Object',
                      'ForEach-Object', 'Select-Object', 'Write-LogEntry', 'Send-CatastropheAlert', 'Resolve-Catastrophe',
                      'Get-LoopNowUtc', 'ConvertTo-UtcInstant', 'Format-HostMemGiB', 'ConvertTo-HostMemReason',
-                     'Get-HostMemProcess', 'Get-HostMemorySample', 'Update-HostMemAlert', 'Get-HostMemBackendGrowth')
-    $allowedMembers = @('Dispose', 'ToString', 'Max', 'Substring', 'ReadAllText', 'WriteAllText', 'AddHours', 'TryParse', 'ContainsKey', 'Keys')
+                     'Get-HostMemProcess', 'Get-HostMemorySample', 'Update-HostMemAlert', 'Get-HostMemBackendGrowth',
+                     'Get-HostMemorySampleBounded', 'New-HostMemUnknownSample')
+    $allowedMembers = @('Dispose', 'ToString', 'Max', 'Substring', 'ReadAllText', 'WriteAllText', 'AddHours', 'TryParse', 'ContainsKey', 'Keys',
+                        'CreateRunspace', 'CreateDefault2', 'Open', 'SetVariable', 'Create', 'AddScript', 'BeginInvoke', 'WaitOne',
+                        'BeginStop', 'EndInvoke', 'Trim')
     $hits = @()
     $removeTargets = @()
     foreach ($f in $hmFns) {
@@ -314,22 +340,151 @@ try {
         }
     }
     # Remove-Item may only touch the check's own sentinel / state files.
-    $badRemove = @($removeTargets | Where-Object { $_ -notmatch '-LiteralPath \$(p|path) ' })
+    $badRemove = @($removeTargets | Where-Object { $_ -notmatch '-LiteralPath \$(p|path|firingPath) ' })
     Write-Case 'H12' 'the host-memory functions invoke only read / log / alert commands (no kill, restart, docker, wsl or task change)' (($hmFns.Count -ge 3) -and $hits.Count -eq 0 -and $badRemove.Count -eq 0) "functions=$(@($hmFns | ForEach-Object Name) -join ',') hits=$($hits -join '; ') badRemove=$($badRemove -join '; ')"
 
     # H13 - wired into the health check, BEFORE the Docker-engine step
     $hc = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-HealthCheck' }, $true) | Select-Object -First 1
     $txt = if ($hc) { $hc.Body.Extent.Text } else { '' }
-    $iMem = $txt.IndexOf('Test-HostMemory'); $iEng = $txt.IndexOf('Confirm-DockerEngine')
+    # Positions of the CALLS (command ASTs), so a comment naming either one does not count.
+    $iMem = -1; $iEng = -1
+    if ($hc) {
+        foreach ($c in $hc.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+            $cn = $c.GetCommandName()
+            if ($cn -eq 'Test-HostMemory' -and $iMem -lt 0) { $iMem = $c.Extent.StartOffset }
+            if ($cn -eq 'Confirm-DockerEngine' -and $iEng -lt 0) { $iEng = $c.Extent.StartOffset }
+        }
+    }
     $wired = ($iMem -ge 0) -and ($iEng -ge 0) -and ($iMem -lt $iEng) -and ($txt -match "'host-memory'")
     Write-Case 'H13' 'Invoke-HealthCheck runs Test-HostMemory before Confirm-DockerEngine and records host-memory' ([bool]$wired) "memAt=$iMem engineAt=$iEng"
 
     # H14 - thresholds are named config values
     $names = @('HostMemAvailableFloorGiB', 'HostMemAvailableFloorPercent', 'HostMemCommitMaxPercent', 'HostMemCommitHeadroomFloorGiB',
                'HostMemVmmemMaxGiB', 'HostMemBackendMaxGiB', 'HostMemBackendGrowthGiB', 'HostMemBackendGrowthWindowHours',
-               'HostMemClearMarginPercent', 'HostMemAlertCooldownHours')
+               'HostMemClearMarginPercent', 'HostMemAlertCooldownHours', 'HostMemAvailableClearMinGiB', 'HostMemReadTimeoutSeconds')
     $missing = @($names | Where-Object { $null -eq (Get-Variable -Name $_ -ValueOnly -ErrorAction SilentlyContinue) })
     Write-Case 'H14' 'every threshold is a named config value' ($missing.Count -eq 0) "missing=$($missing -join ',')"
+
+    # H16 - F1(a): a reader stuck 60 s is abandoned at the deadline
+    $sbx7 = New-Sandbox
+    . $script:Loader $sbx7
+    Set-Stubs
+    $script:HostMemReadTimeoutSeconds = 3
+    $script:HostMemReader = $script:HangReader
+    $rsBefore = @(Get-Runspace).Count
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $r = Invoke-Rule
+    $ms = $sw.ElapsedMilliseconds
+    $t = Get-Transport $sbx7
+    $unk = @(Get-Log $sbx7 | Where-Object { $_ -match '\[WARN\] hostmem: avail=UNKNOWN\(timeout after 3s\).*-> UNKNOWN ' }).Count
+    $m = Measure-Alerts $t 'cannot read'
+    Write-Case 'H16' 'reader stuck 60 s, deadline 3 s -> back within 5 s, false, UNKNOWN(timeout) line, ONE page' (($r -eq $false) -and $ms -lt 5000 -and $unk -eq 1 -and $m -eq 'tg=1 mm=1') "result=$r ms=$ms unk=$unk $m err=$script:RuleError"
+
+    # H16b - while it stays hung: later passes report it, start no new reader, page no more
+    $times = @()
+    for ($i = 0; $i -lt 5; $i++) {
+        $script:FakeNow = $script:FakeNow.AddMinutes(10)
+        $sw = [Diagnostics.Stopwatch]::StartNew(); $null = Invoke-Rule; $times += $sw.ElapsedMilliseconds
+    }
+    $rsAfter = @(Get-Runspace).Count
+    $t = Get-Transport $sbx7
+    $still = @(Get-Log $sbx7 | Where-Object { $_ -match 'avail=UNKNOWN\(timeout: an earlier read is still hung' }).Count
+    $m = Measure-Alerts $t 'cannot read'
+    Write-Case 'H16b' '5 more passes while it is hung -> each fast, UNKNOWN(still hung), no new runspace, no second page' (($still -eq 5) -and ($rsAfter - $rsBefore) -le 1 -and (($times | Measure-Object -Maximum).Maximum -lt 1000) -and $m -eq 'tg=1 mm=1') "runspaces $rsBefore -> $rsAfter; pass ms $($times -join ',') ; still=$still $m"
+
+    # H16c - a timed-out reader that DOES finish is disposed and reading resumes
+    $sbx8 = New-Sandbox
+    . $script:Loader $sbx8
+    Set-Stubs
+    $script:HostMemReadTimeoutSeconds = 1
+    $script:HostMemReader = { Start-Sleep -Seconds 3; $HostMemReaderInput }
+    $script:HostMemReaderInput = New-Sample
+    $r1 = Invoke-Rule
+    Start-Sleep -Seconds 1
+    $script:HostMemReadTimeoutSeconds = 15
+    Use-Sample (New-Sample)
+    $r2 = Invoke-Rule
+    $t = Get-Transport $sbx8
+    $pend = $script:HostMemPendingReader
+    Write-Case 'H16c' 'timed-out reader that ends -> disposed next pass; reading resumes; one RESOLVED' (($r1 -eq $false) -and ($r2 -eq $true) -and ($null -eq $pend) -and ((Measure-Alerts $t 'RESOLVED') -match '^tg=1 ')) "r1=$r1 r2=$r2 pendingCleared=$($null -eq $pend) $(Measure-Alerts $t 'RESOLVED') err=$script:RuleError"
+
+    # H17 - F1(b): with a hung reader the health pass still reaches Confirm-DockerEngine in time
+    $sbx9 = New-Sandbox
+    . $script:Loader $sbx9
+    Set-Stubs
+    $script:HostMemReadTimeoutSeconds = 3
+    $script:HostMemReader = $script:HangReader
+    $script:EngineCalled = $false
+    function Confirm-DockerEngine { $script:EngineCalled = $true; return $false }
+    function Confirm-HostTaskByPort { param($TaskName, $Port, $Label) }
+    $cwd = Get-Location
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $hcErr = $null
+    try { $null = Invoke-HealthCheck } catch { $hcErr = $_.Exception.Message }
+    $ms = $sw.ElapsedMilliseconds
+    Set-Location $cwd
+    $t = Get-Transport $sbx9
+    $unk = @(Get-Log $sbx9 | Where-Object { $_ -match 'hostmem: avail=UNKNOWN\(timeout after 3s\)' }).Count
+    Write-Case 'H17' 'Invoke-HealthCheck with a reader stuck 60 s -> Confirm-DockerEngine runs, pass ends within 5 s, UNKNOWN(timeout), one page' ($script:EngineCalled -and $ms -lt 5000 -and -not $hcErr -and $unk -eq 1 -and (Measure-Alerts $t 'cannot read') -eq 'tg=1 mm=1') "engine=$script:EngineCalled ms=$ms err=$hcErr unk=$unk $(Measure-Alerts $t 'cannot read')"
+
+    # H17b - F1(b): a memory check that THROWS cannot stop the pass either
+    . $script:Loader $sbx9
+    Set-Stubs
+    $script:EngineCalled = $false
+    function Confirm-DockerEngine { $script:EngineCalled = $true; return $false }
+    function Confirm-HostTaskByPort { param($TaskName, $Port, $Label) }
+    function Test-HostMemory { throw 'memory check blew up' }
+    $hcErr = $null
+    try { $null = Invoke-HealthCheck } catch { $hcErr = $_.Exception.Message }
+    Set-Location $cwd
+    $esc = @(Get-Log $sbx9 | Where-Object { $_ -match 'escaped its own guard: memory check blew up' }).Count
+    Write-Case 'H17b' 'Test-HostMemory throws -> Invoke-HealthCheck still reaches Confirm-DockerEngine, logs it' ($script:EngineCalled -and -not $hcErr -and $esc -eq 1) "engine=$script:EngineCalled err=$hcErr logged=$esc"
+    . $script:Loader $sbx
+
+    # H18 - F1: a hung reader cannot keep the watchdog PROCESS alive (IgnoreNew would drop later passes)
+    $tok = $null; $pe = $null
+    $mainAst = [System.Management.Automation.Language.Parser]::ParseFile($Script, [ref]$tok, [ref]$pe)
+    $sw0 = $mainAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.SwitchStatementAst] }, $false) | Select-Object -Last 1
+    $checkClause = ''
+    if ($sw0) { foreach ($cl in $sw0.Clauses) { if ($cl.Item1.Extent.Text -match '"check"') { $checkClause = $cl.Item2.Extent.Text } } }
+    $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $MyInvocation.MyCommand.Path, '-Script', $Script, '-ChildHang')
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $childOut = & powershell.exe @childArgs 2>&1
+    $childCode = $LASTEXITCODE
+    $ms = $sw.ElapsedMilliseconds
+    $wired = $checkClause -match 'Exit-WatchdogProcess'
+    Write-Case 'H18' 'a pass whose reader is stuck 60 s: the process exits soon after the 3 s deadline (exit code kept), and -Mode check uses that exit' (($ms -lt 20000) -and $childCode -eq 7 -and $wired) "child wall ms=$ms exit=$childCode checkModeWired=$wired`n$(@($childOut | Where-Object { $_ -match 'CHILD' }) -join '')"
+
+    # H19 - F2: values swinging across the band for 2 h page once, no ALERT/RESOLVED ping-pong
+    $sbx10 = New-Sandbox
+    . $script:Loader $sbx10
+    Set-Stubs
+    $script:FakeNow = [datetime]::new(2026, 10, 7, 12, 0, 0, [DateTimeKind]::Utc)
+    for ($i = 0; $i -lt 12; $i++) {
+        $av = if ($i % 2 -eq 0) { 15.5 } else { 17.8 }
+        $vm = if ($i % 2 -eq 0) { 80.5 } else { 71.5 }
+        Use-Sample (New-Sample -Avail $av -Vmmem $vm)
+        $null = Invoke-Rule
+        $script:FakeNow = $script:FakeNow.AddMinutes(10)
+    }
+    $t = Get-Transport $sbx10
+    $avA = Measure-Alerts $t 'HOST MEMORY LOW'
+    $avR = Measure-Alerts $t 'RESOLVED.*available'
+    $vmA = Measure-Alerts $t 'vmmemWSL holds'
+    $vmR = Measure-Alerts $t 'RESOLVED.*vmmemWSL'
+    $ok19 = ($avA -eq 'tg=1 mm=1') -and ($avR -eq 'tg=0 mm=0') -and ($vmA -eq 'tg=1 mm=1') -and ($vmR -match '^tg=[01] mm=0$')
+    Write-Case 'H19' '12 passes (2 h) of 15.5<->17.8 GiB available and 80.5<->71.5 GiB vmmemWSL -> one page each, at most one RESOLVED' $ok19 "available: alert $avA resolved $avR ; vmmemWSL: alert $vmA resolved $vmR"
+
+    # H19b - the cooldown is per page, not a mute: the next swing after 2 h pages again
+    Use-Sample (New-Sample -Avail 15.5 -Vmmem 80.5)
+    foreach ($k in @('hostmem-available', 'hostmem-vmmem')) {
+        $f = Join-Path $sbx10 "logs\.tg-alert-$k"
+        if (Test-Path $f) { (Get-Item $f).LastWriteTime = (Get-Date).AddHours(-2) }
+    }
+    $null = Invoke-Rule
+    $t = Get-Transport $sbx10
+    Write-Case 'H19b' 'at 2 h after the first page, still swinging -> paged once more' (((Measure-Alerts $t 'HOST MEMORY LOW') -eq 'tg=2 mm=2') -and ((Measure-Alerts $t 'vmmemWSL holds') -eq 'tg=2 mm=2')) "available $(Measure-Alerts $t 'HOST MEMORY LOW') vmmemWSL $(Measure-Alerts $t 'vmmemWSL holds')"
+    . $script:Loader $sbx
 
     # H15 - live: the REAL counters, read-only, senders stubbed by the sandbox
     if ($Live) {
@@ -345,10 +500,10 @@ try {
         Write-Case 'H15' 'live read-only pass prints real current values (no alert leaves the sandbox)' ($real -and -not $script:RuleError) "result=$r ms=$ms err=$script:RuleError`n$($line -join '')"
     }
 } finally {
-    foreach ($d in @($sbx, $sbx2, $sbx3, $sbx4, $sbx5, $sbx6)) { if ($d -and (Test-Path $d)) { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue } }
+    foreach ($d in @($sbx, $sbx2, $sbx3, $sbx4, $sbx5, $sbx6, $sbx7, $sbx8, $sbx9, $sbx10)) { if ($d -and (Test-Path $d)) { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue } }
 }
 
 Write-Host ""
 Write-Host ("RESULTS: " + ($script:Results -join ' '))
 Write-Host "FAILED: $script:Failures"
-exit $script:Failures
+[Environment]::Exit($script:Failures)

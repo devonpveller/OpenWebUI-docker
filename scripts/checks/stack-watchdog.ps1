@@ -2833,11 +2833,13 @@ function Test-PortalAlertDelivery {
 # summed) via Get-Process. A counter that cannot be read is an UNKNOWN in the
 # status line and its own page (hostmem-unreadable), never silence.
 #
-# Thresholds (GiB = 2^30 bytes). A key pages when its line is crossed, re-pages
-# at most every $HostMemAlertCooldownHours while it stays crossed, and sends its
-# all-clear only once the value is $HostMemClearMarginPercent back on the safe
-# side of the line (hysteresis, so a value hovering on the line cannot page
-# ALERT + RESOLVED every 10-minute pass).
+# Thresholds (GiB = 2^30 bytes). A key pages when its line is crossed, at most
+# once per $HostMemAlertCooldownHours (all-clears included - see
+# Update-HostMemAlert), and sends its all-clear only once the value is
+# $HostMemClearMarginPercent back on the safe side of the line (and, for
+# available memory, at least $HostMemAvailableClearMinGiB above it) - so a value
+# hovering on, or swinging across, the line cannot page ALERT + RESOLVED every
+# 10-minute pass. The read itself runs under $HostMemReadTimeoutSeconds.
 #   available  < max(16 GiB, 12.5% of physical). 16 GiB = 12.5% of this 128 GiB
 #              host; Windows starts hard paging near there, and 07-05 died at 0.
 #   commit     >= 85% of the commit limit, or < 24 GiB of commit headroom.
@@ -2860,10 +2862,29 @@ $HostMemBackendMaxGiB = 12
 $HostMemBackendGrowthGiB = 4
 $HostMemBackendGrowthWindowHours = 6
 $HostMemClearMarginPercent = 10
+# The available-memory all-clear line is at least this far above its floor
+# (10% of 16 GiB alone is a 1.6 GiB band, and available swings 2 GiB between
+# passes; attempt-1 finding F2). So it clears at 20 GiB, not 17.6.
+$HostMemAvailableClearMinGiB = 4
+# Per key, at most one page per cooldown - ACROSS all-clears: an all-clear does
+# not reset it (attempt-1 finding F2), so a value swinging across the band
+# cannot page ALERT / RESOLVED every pass. Measured on the check's own clock.
 $HostMemAlertCooldownHours = 2
-# Test seam: a scriptblock returning one sample in Get-HostMemorySample's shape.
-# $null (always, in production) reads the real counters.
+# Hard deadline on the counter read (attempt-1 finding F1). The read runs in a
+# runspace; at the deadline it is abandoned, the line shows UNKNOWN(timeout)
+# and the pass carries on to the Docker-engine step. Worst cold read measured
+# 6.5 s (tester, 2026-10-07), so 15 s leaves room without stalling the pass.
+$HostMemReadTimeoutSeconds = 15
+# Test seam: a scriptblock whose TEXT runs as the reader (in the reader's own
+# runspace, with $HostMemReaderInput set there). $null (always, in production)
+# reads the real counters.
 $HostMemReader = $null
+$HostMemReaderInput = $null
+# A reader that missed its deadline and has not finished. At most ONE per
+# process: while it is outstanding, later passes report it instead of starting
+# another (no accumulation in daemon mode), and the check-mode exit hard-exits
+# the process so the hung thread cannot keep it alive (Exit-WatchdogProcess).
+$HostMemPendingReader = $null
 
 function Format-HostMemGiB {
     param([double]$Bytes, [int]$Decimals = 1)
@@ -2910,7 +2931,6 @@ function Get-HostMemProcess {
 function Get-HostMemorySample {
     [CmdletBinding()]
     param()
-    if ($HostMemReader) { return (& $HostMemReader) }
     $s = [ordered]@{ TotalBytes = $null; AvailBytes = $null; CommitBytes = $null; CommitLimitBytes = $null
                      Vmmem = $null; Backend = $null; Errors = @{} }
     try {
@@ -2935,10 +2955,104 @@ function Get-HostMemorySample {
     return [pscustomobject]$s
 }
 
-# One key's paging state. Breach pages (at most once per cooldown); Clear sends
-# the all-clear for a key that paged and re-arms it; neither is HOLDING. The
-# .hostmem-alert-<key> sentinel means "paged and not yet cleared". Returns
-# 'firing' / 'holding' / 'cleared' / 'ok'.
+# A sample in which every field is unreadable for one reason (a timeout, a
+# reader that could not start, a reader still hung from an earlier pass).
+function New-HostMemUnknownSample {
+    param([string]$Reason)
+    $e = @{}
+    foreach ($k in @('available', 'commit', 'commit-limit', 'vmmemWSL', 'com.docker.backend')) { $e[$k] = $Reason }
+    return [pscustomobject]@{ TotalBytes = $null; AvailBytes = $null; CommitBytes = $null; CommitLimitBytes = $null
+                              Vmmem = [pscustomobject]@{ State = 'unknown'; PrivateBytes = $null; Id = ''; Count = 0; Error = $Reason }
+                              Backend = [pscustomobject]@{ State = 'unknown'; PrivateBytes = $null; Id = ''; Count = 0; Error = $Reason }
+                              Errors = $e }
+}
+
+# The sample, under a hard deadline (finding F1). The reader runs in its own
+# runspace so a counter read that hangs cannot hold the pass: at the deadline
+# it is abandoned (a non-blocking stop request; never a blocking Stop/Dispose)
+# and kept in $HostMemPendingReader - one at most - so the next pass reports
+# it instead of starting another. A finished reader is disposed on the next
+# pass. Returns a sample, or throws what the reader threw.
+function Get-HostMemorySampleBounded {
+    [CmdletBinding()]
+    param()
+    $p = $script:HostMemPendingReader
+    if ($p) {
+        if ($p.Handle.IsCompleted) {
+            try { $null = $p.PS.EndInvoke($p.Handle) } catch { }
+            try { $p.PS.Dispose() } catch { }
+            try { $p.RS.Dispose() } catch { }
+            $script:HostMemPendingReader = $null
+        } else {
+            return (New-HostMemUnknownSample ("timeout: an earlier read is still hung (since {0})" -f $p.Started.ToString('yyyy-MM-dd HH:mm:ss')))
+        }
+    }
+    if ($HostMemReader) {
+        $code = $HostMemReader.ToString()
+    } else {
+        $code = "function Get-HostMemProcess {`n" + ${function:Get-HostMemProcess}.ToString() + "`n}`n" +
+                "function Get-HostMemorySample {`n" + ${function:Get-HostMemorySample}.ToString() + "`n}`n" +
+                "Get-HostMemorySample"
+    }
+    $rs = $null; $ps = $null; $h = $null
+    try {
+        $rs = [runspacefactory]::CreateRunspace([System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault2())
+        $rs.Open()
+        $rs.SessionStateProxy.SetVariable('HostMemReaderInput', $HostMemReaderInput)
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
+        $null = $ps.AddScript($code)
+        $h = $ps.BeginInvoke()
+    } catch {
+        $why = ConvertTo-HostMemReason $_.Exception.Message
+        if ($ps) { try { $ps.Dispose() } catch { } }
+        if ($rs) { try { $rs.Dispose() } catch { } }
+        return (New-HostMemUnknownSample "reader could not start: $why")
+    }
+    $ms = [int]([double]$HostMemReadTimeoutSeconds * 1000)
+    if (-not $h.AsyncWaitHandle.WaitOne($ms)) {
+        try { $null = $ps.BeginStop($null, $null) } catch { }
+        $script:HostMemPendingReader = [pscustomobject]@{ PS = $ps; RS = $rs; Handle = $h; Started = (Get-Date) }
+        return (New-HostMemUnknownSample ("timeout after {0}s" -f $HostMemReadTimeoutSeconds))
+    }
+    try {
+        $out = @($ps.EndInvoke($h))
+        if ($out.Count -eq 0) {
+            $err = if ($ps.Streams.Error.Count -gt 0) { [string]$ps.Streams.Error[0] } else { 'the reader returned nothing' }
+            throw $err
+        }
+        return $out[-1]
+    } finally {
+        try { $ps.Dispose() } catch { }
+        try { $rs.Dispose() } catch { }
+    }
+}
+
+# Check-mode exit. When a memory read is still hung, its runspace thread is a
+# FOREGROUND thread and would keep powershell.exe alive after `exit` (measured:
+# a reader blocked 60 s held the process 60.6 s) - and StackWatchdog is
+# MultipleInstances IgnoreNew, so that would silently drop every later pass.
+# Then, and only then, end the process outright; otherwise return so the
+# caller's ordinary `exit` runs.
+function Exit-WatchdogProcess {
+    param([int]$Code)
+    $p = $script:HostMemPendingReader
+    if ($p -and -not $p.Handle.IsCompleted) {
+        try { Write-LogEntry "hostmem: a memory read is still hung - ending the watchdog process outright so it cannot block the next scheduled pass" "WARN" } catch { }
+        [Environment]::Exit($Code)
+    }
+}
+
+# One key's paging state. Breach pages at most once per cooldown; Clear sends
+# the all-clear for a key that is firing; neither is HOLDING. Two files per key:
+# .hostmem-firing-<key> = "firing and not yet cleared"; .hostmem-alert-<key> =
+# when this key last paged (check clock, ISO). The all-clear removes ONLY the
+# firing marker: the last-page time and the catastrophe path's 1 h Telegram
+# floor (.tg-alert-<key>) stay, exactly as Resolve-Catastrophe keeps it, so a
+# value swinging across the band pages once per cooldown, not every other pass
+# (finding F2). Trade-off, the same one accepted 2026-09-16: a genuine relapse
+# inside the cooldown is logged and in WITH ISSUES but not re-paged.
+# Returns 'firing' / 'holding' / 'cleared' / 'ok'.
 function Update-HostMemAlert {
     [CmdletBinding()]
     param(
@@ -2948,32 +3062,34 @@ function Update-HostMemAlert {
         [string]$Message,
         [string]$ClearMessage
     )
-    $sentinel = Join-Path $PROJECT_DIR "logs\.hostmem-alert-$Key"
-    $wasFiring = Test-Path -LiteralPath $sentinel
+    $firingPath = Join-Path $PROJECT_DIR "logs\.hostmem-firing-$Key"
+    $lastPath = Join-Path $PROJECT_DIR "logs\.hostmem-alert-$Key"
+    $wasFiring = Test-Path -LiteralPath $firingPath
+    $now = Get-LoopNowUtc
     if ($Breach) {
         $send = $true
-        if ($wasFiring) {
-            try {
-                if (((Get-Date) - (Get-Item -LiteralPath $sentinel).LastWriteTime).TotalHours -lt $HostMemAlertCooldownHours) { $send = $false }
-            } catch { }
-        }
+        try {
+            if (Test-Path -LiteralPath $lastPath) {
+                $last = ConvertTo-UtcInstant (([IO.File]::ReadAllText($lastPath)).Trim())
+                if ($last -and ($now - $last).TotalHours -lt $HostMemAlertCooldownHours -and $last -le $now) { $send = $false }
+            }
+        } catch { }
         if ($send) {
             Send-CatastropheAlert -Key $Key -Message $Message
-            try { (Get-Date -Format o) | Out-File -LiteralPath $sentinel -Encoding ascii -Force } catch { }
+            try { [IO.File]::WriteAllText($lastPath, $now.ToString('o')) } catch { }
         } else {
-            Write-LogEntry "HOSTMEM [$Key] still firing; not re-paged inside the ${HostMemAlertCooldownHours}h cooldown: $Message" "WARN"
+            Write-LogEntry "HOSTMEM [$Key] firing; not re-paged inside the ${HostMemAlertCooldownHours}h cooldown since its last page: $Message" "WARN"
         }
+        try { if (-not $wasFiring) { [IO.File]::WriteAllText($firingPath, $now.ToString('o')) } } catch { }
         return 'firing'
     }
     if (-not $wasFiring) { return 'ok' }
     if ($Clear) {
+        # Resolve-Catastrophe pings RESOLVED only if a page actually left since
+        # the last all-clear (its .tg-state marker), so a re-fire that was held
+        # back by the cooldown clears silently.
         Resolve-Catastrophe -Key $Key -Message $ClearMessage
-        # Re-arm: drop this check's sentinel AND the catastrophe path's 1h
-        # Telegram throttle, so a relapse after the all-clear pages at once.
-        $rearm = @($sentinel, (Join-Path $PROJECT_DIR "logs\.tg-alert-$Key"))
-        foreach ($p in $rearm) {
-            Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
-        }
+        Remove-Item -LiteralPath $firingPath -Force -ErrorAction SilentlyContinue
         Write-LogEntry "HOSTMEM [$Key] cleared: $ClearMessage" "SUCCESS"
         return 'cleared'
     }
@@ -3034,7 +3150,7 @@ function Test-HostMemory {
     [CmdletBinding()]
     param()
     try {
-        $s = Get-HostMemorySample
+        $s = Get-HostMemorySampleBounded
         $gib = [double]1GB
         $m = [double]$HostMemClearMarginPercent / 100.0
         $errs = @{}
@@ -3082,7 +3198,8 @@ function Test-HostMemory {
         $floor = [double]$HostMemAvailableFloorGiB * $gib
         if ($null -ne $total) { $floor = [math]::Max($floor, ([double]$HostMemAvailableFloorPercent / 100.0) * $total) }
         if ($null -ne $avail) {
-            $states['hostmem-available'] = Update-HostMemAlert -Key 'hostmem-available' -Breach ($avail -lt $floor) -Clear ($avail -ge $floor * (1 + $m)) `
+            $clearAt = [math]::Max($floor * (1 + $m), $floor + [double]$HostMemAvailableClearMinGiB * $gib)
+            $states['hostmem-available'] = Update-HostMemAlert -Key 'hostmem-available' -Breach ($avail -lt $floor) -Clear ($avail -ge $clearAt) `
                 -Message ("HOST MEMORY LOW: {0} GiB available (floor {1} GiB). {2} {3}" -f (Format-HostMemGiB $avail), (Format-HostMemGiB $floor), $ctx, $tail) `
                 -ClearMessage ("host memory available is back above the floor: {0} GiB." -f (Format-HostMemGiB $avail))
         }
@@ -3141,7 +3258,7 @@ function Test-HostMemory {
         return $ok
     } catch {
         $why = ConvertTo-HostMemReason $_.Exception.Message
-        Write-LogEntry "hostmem: UNKNOWN - the host memory check failed: $why" "WARN"
+        try { Write-LogEntry "hostmem: UNKNOWN - the host memory check failed: $why" "WARN" } catch { }
         try {
             $null = Update-HostMemAlert -Key 'hostmem-unreadable' -Breach $true -Clear $false `
                 -Message "HOST MEMORY watchdog failed to run: $why. Memory pressure is NOT watched until this clears."
@@ -3168,8 +3285,16 @@ function Invoke-HealthCheck {
     # --- HOST memory, before anything touches Docker (hm-watchdog, 2026-10-07):
     # it needs no Docker and matters most when the WSL VM or the Docker backend
     # is eating the host. Alert only; see the HOST MEMORY section.
-    if (-not [bool](@(Test-HostMemory) | Select-Object -Last 1)) {
+    # Its read is bounded (Get-HostMemorySampleBounded) and NOTHING it does -
+    # a hang past the deadline, a throw, a failing logger - may stop this pass
+    # from reaching Confirm-DockerEngine and the rest (finding F1).
+    try {
+        if (-not [bool](@(Test-HostMemory) | Select-Object -Last 1)) {
+            $script:HealthIssues += 'host-memory'
+        }
+    } catch {
         $script:HealthIssues += 'host-memory'
+        try { Write-LogEntry "hostmem: UNKNOWN - the host memory check escaped its own guard: $($_.Exception.Message)" "WARN" } catch { }
     }
 
     # --- Docker ENGINE liveness FIRST (after the read-only memory check): every check below issues `docker ...` and
@@ -3599,7 +3724,13 @@ function Install-WindowsService {
 # Main execution logic
 switch ($Mode.ToLower()) {
     "check" {
-        $Success = Invoke-HealthCheck
+        $Success = $false
+        try {
+            $Success = Invoke-HealthCheck
+        } finally {
+            # A no-op unless a host-memory read is still hung (see the function).
+            Exit-WatchdogProcess -Code $(if ($Success) { 0 } else { 1 })
+        }
         exit $(if ($Success) { 0 } else { 1 })
     }
     
