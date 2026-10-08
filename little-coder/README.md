@@ -69,8 +69,11 @@ run `python agent-org/scripts/gen-worker-configs.py`.
 The control daemon (`:8090`) runs agent tasks, clears the agent's stop-gates
 (`/tasks/{id}/confirm` is journalled as an operator action), approves skills,
 retargets the workspace and shuts itself down. So every route **except
-`GET /health`** requires `Authorization: Bearer <LC_DAEMON_TOKEN>` (ao-dauth,
+`GET /health`** requires `Authorization: Bearer <token>` (ao-dauth,
 2026-10-07; [`src/littlecoder/daemon_auth.py`](src/littlecoder/daemon_auth.py)).
+The token is a **root-only secret file**, `/etc/lc-secret/token` in the container
+(a read-only bind mount inside a `root 0700` directory the image creates), never
+an environment variable.
 
 - **One route table**, `ROUTE_ACCESS` in `daemon_auth.py`. A route served but
   missing from it (or a row naming no route) stops the daemon from starting.
@@ -78,24 +81,35 @@ retargets the workspace and shuts itself down. So every route **except
 - **Checked before anything runs**: a pure ASGI middleware, before the request
   body is read; constant-time compare; the value is never logged or returned.
   Refusals carry `x-lc-auth: refused`. Websocket connections are refused.
-- **Fail closed**: unset or blank, every route but `/health` answers **503**
-  and the daemon logs `LC_DAEMON_TOKEN is not set` at startup. Missing or wrong:
-  **401**.
-- **Not readable by the agent**: at start the daemon takes the variable out of
-  its environment and re-execs itself (same PID) with the value on a pipe that it
-  reads once and closes (`LC_DAEMON_TOKEN_FD` names the fd), then marks itself
-  non-dumpable. So the agent, `ot-exec`, git and acceptance checks - which run as
-  the same uid - find it in neither their own env nor `/proc/<daemon>/environ`,
-  `cmdline` or `fd` (pi's read tool included). It does remain in the daemon's
-  memory (ptrace-attach needed: refused) and in the environment of `docker exec`
-  processes, which run as root.
-  `docker exec <container> lc ...` still works: `docker exec` carries the
-  container's configured environment, and the `lc` CLI (and the dormant
-  `lc-mcp`) send it.
-- **Who holds it**: the coder-plane `little-coder` (from `coder/.env`) and Open
-  WebUI's `little_coder` pipe (its `daemon_token` valve); `ao-worker-1/2` and
-  `agent-bridge` (from `agent-org/docker/.env`, a different value). Never
-  `open-terminal`, `lc-egress` or `ao-ot-1/2`.
+- **Fail closed**: no file (or a blank one, or the empty directory Docker
+  creates when the host file is missing), every route but `/health` answers
+  **503** and the daemon logs `no token in the secret file` and
+  `LC_DAEMON_TOKEN is not set` at startup. Missing or wrong: **401**.
+- **Not readable by the agent - nor by any `lc` process.** The entrypoint starts
+  the daemon as **root**; it reads the file and drops to `lc` itself (as gosu
+  did). The kernel marks a process non-dumpable when its credentials change, so
+  `/proc/<daemon>/*` belongs to root from then on; before the drop it is root's
+  anyway - there is no startup window. The value is in no environment: not the
+  container's configured env, so no `docker exec` process (of any uid - an
+  operator's `docker exec -u lc little-coder little-coder --print ...` included)
+  carries it, and not the agent's. What the agent uid (`lc`) can read holds it
+  nowhere: its env, `/proc/*`, the secret directory (pi's read tool included -
+  measured, ao-dauth round 3). It remains only in the daemon's memory
+  (ptrace-attach: refused to the agent) and in the file (root-only).
+- **In-container clients**: `docker exec <container> lc ...` runs as root and
+  reads the file (`daemon_auth.client_headers`; so does the dormant `lc-mcp`).
+  `docker exec -u lc ... lc ...` gets no token and a 401 - by design, `lc` is
+  the agent's uid. `LC_DAEMON_TOKEN` exported in the CLIENT's own env still wins
+  (an operator's one-off).
+- **Who holds it**: two files, two values. Coder plane:
+  `secrets/little-coder/daemon-token` at the repo root (mounted into
+  `little-coder`; the same value is Open WebUI's `little_coder` pipe valve
+  `daemon_token`). Agent-org: `agent-org/agent-bridge/secrets/lc-daemon-token`
+  (mounted into `ao-worker-1/2`; `agent-bridge` reads it through its existing
+  secrets mount). Never `open-terminal`, `lc-egress` or `ao-ot-1/2`. A non-root
+  start (tests, a hand run) may still pass `LC_DAEMON_TOKEN` in the env: the
+  daemon then takes it out and re-execs itself with it on a pipe
+  (`LC_DAEMON_TOKEN_FD`, `python -P`).
 - **Bind scope, `LC_DAEMON_HIDE_FROM`** (comma-separated host names): the daemon
   (`:8090`) and its metrics (`:9090`) do not listen on any interface whose subnet
   holds one of them. The agent-org
@@ -104,11 +118,11 @@ retargets the workspace and shuts itself down. So every route **except
   A name that does not resolve, or a scope that leaves only loopback, stops the
   daemon (fail closed). Unset: the configured `daemon.host` as before. The coder
   plane leaves it unset: `open-terminal` shares both of that daemon's networks.
-- `scripts/agent-harness/dispatch.ps1` (docker-exec transport) prints the header
-  from the container's own environment inside the container; the host never
-  holds the value. Its `http` transport sends `$env:LC_DAEMON_TOKEN`. The
-  quadrant comparison's transport (`scripts/agent-harness/quadrant/lc_docker.py`)
-  does the same with `bash -c` and a process-substitution header file.
+- `scripts/agent-harness/dispatch.ps1` (docker-exec transport, as root) prints
+  the header from the secret file inside the container; the host never holds the
+  value. Its `http` transport sends `$env:LC_DAEMON_TOKEN`. The quadrant
+  comparison's transport (`scripts/agent-harness/quadrant/lc_docker.py`) does the
+  same with `bash -c` and a process-substitution header file.
 
 ## Language note
 

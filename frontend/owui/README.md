@@ -46,8 +46,8 @@ centralized here:
   `pantry-meal-planner` plan set). Tests: `tools/tests/test_pantry.py`.
 - `pipes/little_coder.py` ← service: [`little-coder/`](../../little-coder/).
   Since v0.8.0 (ao-dauth) the daemon requires a bearer on every route but
-  `/health`: after pasting, set the pipe's **`daemon_token`** valve to
-  `LC_DAEMON_TOKEN` from `coder/.env` (blank = every call refused). Tests:
+  `/health`: after pasting, set the pipe's **`daemon_token`** valve to the
+  content of `secrets/little-coder/daemon-token` (blank = every call refused). Tests:
   `python -m unittest discover -s frontend/owui/pipes/tests`.
 - `tools/deep_research.py` ← service: `OB1/integrations/research-service/` (the
   `openbrain-research` Deno engine). The Python harness that used to live at

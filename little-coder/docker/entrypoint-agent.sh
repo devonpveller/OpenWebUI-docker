@@ -156,4 +156,11 @@ if [ -n "$SESS_TMP" ]; then mv "$SESS_TMP/sessions" "$PI_SESSIONS"; rmdir "$SESS
 mkdir -p "$PI_SESSIONS" && chown -R lc:lc "$PI_SESSIONS" && chmod 0755 "$PI_SESSIONS"
 echo "[entrypoint] load surface locked: ~ root-owned read-only except ~/.little-coder ~/.cache ~/.npm ~/.lc-quarantine ~/.pi/agent/sessions; user extensions dir: ${LITTLE_CODER_EXTENSIONS_DIR:-UNSET}; jiti fs cache: ${JITI_FS_CACHE:-UNSET}"
 
+# ao-dauth round 3: the control daemon starts as ROOT and drops to `lc` itself, right after reading
+# its token from the root-only secret file /etc/lc-secret/token (littlecoder/daemon_auth.py,
+# take_root_secret). The token is never in any environment, and the daemon is never readable by lc
+# while it holds the file's content. Everything else (lc-mcpo, a direct command) drops here as before.
+if [ "$1" = "lc-daemon" ]; then
+  exec "$@"
+fi
 exec gosu lc "$@"

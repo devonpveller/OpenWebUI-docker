@@ -79,9 +79,12 @@ print(json.dumps(out))
 """
 
 
-# Runs as `bash -c` inside the little-coder container; "$@" are curl's own arguments.
-_AUTH_CURL = ('exec curl -H @<(printf \'Authorization: Bearer %s\\n\' "${LC_DAEMON_TOKEN:-unset}") '
-              '"$@"')
+# Runs as `bash -c` inside the little-coder container (as root - the docker exec default); "$@" are
+# curl's own arguments. The token comes from the root-only secret file (ao-dauth round 3: it is in
+# no environment); the command substitution's `tr` has no token in its argv.
+_SECRET = "/etc/lc-secret/token"   # root-only in the little-coder image
+_AUTH_CURL = ('exec curl -H @<(printf \'Authorization: Bearer %s\\n\' '
+              '"$(tr -d \'\\r\\n\' < /etc/lc-secret/token 2>/dev/null || echo unset)") "$@"')
 
 
 class LcDockerError(RuntimeError):
@@ -112,11 +115,11 @@ def api(container: str, base_url: str, method: str, path: str,
     harness does not own, and no JSON has to survive an argv round-trip.
     """
     url = base_url.rstrip("/") + path
-    # ao-dauth: every daemon route but /health needs `Authorization: Bearer <LC_DAEMON_TOKEN>`.
-    # The header is built INSIDE the container from the container's own environment (the env
-    # `docker exec` carries) and handed to curl on a process-substitution pipe: the token is in
-    # no argv on either side (a container's /proc/<pid>/cmdline is world-readable) and never
-    # passes through this host. stdin stays free for the body.
+    # ao-dauth: every daemon route but /health needs `Authorization: Bearer <token>`. The header
+    # is built INSIDE the container from the root-only secret file and handed to curl on a
+    # process-substitution pipe: the token is in no argv on either side (a container's
+    # /proc/<pid>/cmdline is world-readable) and never passes through this host. stdin stays free
+    # for the body.
     args = ["exec", "-i", container, "bash", "-c", _AUTH_CURL, "lc-quadrant",
             "-sS", "--max-time", str(timeout), "-w", "\n%{http_code}", "-X", method]
     payload = None

@@ -72,16 +72,17 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
 
   | Token | Accepted on | Held by | Unset / wrong |
   |---|---|---|---|
-  | `LC_DAEMON_TOKEN` | every little-coder daemon route except `GET /health` (the one table: `ROUTE_ACCESS` in `little-coder/src/littlecoder/daemon_auth.py`) | two values: `agent-org/docker/.env` (`ao-worker-1/2`, `agent-bridge`) and `coder/.env` (`little-coder`, Open WebUI's `little_coder` pipe valve `daemon_token`) - never `ao-ot-1/2`, `open-terminal` or `lc-egress` | unset: those routes refuse **503** (fail closed); wrong/missing: **401** |
+  | little-coder daemon token (a FILE, not an env var) | every little-coder daemon route except `GET /health` (the one table: `ROUTE_ACCESS` in `little-coder/src/littlecoder/daemon_auth.py`) | two files, two values: `agent-org/agent-bridge/secrets/lc-daemon-token` (mounted root-only into `ao-worker-1/2`; read by `agent-bridge`) and `secrets/little-coder/daemon-token` (mounted root-only into `little-coder`; Open WebUI's `little_coder` pipe valve `daemon_token`) - never `ao-ot-1/2`, `open-terminal` or `lc-egress` | missing/blank: those routes refuse **503** (fail closed); wrong/missing header: **401** |
 
-  At start the daemon re-execs itself (same PID) with the token removed from its environment,
-  handed over on a pipe that is read once and closed, and makes itself non-dumpable: the agent
-  (same uid `lc`) finds it in neither its own env, `/proc/1/environ`, `/proc/1/cmdline` nor
-  `/proc/1/fd` - measured with a shell and with pi's own read tool (round 2). It still exists in
-  the daemon's memory and in the env of `docker exec` processes, which run as root. The workers set
+  The daemon starts as root, reads `/etc/lc-secret/token` (inside a root `0700` directory) and
+  drops to `lc` itself; from then on it is non-dumpable. The token is in no environment - not the
+  container's configured env, so no `docker exec` process of any uid carries it - and the agent
+  (uid `lc`) can read it from nothing: its env, `/proc/*` or the secret directory (measured with a
+  shell, a concurrent `docker exec -u lc` and pi's own read tool, both layouts, ao-dauth round 3).
+  It exists only in the file and in the daemon's memory. The workers set
   `LC_DAEMON_HIDE_FROM=ao-ot-N`, so neither the daemon (`:8090`) nor its metrics (`:9090`) listen on
   the network shared with the executor: a worker command cannot connect to them at all.
-  **Key rotation:** on the rotation list - new value in the `.env`, `--force-recreate` the
+  **Key rotation:** on the rotation list - new content in the token file, `--force-recreate` the
   daemon(s) and their caller (`agent-bridge`; for the coder plane, update the pipe valve);
   rotate at once if it is ever seen in a log, a chat post, or an `ao-ot`/`open-terminal`
   environment.

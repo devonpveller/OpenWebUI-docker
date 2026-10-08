@@ -224,7 +224,7 @@ class Pipe:
         )
         daemon_token: str = Field(
             default_factory=lambda: os.environ.get("LC_DAEMON_TOKEN", ""),
-            description="The daemon's LC_DAEMON_TOKEN (coder/.env). Every daemon route "
+            description="The daemon token (secrets/little-coder/daemon-token). Every daemon route "
             "except /health requires it (ao-dauth); blank = the daemon refuses (503).",
         )
         operator_roles: str = Field(

@@ -194,3 +194,29 @@ async def test_against_the_real_daemon_app(tmp_path):
         assert st.status == TaskStatus.RUNNING
     assert await good.cancel_task(BASE, st.task_id) is True
     assert st.status == TaskStatus.ABANDONED
+
+
+# --- round 3: the bridge reads the token FILE it shares with the workers ---------------------------
+
+def test_settings_read_the_token_file_when_env_is_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("LC_DAEMON_TOKEN", raising=False)
+    f = tmp_path / "lc-daemon-token"
+    f.write_text(LC_TOKEN + "\n", encoding="utf-8")
+    s = Settings(_env_file=None, lc_daemon_token_file=str(f))
+    assert s.lc_daemon_token_value() == LC_TOKEN
+    assert Settings(_env_file=None, lc_daemon_token_file=str(tmp_path / "missing")).lc_daemon_token_value() == ""
+    assert Settings(_env_file=None, lc_daemon_token_file=str(tmp_path)).lc_daemon_token_value() == ""   # a dir
+    monkeypatch.setenv("LC_DAEMON_TOKEN", "env-wins")
+    assert Settings(_env_file=None, lc_daemon_token_file=str(f)).lc_daemon_token_value() == "env-wins"
+
+
+async def test_production_orchestrator_uses_the_token_file(db_url, tmp_path, monkeypatch):
+    monkeypatch.delenv("LC_DAEMON_TOKEN", raising=False)
+    f = tmp_path / "lc-daemon-token"
+    f.write_text(LC_TOKEN, encoding="utf-8")
+    s = Settings(_env_file=None, chat_adapter="mattermost", database_url=db_url,
+                 profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+                 floor_dir=str(ROOT / "floor"), worker_instance_urls=BASE, egress_allowlist_file="",
+                 lc_daemon_token_file=str(f))
+    orch = Orchestrator(s, Database(db_url), FakeChatAdapter(), model_client=FakeModelClient())
+    assert orch.harness._headers == {"Authorization": f"Bearer {LC_TOKEN}"}

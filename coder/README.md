@@ -189,9 +189,11 @@ its script exits 0 when there is nothing to archive.
   accepts work and `open-terminal:8000` executes commands; neither is published.
   Open WebUI's little-coder pipe reaches the daemon by name on `ai-stack_llm-net`.
 - **Daemon token** (ao-dauth): every daemon route except `GET /health` needs
-  `Authorization: Bearer <LC_DAEMON_TOKEN>` (`coder/.env`; unset = 503, fail
-  closed). The pipe sends its `daemon_token` valve; set the valve to the same
-  value when it changes. Details:
+  `Authorization: Bearer <token>`; the token is the file
+  `secrets/little-coder/daemon-token` at the repo root (gitignored; create it
+  before `up` - missing = 503, fail closed), mounted root-only into
+  `little-coder`, never an env var. The pipe sends its `daemon_token` valve; set
+  the valve to the same value when it changes. Details:
   [`../little-coder/README.md`](../little-coder/README.md#daemon-api-access-lc_daemon_token).
 - **Rebuilding here changes what agent-org runs.** Its worker pool uses
   `little-coder:local` and `little-coder-open-terminal:local`, and its egress

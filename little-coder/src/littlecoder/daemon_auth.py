@@ -15,10 +15,12 @@ worker). Two layers now:
    - constant-time compare; the token is never logged, echoed or returned;
    - fail closed: unset/blank -> every non-public route answers 503 and a startup line says so;
    - websocket (and any other non-http, non-lifespan) scopes are refused outright.
-   `acquire_token` (main) removes the variable from the environment and re-execs the daemon
-   (same PID) with the value on a pipe, so neither a child's env nor /proc/<daemon>/environ holds
-   it; `harden_process` then makes the daemon non-dumpable (its /proc entries become root's). The
-   agent runs as the same uid, so both matter (ao-dauth round 2, tester X2).
+   Round 3: the token lives in NO environment. In the image the daemon starts as root,
+   `take_root_secret` reads the root-only secret file and drops to `lc` (non-dumpable from then
+   on), and nothing in the container's configured env carries it - so neither the agent nor any
+   `docker exec` process (any uid) holds it. `acquire_token` (env -> re-exec with a pipe) remains
+   for a non-root start with LC_DAEMON_TOKEN set (tests, a hand run); `harden_process` makes the
+   daemon non-dumpable either way.
 
 2. A bind scope, LC_DAEMON_HIDE_FROM (comma-separated host names): the daemon does not listen on
    any interface whose subnet holds one of those hosts. A worker sets it to its open-terminal
@@ -86,12 +88,72 @@ def _clean(raw: str | None) -> bytes | None:
     return raw.encode("utf-8") if raw else None
 
 
+SECRET_FILE_ENV = "LC_DAEMON_TOKEN_FILE"
+DEFAULT_SECRET_FILE = "/etc/lc-secret/token"   # dir root:root 0700 in the image (Dockerfile.agent)
+RUN_AS_ENV = "LC_DAEMON_RUN_AS"
+
+
+def read_secret_file(path: str | None = None, environ=None) -> bytes | None:
+    """The token from the root-only secret file, or None (missing, a directory - Docker creates
+    one when the host file is absent -, unreadable, or blank). Never logs the value."""
+    env = os.environ if environ is None else environ
+    path = path or env.get(SECRET_FILE_ENV) or DEFAULT_SECRET_FILE
+    try:
+        with open(path, "rb") as fh:
+            return _clean(fh.read().decode("utf-8", "replace"))
+    except OSError:
+        return None
+
+
 def client_headers(environ=None) -> dict[str, str]:
-    """The header a client inside the container (lc CLI, lc-mcp) sends: the token from its own
-    environment (docker exec carries the container's configured env), or nothing."""
+    """The header a client INSIDE the container sends (the `lc` CLI, the dormant lc-mcp).
+
+    Round 3: the token is no longer in the container's environment. `docker exec <c> lc ...` runs
+    as root, which can read the root-only secret file; a `docker exec -u lc` run cannot (by design:
+    lc is the agent's uid) and gets no header -> the daemon answers 401. LC_DAEMON_TOKEN in the
+    caller's own env (an operator exporting it for one command) still wins."""
     env = os.environ if environ is None else environ
     tok = (env.get(TOKEN_ENV) or "").strip()
+    if not tok:
+        raw = read_secret_file(environ=env)
+        tok = raw.decode("utf-8") if raw else ""
     return {"Authorization": f"Bearer {tok}"} if tok else {}
+
+
+def drop_privileges(user: str) -> None:
+    """root -> `user` (initgroups, gid, uid, HOME), like gosu did. The kernel marks a process
+    non-dumpable when its credentials change, so from here on /proc/<daemon>/* belongs to root."""
+    import pwd
+
+    try:
+        pw = pwd.getpwnam(user)
+    except KeyError:
+        raise SystemExit(f"[little-coder] auth: cannot drop to user {user!r}: no such user") from None
+    os.initgroups(user, pw.pw_gid)
+    os.setgid(pw.pw_gid)
+    os.setuid(pw.pw_uid)
+    if os.geteuid() == 0 or os.getuid() == 0:
+        raise SystemExit("[little-coder] auth: privilege drop failed; refusing to run as root")
+    os.environ["HOME"] = pw.pw_dir
+
+
+def take_root_secret(environ=None) -> tuple[bool, bytes | None]:
+    """Round 3 (tester X3): the token lives in NO environment. The image's entrypoint starts the
+    daemon as ROOT; this reads the root-only secret file (`/etc/lc-secret/token`, a read-only bind
+    mount inside a root 0700 directory), then drops to the agent's user (LC_DAEMON_RUN_AS, default
+    `lc`). Before the drop the process is root's (the agent uid cannot read its /proc); after it the
+    process is non-dumpable - so there is no startup window, and since the container's configured
+    environment no longer carries the token, no `docker exec` (any uid) carries it either.
+    Returns (ran_as_root, token). Not root (tests, a non-container run): (False, None)."""
+    env = os.environ if environ is None else environ
+    if os.name != "posix" or os.geteuid() != 0:
+        return False, None
+    path = env.get(SECRET_FILE_ENV) or DEFAULT_SECRET_FILE
+    tok = read_secret_file(path, env)
+    if tok is None:
+        _say(f"auth: no token in the secret file {path} (missing, a directory, unreadable or blank)")
+    drop_privileges(env.get(RUN_AS_ENV) or "lc")
+    return True, tok
 
 
 def take_token_from_env(environ=None) -> bytes | None:
@@ -146,7 +208,8 @@ def acquire_token(environ=None, *, execve=None, executable: str | None = None) -
     child_env = dict(env)
     child_env[FD_ENV] = str(r)
     exe = executable or sys.executable
-    (execve or os.execve)(exe, [exe, "-m", "littlecoder.daemon"], child_env)
+    # -P (PYTHONSAFEPATH): the re-exec never puts the cwd on sys.path, whoever owns it.
+    (execve or os.execve)(exe, [exe, "-P", "-m", "littlecoder.daemon"], child_env)
     raise SystemExit("[little-coder] auth: re-exec returned")   # only a stubbed execve gets here
 
 

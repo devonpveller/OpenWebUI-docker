@@ -250,7 +250,7 @@ def test_acquire_reexecs_without_the_token(monkeypatch):
     env = {"LC_DAEMON_TOKEN": f" {_TOKEN} ", "PATH": "/usr/bin"}
     with pytest.raises(RuntimeError, match="execve"):
         da.acquire_token(env, execve=fake_execve, executable="/usr/local/bin/python")
-    assert seen["argv"] == ["/usr/local/bin/python", "-m", "littlecoder.daemon"]
+    assert seen["argv"] == ["/usr/local/bin/python", "-P", "-m", "littlecoder.daemon"]  # -P: no cwd on sys.path
     assert "LC_DAEMON_TOKEN" not in seen["env"] and seen["env"]["PATH"] == "/usr/bin"
     assert not any(_TOKEN in v for v in seen["env"].values()) and _TOKEN not in " ".join(seen["argv"])
     fd = int(seen["env"]["LC_DAEMON_TOKEN_FD"])
@@ -282,3 +282,44 @@ def test_metrics_server_takes_the_bind_scope(monkeypatch):
     metrics.start_metrics_server(9090, ["127.0.0.1", "198.51.100.3"])
     metrics.start_metrics_server(9090)
     assert calls == [(9090, "127.0.0.1"), (9090, "198.51.100.3"), (9090, "0.0.0.0")]
+
+
+# --- round 3 (X3): the token lives in a root-only FILE, in no environment ----------------------------
+
+def test_read_secret_file(tmp_path):
+    f = tmp_path / "token"
+    f.write_text(f"{_TOKEN}\r\n", encoding="utf-8")
+    assert da.read_secret_file(str(f)) == _TOKEN.encode()
+    assert da.read_secret_file(str(tmp_path / "missing")) is None
+    assert da.read_secret_file(str(tmp_path)) is None              # Docker made a directory
+    (tmp_path / "blank").write_text("  \n", encoding="utf-8")
+    assert da.read_secret_file(str(tmp_path / "blank")) is None
+    assert da.read_secret_file(environ={"LC_DAEMON_TOKEN_FILE": str(f)}) == _TOKEN.encode()
+
+
+def test_client_headers_read_the_file_when_env_is_unset(tmp_path):
+    f = tmp_path / "token"
+    f.write_text(_TOKEN, encoding="utf-8")
+    assert da.client_headers({"LC_DAEMON_TOKEN_FILE": str(f)}) == {"Authorization": f"Bearer {_TOKEN}"}
+    assert da.client_headers({"LC_DAEMON_TOKEN_FILE": str(tmp_path / "nope")}) == {}
+    assert da.client_headers({"LC_DAEMON_TOKEN_FILE": str(f), "LC_DAEMON_TOKEN": "x"}) == {
+        "Authorization": "Bearer x"}
+
+
+def test_take_root_secret_reads_then_drops(tmp_path, monkeypatch):
+    f = tmp_path / "token"
+    f.write_text(_TOKEN, encoding="utf-8")
+    monkeypatch.setattr(da.os, "name", "posix")
+    monkeypatch.setattr(da.os, "geteuid", lambda: 0, raising=False)
+    dropped = []
+    monkeypatch.setattr(da, "drop_privileges", lambda user: dropped.append(user))
+    assert da.take_root_secret({"LC_DAEMON_TOKEN_FILE": str(f)}) == (True, _TOKEN.encode())
+    assert da.take_root_secret({"LC_DAEMON_TOKEN_FILE": str(tmp_path / "x"), "LC_DAEMON_RUN_AS": "u"}) == (True, None)
+    assert dropped == ["lc", "u"]          # drops even when the file is missing (never stays root)
+
+
+def test_take_root_secret_not_root(monkeypatch):
+    monkeypatch.setattr(da.os, "name", "posix")
+    monkeypatch.setattr(da.os, "geteuid", lambda: 10002, raising=False)
+    monkeypatch.setattr(da, "drop_privileges", lambda user: (_ for _ in ()).throw(AssertionError))
+    assert da.take_root_secret({}) == (False, None)

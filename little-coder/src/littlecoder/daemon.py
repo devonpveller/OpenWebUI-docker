@@ -1378,12 +1378,16 @@ def _listen(hosts: list[str], port: int) -> list:
 
 
 def main() -> None:
-    config = load_config(os.environ.get("LC_CONFIG", "/app/config/little-coder.config.yaml"))
-    # ao-dauth: the token leaves the environment before anything is spawned, and the first start
-    # re-execs (same PID) without it, so neither a child's env nor /proc/<daemon>/environ holds it;
-    # the daemon is then made non-dumpable (its /proc entries are root's, not the agent uid's).
-    token = daemon_auth.acquire_token()
+    # ao-dauth: FIRST, before anything else runs. In the image the daemon starts as root: read the
+    # root-only secret file, drop to `lc` (non-dumpable from then on). A non-root start falls back
+    # to LC_DAEMON_TOKEN in the env (taken out, re-exec with a pipe so /proc/<pid>/environ is clean).
+    as_root, token = daemon_auth.take_root_secret()
+    if not as_root:
+        token = daemon_auth.acquire_token()
+    else:
+        daemon_auth.take_token_from_env()   # a stray env copy is dropped, never used or inherited
     daemon_auth.harden_process()
+    config = load_config(os.environ.get("LC_CONFIG", "/app/config/little-coder.config.yaml"))
     hosts = daemon_auth.bind_hosts(config.daemon.host)
     daemon = LittleCoderDaemon(config)
     daemon.bind_hosts = hosts   # the metrics port takes the same bind scope

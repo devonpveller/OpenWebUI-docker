@@ -151,11 +151,12 @@ function Invoke-LcApi {
     $bodyFile = "/tmp/lc-dispatch-body-" + [guid]::NewGuid().ToString("N")
     # ao-dauth: the daemon wants `Authorization: Bearer <LC_DAEMON_TOKEN>` on every route but
     # /health. The token never crosses to the host: a constant sh script INSIDE the container
-    # prints the header from the container's own env onto curl's stdin (-H @-), so it is in no
-    # argv on either side. The script has no double quotes (PowerShell 5.1 mangles them in a
-    # native argument), so curl's own args arrive unquoted as $@ - with globbing off (set -f)
+    # (as root, the docker exec default) prints the header from the root-only secret file
+    # /etc/lc-secret/token onto curl's stdin (-H @-), so it is in no argv on either side and in no
+    # environment (ao-dauth round 3). The script has no double quotes (PowerShell 5.1 mangles them
+    # in a native argument), so curl's own args arrive unquoted as $@ - with globbing off (set -f)
     # and no whitespace in any of them (checked below).
-    $auth = 'set -f; printf ''Authorization: Bearer %s\n'' ${LC_DAEMON_TOKEN:-unset} | curl -H @- $@'
+    $auth = 'set -f; { printf ''Authorization: Bearer ''; tr -d ''\r\n'' < /etc/lc-secret/token 2>/dev/null || printf unset; echo; } | curl -H @- $@'
     $curlArgs = @("-sS", "--max-time", "$TimeoutSeconds",
                   "-o", $bodyFile, "-w", "%{http_code}", "-X", $Method)
     if ($null -ne $Body) {
