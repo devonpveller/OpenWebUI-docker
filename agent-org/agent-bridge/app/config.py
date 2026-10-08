@@ -27,6 +27,24 @@ class Settings(BaseSettings):
     # Unset operator token => every operator route refuses (503): fail closed, never open.
     operator_token: SecretStr = SecretStr("")
     worker_token: SecretStr = SecretStr("")
+    # ao-dauth: the bearer the bridge sends to the workers' little-coder daemons (every route but
+    # GET /health requires it). Same name as the daemons read - LC_DAEMON_TOKEN, no AO_ prefix.
+    lc_daemon_token: SecretStr = Field(default=SecretStr(""), validation_alias="LC_DAEMON_TOKEN")
+    # ao-dauth round 3: the single source is a FILE shared with the workers' daemons (they mount the
+    # same host file root-only). Used when LC_DAEMON_TOKEN is unset. Mounted via ../agent-bridge/secrets.
+    lc_daemon_token_file: str = "/etc/agent-bridge/secrets/lc-daemon-token"
+
+    def lc_daemon_token_value(self) -> str:
+        """LC_DAEMON_TOKEN if set, else the token file's content, else "" (no header -> the
+        workers' daemons refuse: fail closed). Never logged."""
+        tok = self.lc_daemon_token.get_secret_value().strip()
+        if tok:
+            return tok
+        try:
+            with open(self.lc_daemon_token_file, encoding="utf-8") as fh:
+                return fh.read().strip()
+        except (OSError, ValueError):
+            return ""
 
     # ── State store (fail-safe persistence — governance §3.0 invariant i) ───
     # SQLAlchemy async URL. Postgres in prod (asyncpg); SQLite default for

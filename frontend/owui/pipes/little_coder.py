@@ -1,7 +1,7 @@
 """
 title: Little Coder
 author: ai-stack
-version: 0.7.0
+version: 0.8.0
 license: MIT
 description: Drive little-coder from OpenWebUI chat (Chapter 2 — OWUI pipeline).
   Plain messages trigger coding tasks and stream the agent's process live —
@@ -28,6 +28,7 @@ required_open_webui_version: 0.5.0
 import asyncio
 import contextlib
 import json
+import os
 from typing import Optional
 
 import aiohttp
@@ -220,6 +221,11 @@ class Pipe:
         daemon_url: str = Field(
             default="http://little-coder:8090",
             description="little-coder control-daemon URL (reachable over llm-net).",
+        )
+        daemon_token: str = Field(
+            default_factory=lambda: os.environ.get("LC_DAEMON_TOKEN", ""),
+            description="The daemon token (secrets/little-coder/daemon-token). Every daemon route "
+            "except /health requires it (ao-dauth); blank = the daemon refuses (503).",
         )
         operator_roles: str = Field(
             default="admin",
@@ -769,8 +775,10 @@ class Pipe:
         parameter, not a request body."""
         url = self.valves.daemon_url.rstrip("/") + path
         timeout = aiohttp.ClientTimeout(total=60)
+        token = (self.valves.daemon_token or "").strip()
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                 async with session.request(
                     method, url, json=body, params=params
                 ) as resp:

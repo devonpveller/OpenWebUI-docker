@@ -18,6 +18,8 @@ import os
 import httpx
 from mcp.server.fastmcp import FastMCP
 
+from .daemon_auth import client_headers
+
 mcp = FastMCP("little-coder")
 
 _DAEMON = os.environ.get("LC_DAEMON_URL", "http://little-coder:8090")
@@ -25,7 +27,7 @@ _DAEMON = os.environ.get("LC_DAEMON_URL", "http://little-coder:8090")
 
 def _call(method: str, path: str, **kwargs) -> str:
     try:
-        with httpx.Client(base_url=_DAEMON, timeout=30.0) as c:
+        with httpx.Client(base_url=_DAEMON, timeout=30.0, headers=client_headers()) as c:
             resp = c.request(method, path, **kwargs)
         resp.raise_for_status()
         return json.dumps(resp.json())
