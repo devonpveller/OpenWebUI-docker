@@ -395,8 +395,9 @@ class LittleCoderHarness:
         self._transport = transport   # tests only
 
     def _client(self, base_url: str, timeout: float) -> httpx.AsyncClient:
+        extra = {"transport": self._transport} if self._transport is not None else {}
         return httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=timeout,
-                                 headers=self._headers, transport=self._transport)
+                                 headers=self._headers, **extra)
 
     async def wake(
         self, base_url: str, session_id: str, prompt: str, *,
