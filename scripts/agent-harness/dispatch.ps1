@@ -114,6 +114,9 @@ function Invoke-LcApi {
     if ($transport -eq "http") {
         # The revert path. Kept live so flipping the config is the whole change.
         $req = @{ Uri = $url; Method = $Method; TimeoutSec = $TimeoutSeconds; UseBasicParsing = $true }
+        # ao-dauth: every daemon route but /health needs LC_DAEMON_TOKEN; on this path the host
+        # must hold it (env only; never written to a file or printed).
+        if ($env:LC_DAEMON_TOKEN) { $req["Headers"] = @{ Authorization = "Bearer $($env:LC_DAEMON_TOKEN)" } }
         if ($null -ne $Body) {
             $req["Body"] = ($Body | ConvertTo-Json -Depth 8 -Compress)
             $req["ContentType"] = "application/json"
@@ -146,12 +149,23 @@ function Invoke-LcApi {
         }
     }
     $bodyFile = "/tmp/lc-dispatch-body-" + [guid]::NewGuid().ToString("N")
-    $curl = @("exec", $container, "curl", "-sS", "--max-time", "$TimeoutSeconds",
-              "-o", $bodyFile, "-w", "%{http_code}", "-X", $Method)
+    # ao-dauth: the daemon wants `Authorization: Bearer <LC_DAEMON_TOKEN>` on every route but
+    # /health. The token never crosses to the host: a constant sh script INSIDE the container
+    # prints the header from the container's own env onto curl's stdin (-H @-), so it is in no
+    # argv on either side. The script has no double quotes (PowerShell 5.1 mangles them in a
+    # native argument), so curl's own args arrive unquoted as $@ - with globbing off (set -f)
+    # and no whitespace in any of them (checked below).
+    $auth = 'set -f; printf ''Authorization: Bearer %s\n'' ${LC_DAEMON_TOKEN:-unset} | curl -H @- $@'
+    $curlArgs = @("-sS", "--max-time", "$TimeoutSeconds",
+                  "-o", $bodyFile, "-w", "%{http_code}", "-X", $Method)
     if ($null -ne $Body) {
-        $curl += @("-H", "Content-Type: application/json", "--data-binary", "@$tmpName")
+        $curlArgs += @("-H", "Content-Type:application/json", "--data-binary", "@$tmpName")
     }
-    $curl += @($url)
+    $curlArgs += @($url)
+    foreach ($a in $curlArgs) {
+        if ("$a" -match '\s') { throw "dispatch: curl argument '$a' contains whitespace (the docker-exec path passes them unquoted)" }
+    }
+    $curl = @("exec", $container, "sh", "-c", $auth, "lc-dispatch") + $curlArgs
 
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     try {

@@ -58,7 +58,9 @@ def _daemon(tmp_path, monkeypatch, *, allowed: dict[str, str] | None = None):
     d.current_focus = normalize_repo_url("https://github.com/acme/widget")
     d.workspace = SimpleNamespace(is_focused=lambda: True)
     d._ensure_git_credentials = lambda: None
-    return d, TestClient(build_app(d)), argv_log   # no `with`: the lifespan (workers) never starts
+    tok = "-".join(["efwm", "test", "token"])   # ao-dauth: every route but /health needs it
+    client = TestClient(build_app(d, token=tok), headers={"Authorization": f"Bearer {tok}"})
+    return d, client, argv_log   # no `with`: the lifespan (workers) never starts
 
 
 def _run_queued(d) -> str:

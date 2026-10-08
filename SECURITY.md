@@ -65,6 +65,22 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
   **Key rotation:** both tokens are on the rotation list - new values in `agent-org/docker/.env`,
   `--force-recreate` `agent-bridge` + `ao-worker-1/2`, then any copy host tooling holds; rotate
   at once if either is ever seen in a log, a chat post, or an `ao-ot` environment.
+- **little-coder daemon token (ao-dauth, 2026-10-07)** - `LC_DAEMON_TOKEN`. Before it every
+  route on a little-coder daemon (`:8090`: run a task, `/tasks/{id}/confirm`, `/admin/approve`,
+  `/project`, `/admin/shutdown`) answered anyone who could reach it - for the agent-org
+  workers, that included `ao-ot-1/2`, where the worker's own shell commands run.
+
+  | Token | Accepted on | Held by | Unset / wrong |
+  |---|---|---|---|
+  | `LC_DAEMON_TOKEN` | every little-coder daemon route except `GET /health` (the one table: `ROUTE_ACCESS` in `little-coder/src/littlecoder/daemon_auth.py`) | two values: `agent-org/docker/.env` (`ao-worker-1/2`, `agent-bridge`) and `coder/.env` (`little-coder`, Open WebUI's `little_coder` pipe valve `daemon_token`) - never `ao-ot-1/2`, `open-terminal` or `lc-egress` | unset: those routes refuse **503** (fail closed); wrong/missing: **401** |
+
+  The daemon drops the variable from its own environment at start (the agent never inherits
+  it), and the workers set `LC_DAEMON_HIDE_FROM=ao-ot-N`, so the daemon does not listen on the
+  network it shares with its executor: a worker command cannot connect to `:8090` at all.
+  **Key rotation:** on the rotation list - new value in the `.env`, `--force-recreate` the
+  daemon(s) and their caller (`agent-bridge`; for the coder plane, update the pipe valve);
+  rotate at once if it is ever seen in a log, a chat post, or an `ao-ot`/`open-terminal`
+  environment.
 
 ### Container Security (portal slice)
 - ✅ Every portal container: `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges: true`, `tmpfs /tmp`, non-root UID (10000–10007)

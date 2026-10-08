@@ -320,6 +320,28 @@ plane holds four such parts, and a default `up` starts none of them:
   - **Rotation:** two different random values; on change, `--force-recreate`
     `agent-bridge` and `ao-worker-1/2`. Both are on the key-rotation list in
     [`SECURITY.md`](../SECURITY.md).
+- **The workers' little-coder daemons (ao-dauth, 2026-10-07).** `ao-worker-N:8090`
+  takes tasks, `/tasks/{id}/confirm` (an operator action), `/admin/approve`,
+  `/project` and `/admin/shutdown`; before this, a worker command running in
+  `ao-ot-N` could call all of them on its own worker. Now:
+  - **`LC_DAEMON_TOKEN`** (in `agent-org/docker/.env`) is required on every
+    daemon route except `GET /health`; unset = **503** (fail closed), missing or
+    wrong = **401**. The table and the details are in
+    [`../little-coder/README.md`](../little-coder/README.md#daemon-api-access-lc_daemon_token).
+    `agent-bridge` sends it on every call (`LittleCoderHarness`; the setting is
+    `lc_daemon_token`, env name `LC_DAEMON_TOKEN` with no `AO_` prefix);
+    `ao-worker-1/2` check it; no `ao-ot` sandbox holds it, and the daemon removes
+    it from its own environment so the agent never inherits it.
+  - **`ao-ot-N` cannot connect to `:8090` at all**: the workers set
+    `LC_DAEMON_HIDE_FROM=ao-ot-N`, so the daemon does not listen on
+    `ao-worker-net` (the network it shares with its executor and
+    `ao-git-egress`). The daemon still reaches `ao-ot-N` (outbound), and the
+    bridge reaches the daemon over `ai-stack_llm-net`. Nothing in `ao-ot` calls
+    the daemon (`git-proxy` and `ot-exec` only write locally / are called by the
+    worker).
+  - **Rotation:** a value different from `coder/.env`'s; on change,
+    `--force-recreate` `ao-worker-1/2` and `agent-bridge`. On the key-rotation
+    list in [`SECURITY.md`](../SECURITY.md).
 - No secret belongs in a file under git: bot tokens, database passwords and
   model keys come from `agent-org/docker/.env` only.
 

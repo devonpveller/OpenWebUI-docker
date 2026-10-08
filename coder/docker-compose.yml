@@ -120,6 +120,12 @@ services:
       - LC_LLAMA_API_KEY=${LC_LLAMA_API_KEY:-llama}
       - OPEN_TERMINAL_API_KEY=${OPEN_TERMINAL_API_KEY}
       - LC_DEPLOY_TOKEN=${LC_DEPLOY_TOKEN:-}
+      # ao-dauth: the daemon's bearer - every route but GET /health requires it (unset = 503,
+      # fail closed). Open WebUI's little_coder pipe holds it as its `daemon_token` valve;
+      # open-terminal and lc-egress never get it. The daemon removes it from its own environment
+      # at start, so the agent and its commands never inherit it. No LC_DAEMON_HIDE_FROM here:
+      # open-terminal shares both of this daemon's networks (findings ao-dauth).
+      - LC_DAEMON_TOKEN=${LC_DAEMON_TOKEN:-}
       # Route the agent's shell into open-terminal (design §3.4). Verified
       # working; default on. Set 0 to fall back to built-in bash (runs in the
       # network-isolated little-coder container). See pi-extension/README.md.

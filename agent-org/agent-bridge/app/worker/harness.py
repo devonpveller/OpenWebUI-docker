@@ -384,9 +384,19 @@ class LittleCoderHarness:
     """Drives the little-coder control daemon. One instance addresses many daemons
     (the pool) by their `base_url` — the scheduler owns which base_url is free."""
 
-    def __init__(self, poll_interval_s: float = 3.0, poll_timeout_s: float = 1800.0) -> None:
+    def __init__(self, poll_interval_s: float = 3.0, poll_timeout_s: float = 1800.0, *,
+                 daemon_token: str = "", transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.poll_interval = poll_interval_s
         self.poll_timeout = poll_timeout_s
+        # ao-dauth: every daemon route but GET /health needs `Authorization: Bearer
+        # <LC_DAEMON_TOKEN>`. Unset here -> no header -> the daemon refuses (fail closed).
+        tok = (daemon_token or "").strip()
+        self._headers = {"Authorization": f"Bearer {tok}"} if tok else {}
+        self._transport = transport   # tests only
+
+    def _client(self, base_url: str, timeout: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=timeout,
+                                 headers=self._headers, transport=self._transport)
 
     async def wake(
         self, base_url: str, session_id: str, prompt: str, *,
@@ -406,7 +416,7 @@ class LittleCoderHarness:
         on review turns, a no-finding rule (see `LoopGuard`). A `kind="work"` guard counts the
         daemon's reported `edits` as progress and stays INERT on a daemon that reports none, so
         an edit-then-test coding loop is never mistaken for a repeat."""
-        async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=60.0) as c:
+        async with self._client(base_url, 60.0) as c:
             body = {
                 "prompt": prompt,
                 "channel": channel,
@@ -523,7 +533,7 @@ class LittleCoderHarness:
             body["upstream"] = upstream
             if upstream_token:
                 body["upstream_token"] = upstream_token
-        async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=1800.0) as c:
+        async with self._client(base_url, 1800.0) as c:
             r = await c.post("/project", json=body)
             if r.status_code < 400:
                 # Clone succeeded. None when no upstream was requested → nothing to warn.
@@ -544,7 +554,7 @@ class LittleCoderHarness:
             return False, detail.strip()[:200], None
 
     async def current_focus(self, base_url: str) -> str | None:
-        async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=30.0) as c:
+        async with self._client(base_url, 30.0) as c:
             h = (await c.get("/health")).json()
             return h.get("focus")
 
@@ -554,7 +564,7 @@ class LittleCoderHarness:
         body: dict[str, Any] = {"url": url, "path": path, "actor": "agent-bridge"}
         if token:
             body["token"] = token
-        async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=1800.0) as c:
+        async with self._client(base_url, 1800.0) as c:
             r = await c.post("/project/submodule", json=body)
             if r.status_code < 400:
                 return True, ""
@@ -568,8 +578,7 @@ class LittleCoderHarness:
     async def run_check(
         self, base_url: str, command: str, *, cwd: str | None = None, timeout: int = 600,
     ) -> tuple[int | None, str, bool]:
-        async with httpx.AsyncClient(base_url=base_url.rstrip("/"),
-                                     timeout=float(timeout) + 90.0) as c:
+        async with self._client(base_url, float(timeout) + 90.0) as c:
             r = await c.post("/check", json={"command": command, "cwd": cwd,
                                              "timeout": timeout, "actor": "agent-bridge"})
             r.raise_for_status()   # 404 = an old daemon without /check → the caller falls back
@@ -581,7 +590,7 @@ class LittleCoderHarness:
         stays busy running an ORPHANED turn and the next dispatch 409s (live 2026-07-08: both
         burn-down part turns outlived the poll window and would have zombie-blocked round 2)."""
         try:
-            async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=30.0) as c:
+            async with self._client(base_url, 30.0) as c:
                 r = await c.post(f"/tasks/{task_id}/cancel")
                 return r.status_code < 400
         except httpx.HTTPError:
@@ -590,7 +599,7 @@ class LittleCoderHarness:
     async def has_running_task(self, base_url: str) -> bool:
         """Restart-safe ground truth: does this daemon report a RUNNING task? (see Protocol doc)."""
         try:
-            async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=15.0) as c:
+            async with self._client(base_url, 15.0) as c:
                 r = await c.get("/tasks")
                 if r.status_code != 200:
                     return False
@@ -613,7 +622,7 @@ class LittleCoderHarness:
         from 0 (ao-wd-offset: a new task used to inherit the previous task's offset, read as frozen,
         and was cancelled as "silent"). `since_task_id=None` keeps the legacy "trust the offset"."""
         try:
-            async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=15.0) as c:
+            async with self._client(base_url, 15.0) as c:
                 r = await c.get("/tasks")
                 if r.status_code != 200:
                     return None

@@ -3,8 +3,9 @@
 Owns the FIFO task queue (one task at a time, design §12.4), the task
 lifecycle and journals, project focus (design §12.3), and SIGTERM drain
 (design §12.7). Exposes an internal HTTP API on `lc-net` — reachable by the
-`lc` CLI and, from Chapter 2, by `lc-mcpo`. It is NOT the task-trigger
-authentication surface; that is `lc-mcpo` (design §12.6).
+`lc` CLI and, from Chapter 2, by `lc-mcpo`. Every route except GET /health
+requires LC_DAEMON_TOKEN, and LC_DAEMON_HIDE_FROM keeps the daemon off the
+executor's network (ao-dauth; see daemon_auth.py).
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ from .workspace import (
     detect_primary_language,
 )
 from . import metrics
+from . import daemon_auth
 
 _VALID_CHANNELS = {"owui", "cli", "validation", "batch"}
 _VALID_OUTCOMES = {"pass", "fail", "unverified"}
@@ -906,14 +908,27 @@ def workspace_marker(root: str, cache: dict, *, now: float | None = None,
     return result
 
 
-def build_app(daemon: LittleCoderDaemon) -> FastAPI:
+_FROM_ENV = object()
+
+
+def build_app(daemon: LittleCoderDaemon, *, token=_FROM_ENV) -> FastAPI:
+    """`token`: the daemon bearer (bytes/str; None/blank = unset -> fail closed). Default: read
+    LC_DAEMON_TOKEN without removing it (tests); main() takes it out of the env first."""
+    if token is _FROM_ENV:
+        token = os.environ.get(daemon_auth.TOKEN_ENV)
+    if isinstance(token, str) or token is None:
+        token = daemon_auth._clean(token)
+    daemon_auth.announce(token)
+
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await daemon.start()
         yield
         await daemon.shutdown()
 
-    app = FastAPI(title="little-coder control daemon", lifespan=lifespan)
+    # No /docs, /redoc or /openapi.json: unauthenticated surface nothing uses (ao-dauth).
+    app = FastAPI(title="little-coder control daemon", lifespan=lifespan,
+                  docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.get("/health")
     def health() -> dict:
@@ -1343,14 +1358,38 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
         os.kill(os.getpid(), signal.SIGTERM)
         return {"status": "draining", "drain_deadline_seconds": daemon._drain_deadline}
 
+    # ao-dauth: every served route is in daemon_auth.ROUTE_ACCESS (else no app), and the bearer
+    # is checked before any endpoint - or any request body - runs.
+    daemon_auth.verify_table(app)
+    app.add_middleware(daemon_auth.DaemonAuthMiddleware, router=app.router, token=token)
     return app
+
+
+def _listen(hosts: list[str], port: int) -> list:
+    import socket as _socket
+
+    socks = []
+    for host in hosts:
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        s.bind((host, port))
+        socks.append(s)
+    return socks
 
 
 def main() -> None:
     config = load_config(os.environ.get("LC_CONFIG", "/app/config/little-coder.config.yaml"))
+    # Taken OUT of the environment before anything is spawned: the agent, ot-exec, git and
+    # acceptance checks never inherit the daemon token (ao-dauth).
+    token = daemon_auth.take_token_from_env()
+    hosts = daemon_auth.bind_hosts(config.daemon.host)
     daemon = LittleCoderDaemon(config)
-    app = build_app(daemon)
-    uvicorn.run(app, host=config.daemon.host, port=config.daemon.port, log_level="info")
+    app = build_app(daemon, token=token)
+    if hosts == [config.daemon.host]:
+        uvicorn.run(app, host=config.daemon.host, port=config.daemon.port, log_level="info")
+        return
+    server = uvicorn.Server(uvicorn.Config(app, port=config.daemon.port, log_level="info"))
+    server.run(sockets=_listen(hosts, config.daemon.port))
 
 
 if __name__ == "__main__":

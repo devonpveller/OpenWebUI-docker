@@ -64,6 +64,43 @@ profile's model with every worker turn. See
 The pooled workers read generated copies of this config, so after editing `allowed_models`,
 run `python agent-org/scripts/gen-worker-configs.py`.
 
+## Daemon API access: `LC_DAEMON_TOKEN`
+
+The control daemon (`:8090`) runs agent tasks, clears the agent's stop-gates
+(`/tasks/{id}/confirm` is journalled as an operator action), approves skills,
+retargets the workspace and shuts itself down. So every route **except
+`GET /health`** requires `Authorization: Bearer <LC_DAEMON_TOKEN>` (ao-dauth,
+2026-10-07; [`src/littlecoder/daemon_auth.py`](src/littlecoder/daemon_auth.py)).
+
+- **One route table**, `ROUTE_ACCESS` in `daemon_auth.py`. A route served but
+  missing from it (or a row naming no route) stops the daemon from starting.
+  `/docs`, `/redoc` and `/openapi.json` are off.
+- **Checked before anything runs**: a pure ASGI middleware, before the request
+  body is read; constant-time compare; the value is never logged or returned.
+  Refusals carry `x-lc-auth: refused`. Websocket connections are refused.
+- **Fail closed**: unset or blank, every route but `/health` answers **503**
+  and the daemon logs `LC_DAEMON_TOKEN is not set` at startup. Missing or wrong:
+  **401**.
+- **Not inherited**: the daemon removes the variable from its own environment at
+  start, so the agent, `ot-exec`, git and acceptance checks never see it.
+  `docker exec <container> lc ...` still works: `docker exec` carries the
+  container's configured environment, and the `lc` CLI (and the dormant
+  `lc-mcp`) send it.
+- **Who holds it**: the coder-plane `little-coder` (from `coder/.env`) and Open
+  WebUI's `little_coder` pipe (its `daemon_token` valve); `ao-worker-1/2` and
+  `agent-bridge` (from `agent-org/docker/.env`, a different value). Never
+  `open-terminal`, `lc-egress` or `ao-ot-1/2`.
+- **Bind scope, `LC_DAEMON_HIDE_FROM`** (comma-separated host names): the daemon
+  does not listen on any interface whose subnet holds one of them. The agent-org
+  workers set it to their own executor (`ao-ot-N`), so a worker's shell commands
+  cannot even connect to its daemon; nothing in the executor calls the daemon.
+  A name that does not resolve, or a scope that leaves only loopback, stops the
+  daemon (fail closed). Unset: the configured `daemon.host` as before. The coder
+  plane leaves it unset: `open-terminal` shares both of that daemon's networks.
+- `scripts/agent-harness/dispatch.ps1` (docker-exec transport) prints the header
+  from the container's own environment inside the container; the host never
+  holds the value. Its `http` transport sends `$env:LC_DAEMON_TOKEN`.
+
 ## Language note
 
 Upstream little-coder is a **Node.js** CLI built on the `pi` agent framework —

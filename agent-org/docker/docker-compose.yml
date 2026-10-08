@@ -164,7 +164,8 @@ services:
     # them per project (multi-PAT). Secrets via env only; the DB stores just the var NAME.
     # The HTTP control-plane tokens arrive the same way (ao-auth, app/auth.py): AO_OPERATOR_TOKEN
     # (every route but /health; unset = those routes refuse with 503) and AO_WORKER_TOKEN (the
-    # floor-check route only). Never set either in an ao-ot command sandbox.
+    # floor-check route only). Never set either in an ao-ot command sandbox. LC_DAEMON_TOKEN (ao-dauth)
+    # too: the bearer the bridge sends to the workers' little-coder daemons.
     env_file:
       - .env
     environment:
@@ -378,6 +379,15 @@ services:
       # ao-auth: the bearer the floor hook sends to /hook/floor-check - the ONLY route it opens.
       # Workers only; the ao-ot sandboxes (where commands run) never get it.
       - AO_WORKER_TOKEN=${AO_WORKER_TOKEN:-}
+      # ao-dauth: this daemon's own bearer - every route but GET /health requires it; agent-bridge
+      # sends it (same .env). Unset = every such route answers 503 (fail closed). The daemon takes
+      # it out of its environment at start, so the agent and its commands never inherit it; the
+      # ao-ot sandboxes never get it.
+      - LC_DAEMON_TOKEN=${LC_DAEMON_TOKEN:-}
+      # ao-dauth: do not even LISTEN on the network shared with ao-ot-1 (ao-worker-net): the
+      # sandbox cannot connect to :8090 at all. The daemon still reaches ao-ot-1 (outbound), and
+      # agent-bridge reaches the daemon over llm-net. Nothing in ao-ot calls the daemon.
+      - LC_DAEMON_HIDE_FROM=ao-ot-1
       # sl-ao-envfile (2026-09-19): the two names that replaced `env_file: ../../.env`.
       # Measured, not assumed — they are the only variables the little-coder image reads
       # container-side that the wildcard was carrying and this block did not already set:
@@ -491,6 +501,9 @@ services:
       # ao-auth: the bearer the floor hook sends to /hook/floor-check - the ONLY route it opens.
       # Workers only; the ao-ot sandboxes (where commands run) never get it.
       - AO_WORKER_TOKEN=${AO_WORKER_TOKEN:-}
+      # ao-dauth: see ao-worker-1 (daemon bearer; not listening on ao-ot-2's network).
+      - LC_DAEMON_TOKEN=${LC_DAEMON_TOKEN:-}
+      - LC_DAEMON_HIDE_FROM=ao-ot-2
       # See ao-worker-1 for the measurement: the deploy token on the clone path, and the
       # key little-coder itself reads (config.py inference.api_key_env), which the
       # differently-named LLAMACPP_API_KEY above does not cover. From agent-org/docker/.env.
