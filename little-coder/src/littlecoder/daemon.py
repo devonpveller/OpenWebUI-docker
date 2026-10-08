@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import itertools
+import json as _json
 import os
 import signal
 import threading
@@ -24,7 +26,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from . import __version__
-from .agent import AgentRunner, TaskTimeout, kill_process_group, read_activity_file
+from .agent import _EDIT_TOOLS, AgentRunner, TaskTimeout, kill_process_group, read_activity_file
 from .audit import AuditLog
 from .config import Config, load_config
 from .journals import Journals, utc_now
@@ -795,6 +797,115 @@ def read_event_lines(path: str, offset: int, cache: dict) -> list[str]:
     return [ln.decode("utf-8", errors="replace").rstrip("\n") for ln in complete[skip:]]
 
 
+_TOOL_COUNT_LOCK = threading.Lock()
+
+
+def count_tool_calls(path: str, cache: dict) -> tuple[int, int]:
+    """(tool calls, edit/write calls) so far in a task's pi `--mode json` events file, for the live
+    task view (ao-loopguard). The agent-org bridge's loop guard sees only the bash `activity`
+    stream, where an edit-then-test loop (edit, run tests, edit, run tests) looks like the same
+    test command over and over; the edit count is how it tells progress from a loop.
+
+    O(new bytes) per call, like `read_event_lines`: `cache[path]` holds (byte_pos, total, edits)
+    and only the complete lines appended since are parsed (a lens journal reached 761 MB). A
+    shrunk file starts over."""
+    with _TOOL_COUNT_LOCK:
+        ent = cache.get(path)
+    with open(path, "rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
+        pos, total, edits = ent if ent is not None and size >= ent[0] else (0, 0, 0)
+        fh.seek(pos)
+        raw = fh.readlines()
+    for ln in itertools.takewhile(lambda b: b.endswith(b"\n"), raw):
+        pos += len(ln)
+        if b'"tool_execution_start"' not in ln:
+            continue
+        try:
+            ev = _json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict) or ev.get("type") != "tool_execution_start":
+            continue
+        total += 1
+        if str(ev.get("toolName", "")).lower() in _EDIT_TOOLS:
+            edits += 1
+    with _TOOL_COUNT_LOCK:
+        cache[path] = (pos, total, edits)
+        while len(cache) > 64:
+            cache.pop(next(iter(cache)), None)
+    return total, edits
+
+
+# Directories the workspace fingerprint skips: VCS internals (a fetch/checkout is not an edit) and
+# caches/build output a test run rewrites without anyone editing the project.
+_MARKER_SKIP_DIRS = frozenset({
+    ".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox",
+    "node_modules", ".venv", "venv", "dist", "build", "bin", "obj", ".gradle", "target",
+})
+_MARKER_SKIP_SUFFIXES = (".pyc", ".pyo")
+_MARKER_MAX_FILES = 20000      # past this the fingerprint is not computed (None): bounded cost
+_MARKER_TTL_S = 2.0            # a poll storm reuses one scan
+_MARKER_LOCK = threading.Lock()
+
+
+def workspace_marker(root: str, cache: dict, *, now: float | None = None,
+                     max_files: int = _MARKER_MAX_FILES, ttl: float = _MARKER_TTL_S) -> str | None:
+    """A fingerprint of the workspace's files (path, size, mtime_ns), for the live task view
+    (ao-loopguard round 2). The agent-org bridge's loop guard must tell an edit-then-test turn from
+    a loop, and edits made through bash (`sed -i`, `cat > f <<EOF`, a `python3 -c` write) never
+    show up as edit/write tool calls - but they do change a file's size or mtime here.
+
+    Pure stat walk of the shared volume (no git, no file reads), skipping VCS internals and caches.
+    Bounded: at most `max_files` files (else None - "unknown", never a false "unchanged"), and
+    cached for `ttl` seconds per root. None when the root itself is missing or unreadable.
+    Round 3: one unreadable subdirectory, or a file that vanishes between listing and stat (a
+    `sed -i` temp file), is recorded in the hash and skipped - it no longer nulls the whole marker,
+    which left the bridge without a progress signal."""
+    now = time.monotonic() if now is None else now
+    with _MARKER_LOCK:
+        hit = cache.get(root)
+        if hit is not None and now - hit[0] < ttl:
+            return hit[1]
+    h = hashlib.blake2b(digest_size=12)
+    n = 0
+    result: str | None
+    try:
+        stack = [root]
+        while stack:
+            d = stack.pop()
+            try:
+                with os.scandir(d) as it:
+                    entries = sorted(it, key=lambda e: e.name)
+            except OSError:
+                if d == root:
+                    raise               # the root itself must be readable
+                h.update(f"{d}\0!unreadable\n".encode("utf-8", "replace"))
+                continue
+            for e in entries:
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        if e.name not in _MARKER_SKIP_DIRS:
+                            stack.append(e.path)
+                        continue
+                    if e.name.endswith(_MARKER_SKIP_SUFFIXES):
+                        continue
+                    st = e.stat(follow_symlinks=False)
+                except OSError:
+                    continue            # vanished mid-scan: it is not part of the workspace now
+                n += 1
+                if n > max_files:
+                    raise OverflowError
+                h.update(f"{e.path}\0{st.st_size}\0{st.st_mtime_ns}\n".encode("utf-8", "replace"))
+        result = f"{n}:{h.hexdigest()}"
+    except (OSError, OverflowError):
+        result = None
+    with _MARKER_LOCK:
+        cache[root] = (now, result)
+        while len(cache) > 16:
+            cache.pop(next(iter(cache)), None)
+    return result
+
+
 def build_app(daemon: LittleCoderDaemon) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -824,6 +935,9 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
     def list_tasks() -> dict:
         return {"tasks": [t.public() for t in daemon.tasks.values()]}
 
+    _tool_count_cache: dict = {}
+    _marker_cache: dict = {}
+
     @app.get("/tasks/{task_id}")
     def get_task(task_id: str) -> dict:
         state = daemon.tasks.get(task_id)
@@ -836,6 +950,18 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
             live = read_activity_file(state.event_stream_path)
             data["activity"] = live
             data["commands"] = len(live)
+            # ao-loopguard: edits so far (edit/write tools never appear in `activity`). Omitted
+            # when unreadable, so a consumer reads "unknown", never "zero edits".
+            if state.events_path:
+                try:
+                    data["tool_calls"], data["edits"] = count_tool_calls(
+                        state.events_path, _tool_count_cache)
+                except OSError:
+                    pass
+            # ao-loopguard round 2: changes made through bash. Omitted when unknown.
+            marker = workspace_marker(daemon.cfg.workspace.path, _marker_cache)
+            if marker is not None:
+                data["workspace_marker"] = marker
         return data
 
     _event_cache: dict = {}

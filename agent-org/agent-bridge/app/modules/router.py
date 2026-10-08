@@ -30,7 +30,7 @@ from ..schemas import Trigger
 from .audit_sink import AuditSink
 from .governance_gate import GovernanceGate
 from .scheduler import FrozenEffortError, NoCapacityError, Scheduler
-from ..worker.harness import UPSTREAM_MISMATCH, WorkerHarness, WorkResult
+from ..worker.harness import UPSTREAM_MISMATCH, LoopGuard, WorkerHarness, WorkResult
 
 log = logging.getLogger("agent_bridge.router")
 
@@ -350,6 +350,101 @@ class Router:
             return (row.effort_id, row.session_id) if row else None
 
     # ── wake execution (P1.2/P1.3) ───────────────────────────────────────────
+    def work_loop_guard(self) -> LoopGuard | None:
+        """ao-loopguard — the window rules for a WORK turn (coding, fix, burn-down and any other turn
+        that may change the workspace), or None when `loop_guard_work` is off. Change-nothing turns
+        (QA, verify, plan, state/project checks) get `readonly_loop_guard` instead. No no-finding
+        rule: these turns do not write FINDING lines. Progress is a change in the daemon's
+        `workspace_marker` (or its edit-tool count); the harness keeps this guard inert while the
+        daemon reports no marker, since without it bash edits are invisible."""
+        if not getattr(self.s, "loop_guard_work", False):
+            return None
+        return LoopGuard(
+            "work", identical_run=self.s.lens_flail_repeats, window=self.s.loop_guard_window,
+            window_distinct=self.s.loop_guard_window_distinct,
+            window_repeats=self.s.loop_guard_window_repeats)
+
+    def readonly_loop_guard(self) -> LoopGuard:
+        """ao-loopguard — the guard for a CHANGE-NOTHING turn (QA evaluation, verification, plan, the
+        state check and the project check run). These turns have no progress signal (no edits, no
+        FINDING lines) and their legitimate shape re-runs the product's own read command between
+        other inputs (`add a`, `list`, `add b`, `list`, ...): round 1's window (4 of 12) stopped such a
+        QA turn. So: `lens_flail_repeats` identical in a row, plus a LOOSER window (round 3) - a full
+        window of <= `readonly_window_distinct` (2) distinct commands, or one command
+        >= `readonly_window_repeats` (7) times in it. Input-then-check repeats the check at most
+        every other command (6 in 12, 3+ distinct); two commands cycling (gym-002's A/B loop) or a
+        check run back-to-back is a loop. Not switched by `loop_guard_work`."""
+        return LoopGuard("readonly", identical_run=self.s.lens_flail_repeats,
+                         window=self.s.loop_guard_window,
+                         window_distinct=self.s.readonly_window_distinct,
+                         window_repeats=self.s.readonly_window_repeats)
+
+    _READONLY_SESSIONS = ("~qa", "~vfy", "~plan")
+
+    def default_loop_guard(self, session_id: str, *, plan_only: bool = False) -> LoopGuard | None:
+        """The guard a wake gets when its caller did not choose one: change-nothing turns (plan_only,
+        or a `~qa` / `~vfy` / `~plan` session) the read-only guard, every other turn the work guard."""
+        if plan_only or any(m in (session_id or "") for m in self._READONLY_SESSIONS):
+            return self.readonly_loop_guard()
+        return self.work_loop_guard()
+
+    def review_loop_guard(self) -> LoopGuard:
+        """ao-loopguard — the guard for a REVIEW turn (the lens sweep, Mode B): the window rules plus
+        the no-finding stop. Read-only turns, so a new FINDING line is their only progress signal."""
+        return LoopGuard(
+            "review", identical_run=self.s.lens_flail_repeats, window=self.s.loop_guard_window,
+            window_distinct=self.s.loop_guard_window_distinct,
+            window_repeats=self.s.loop_guard_window_repeats,
+            first_finding_by=self.s.review_first_finding_by,
+            finding_gap=self.s.review_finding_gap)
+
+    _TURN_LABELS = (("~lens", "lens review"), ("~modeb", "adversarial review"),
+                    ("~qa", "QA review"), ("~plan", "planning"), ("~vfy", "verification"),
+                    ("~bd", "burn-down"))
+
+    @classmethod
+    def _turn_label(cls, session_id: str) -> str:
+        for marker, label in cls._TURN_LABELS:
+            if marker in (session_id or ""):
+                return label
+        return "work"
+
+    async def _report_loop_stop(
+        self, effort_id: str, worker: str, role: str, session_id: str, result: WorkResult, *,
+        channel_id: str, thread_id: str, turn_label: str | None, kind: str = "",
+    ) -> None:
+        """ao-loopguard (4) — a stopped turn is VISIBLE: one `loop_guard_stopped` event and one
+        honest line in the effort thread naming the guard, the turn and the reason."""
+        trip = getattr(result, "loop_trip", None)
+        n = trip.commands if trip else len(getattr(result, "commands", []) or [])
+        guard = trip.guard if trip else "identical_run"
+        reason = trip.reason if trip else "it kept repeating one command"
+        label = turn_label or self._turn_label(session_id)
+        await self.audit.log(
+            "loop_guard_stopped", effort_id=effort_id, actor=worker,
+            payload={"role": role, "turn": label, "session": session_id, "guard": guard,
+                     "reason": reason, "commands": n,
+                     "sample": (trip.sample[:200] if trip else "")},
+        )
+        sample = f" (`{trip.sample[:80]}`)" if trip and trip.sample else ""
+        # ONE line per stop, in the effort thread (round 2). Callers do not add their own thread
+        # message for a loop-guard stop; #management gets at most the caller's existing notice.
+        # Only a REVIEW turn (lens, Mode B) has findings on disk to keep.
+        if kind == "review":
+            after = "findings written so far are kept."
+        elif kind == "readonly":
+            after = "the turn did not finish, so its result is not used."
+        else:
+            after = "the turn counts as failed and the usual recovery takes over."
+        try:
+            await self.chat.post(
+                channel_id,
+                f"🛑 Loop guard stopped the {label} turn on `{worker}` after {n} commands: "
+                f"{reason}{sample}; {after}",
+                thread_id=thread_id)
+        except Exception as exc:  # noqa: BLE001 - the event above is the record; a post hiccup is not fatal
+            log.debug("loop-guard post failed for %s: %s", effort_id, exc)
+
     async def wake(
         self,
         effort_id: str,
@@ -370,6 +465,8 @@ class Router:
         checkout_branch: str | None = None,
         expected_base: str | None = None,
         withhold_goal: bool = False,
+        loop_guard: LoopGuard | None = None,
+        turn_label: str | None = None,
     ) -> WorkResult | None:
         """Wake a worker on an effort and post its reply in-thread. Returns None if the
         effort is frozen (the composition rule refuses to dispatch) or no capacity. If `repo`
@@ -383,8 +480,14 @@ class Router:
         ONLY if it was cloned at that same base — a moved base forces a fresh clone. When None,
         reuse falls back to the effort+repo identity alone (mid-effort follow-up turns).
         `withhold_goal` (P10.1): omit the goal/scope/steering blocks from the injected context, for
-        an OBJECTIVE lens that must observe the codebase without knowing what it is meant to be."""
+        an OBJECTIVE lens that must observe the codebase without knowing what it is meant to be.
+        `loop_guard` (ao-loopguard): the turn's loop/no-progress policy. None = the default WORK guard
+        (window rules, edit-aware) when `loop_guard_work` is on and the caller did not arm F31.4's
+        `max_repeat`. `turn_label` names the turn in the one-line stop message (default: derived
+        from the session suffix)."""
         session_id = session_id or thread_id
+        if loop_guard is None and not max_repeat:
+            loop_guard = self.default_loop_guard(session_id, plan_only=plan_only)
         # RELIABILITY: dispatch inside a bounded retry loop. If the acquired worker is wedged (409
         # busy) or unreachable, QUARANTINE it (so it stops being picked) and RE-DISPATCH on another
         # worker — a stuck daemon no longer traps the effort in an infinite 409-retry (the idle-GPU
@@ -623,6 +726,9 @@ class Router:
                 if max_repeat:
                     # F31.4 — bridge-side repeat guard for a read-only lens turn (not a daemon flag).
                     extra["max_repeat"] = max_repeat
+                if loop_guard is not None:
+                    # ao-loopguard — the bridge-side loop/no-progress guard (not a daemon flag).
+                    extra["loop_guard"] = loop_guard
                 if model:
                     # ef-worker-model: the turn runs on its profile's model, for this task only.
                     extra["model"] = model
@@ -652,12 +758,14 @@ class Router:
                              "model_ran": getattr(result, "model", None),
                              "model_from": model_note},
                 )
-                # F31.4 — the bridge-side lens flail-guard stopped a turn stuck repeating one command.
+                # F31.4 / ao-loopguard — the bridge's loop guard stopped this turn. ONE event and ONE
+                # line in the effort thread saying which guard stopped which turn and why (gym-002:
+                # a looping lens was reported as "went silent", which was false).
                 if result.status == "flail":
-                    await self.audit.log(
-                        "lens_flail_stopped", effort_id=effort_id, actor=inst.id,
-                        payload={"role": role, "commands": len(getattr(result, "commands", []) or [])},
-                    )
+                    await self._report_loop_stop(effort_id, inst.id, role, session_id, result,
+                                                 channel_id=channel_id, thread_id=thread_id,
+                                                 turn_label=turn_label,
+                                                 kind=getattr(loop_guard, "kind", "review"))
                 # P21 F1 — an ABANDONED turn ROTS its session (the model runs on the accumulated
                 # context, and a small model returns EMPTY on an overflowing one — §8/context-rot).
                 # gym-019: a `re-run it` reused the exact `~r2~plan` session a 60-min turn had
