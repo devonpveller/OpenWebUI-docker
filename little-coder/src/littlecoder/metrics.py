@@ -54,9 +54,11 @@ LC_META_MINTED = Counter(
 )
 
 
-def start_metrics_server(port: int) -> None:
-    """Start the Prometheus exposition server on its own thread."""
-    start_http_server(port)
+def start_metrics_server(port: int, addrs: list[str] | None = None) -> None:
+    """Start the Prometheus exposition server on its own thread - one per address when the
+    daemon runs with a bind scope (ao-dauth: LC_DAEMON_HIDE_FROM covers :9090 too)."""
+    for addr in addrs or ["0.0.0.0"]:
+        start_http_server(port, addr=addr)
 
 
 def set_build_info(version: str, chapter: str) -> None:

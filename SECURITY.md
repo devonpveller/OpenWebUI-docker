@@ -65,6 +65,27 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
   **Key rotation:** both tokens are on the rotation list - new values in `agent-org/docker/.env`,
   `--force-recreate` `agent-bridge` + `ao-worker-1/2`, then any copy host tooling holds; rotate
   at once if either is ever seen in a log, a chat post, or an `ao-ot` environment.
+- **little-coder daemon token (ao-dauth, 2026-10-07)** - `LC_DAEMON_TOKEN`. Before it every
+  route on a little-coder daemon (`:8090`: run a task, `/tasks/{id}/confirm`, `/admin/approve`,
+  `/project`, `/admin/shutdown`) answered anyone who could reach it - for the agent-org
+  workers, that included `ao-ot-1/2`, where the worker's own shell commands run.
+
+  | Token | Accepted on | Held by | Unset / wrong |
+  |---|---|---|---|
+  | little-coder daemon token (a FILE, not an env var) | every little-coder daemon route except `GET /health` (the one table: `ROUTE_ACCESS` in `little-coder/src/littlecoder/daemon_auth.py`) | two files, two values: `agent-org/agent-bridge/secrets/lc-daemon-token` (mounted root-only into `ao-worker-1/2`; read by `agent-bridge`) and `secrets/little-coder/daemon-token` (mounted root-only into `little-coder`; Open WebUI's `little_coder` pipe valve `daemon_token`) - never `ao-ot-1/2`, `open-terminal` or `lc-egress` | missing/blank: those routes refuse **503** (fail closed); wrong/missing header: **401** |
+
+  The daemon starts as root, reads `/etc/lc-secret/token` (inside a root `0700` directory) and
+  drops to `lc` itself; from then on it is non-dumpable. The token is in no environment - not the
+  container's configured env, so no `docker exec` process of any uid carries it - and the agent
+  (uid `lc`) can read it from nothing: its env, `/proc/*` or the secret directory (measured with a
+  shell, a concurrent `docker exec -u lc` and pi's own read tool, both layouts, ao-dauth round 3).
+  It exists only in the file and in the daemon's memory. The workers set
+  `LC_DAEMON_HIDE_FROM=ao-ot-N`, so neither the daemon (`:8090`) nor its metrics (`:9090`) listen on
+  the network shared with the executor: a worker command cannot connect to them at all.
+  **Key rotation:** on the rotation list - new content in the token file, `--force-recreate` the
+  daemon(s) and their caller (`agent-bridge`; for the coder plane, update the pipe valve);
+  rotate at once if it is ever seen in a log, a chat post, or an `ao-ot`/`open-terminal`
+  environment.
 
 ### Container Security (portal slice)
 - ✅ Every portal container: `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges: true`, `tmpfs /tmp`, non-root UID (10000–10007)

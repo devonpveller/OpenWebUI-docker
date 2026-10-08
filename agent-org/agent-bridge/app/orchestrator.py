@@ -1048,7 +1048,8 @@ class Orchestrator:
         self.harness: WorkerHarness = harness or (
             FakeHarness()
             if settings.chat_adapter == "fake"
-            else LittleCoderHarness(settings.worker_poll_interval_s, settings.worker_poll_timeout_s)
+            else LittleCoderHarness(settings.worker_poll_interval_s, settings.worker_poll_timeout_s,
+                                    daemon_token=settings.lc_daemon_token_value())
         )
         self.router = Router(
             db, settings, self.gate, self.scheduler, self.harness, chat, self.audit,

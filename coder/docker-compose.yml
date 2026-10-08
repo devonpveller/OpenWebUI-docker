@@ -120,6 +120,11 @@ services:
       - LC_LLAMA_API_KEY=${LC_LLAMA_API_KEY:-llama}
       - OPEN_TERMINAL_API_KEY=${OPEN_TERMINAL_API_KEY}
       - LC_DEPLOY_TOKEN=${LC_DEPLOY_TOKEN:-}
+      # ao-dauth: the daemon's bearer is NOT an environment variable (round 3): it is the file
+      # mounted at /etc/lc-secret/token below. The daemon starts as root, reads it, drops to `lc`;
+      # no env - so no `docker exec`, of any uid - carries it. Open WebUI's little_coder pipe holds
+      # the same value in its `daemon_token` valve; open-terminal and lc-egress never get it. No
+      # LC_DAEMON_HIDE_FROM: open-terminal shares both of this daemon's networks (findings ao-dauth).
       # Route the agent's shell into open-terminal (design §3.4). Verified
       # working; default on. Set 0 to fall back to built-in bash (runs in the
       # network-isolated little-coder container). See pi-extension/README.md.
@@ -142,6 +147,9 @@ services:
       - LITTLE_CODER_NO_CTX_PROBE=1
     volumes:
       - ../little-coder/config:/app/config:ro
+      # ao-dauth: the daemon token, root-only inside the container. Create the host file before `up`
+      # (a missing host file becomes an empty DIRECTORY: the daemon then refuses every route, 503).
+      - ../secrets/little-coder/daemon-token:/etc/lc-secret/token:ro
       - little-coder-journals:/var/lib/little-coder/journals
       - little-coder-skill:/var/lib/little-coder/skill
       - little-coder-cohorts:/var/lib/little-coder/cohorts

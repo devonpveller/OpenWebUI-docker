@@ -17,6 +17,8 @@ import time
 
 import httpx
 
+from .daemon_auth import client_headers
+
 _DAEMON = os.environ.get("LC_DAEMON_URL", "http://localhost:8090")
 _TERMINAL = {"done", "abandoned", "rejected"}
 
@@ -36,7 +38,7 @@ def _parse_duration(text: str) -> int:
 
 def _request(method: str, path: str, **kwargs) -> dict:
     try:
-        with httpx.Client(base_url=_DAEMON, timeout=60.0) as c:
+        with httpx.Client(base_url=_DAEMON, timeout=60.0, headers=client_headers()) as c:
             resp = c.request(method, path, **kwargs)
     except httpx.HTTPError as exc:
         _err(f"cannot reach the daemon at {_DAEMON}: {exc}")
