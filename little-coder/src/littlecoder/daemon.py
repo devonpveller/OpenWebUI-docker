@@ -857,7 +857,10 @@ def workspace_marker(root: str, cache: dict, *, now: float | None = None,
 
     Pure stat walk of the shared volume (no git, no file reads), skipping VCS internals and caches.
     Bounded: at most `max_files` files (else None - "unknown", never a false "unchanged"), and
-    cached for `ttl` seconds per root. None when the root is missing or unreadable."""
+    cached for `ttl` seconds per root. None when the root itself is missing or unreadable.
+    Round 3: one unreadable subdirectory, or a file that vanishes between listing and stat (a
+    `sed -i` temp file), is recorded in the hash and skipped - it no longer nulls the whole marker,
+    which left the bridge without a progress signal."""
     now = time.monotonic() if now is None else now
     with _MARKER_LOCK:
         hit = cache.get(root)
@@ -870,19 +873,28 @@ def workspace_marker(root: str, cache: dict, *, now: float | None = None,
         stack = [root]
         while stack:
             d = stack.pop()
-            with os.scandir(d) as it:
-                entries = sorted(it, key=lambda e: e.name)
+            try:
+                with os.scandir(d) as it:
+                    entries = sorted(it, key=lambda e: e.name)
+            except OSError:
+                if d == root:
+                    raise               # the root itself must be readable
+                h.update(f"{d}\0!unreadable\n".encode("utf-8", "replace"))
+                continue
             for e in entries:
-                if e.is_dir(follow_symlinks=False):
-                    if e.name not in _MARKER_SKIP_DIRS:
-                        stack.append(e.path)
-                    continue
-                if e.name.endswith(_MARKER_SKIP_SUFFIXES):
-                    continue
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        if e.name not in _MARKER_SKIP_DIRS:
+                            stack.append(e.path)
+                        continue
+                    if e.name.endswith(_MARKER_SKIP_SUFFIXES):
+                        continue
+                    st = e.stat(follow_symlinks=False)
+                except OSError:
+                    continue            # vanished mid-scan: it is not part of the workspace now
                 n += 1
                 if n > max_files:
                     raise OverflowError
-                st = e.stat(follow_symlinks=False)
                 h.update(f"{e.path}\0{st.st_size}\0{st.st_mtime_ns}\n".encode("utf-8", "replace"))
         result = f"{n}:{h.hexdigest()}"
     except (OSError, OverflowError):

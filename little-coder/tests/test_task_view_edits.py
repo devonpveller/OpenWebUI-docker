@@ -166,3 +166,74 @@ def test_running_task_view_reports_the_workspace_marker(tmp_path):
     d.tasks["t1"] = st
     v = TestClient(build_app(d)).get("/tasks/t1").json()
     assert v["workspace_marker"] == workspace_marker(str(ws), {}, ttl=0)
+
+
+# ── round 3: one bad entry does not null the whole marker; the cap still does ─────────────────
+def test_unreadable_subdir_keeps_a_marker(tmp_path, monkeypatch):
+    import os
+    from littlecoder import daemon as dm
+    ws = _ws(tmp_path)
+    (ws / "locked").mkdir()
+    real = os.scandir
+
+    def scandir(p):
+        if str(p).endswith("locked"):
+            raise PermissionError(13, "denied", str(p))
+        return real(p)
+
+    monkeypatch.setattr(dm.os, "scandir", scandir)
+    m0 = workspace_marker(str(ws), {}, ttl=0)
+    assert m0 is not None
+    p = ws / "todo.py"
+    p.write_text("def main():\n    return 2\n", encoding="utf-8")
+    _bump(p)
+    assert workspace_marker(str(ws), {}, ttl=0) not in (None, m0)    # edits elsewhere still seen
+
+
+def test_file_vanishing_mid_scan_keeps_a_marker(tmp_path, monkeypatch):
+    import os
+    from littlecoder import daemon as dm
+    ws = _ws(tmp_path)
+    (ws / "sedXYZ").write_text("tmp", encoding="utf-8")
+    real = os.scandir
+
+    class _Gone:
+        """A listed entry whose file no longer exists (DirEntry may cache stat on Windows, so the
+        vanish is simulated at the entry)."""
+        def __init__(self, e):
+            self.name, self.path = e.name, e.path
+
+        def is_dir(self, follow_symlinks=True):
+            return False
+
+        def stat(self, follow_symlinks=True):
+            raise FileNotFoundError(2, "gone", self.path)
+
+    class _It:
+        def __init__(self, p):
+            self._it = real(p)
+            self._l = list(self._it)
+
+        def __enter__(self):
+            out = []
+            for e in self._l:
+                if e.name == "sedXYZ":      # sed -i's temp file, gone between listing and stat
+                    out.append(_Gone(e))
+                else:
+                    out.append(e)
+            return iter(out)
+
+        def __exit__(self, *a):
+            self._it.close()
+
+    monkeypatch.setattr(dm.os, "scandir", lambda p: _It(p))
+    m = workspace_marker(str(ws), {}, ttl=0)
+    monkeypatch.undo()
+    (ws / "sedXYZ").unlink()
+    assert m is not None and m == workspace_marker(str(ws), {}, ttl=0)   # the vanished file is not in it
+
+
+def test_cap_and_missing_root_still_give_no_marker(tmp_path):
+    ws = _ws(tmp_path)
+    assert workspace_marker(str(ws), {}, max_files=1, ttl=0) is None
+    assert workspace_marker(str(tmp_path / "nope"), {}, ttl=0) is None

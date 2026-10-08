@@ -158,10 +158,25 @@ class Settings(BaseSettings):
     # the prompt finishes and reports on its own; the bridge stops the one that does not.
     review_first_finding_by: int = 40
     review_finding_gap: int = 20
-    # The window rules on every OTHER worker turn (coding, fix, QA, plan, verify): where the daemon's
-    # read-without-edit flail guard does not reach (it is armed on coding steps only, and disarms after
-    # the first edit). Edit-aware: inert against a little-coder that does not report its edit count.
+    # WHICH SWITCH DISABLES WHICH GUARD (ao-loopguard), by turn kind:
+    #   - review (lens sweep, Mode B): every rule; `lens_flail_repeats`=0 / `loop_guard_window`=0 /
+    #     `review_first_finding_by`=0 / `review_finding_gap`=0 each switch one rule off.
+    #   - readonly (change-nothing turns: QA, verify, plan, the STATE CHECK and the project CHECK run):
+    #     `lens_flail_repeats` in a row, plus a LOOSER window - a full `loop_guard_window` holding
+    #     <= `readonly_window_distinct` distinct commands, or one command >= `readonly_window_repeats`
+    #     times. Off: those settings at 0. `loop_guard_work` does NOT touch it.
+    #   - work (coding, fix, burn-down and every other turn): the window rules above, ONLY while the
+    #     daemon reports a `workspace_marker` (its fingerprint of the workspace files - the progress
+    #     signal that also sees bash edits); inert otherwise. `loop_guard_work`=False switches it off.
+    # The work guard is where the daemon's own read-without-edit flail guard does not reach (it is armed
+    # on coding steps only, and disarms after the first edit).
     loop_guard_work: bool = True
+    # Readonly window (round 3): a QA turn re-runs its check command between inputs (`add a`, `list`,
+    # `add b`, `list`, ...: 6 in 12 and 3+ distinct), so it must not trip; two commands cycling (the
+    # gym-002 A/B loop, a `list`/`add x` alternation) or one command run back-to-back more than half the
+    # window must.
+    readonly_window_distinct: int = 2
+    readonly_window_repeats: int = 7
     # POST-DELIVERY QA / EXPLORATORY EVALUATION (operator 2026-07-15, reviewing gym PR#2: the
     # delivery passed its own tests and read well, but was frustrating to actually USE — no help
     # systems, and a SEPARATE little-coder QA pass surfaced a page of gaps "that could've been

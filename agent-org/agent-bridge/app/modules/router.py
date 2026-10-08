@@ -351,9 +351,12 @@ class Router:
 
     # ── wake execution (P1.2/P1.3) ───────────────────────────────────────────
     def work_loop_guard(self) -> LoopGuard | None:
-        """ao-loopguard — the window rules for a non-review worker turn (coding, fix, QA, plan,
-        verify), or None when `loop_guard_work` is off. No no-finding rule: these turns do not
-        write FINDING lines; progress is an edit the daemon reports."""
+        """ao-loopguard — the window rules for a WORK turn (coding, fix, burn-down and any other turn
+        that may change the workspace), or None when `loop_guard_work` is off. Change-nothing turns
+        (QA, verify, plan, state/project checks) get `readonly_loop_guard` instead. No no-finding
+        rule: these turns do not write FINDING lines. Progress is a change in the daemon's
+        `workspace_marker` (or its edit-tool count); the harness keeps this guard inert while the
+        daemon reports no marker, since without it bash edits are invisible."""
         if not getattr(self.s, "loop_guard_work", False):
             return None
         return LoopGuard(
@@ -362,14 +365,19 @@ class Router:
             window_repeats=self.s.loop_guard_window_repeats)
 
     def readonly_loop_guard(self) -> LoopGuard:
-        """ao-loopguard round 2 — the guard for a CHANGE-NOTHING turn (QA evaluation, verification,
-        plan): the identical-run rule only (F31.4, `lens_flail_repeats` in a row). These turns have no
-        progress signal (they make no edits and write no FINDING lines) and their legitimate shape
-        re-runs the product's own read command between other inputs (`add`, `list`, `done 1`,
-        `list`, ...): a QA turn ran `python3 todo.py list` 4 times in 12 commands and the window
-        rule stopped it. A command run N times IN A ROW with nothing in between is a loop on any
-        turn; that is the rule that stays."""
-        return LoopGuard("readonly", identical_run=self.s.lens_flail_repeats, window=0)
+        """ao-loopguard — the guard for a CHANGE-NOTHING turn (QA evaluation, verification, plan, the
+        state check and the project check run). These turns have no progress signal (no edits, no
+        FINDING lines) and their legitimate shape re-runs the product's own read command between
+        other inputs (`add a`, `list`, `add b`, `list`, ...): round 1's window (4 of 12) stopped such a
+        QA turn. So: `lens_flail_repeats` identical in a row, plus a LOOSER window (round 3) - a full
+        window of <= `readonly_window_distinct` (2) distinct commands, or one command
+        >= `readonly_window_repeats` (7) times in it. Input-then-check repeats the check at most
+        every other command (6 in 12, 3+ distinct); two commands cycling (gym-002's A/B loop) or a
+        check run back-to-back is a loop. Not switched by `loop_guard_work`."""
+        return LoopGuard("readonly", identical_run=self.s.lens_flail_repeats,
+                         window=self.s.loop_guard_window,
+                         window_distinct=self.s.readonly_window_distinct,
+                         window_repeats=self.s.readonly_window_repeats)
 
     _READONLY_SESSIONS = ("~qa", "~vfy", "~plan")
 

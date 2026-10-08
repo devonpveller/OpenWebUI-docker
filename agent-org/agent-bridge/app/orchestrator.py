@@ -9537,6 +9537,10 @@ class Orchestrator:
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
                 session_id=await self._session_for(effort_id), instruction=instruction, repo=repo,
                 repo_token=await self._project_token(effort_id),
+                # ao-loopguard round 3 — a read-only state check changes nothing: the readonly guard
+                # (it runs in the plain effort session, so the session-suffix default would arm the
+                # work guard).
+                loop_guard=self.router.readonly_loop_guard(), turn_label="state check",
             )
         except Exception as exc:  # noqa: BLE001 — recovery is best-effort; escalation still runs
             log.debug("state check failed for %s: %s", effort_id, exc)
@@ -10013,6 +10017,8 @@ class Orchestrator:
             result = await self.router.wake(
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
                 session_id=await self._session_for(effort_id), instruction=instruction, repo=None,
+                # ao-loopguard round 3 — "change NOTHING": the readonly guard, not the work guard.
+                loop_guard=self.router.readonly_loop_guard(), turn_label="project check",
             )
         except (httpx.HTTPStatusError, httpx.TransportError, NoCapacityError) as exc:
             return "unknown", str(exc)[:160], "worker-reported"

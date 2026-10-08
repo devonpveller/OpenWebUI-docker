@@ -75,7 +75,9 @@ async def test_qa_turn_is_not_stopped_and_keeps_its_defects(db_url):
         assert [p["status"] for p in await _payloads(db, "wake_done")] == ["done"]
         assert await _payloads(db, "loop_guard_stopped") == [] and len(defects) == 2
         (w,) = orch.harness.wakes
-        assert w["loop_guard"].kind == "readonly" and w["loop_guard"].window == 0
+        assert w["loop_guard"].kind == "readonly"
+        assert w["loop_guard"].window_distinct == orch.s.readonly_window_distinct == 2
+        assert w["loop_guard"].window_repeats == orch.s.readonly_window_repeats == 7
     finally:
         await _stop(orch, db)
 
@@ -104,7 +106,7 @@ async def test_change_nothing_turns_get_the_readonly_guard(db_url):
         r = orch.router
         for sid, plan in (("e~qa3", False), ("e~vfy2", False), ("e~r1~plan", False), ("e", True)):
             g = r.default_loop_guard(sid, plan_only=plan)
-            assert g.kind == "readonly" and g.window == 0
+            assert g.kind == "readonly" and g.window_repeats == orch.s.readonly_window_repeats
             assert g.identical_run == orch.s.lens_flail_repeats
         assert r.default_loop_guard("e~r1").kind == "work"
         assert _first_trip(QA_CMDS, r.readonly_loop_guard()) is None

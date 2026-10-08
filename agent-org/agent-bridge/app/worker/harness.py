@@ -442,11 +442,13 @@ class LittleCoderHarness:
                 s = (await c.get(f"/tasks/{task_id}")).json()
                 ran = _ran_model(s)
                 activity = s.get("activity") or []
-                # A work-kind guard can only tell a loop from edit-then-test progress if the daemon
-                # reports a progress signal (`edits` and/or `workspace_marker`); without one it stays
-                # inert (never a blind false stop). A snapshot that is already terminal is not
-                # stopped: the turn ended on its own and its answer is the deliverable.
-                has_signal = "edits" in s or "workspace_marker" in s
+                # A work-kind guard can only tell a loop from edit-then-test progress while the daemon
+                # reports its `workspace_marker`: the edit-tool count alone is blind to `sed -i` /
+                # heredoc / script edits (round 3: a daemon that reported `edits` but omitted the
+                # marker - >20k files - had a bash-editing turn stopped). Without a marker this poll
+                # the guard is inert (never a blind false stop). A snapshot that is already terminal
+                # is not stopped: the turn ended on its own and its answer is the deliverable.
+                has_signal = s.get("workspace_marker") is not None
                 watching = (watch is not None and (guard.kind != "work" or has_signal)
                             and s.get("status", "") in ("queued", "running", "pending", ""))
                 if watching and guard.kind == "work":
@@ -696,8 +698,8 @@ class FakeHarness:
         # Optional answer text streamed via on_update (default "ok") — set long text to exercise
         # the answer-chunking path.
         self.answer_text: str | None = None
-        # ao-loopguard — whether this fake daemon reports its edit count (a little-coder older than
-        # ao-loopguard does not; a work-kind loop guard is then inert).
+        # ao-loopguard — whether this fake daemon reports its `workspace_marker` (a little-coder older
+        # than ao-loopguard, or one whose workspace scan gave up, does not; a work guard is then inert).
         self.reports_edits = True
         # The daemon's answer text at the moment a non-work guard stops a turn (default: none yet).
         self.flail_answer = ""

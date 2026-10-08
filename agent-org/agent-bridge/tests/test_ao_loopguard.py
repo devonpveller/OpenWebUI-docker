@@ -384,18 +384,21 @@ async def test_real_harness_stops_the_ab_loop_and_cancels_the_task(monkeypatch):
 async def test_real_harness_work_guard_counts_edits_and_is_inert_without_them(monkeypatch):
     test_cmd = FIX_24[7]
     cmds = [test_cmd] * 12
-    # an edit lands before every suite run: progress, never stopped
+    # an edit lands before every suite run: progress, never stopped (round 3: the work guard watches
+    # only while the daemon reports a workspace_marker; the edit count is extra progress)
     d = _ReplayDaemon(cmds, edits_after=list(range(1, 13)))
+    d.markers = ["m0"] * 12
     _route(monkeypatch, d)
     r = await _h().wake(W1, "s", "p", loop_guard=_work())
     assert r.status == "done" and d.cancelled == []
     # the same suite run 12 times and NO edit: a loop, stopped at the 4th
     d2 = _ReplayDaemon(cmds, edits_after=[0] * 12)
+    d2.markers = ["m0"] * 12
     _route(monkeypatch, d2)
     r2 = await _h().wake(W1, "s", "p", loop_guard=_work())
     assert r2.status == "flail" and r2.loop_trip.commands == 4
     assert r2.output.startswith("LOOP-GUARD:")
-    # a daemon that does not report edits: the work guard cannot tell, so it never stops
+    # a daemon that reports neither: the work guard cannot tell, so it never stops
     d3 = _ReplayDaemon(cmds, edits_after=None)
     _route(monkeypatch, d3)
     r3 = await _h().wake(W1, "s", "p", loop_guard=_work())
