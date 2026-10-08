@@ -109,11 +109,15 @@ async def test_lens_sweep_arms_the_guard_and_salvages_a_flail(db_url):
         orch.harness.stream_commands = findings + ["python todo.py add 'test --priority high'"] * (
             orch.s.lens_flail_repeats + 3)
         await orch._lens_sweep(eid, chan, root, REPO, _delivery(), round_no=1)
-        # every lens wake was armed with the bridge-side guard
+        # every lens wake was armed with the bridge-side guard (ao-loopguard: the review LoopGuard,
+        # which keeps F31.4's identical-run rule at `lens_flail_repeats`)
         assert orch.harness.wakes and all(
-            w["max_repeat"] == orch.s.lens_flail_repeats for w in orch.harness.wakes)
-        # the wedged lens was stopped, not left to loop to the deadline
-        assert await orch._event_count(eid, "lens_flail_stopped") >= 1
+            w["loop_guard"] is not None and w["loop_guard"].kind == "review"
+            and w["loop_guard"].identical_run == orch.s.lens_flail_repeats
+            for w in orch.harness.wakes)
+        # the wedged lens was stopped, not left to loop to the deadline (ao-loopguard: the one
+        # event is `loop_guard_stopped`, which replaced `lens_flail_stopped`)
+        assert await orch._event_count(eid, "loop_guard_stopped") >= 1
         # and its findings-so-far were recovered from the streamed commands
         assert await orch._event_count(eid, "lens_findings_salvaged") >= 1
     finally:
@@ -127,6 +131,6 @@ async def test_a_non_flailing_lens_is_untouched(db_url):
         eid, chan, root = await _effort(orch)
         orch.harness.stream_commands = [f"probe step {i}" for i in range(orch.s.lens_flail_repeats + 5)]
         await orch._lens_sweep(eid, chan, root, REPO, _delivery(), round_no=1)
-        assert await orch._event_count(eid, "lens_flail_stopped") == 0
+        assert await orch._event_count(eid, "loop_guard_stopped") == 0
     finally:
         await db.dispose()

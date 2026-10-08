@@ -142,6 +142,41 @@ class Settings(BaseSettings):
     # findings file), looping to the turn deadline. The lens sweep stops a turn after this many
     # CONSECUTIVE identical commands and salvages whatever findings streamed first. 0 disables it.
     lens_flail_repeats: int = 6
+    # ao-loopguard (gym-002, 2026-10-07) — the bridge loop guard (worker/harness.py `LoopGuard`).
+    # F31.4 above only sees CONSECUTIVE identical commands: the documentation lens alternated two
+    # commands 38 times each (max run 1) and was never stopped. Window rules: within the last
+    # `loop_guard_window` commands, one command occurring `loop_guard_window_repeats` times, or a
+    # full window holding <= `loop_guard_window_distinct` distinct commands, stops the turn. A new
+    # FINDING (review) or a reported file edit (work) resets the window. 0 disables a rule.
+    loop_guard_window: int = 12
+    loop_guard_window_repeats: int = 4
+    loop_guard_window_distinct: int = 3
+    # No-progress stop for REVIEW turns (the lens sweep, Mode B): no FINDING line in the first
+    # `review_first_finding_by` commands, or `review_finding_gap` commands since the last one.
+    # gym-002's goal lens ran 382 commands / 48 min with 0 findings. Both sit ABOVE the prompt's own
+    # budget (the prompt says ~40 commands total, stop after 15 with nothing) so a model that follows
+    # the prompt finishes and reports on its own; the bridge stops the one that does not.
+    review_first_finding_by: int = 40
+    review_finding_gap: int = 20
+    # WHICH SWITCH DISABLES WHICH GUARD (ao-loopguard), by turn kind:
+    #   - review (lens sweep, Mode B): every rule; `lens_flail_repeats`=0 / `loop_guard_window`=0 /
+    #     `review_first_finding_by`=0 / `review_finding_gap`=0 each switch one rule off.
+    #   - readonly (change-nothing turns: QA, verify, plan, the STATE CHECK and the project CHECK run):
+    #     `lens_flail_repeats` in a row, plus a LOOSER window - a full `loop_guard_window` holding
+    #     <= `readonly_window_distinct` distinct commands, or one command >= `readonly_window_repeats`
+    #     times. Off: those settings at 0. `loop_guard_work` does NOT touch it.
+    #   - work (coding, fix, burn-down and every other turn): the window rules above, ONLY while the
+    #     daemon reports a `workspace_marker` (its fingerprint of the workspace files - the progress
+    #     signal that also sees bash edits); inert otherwise. `loop_guard_work`=False switches it off.
+    # The work guard is where the daemon's own read-without-edit flail guard does not reach (it is armed
+    # on coding steps only, and disarms after the first edit).
+    loop_guard_work: bool = True
+    # Readonly window (round 3): a QA turn re-runs its check command between inputs (`add a`, `list`,
+    # `add b`, `list`, ...: 6 in 12 and 3+ distinct), so it must not trip; two commands cycling (the
+    # gym-002 A/B loop, a `list`/`add x` alternation) or one command run back-to-back more than half the
+    # window must.
+    readonly_window_distinct: int = 2
+    readonly_window_repeats: int = 7
     # POST-DELIVERY QA / EXPLORATORY EVALUATION (operator 2026-07-15, reviewing gym PR#2: the
     # delivery passed its own tests and read well, but was frustrating to actually USE — no help
     # systems, and a SEPARATE little-coder QA pass surfaced a page of gaps "that could've been

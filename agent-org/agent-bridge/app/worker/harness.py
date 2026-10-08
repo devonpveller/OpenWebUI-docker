@@ -48,6 +48,8 @@ class WorkResult:
         # e.g. "llamacpp/local-small"). None = the daemon did not report one (older than
         # ef-worker-model, or the task was never read back): UNKNOWN, never the model that was sent.
         self.model: str | None = model
+        # ao-loopguard — set when the bridge's loop guard stopped this turn (status "flail").
+        self.loop_trip: LoopTrip | None = None
 
     @property
     def ok(self) -> bool:
@@ -97,6 +99,168 @@ def _flail_key(cmd: str) -> str:
     return _TEMP_PATH_RE.sub("<tmp>", cmd)
 
 
+_WS_RE = re.compile(r"\s+")
+# A lens's finding line (the `echo 'FINDING: ...' >> <findings file>` the review prompts require).
+_FINDING_RE = re.compile(r"\bFINDING:")
+# ...and only when the command WRITES it (an append/redirect or tee). Round 2: a
+# `grep -c 'FINDING:' /tmp/lens-findings.txt` read-back contains the text but writes nothing.
+_WRITES_RE = re.compile(r">>|\btee\b|(?<![0-9&])>(?!&|\s*/dev/)")
+
+
+def _writes_finding(key: str) -> bool:
+    return bool(_FINDING_RE.search(key) and _WRITES_RE.search(key))
+
+
+# FakeHarness only: the fake's model of the daemon's `workspace_marker` (the real daemon fingerprints
+# the workspace files; a fake has no files, so it treats a write-shaped command as changing them).
+_FAKE_WRITE_RE = re.compile(
+    r"\bsed\s+(?:-[a-zA-Z]*\s+)*-i|\bcat\s*>|\btee\b|>\s*(?!/tmp/|/dev/)[\w./-]+\.\w+|"
+    r"open\([^)]*['\"][wa]['\"]|write_text\(|\bgit\s+(?:commit|apply|am)\b|\bpatch\b")
+
+
+def _loop_key(cmd: str) -> str:
+    """ao-loopguard: the key the loop guard compares. `_flail_key` (temp scratch paths collapsed)
+    plus whitespace runs collapsed, so the same probe re-typed with different spacing is one key.
+    Deliberately NOT a digit or line-range normalisation: paging through a file with
+    `sed -n '250,600p'`, `'600,800p'`, ... is reading, not looping (gym-002 01M4BVAD commands 6-11)."""
+    return _WS_RE.sub(" ", _flail_key(cmd)).strip()
+
+
+class LoopGuard:
+    """ao-loopguard (gym-002, 2026-10-07): the bridge-side policy that stops a looping or
+    unproductive worker turn. Replaces F31.4's "N CONSECUTIVE identical commands" rule, which a
+    strict A/B alternation evades (01M4BVAD ran two commands 38 times each, max consecutive run 1)
+    and which never sees a turn that explores without output (01M4BN82: 382 commands, 0 findings).
+
+    Rules, each off at 0:
+      - `identical_run`: N consecutive identical commands (the F31.4 rule, kept);
+      - `window_repeats`: one command occurs N times in the last `window` commands (a near-repeat);
+      - `window_distinct`: a FULL window of `window` commands holds <= N distinct commands
+        (alternation / a short cycle);
+      - review turns only (`kind="review"`): `first_finding_by` (no FINDING line in the first N
+        commands) and `finding_gap` (N commands since the last FINDING line).
+    PROGRESS resets the repetition window: a NEW finding line written by the turn (review) or a
+    change the daemon reports - an edit/write tool call (`edits`) or a change to the workspace's
+    files (`workspace_marker`, which also sees `sed -i` / heredoc / script writes) (work). So a
+    turn that keeps producing findings or edits is never stopped by the window rules - the threat
+    model is a false stop of a productive turn.
+    Kinds: `review` (lens sweep, Mode B), `work` (coding/fix turns: needs the daemon's progress
+    fields; the real harness keeps it inert on a daemon that reports neither), and `readonly`
+    (change-nothing turns: QA, verify, plan - the router gives them the identical-run rule only,
+    because re-running the product's own read command between inputs is how they work)."""
+
+    __slots__ = ("kind", "identical_run", "window", "window_distinct", "window_repeats",
+                 "first_finding_by", "finding_gap")
+
+    def __init__(self, kind: str = "review", *, identical_run: int = 6, window: int = 12,
+                 window_distinct: int = 3, window_repeats: int = 4, first_finding_by: int = 0,
+                 finding_gap: int = 0) -> None:
+        self.kind = kind
+        self.identical_run = max(0, int(identical_run))
+        self.window = max(0, int(window))
+        self.window_distinct = max(0, int(window_distinct))
+        self.window_repeats = max(0, int(window_repeats))
+        self.first_finding_by = max(0, int(first_finding_by)) if kind == "review" else 0
+        self.finding_gap = max(0, int(finding_gap)) if kind == "review" else 0
+
+    def __repr__(self) -> str:   # shows up in test failure output
+        return (f"LoopGuard({self.kind!r}, run={self.identical_run}, window={self.window}, "
+                f"distinct<={self.window_distinct}, repeats>={self.window_repeats}, "
+                f"first_finding_by={self.first_finding_by}, gap={self.finding_gap})")
+
+
+class LoopTrip:
+    """Which loop-guard rule stopped a turn, and why (carried on `WorkResult.loop_trip`)."""
+
+    __slots__ = ("guard", "reason", "commands", "sample")
+
+    def __init__(self, guard: str, reason: str, commands: int, sample: str = "") -> None:
+        self.guard = guard          # identical_run | window_repeats | window_distinct | no_finding | finding_gap
+        self.reason = reason        # one plain sentence for the operator
+        self.commands = commands    # commands the turn had run when it was stopped
+        self.sample = sample        # the repeated command (repeat rules), "" otherwise
+
+    def as_dict(self) -> dict:
+        return {"guard": self.guard, "reason": self.reason, "commands": self.commands,
+                "sample": self.sample[:200]}
+
+
+class LoopWatch:
+    """Feeds one turn's commands through a `LoopGuard`. Pure; the real and fake harness share it."""
+
+    def __init__(self, guard: LoopGuard) -> None:
+        self.g = guard
+        self.n = 0                       # commands seen
+        self.findings = 0
+        self.last_finding_at = 0
+        self._seen_findings: set[str] = set()
+        self._recent: list[str] = []
+        self._run_key = ""
+        self._run = 0
+
+    def progress(self) -> None:
+        """The turn made progress (a new finding, or an edit): the repetition window starts over."""
+        self._recent.clear()
+        self._run_key, self._run = "", 0
+
+    def feed(self, cmd: str) -> LoopTrip | None:
+        g = self.g
+        self.n += 1
+        key = _loop_key(cmd or "")
+        if g.kind == "review" and key and _writes_finding(cmd or ""):
+            # Progress only when the finding is NEW: a turn echoing the same line forever is a loop.
+            if key not in self._seen_findings:
+                self._seen_findings.add(key)
+                self.findings += 1
+                self.last_finding_at = self.n
+                self.progress()
+                return None
+        if key:
+            if key == self._run_key:
+                self._run += 1
+            else:
+                self._run_key, self._run = key, 1
+            if g.identical_run and self._run >= g.identical_run:
+                return LoopTrip("identical_run",
+                                f"it ran the same command {self._run} times in a row", self.n, key)
+            if g.window:
+                self._recent.append(key)
+                if len(self._recent) > g.window:
+                    del self._recent[0]
+                if g.window_repeats:
+                    c = self._recent.count(key)
+                    if c >= g.window_repeats:
+                        return LoopTrip(
+                            "window_repeats",
+                            f"it ran the same command {c} times in its last "
+                            f"{len(self._recent)} commands", self.n, key)
+                if g.window_distinct and len(self._recent) >= g.window:
+                    d = len(set(self._recent))
+                    if d <= g.window_distinct:
+                        return LoopTrip(
+                            "window_distinct",
+                            f"its last {g.window} commands cycled through only {d} distinct "
+                            f"commands", self.n, key)
+        if g.first_finding_by and not self.findings and self.n >= g.first_finding_by:
+            return LoopTrip("no_finding",
+                            f"{self.n} commands without writing a single FINDING", self.n)
+        if g.finding_gap and self.findings and self.n - self.last_finding_at >= g.finding_gap:
+            return LoopTrip("finding_gap",
+                            f"{self.n - self.last_finding_at} commands since its last FINDING "
+                            f"({self.findings} written)", self.n)
+        return None
+
+
+def _guard_for(loop_guard: LoopGuard | None, max_repeat: int) -> LoopGuard | None:
+    """The effective guard: an explicit `loop_guard`, else F31.4's bare `max_repeat` (identical-run
+    only, for callers that predate ao-loopguard), else None."""
+    if loop_guard is not None:
+        return loop_guard
+    if max_repeat:
+        return LoopGuard("review", identical_run=max_repeat, window=0)
+    return None
+
+
 def _ran_model(task: dict) -> str | None:
     """The model a daemon task view says ran (TF1), or None when it reports none (an older daemon)."""
     m = task.get("model") if isinstance(task, dict) else None
@@ -138,7 +302,7 @@ class WorkerHarness(Protocol):
         self, base_url: str, session_id: str, prompt: str, *,
         channel: str = LC_TRIGGER_CHANNEL, on_update: OnUpdate | None = None,
         plan_only: bool = False, flail_guard: bool = False, max_repeat: int = 0,
-        model: str | None = None,
+        model: str | None = None, loop_guard: LoopGuard | None = None,
     ) -> WorkResult:
         """Resume a session and run one turn to completion; return the result. `on_update`
         streams the worker's commands + answer to the bus as it works (observability).
@@ -148,7 +312,10 @@ class WorkerHarness(Protocol):
         turn is killed with a FLAIL-GUARD answer marker instead of burning the timeout.
         `model` (ef-worker-model) is the model role this turn runs on: the dispatching profile's
         model. The daemon runs it for this task only, or refuses it (422) when its allowlist does
-        not name it; None = the daemon's own agent.model."""
+        not name it; None = the daemon's own agent.model.
+        `loop_guard` (ao-loopguard) is the bridge-side loop/no-progress policy for this turn (see
+        `LoopGuard`); a tripped guard cancels the task and returns status "flail" with
+        `WorkResult.loop_trip` set. `max_repeat` is its F31.4 predecessor (identical run only)."""
         ...
 
     async def set_project(
@@ -225,7 +392,7 @@ class LittleCoderHarness:
         self, base_url: str, session_id: str, prompt: str, *,
         channel: str = LC_TRIGGER_CHANNEL, on_update: OnUpdate | None = None,
         plan_only: bool = False, flail_guard: bool = False, max_repeat: int = 0,
-        model: str | None = None,
+        model: str | None = None, loop_guard: LoopGuard | None = None,
     ) -> WorkResult:
         """`max_repeat` (F31.4) — a BRIDGE-SIDE flail-guard for READ-ONLY turns (the lens sweep).
         The daemon's `flail_guard` keys on read-*without-edit*, so it can't police a lens, which
@@ -233,7 +400,12 @@ class LittleCoderHarness:
         watchdog (its offset keeps advancing), and lens truncation (repeats don't grow the findings
         file), looping to the turn deadline (gym-035). When `max_repeat > 0`, this poll loop stops
         the turn after that many CONSECUTIVE identical commands; the caller salvages whatever
-        findings streamed before the flail. 0 = off (every non-lens wake is unaffected)."""
+        findings streamed before the flail. 0 = off (every non-lens wake is unaffected).
+
+        `loop_guard` (ao-loopguard) supersedes it: a sliding-window repeat/alternation rule plus,
+        on review turns, a no-finding rule (see `LoopGuard`). A `kind="work"` guard counts the
+        daemon's reported `edits` as progress and stays INERT on a daemon that reports none, so
+        an edit-then-test coding loop is never mistaken for a repeat."""
         async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=60.0) as c:
             body = {
                 "prompt": prompt,
@@ -260,14 +432,38 @@ class LittleCoderHarness:
             seen = 0
             waited = 0.0
             ran: str | None = None   # TF1 — the model the daemon reports for this task
-            last_cmd: str | None = None   # F31.4 — consecutive-repeat tracking for the lens flail-guard
-            repeat = 0
+            guard = _guard_for(loop_guard, max_repeat)
+            watch = LoopWatch(guard) if guard else None
+            edits_seen: int | None = None   # ao-loopguard — the daemon's edit count at the last poll
+            marker_seen: str | None = None  # ...and its workspace fingerprint
             while waited < self.poll_timeout:
                 await asyncio.sleep(self.poll_interval)
                 waited += self.poll_interval
                 s = (await c.get(f"/tasks/{task_id}")).json()
                 ran = _ran_model(s)
                 activity = s.get("activity") or []
+                # A work-kind guard can only tell a loop from edit-then-test progress while the daemon
+                # reports its `workspace_marker`: the edit-tool count alone is blind to `sed -i` /
+                # heredoc / script edits (round 3: a daemon that reported `edits` but omitted the
+                # marker - >20k files - had a bash-editing turn stopped). Without a marker this poll
+                # the guard is inert (never a blind false stop). A snapshot that is already terminal
+                # is not stopped: the turn ended on its own and its answer is the deliverable.
+                has_signal = s.get("workspace_marker") is not None
+                watching = (watch is not None and (guard.kind != "work" or has_signal)
+                            and s.get("status", "") in ("queued", "running", "pending", ""))
+                if watching and guard.kind == "work":
+                    try:
+                        edits_now = int(s.get("edits") or 0)
+                    except (TypeError, ValueError):
+                        edits_now = 0
+                    marker_now = s.get("workspace_marker")
+                    if ((edits_seen is not None and edits_now > edits_seen)
+                            or (marker_seen is not None and marker_now is not None
+                                and marker_now != marker_seen)):
+                        watch.progress()          # the workspace changed since the last poll
+                    edits_seen = edits_now
+                    if marker_now is not None:
+                        marker_seen = marker_now
                 if len(activity) > seen:
                     for item in activity[seen:]:
                         if on_update:
@@ -275,24 +471,22 @@ class LittleCoderHarness:
                                 await on_update("command", item)
                             except Exception:  # noqa: BLE001 - streaming must never break the poll
                                 pass
-                        # F31.4 — a lens stuck repeating one command: stop it (findings so far are
-                        # salvaged by the caller from the streamed command list).
-                        if max_repeat:
-                            cmd = _one_command_text(item)
-                            key = _flail_key(cmd) if cmd else ""   # F31.4b — digits→# so a probe
-                            if key and key == last_cmd:            # re-run on a fresh scratch file counts
-                                repeat += 1
-                            elif key:
-                                last_cmd, repeat = key, 1
-                            if key and repeat >= max_repeat:
-                                try:
-                                    await self.cancel_task(base_url, task_id)
-                                except Exception:  # noqa: BLE001 - cancel is best-effort
-                                    pass
-                                return WorkResult(
-                                    "flail", task_id,
-                                    s.get("answer") or s.get("result", "") or "",
-                                    commands=_command_texts(activity), model=_ran_model(s))
+                        # F31.4 / ao-loopguard — a turn looping (one command, or a short cycle) or
+                        # a review turn producing nothing: stop it (findings so far are salvaged by
+                        # the caller from the streamed command list).
+                        trip = watch.feed(_one_command_text(item)) if watching else None
+                        if trip is not None:
+                            try:
+                                await self.cancel_task(base_url, task_id)
+                            except Exception:  # noqa: BLE001 - cancel is best-effort
+                                pass
+                            answer = s.get("answer") or s.get("result", "") or ""
+                            if not answer and guard.kind == "work":
+                                answer = f"LOOP-GUARD: stopped after {trip.commands} commands - {trip.reason}"
+                            res = WorkResult("flail", task_id, answer,
+                                             commands=_command_texts(activity), model=_ran_model(s))
+                            res.loop_trip = trip
+                            return res
                     seen = len(activity)
                 status = s.get("status", "")
                 # Terminal = anything not still in-flight (done/abandoned/rejected/cancelled/…).
@@ -441,6 +635,10 @@ class LittleCoderHarness:
             return None
 
 
+#: FakeHarness `stream_commands` entry standing for a file edit (an edit/write tool call).
+FAKE_EDIT = "<fake-edit>"
+
+
 class FakeHarness:
     """Deterministic in-memory worker for tests. Records every wake."""
 
@@ -500,17 +698,22 @@ class FakeHarness:
         # Optional answer text streamed via on_update (default "ok") — set long text to exercise
         # the answer-chunking path.
         self.answer_text: str | None = None
+        # ao-loopguard — whether this fake daemon reports its `workspace_marker` (a little-coder older
+        # than ao-loopguard, or one whose workspace scan gave up, does not; a work guard is then inert).
+        self.reports_edits = True
+        # The daemon's answer text at the moment a non-work guard stops a turn (default: none yet).
+        self.flail_answer = ""
 
     async def wake(
         self, base_url: str, session_id: str, prompt: str, *,
         channel: str = LC_TRIGGER_CHANNEL, on_update: OnUpdate | None = None,
         plan_only: bool = False, flail_guard: bool = False, max_repeat: int = 0,
-        model: str | None = None,
+        model: str | None = None, loop_guard: LoopGuard | None = None,
     ) -> WorkResult:
         self.wakes.append(
             {"base_url": base_url, "session_id": session_id, "prompt": prompt,
              "plan_only": plan_only, "flail_guard": flail_guard, "max_repeat": max_repeat,
-             "model": model}
+             "model": model, "loop_guard": loop_guard}
         )
         if base_url in self.busy_urls:
             req = httpx.Request("POST", base_url.rstrip("/") + "/tasks")
@@ -519,24 +722,35 @@ class FakeHarness:
         if base_url in self.down_urls:
             raise httpx.ConnectError("connection refused", request=httpx.Request("POST", base_url))
         out = self.output_queue.pop(0) if self.output_queue else self.output
-        cmds = list(self.stream_commands or [])
-        # F31.4 — mirror the real harness's consecutive-repeat guard so tests exercise the lens
-        # flail-guard: stop at the Nth identical command in a row and return a "flail" result.
-        if max_repeat:
-            last, rep = None, 0
-            for i, cmd in enumerate(cmds):
-                key = _flail_key(cmd)          # F31.4b — normalise digits so a counter-suffixed
-                if key == last:                # scratch file doesn't reset the repeat counter
-                    rep += 1
-                else:
-                    last, rep = key, 1
-                if rep >= max_repeat:
-                    streamed = cmds[: i + 1]
-                    if on_update:
-                        for c in streamed:
-                            await on_update("command", {"command": c, "ok": True})
-                    return WorkResult("flail", task_id=f"fake-{len(self.wakes)}",
-                                      output="", commands=streamed)
+        stream = list(self.stream_commands or [])
+        # ao-loopguard — a `FAKE_EDIT` entry is a file edit (an edit/write tool call), which the
+        # daemon counts but never reports as a command; it is not streamed.
+        cmds = [c for c in stream if c != FAKE_EDIT]
+        # F31.4 / ao-loopguard — mirror the real harness's loop guard (the same `LoopWatch`) so
+        # tests exercise it: stop at the tripping command and return a "flail" result.
+        guard = _guard_for(loop_guard, max_repeat)
+        if guard is not None and (guard.kind != "work" or self.reports_edits):
+            watch = LoopWatch(guard)
+            streamed: list[str] = []
+            for cmd in stream:
+                if cmd == FAKE_EDIT:
+                    watch.progress()
+                    continue
+                streamed.append(cmd)
+                trip = watch.feed(cmd)
+                if trip is None and guard.kind == "work" and _FAKE_WRITE_RE.search(cmd):
+                    watch.progress()            # the fake's workspace_marker moved
+                if trip is None:
+                    continue
+                if on_update:
+                    for c in streamed:
+                        await on_update("command", {"command": c, "ok": True})
+                answer = (self.flail_answer if guard.kind != "work" else
+                          f"LOOP-GUARD: stopped after {trip.commands} commands - {trip.reason}")
+                res = WorkResult("flail", task_id=f"fake-{len(self.wakes)}",
+                                 output=answer, commands=streamed)
+                res.loop_trip = trip
+                return res
         if on_update:
             for cmd in cmds:
                 await on_update("command", {"command": cmd, "ok": True})
