@@ -380,12 +380,12 @@ services:
       # Workers only; the ao-ot sandboxes (where commands run) never get it.
       - AO_WORKER_TOKEN=${AO_WORKER_TOKEN:-}
       # ao-dauth: this daemon's own bearer - every route but GET /health requires it; agent-bridge
-      # sends it (same .env). Unset = every such route answers 503 (fail closed). The daemon takes
-      # it out of its environment at start, so the agent and its commands never inherit it; the
-      # ao-ot sandboxes never get it.
+      # sends it (same .env). Unset = every such route answers 503 (fail closed). At start the
+      # daemon re-execs itself without it (pipe hand-off) and goes non-dumpable, so the agent (same
+      # uid) can read it neither from its env nor from /proc/1; the ao-ot sandboxes never get it.
       - LC_DAEMON_TOKEN=${LC_DAEMON_TOKEN:-}
       # ao-dauth: do not even LISTEN on the network shared with ao-ot-1 (ao-worker-net): the
-      # sandbox cannot connect to :8090 at all. The daemon still reaches ao-ot-1 (outbound), and
+      # sandbox cannot connect to :8090 (or the metrics :9090) at all. The daemon still reaches ao-ot-1 (outbound), and
       # agent-bridge reaches the daemon over llm-net. Nothing in ao-ot calls the daemon.
       - LC_DAEMON_HIDE_FROM=ao-ot-1
       # sl-ao-envfile (2026-09-19): the two names that replaced `env_file: ../../.env`.

@@ -238,7 +238,7 @@ class LittleCoderDaemon:
     async def start(self) -> None:
         metrics.set_build_info(__version__, "Tool")
         if self.cfg.metrics.enabled:
-            metrics.start_metrics_server(self.cfg.metrics.port)
+            metrics.start_metrics_server(self.cfg.metrics.port, getattr(self, "bind_hosts", None))
         self._seed_focus()
         self._worker_task = asyncio.create_task(self._worker(), name="lc-worker")
         self._metrics_task = asyncio.create_task(
@@ -1379,11 +1379,14 @@ def _listen(hosts: list[str], port: int) -> list:
 
 def main() -> None:
     config = load_config(os.environ.get("LC_CONFIG", "/app/config/little-coder.config.yaml"))
-    # Taken OUT of the environment before anything is spawned: the agent, ot-exec, git and
-    # acceptance checks never inherit the daemon token (ao-dauth).
-    token = daemon_auth.take_token_from_env()
+    # ao-dauth: the token leaves the environment before anything is spawned, and the first start
+    # re-execs (same PID) without it, so neither a child's env nor /proc/<daemon>/environ holds it;
+    # the daemon is then made non-dumpable (its /proc entries are root's, not the agent uid's).
+    token = daemon_auth.acquire_token()
+    daemon_auth.harden_process()
     hosts = daemon_auth.bind_hosts(config.daemon.host)
     daemon = LittleCoderDaemon(config)
+    daemon.bind_hosts = hosts   # the metrics port takes the same bind scope
     app = build_app(daemon, token=token)
     if hosts == [config.daemon.host]:
         uvicorn.run(app, host=config.daemon.host, port=config.daemon.port, log_level="info")

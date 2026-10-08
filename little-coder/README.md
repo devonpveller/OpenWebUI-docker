@@ -81,8 +81,14 @@ retargets the workspace and shuts itself down. So every route **except
 - **Fail closed**: unset or blank, every route but `/health` answers **503**
   and the daemon logs `LC_DAEMON_TOKEN is not set` at startup. Missing or wrong:
   **401**.
-- **Not inherited**: the daemon removes the variable from its own environment at
-  start, so the agent, `ot-exec`, git and acceptance checks never see it.
+- **Not readable by the agent**: at start the daemon takes the variable out of
+  its environment and re-execs itself (same PID) with the value on a pipe that it
+  reads once and closes (`LC_DAEMON_TOKEN_FD` names the fd), then marks itself
+  non-dumpable. So the agent, `ot-exec`, git and acceptance checks - which run as
+  the same uid - find it in neither their own env nor `/proc/<daemon>/environ`,
+  `cmdline` or `fd` (pi's read tool included). It does remain in the daemon's
+  memory (ptrace-attach needed: refused) and in the environment of `docker exec`
+  processes, which run as root.
   `docker exec <container> lc ...` still works: `docker exec` carries the
   container's configured environment, and the `lc` CLI (and the dormant
   `lc-mcp`) send it.
@@ -91,7 +97,8 @@ retargets the workspace and shuts itself down. So every route **except
   `agent-bridge` (from `agent-org/docker/.env`, a different value). Never
   `open-terminal`, `lc-egress` or `ao-ot-1/2`.
 - **Bind scope, `LC_DAEMON_HIDE_FROM`** (comma-separated host names): the daemon
-  does not listen on any interface whose subnet holds one of them. The agent-org
+  (`:8090`) and its metrics (`:9090`) do not listen on any interface whose subnet
+  holds one of them. The agent-org
   workers set it to their own executor (`ao-ot-N`), so a worker's shell commands
   cannot even connect to its daemon; nothing in the executor calls the daemon.
   A name that does not resolve, or a scope that leaves only loopback, stops the
@@ -99,7 +106,9 @@ retargets the workspace and shuts itself down. So every route **except
   plane leaves it unset: `open-terminal` shares both of that daemon's networks.
 - `scripts/agent-harness/dispatch.ps1` (docker-exec transport) prints the header
   from the container's own environment inside the container; the host never
-  holds the value. Its `http` transport sends `$env:LC_DAEMON_TOKEN`.
+  holds the value. Its `http` transport sends `$env:LC_DAEMON_TOKEN`. The
+  quadrant comparison's transport (`scripts/agent-harness/quadrant/lc_docker.py`)
+  does the same with `bash -c` and a process-substitution header file.
 
 ## Language note
 

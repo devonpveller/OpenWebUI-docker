@@ -122,8 +122,9 @@ services:
       - LC_DEPLOY_TOKEN=${LC_DEPLOY_TOKEN:-}
       # ao-dauth: the daemon's bearer - every route but GET /health requires it (unset = 503,
       # fail closed). Open WebUI's little_coder pipe holds it as its `daemon_token` valve;
-      # open-terminal and lc-egress never get it. The daemon removes it from its own environment
-      # at start, so the agent and its commands never inherit it. No LC_DAEMON_HIDE_FROM here:
+      # open-terminal and lc-egress never get it. At start the daemon re-execs itself without it
+      # (pipe hand-off) and goes non-dumpable, so the agent (same uid) can read it neither from its
+      # env nor from /proc/1 - so open-terminal's tokenless calls get 401. No LC_DAEMON_HIDE_FROM:
       # open-terminal shares both of this daemon's networks (findings ao-dauth).
       - LC_DAEMON_TOKEN=${LC_DAEMON_TOKEN:-}
       # Route the agent's shell into open-terminal (design §3.4). Verified

@@ -330,10 +330,11 @@ plane holds four such parts, and a default `up` starts none of them:
     [`../little-coder/README.md`](../little-coder/README.md#daemon-api-access-lc_daemon_token).
     `agent-bridge` sends it on every call (`LittleCoderHarness`; the setting is
     `lc_daemon_token`, env name `LC_DAEMON_TOKEN` with no `AO_` prefix);
-    `ao-worker-1/2` check it; no `ao-ot` sandbox holds it, and the daemon removes
-    it from its own environment so the agent never inherits it.
+    `ao-worker-1/2` check it; no `ao-ot` sandbox holds it. The daemon re-execs
+    itself without it (pipe hand-off) and goes non-dumpable, so the agent - same
+    uid - cannot read it from its env or from `/proc/<daemon>`.
   - **`ao-ot-N` cannot connect to `:8090` at all**: the workers set
-    `LC_DAEMON_HIDE_FROM=ao-ot-N`, so the daemon does not listen on
+    `LC_DAEMON_HIDE_FROM=ao-ot-N`, so the daemon (and its metrics `:9090`) does not listen on
     `ao-worker-net` (the network it shares with its executor and
     `ao-git-egress`). The daemon still reaches `ao-ot-N` (outbound), and the
     bridge reaches the daemon over `ai-stack_llm-net`. Nothing in `ao-ot` calls

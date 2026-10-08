@@ -17,6 +17,10 @@ from fastapi.testclient import TestClient
 
 from littlecoder.config import Config
 from littlecoder.daemon import LittleCoderDaemon, build_app, count_tool_calls, workspace_marker
+
+# ao-dauth: every daemon route but /health needs the bearer (fake token built from parts).
+_TOK = "-".join(["tve", "test", "token"])
+_AUTH = {"Authorization": f"Bearer {_TOK}"}
 from littlecoder.tasks import TaskState, TaskStatus
 
 
@@ -88,7 +92,7 @@ def test_running_task_view_reports_edits(tmp_path):
     st.status = TaskStatus.RUNNING
     st.events_path, st.event_stream_path = str(pi), str(ot)
     d.tasks["t1"] = st
-    client = TestClient(build_app(d))      # no `with`: the lifespan (workers) never starts
+    client = TestClient(build_app(d, token=_TOK), headers=_AUTH)   # no `with`: lifespan never starts
     v = client.get("/tasks/t1").json()
     assert v["edits"] == 1 and v["tool_calls"] == 3 and v["commands"] == 1
     _append(pi, _ev("write"))
@@ -164,7 +168,7 @@ def test_running_task_view_reports_the_workspace_marker(tmp_path):
     st.status = TaskStatus.RUNNING
     st.event_stream_path = str(ot)
     d.tasks["t1"] = st
-    v = TestClient(build_app(d)).get("/tasks/t1").json()
+    v = TestClient(build_app(d, token=_TOK), headers=_AUTH).get("/tasks/t1").json()
     assert v["workspace_marker"] == workspace_marker(str(ws), {}, ttl=0)
 
 

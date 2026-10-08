@@ -15,8 +15,10 @@ worker). Two layers now:
    - constant-time compare; the token is never logged, echoed or returned;
    - fail closed: unset/blank -> every non-public route answers 503 and a startup line says so;
    - websocket (and any other non-http, non-lifespan) scopes are refused outright.
-   `take_token_from_env` also REMOVES the variable from the daemon's own environment, so the
-   agent, its tools and every subprocess the daemon spawns never inherit it.
+   `acquire_token` (main) removes the variable from the environment and re-execs the daemon
+   (same PID) with the value on a pipe, so neither a child's env nor /proc/<daemon>/environ holds
+   it; `harden_process` then makes the daemon non-dumpable (its /proc entries become root's). The
+   agent runs as the same uid, so both matter (ao-dauth round 2, tester X2).
 
 2. A bind scope, LC_DAEMON_HIDE_FROM (comma-separated host names): the daemon does not listen on
    any interface whose subnet holds one of those hosts. A worker sets it to its open-terminal
@@ -97,6 +99,69 @@ def take_token_from_env(environ=None) -> bytes | None:
     (the agent, ot-exec, git, checks) inherits it. Call once, in main()."""
     env = os.environ if environ is None else environ
     return _clean(env.pop(TOKEN_ENV, None))
+
+
+FD_ENV = "LC_DAEMON_TOKEN_FD"
+REEXEC_ENV = "LC_DAEMON_TOKEN_REEXEC"   # "0" = do not re-exec (tests / non-container use)
+
+
+def _read_fd(fd: int) -> bytes | None:
+    chunks = []
+    try:
+        while True:
+            b = os.read(fd, 4096)
+            if not b:
+                break
+            chunks.append(b)
+    finally:
+        os.close(fd)
+    return _clean(b"".join(chunks).decode("utf-8", "replace"))
+
+
+def acquire_token(environ=None, *, execve=None, executable: str | None = None) -> bytes | None:
+    """Take the daemon token so that NOTHING the agent's uid can read still holds it (round 2).
+
+    `take_token_from_env` alone is not enough: the daemon is PID 1 running as the agent's uid, and
+    /proc/1/environ is the process's INITIAL environment block, which still holds LC_DAEMON_TOKEN
+    after os.environ forgets it. So, on the first start, the daemon writes the token into a pipe,
+    and re-execs itself (same PID) with an environment that does not contain it, passing only the
+    pipe's fd number (LC_DAEMON_TOKEN_FD). The re-exec'd process reads the pipe once and closes it.
+    After that the token exists only in the daemon's memory - /proc/<pid>/mem needs ptrace-attach
+    rights, which the agent (a descendant, yama ptrace_scope=1, and see `harden_process`) lacks.
+    Blank/unset: nothing secret, no re-exec (fail closed at the routes)."""
+    env = os.environ if environ is None else environ
+    fd = env.pop(FD_ENV, None)
+    if fd is not None:
+        env.pop(TOKEN_ENV, None)
+        return _read_fd(int(fd))
+    tok = take_token_from_env(env)
+    if tok is None or os.name != "posix" or env.get(REEXEC_ENV) == "0":
+        return tok
+    r, w = os.pipe()
+    try:
+        os.write(w, tok)
+    finally:
+        os.close(w)
+    os.set_inheritable(r, True)
+    child_env = dict(env)
+    child_env[FD_ENV] = str(r)
+    exe = executable or sys.executable
+    (execve or os.execve)(exe, [exe, "-m", "littlecoder.daemon"], child_env)
+    raise SystemExit("[little-coder] auth: re-exec returned")   # only a stubbed execve gets here
+
+
+def harden_process() -> bool:
+    """Best effort: mark the daemon non-dumpable (prctl PR_SET_DUMPABLE 0), so its /proc entries
+    (environ, fd, mem, maps) belong to root and the agent's uid cannot open them. Children that
+    exec (the agent, git, checks) get their own dumpable state back - nothing else changes."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(4, 0, 0, 0, 0) == 0   # PR_SET_DUMPABLE = 4
+    except (OSError, AttributeError):
+        return False
 
 
 def announce(token: bytes | None) -> None:

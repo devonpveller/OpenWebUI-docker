@@ -79,6 +79,11 @@ print(json.dumps(out))
 """
 
 
+# Runs as `bash -c` inside the little-coder container; "$@" are curl's own arguments.
+_AUTH_CURL = ('exec curl -H @<(printf \'Authorization: Bearer %s\\n\' "${LC_DAEMON_TOKEN:-unset}") '
+              '"$@"')
+
+
 class LcDockerError(RuntimeError):
     """The transport could not do its job. The adapter turns this into an `error` record."""
 
@@ -107,8 +112,13 @@ def api(container: str, base_url: str, method: str, path: str,
     harness does not own, and no JSON has to survive an argv round-trip.
     """
     url = base_url.rstrip("/") + path
-    args = ["exec", "-i", container, "curl", "-sS", "--max-time", str(timeout),
-            "-w", "\n%{http_code}", "-X", method]
+    # ao-dauth: every daemon route but /health needs `Authorization: Bearer <LC_DAEMON_TOKEN>`.
+    # The header is built INSIDE the container from the container's own environment (the env
+    # `docker exec` carries) and handed to curl on a process-substitution pipe: the token is in
+    # no argv on either side (a container's /proc/<pid>/cmdline is world-readable) and never
+    # passes through this host. stdin stays free for the body.
+    args = ["exec", "-i", container, "bash", "-c", _AUTH_CURL, "lc-quadrant",
+            "-sS", "--max-time", str(timeout), "-w", "\n%{http_code}", "-X", method]
     payload = None
     if body is not None:
         args += ["-H", "Content-Type: application/json", "--data-binary", "@-"]

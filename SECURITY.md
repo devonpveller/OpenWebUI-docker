@@ -74,9 +74,13 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
   |---|---|---|---|
   | `LC_DAEMON_TOKEN` | every little-coder daemon route except `GET /health` (the one table: `ROUTE_ACCESS` in `little-coder/src/littlecoder/daemon_auth.py`) | two values: `agent-org/docker/.env` (`ao-worker-1/2`, `agent-bridge`) and `coder/.env` (`little-coder`, Open WebUI's `little_coder` pipe valve `daemon_token`) - never `ao-ot-1/2`, `open-terminal` or `lc-egress` | unset: those routes refuse **503** (fail closed); wrong/missing: **401** |
 
-  The daemon drops the variable from its own environment at start (the agent never inherits
-  it), and the workers set `LC_DAEMON_HIDE_FROM=ao-ot-N`, so the daemon does not listen on the
-  network it shares with its executor: a worker command cannot connect to `:8090` at all.
+  At start the daemon re-execs itself (same PID) with the token removed from its environment,
+  handed over on a pipe that is read once and closed, and makes itself non-dumpable: the agent
+  (same uid `lc`) finds it in neither its own env, `/proc/1/environ`, `/proc/1/cmdline` nor
+  `/proc/1/fd` - measured with a shell and with pi's own read tool (round 2). It still exists in
+  the daemon's memory and in the env of `docker exec` processes, which run as root. The workers set
+  `LC_DAEMON_HIDE_FROM=ao-ot-N`, so neither the daemon (`:8090`) nor its metrics (`:9090`) listen on
+  the network shared with the executor: a worker command cannot connect to them at all.
   **Key rotation:** on the rotation list - new value in the `.env`, `--force-recreate` the
   daemon(s) and their caller (`agent-bridge`; for the coder plane, update the pipe valve);
   rotate at once if it is ever seen in a log, a chat post, or an `ao-ot`/`open-terminal`

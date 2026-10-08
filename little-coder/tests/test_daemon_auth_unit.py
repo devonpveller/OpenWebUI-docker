@@ -234,3 +234,51 @@ def test_cli_sends_the_token(monkeypatch):
     monkeypatch.setenv("LC_DAEMON_TOKEN", _TOKEN)
     cli._request("GET", "/tasks")
     assert seen == [f"Bearer {_TOKEN}"]
+
+
+# --- round 2 (X2): the token leaves /proc/<daemon>/environ via a re-exec + pipe hand-off ---------
+
+def test_acquire_reexecs_without_the_token(monkeypatch):
+    import os
+    monkeypatch.setattr(da.os, "name", "posix")
+    seen = {}
+
+    def fake_execve(exe, argv, env):
+        seen.update(exe=exe, argv=argv, env=env)
+        raise RuntimeError("execve")       # a real execve never returns
+
+    env = {"LC_DAEMON_TOKEN": f" {_TOKEN} ", "PATH": "/usr/bin"}
+    with pytest.raises(RuntimeError, match="execve"):
+        da.acquire_token(env, execve=fake_execve, executable="/usr/local/bin/python")
+    assert seen["argv"] == ["/usr/local/bin/python", "-m", "littlecoder.daemon"]
+    assert "LC_DAEMON_TOKEN" not in seen["env"] and seen["env"]["PATH"] == "/usr/bin"
+    assert not any(_TOKEN in v for v in seen["env"].values()) and _TOKEN not in " ".join(seen["argv"])
+    fd = int(seen["env"]["LC_DAEMON_TOKEN_FD"])
+    assert os.get_inheritable(fd)
+    # the re-exec'd process: reads the pipe once, closes it, keeps nothing in its env
+    child = dict(seen["env"])
+    assert da.acquire_token(child) == _TOKEN.encode()
+    assert "LC_DAEMON_TOKEN_FD" not in child and "LC_DAEMON_TOKEN" not in child
+    with pytest.raises(OSError):
+        os.fstat(fd)                       # closed
+
+
+def test_acquire_without_token_or_opted_out_does_not_reexec(monkeypatch):
+    monkeypatch.setattr(da.os, "name", "posix")
+
+    def boom(*a):
+        raise AssertionError("must not re-exec")
+
+    assert da.acquire_token({"LC_DAEMON_TOKEN": "  "}, execve=boom) is None
+    assert da.acquire_token({}, execve=boom) is None
+    env = {"LC_DAEMON_TOKEN": _TOKEN, "LC_DAEMON_TOKEN_REEXEC": "0"}
+    assert da.acquire_token(env, execve=boom) == _TOKEN.encode() and "LC_DAEMON_TOKEN" not in env
+
+
+def test_metrics_server_takes_the_bind_scope(monkeypatch):
+    from littlecoder import metrics
+    calls = []
+    monkeypatch.setattr(metrics, "start_http_server", lambda port, addr="0.0.0.0": calls.append((port, addr)))
+    metrics.start_metrics_server(9090, ["127.0.0.1", "198.51.100.3"])
+    metrics.start_metrics_server(9090)
+    assert calls == [(9090, "127.0.0.1"), (9090, "198.51.100.3"), (9090, "0.0.0.0")]
