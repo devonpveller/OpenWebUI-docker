@@ -97,6 +97,7 @@ from .schemas import (
     AlignmentVerdict, Concern, Decision, EscalationVerdict, Level, LifecyclePlan, LifecycleStep, MonitorVerdict, OperatorIntent, Trigger,
 )
 from .worker.harness import FakeHarness, LittleCoderHarness, WorkerHarness
+from .worker.command_watch import CommandWatch, judge_frozen
 
 log = logging.getLogger("agent_bridge.orchestrator")
 
@@ -1245,6 +1246,9 @@ class Orchestrator:
         # WHEN. The offset climbing = alive; frozen past `worker_silence_s` = hung. Empty after a
         # restart (we can't know pre-restart silence, so the clock starts fresh — the safe default).
         self._worker_progress: dict[str, tuple[str, int, datetime]] = {}
+        # ao-silence: {base_url: CommandWatch} — the commands the sweep has seen start and not yet end
+        # on each worker's running task (a long command is alive within its own timeout).
+        self._command_watch: dict[str, CommandWatch] = {}
 
     def _spawn(self, coro) -> None:
         """Run a coroutine in the background, keeping a reference so it isn't GC'd."""
@@ -2379,6 +2383,29 @@ class Orchestrator:
             await self.router.update_effort_card(eid, "waiting")
         return True
 
+    async def _watch_commands(self, url: str, task_id: str, now) -> "CommandWatch | None":
+        """ao-silence: fold the task's new pi events into the commands now running. None when the
+        daemon cannot say (then only the plain silence rule applies)."""
+        cw = self._command_watch.get(url)
+        if cw is None or cw.task_id != task_id:               # first sight or a new task: start from 0
+            cw = self._command_watch[url] = CommandWatch(task_id)
+        try:
+            got = await self.harness.task_event_lines(url, task_id, cw.offset)
+        except Exception:  # noqa: BLE001 — a probe failure must not stall the sweep
+            got = None
+        if got is None:
+            return None
+        lines, cw.offset = got
+        cw.feed(lines, now)
+        return cw
+
+    def _silence_reason_text(self, why: dict) -> str:
+        rule = why.get("rule")
+        if rule in ("command_overran", "command_ceiling"):
+            return (f"a command ran {why.get('ran_s', 0) // 60} min against its "
+                    f"{why.get('timeout_s', 0) // 60} min timeout")
+        return f"no progress for ~{int(self.s.worker_silence_s // 60)} min"
+
     async def _sweep_stalled_efforts(self) -> None:
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
@@ -2397,7 +2424,7 @@ class Orchestrator:
         # `worker_silence_s` = hung → cancel the turn and recover the bound effort now. This never
         # interrupts legitimate long work (a working worker keeps bumping the offset).
         alive = False
-        hung: list[tuple[str, str, str | None]] = []          # (base_url, task_id, effort_id)
+        hung: list[tuple[str, str, str | None, dict]] = []    # (base_url, task_id, effort_id, rule info)
         if self.s.worker_silence_s > 0:
             for w in await self._worker_urls():
                 url = w["base_url"]
@@ -2413,20 +2440,31 @@ class Orchestrator:
                     prog = None
                 if prog is None:                              # idle daemon (no running task)
                     self._worker_progress.pop(url, None)
+                    self._command_watch.pop(url, None)
                     continue
                 task_id, offset = prog
+                watch = await self._watch_commands(url, task_id, now)
                 if prev is not None and prev[0] == task_id and offset <= prev[1]:
-                    # same task, no new agent-loop events since we last looked
-                    if (now - prev[2]).total_seconds() >= self.s.worker_silence_s:
-                        hung.append((url, task_id, w.get("effort_id")))
+                    # same task, no new agent-loop events since we last looked. ao-silence: a command
+                    # still executing inside its own timeout is alive; only a silent turn with NO
+                    # command running, or a command past its timeout/ceiling, is hung.
+                    silent_s = (now - prev[2]).total_seconds()
+                    is_hung, why = judge_frozen(
+                        watch, silent_s, now, silence_s=self.s.worker_silence_s,
+                        default_timeout_s=self.s.worker_command_default_timeout_s,
+                        grace_s=self.s.worker_command_grace_s,
+                        ceiling_s=self.s.worker_command_ceiling_s)
+                    if is_hung:
+                        hung.append((url, task_id, w.get("effort_id"), why))
                         continue
-                    alive = True                              # silent but still within the grace window
+                    alive = True                              # silent but within its grace / command window
                 else:                                         # first sight, new task, or offset advanced
                     self._worker_progress[url] = (task_id, offset, now)
                     alive = True
-            for url, task_id, eid in hung:                    # recover each genuinely-hung worker
+            for url, task_id, eid, why in hung:               # recover each genuinely-hung worker
                 await self.harness.cancel_task(url, task_id)   # free the daemon (orphaned turn) …
                 self._worker_progress.pop(url, None)
+                self._command_watch.pop(url, None)
                 if not eid or eid in parked or self._waiting_on(eid) is not None:
                     continue
                 self._delegating.discard(eid)                 # … its delegate coroutine is dead now
@@ -2437,7 +2475,7 @@ class Orchestrator:
                 n = await self._event_count(eid, "stall_recovered")
                 if n >= self.s.stall_max_recoveries:
                     await self.audit.log("stall_escalated", effort_id=eid,
-                                         payload={"reason": "worker_silent", "recoveries": n})
+                                         payload={"reason": "worker_silent", "recoveries": n, **why})
                     body = (f"🧰 **{eid}**'s worker hung mid-turn and my {n} recoveries didn't take — "
                             f"stopping auto-retry to avoid a loop. Say **“re-run it”** when clear.")
                     await self.comms.post(Intent.escalation, body, effort_id=eid)
@@ -2446,7 +2484,7 @@ class Orchestrator:
                     await self.router.update_effort_card(eid, "needs-attention")
                     continue
                 await self.audit.log("stall_recovered", effort_id=eid,
-                                     payload={"reason": "worker_silent", "n": n + 1})
+                                     payload={"reason": "worker_silent", "n": n + 1, **why})
                 # P16 — A RECOVERED TURN MUST START FROM THE LAST COMMITTED STATE. gym-014
                 # (2026-07-20): a worker abandoned mid-edit leaving `tests/test_todo.py` modified
                 # and the suite FAILING (2 errors). The recovery re-engaged onto that same tree, so
@@ -2461,9 +2499,9 @@ class Orchestrator:
                 discarded = await self._discard_uncommitted(url, eid)
                 await self._reengage(
                     [eid], mgmt_channel=mgmt, mgmt_thread=self._mgmt_thread_of(eid),
-                    reply_prefix=(f"🔧 **{eid}**'s worker went silent mid-turn (no progress for "
-                                  f"~{int(self.s.worker_silence_s // 60)} min) — I stopped the hung "
-                                  f"turn and re-engaged it. Committed work is intact"
+                    reply_prefix=(f"🔧 **{eid}**'s worker went silent mid-turn ("
+                                  + self._silence_reason_text(why) + ") — I stopped the hung "
+                                  "turn and re-engaged it. Committed work is intact"
                                   + ("; its half-finished uncommitted edits were discarded so the "
                                      "next turn starts from a clean, known state."
                                      if discarded else ".")))

@@ -523,3 +523,145 @@ async def test_two_tick_real_client_does_not_cancel_a_healthy_new_task(db_url, m
         assert await orch._event_count("effort-t5", "stall_recovered") == 0
     finally:
         await db.dispose()
+
+
+# ── ao-silence: a command running inside its own timeout is alive ─────────────────────────────────
+
+import json as _json  # noqa: E402
+
+_W1 = "http://w1:8090"
+
+
+def _ev_start(cid, command, tool="bash", **extra):
+    return _json.dumps({"type": "tool_execution_start", "toolCallId": cid, "toolName": tool,
+                        "args": {"command": command, **extra}})
+
+
+def _ev_end(cid, tool="bash"):
+    return _json.dumps({"type": "tool_execution_end", "toolCallId": cid, "toolName": tool})
+
+
+async def _bound_busy(orch, eid, lines):
+    """A worker bound to `eid`, daemon RUNNING, offset frozen at 42, pi event stream `lines`."""
+    await _seed(orch, eid, last_kind="worker_project_set", age_min=8)
+    async with orch.db.session_factory() as s:
+        wi = (await s.execute(select(WorkerInstance).where(WorkerInstance.base_url == _W1))).scalar_one()
+        wi.effort_id = eid
+        wi.sched_state = "computing"
+        await s.commit()
+    orch.harness.busy_urls = {_W1}
+    orch.harness.progress_task_ids = {_W1: "task-c"}
+    orch.harness.progress_offsets = {_W1: 42}
+    orch.harness.event_lines = {_W1: lines}
+
+
+def _frozen_for(orch, seconds, task="task-c"):
+    orch._worker_progress = {_W1: (task, 42, datetime.now(timezone.utc) - timedelta(seconds=seconds))}
+
+
+def _cmd_started_ago(orch, seconds):
+    # (getattr: at the pre-fix tip there is no watch, and the cases must fail on behaviour, not here)
+    for oc in getattr(orch, "_command_watch", {}).get(_W1, SimpleNamespace(open={})).open.values():
+        oc.seen_at = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+
+
+async def _last_payload(orch, eid, kind):
+    async with orch.db.session_factory() as s:
+        ev = (await s.execute(select(Event).where(Event.effort_id == eid, Event.kind == kind)
+                              .order_by(Event.id.desc()))).scalars().first()
+        return (ev.payload if ev else None)
+
+
+async def test_nine_minute_command_under_a_fifteen_minute_timeout_is_not_cancelled(db_url):
+    """C7: `timeout 900 pytest` ran 9 min with the event offset frozen and was cancelled at 300 s."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _bound_busy(orch, "effort-long", [_ev_start("c1", "cd x && timeout 900 python -m pytest -q tests")])
+        _frozen_for(orch, 9 * 60)
+        await orch._sweep_stalled_efforts()                       # tick 1: sees the command start
+        _cmd_started_ago(orch, 9 * 60)
+        await orch._sweep_stalled_efforts()                       # tick 2: running 9 min of 15
+        assert orch.harness.cancelled == []
+        assert await orch._event_count("effort-long", "stall_recovered") == 0
+    finally:
+        await db.dispose()
+
+
+async def test_command_with_no_declared_timeout_is_alive_within_the_default_exec_wait(db_url):
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _bound_busy(orch, "effort-nt", [_ev_start("c1", "python -m pytest -q tests")])
+        _frozen_for(orch, 20 * 60)
+        await orch._sweep_stalled_efforts()
+        _cmd_started_ago(orch, 20 * 60)                           # < 1800 s default
+        await orch._sweep_stalled_efforts()
+        assert orch.harness.cancelled == []
+    finally:
+        await db.dispose()
+
+
+async def test_silent_turn_with_no_running_command_is_cancelled_and_audited_as_silent(db_url):
+    """Nothing running (the last command ended) and no output for worker_silence_s: hung."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _bound_busy(orch, "effort-quiet", [_ev_start("c1", "ls"), _ev_end("c1")])
+        _frozen_for(orch, orch.s.worker_silence_s + 60)
+        await orch._sweep_stalled_efforts()
+        assert (_W1, "task-c") in orch.harness.cancelled
+        pl = await _last_payload(orch, "effort-quiet", "stall_recovered")
+        assert pl["reason"] == "worker_silent" and pl["rule"] == "silent"
+    finally:
+        await db.dispose()
+
+
+async def test_command_past_its_timeout_plus_grace_is_cancelled(db_url):
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _bound_busy(orch, "effort-over", [_ev_start("c1", "timeout 600 python -m pytest -q tests")])
+        _frozen_for(orch, 700)
+        await orch._sweep_stalled_efforts()                       # registers the command
+        assert orch.harness.cancelled == []                       # within 600 + grace
+        _cmd_started_ago(orch, 600 + orch.s.worker_command_grace_s + 30)
+        _frozen_for(orch, 900)
+        await orch._sweep_stalled_efforts()
+        assert (_W1, "task-c") in orch.harness.cancelled
+        pl = await _last_payload(orch, "effort-over", "stall_recovered")
+        assert pl["rule"] == "command_overran" and pl["timeout_s"] == 600
+    finally:
+        await db.dispose()
+
+
+async def test_absolute_ceiling_caps_a_command_that_declares_a_huge_timeout(db_url):
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _bound_busy(orch, "effort-ceil", [_ev_start("c1", "timeout 99h python hang.py")])
+        _frozen_for(orch, 3600)
+        await orch._sweep_stalled_efforts()
+        _cmd_started_ago(orch, getattr(orch.s, "worker_command_ceiling_s", 3600.0) + 5)
+        await orch._sweep_stalled_efforts()
+        assert (_W1, "task-c") in orch.harness.cancelled
+        pl = await _last_payload(orch, "effort-ceil", "stall_recovered")
+        assert pl["rule"] == "command_ceiling"
+    finally:
+        await db.dispose()
+
+
+async def test_a_finished_command_stops_protecting_the_turn(db_url):
+    """start then end in the stream: nothing is running, so the silence rule applies again."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _bound_busy(orch, "effort-done", [_ev_start("c1", "timeout 900 pytest"), _ev_end("c1")])
+        _frozen_for(orch, orch.s.worker_silence_s + 10)
+        await orch._sweep_stalled_efforts()
+        assert (_W1, "task-c") in orch.harness.cancelled
+    finally:
+        await db.dispose()
+
+
+def test_declared_timeout_parsing():
+    from app.worker.command_watch import declared_timeout_s as d
+    assert d("bash", {"command": "timeout 900 pytest"}) == 900
+    assert d("bash", {"command": "timeout -k 10 5m pytest"}) == 300
+    assert d("bash", {"command": "timeout 2m a && timeout 1h b"}) == 3720
+    assert d("bash", {"command": "pytest", "timeout": 45}) == 45
+    assert d("bash", {"command": "pytest -q tests"}) is None

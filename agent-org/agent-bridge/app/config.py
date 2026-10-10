@@ -108,11 +108,18 @@ class Settings(BaseSettings):
     # `busy` and the stall sweep DEFERS indefinitely — a real hang (arm D) sat 20 min, uncaught, with
     # GPU at 0%. The fix asks the daemon's per-agent-step event offset (`/tasks/{id}/events`
     # `next_offset`, which advances on generation/tool/edit — unlike the shell-only `activity` array):
-    # a working worker's offset climbs every tick; a hung one's is FROZEN. If a running worker's offset
-    # has not advanced for `worker_silence_s`, it is hung → cancel the turn + recover the effort. This
-    # NEVER interrupts legitimate long work (a working worker keeps bumping the offset), so the value
-    # can be small and generous at once. 0 disables the check (pure legacy busy-defer).
-    worker_silence_s: float = 300.0         # running but offset frozen this long (5 min) = hung
+    # a working worker's offset climbs every tick; a hung one's is FROZEN. A single long COMMAND emits no
+    # agent-loop events while it runs, so a frozen offset alone is not a hang (C7, 2026-10-10: a
+    # `timeout 900 pytest` was cancelled at 300 s). ao-silence: the sweep also reads the daemon's
+    # tool_execution start/end events; a turn with a command running inside its own timeout (+ grace) is
+    # alive. It is cancelled when (a) NO command is running and the offset has been frozen for
+    # `worker_silence_s`, (b) a command is past its own timeout + `worker_command_grace_s`, or (c) a
+    # command has held the turn for `worker_command_ceiling_s` (absolute). The audit entry names the rule.
+    # 0 disables the whole check (pure legacy busy-defer).
+    worker_silence_s: float = 300.0         # no command running and offset frozen this long (5 min) = hung
+    worker_command_default_timeout_s: float = 1800.0   # a command declaring no timeout: the exec wait (1800 s)
+    worker_command_grace_s: float = 120.0   # past a command's own timeout by this much = hung
+    worker_command_ceiling_s: float = 3600.0   # no single command keeps a turn alive longer than this (0 = off)
     # Autonomous INFRA-freeze recovery (operator 2026-07-13: "fully autonomous would be my choice,
     # but send a message so i can see; i don't need approval"). When the PM monitor freezes an effort
     # on an ENVIRONMENT/WORKSPACE symptom (no .git, clone missing, "repository setup") rather than a
