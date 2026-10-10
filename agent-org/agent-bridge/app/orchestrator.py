@@ -2399,12 +2399,21 @@ class Orchestrator:
         cw.feed(lines, now)
         return cw
 
+    @staticmethod
+    def _fmt_s(sec: float) -> str:
+        sec = int(sec)
+        return f"{sec} s" if sec < 120 else f"{sec // 60} min"
+
     def _silence_reason_text(self, why: dict) -> str:
-        rule = why.get("rule")
-        if rule in ("command_overran", "command_ceiling"):
-            return (f"a command ran {why.get('ran_s', 0) // 60} min against its "
-                    f"{why.get('timeout_s', 0) // 60} min timeout")
-        return f"no progress for ~{int(self.s.worker_silence_s // 60)} min"
+        """What the operator is told, per the rule that fired (no raw command text, ever)."""
+        rule, f = why.get("rule"), self._fmt_s
+        prog = why.get("program") or "a command"
+        if rule == "command_ceiling":
+            return (f"ran {prog} for {f(why.get('ran_s', 0))}, which hit the {f(why.get('ceiling_s', 0))} "
+                    f"absolute ceiling")
+        if rule == "command_overran":
+            return f"ran {prog} for {f(why.get('ran_s', 0))} against its {f(why.get('timeout_s', 0))} timeout"
+        return f"went silent mid-turn (no progress for ~{f(self.s.worker_silence_s)})"
 
     async def _sweep_stalled_efforts(self) -> None:
         from datetime import datetime, timezone
@@ -2421,8 +2430,10 @@ class Orchestrator:
         # mid-turn holds status `running` forever, so a status-only busy-defer sat idle 20 min while the
         # GPU was at 0%. So we ask the daemon for each running worker's per-agent-step event OFFSET
         # (advances on generation/tool/edit): offset climbing = alive → defer to it; offset FROZEN past
-        # `worker_silence_s` = hung → cancel the turn and recover the bound effort now. This never
-        # interrupts legitimate long work (a working worker keeps bumping the offset).
+        # `worker_silence_s` = hung → cancel the turn and recover the bound effort now. A frozen
+        # offset is not by itself a hang: a command still running inside its own timeout keeps the turn
+        # alive (ao-silence; `judge_frozen`), and only silence with no command running, a command past
+        # its timeout + grace, or the absolute command ceiling cancels it.
         alive = False
         hung: list[tuple[str, str, str | None, dict]] = []    # (base_url, task_id, effort_id, rule info)
         if self.s.worker_silence_s > 0:
@@ -2499,8 +2510,8 @@ class Orchestrator:
                 discarded = await self._discard_uncommitted(url, eid)
                 await self._reengage(
                     [eid], mgmt_channel=mgmt, mgmt_thread=self._mgmt_thread_of(eid),
-                    reply_prefix=(f"🔧 **{eid}**'s worker went silent mid-turn ("
-                                  + self._silence_reason_text(why) + ") — I stopped the hung "
+                    reply_prefix=(f"🔧 **{eid}**'s worker " + self._silence_reason_text(why)
+                                  + " — I stopped the hung "
                                   "turn and re-engaged it. Committed work is intact"
                                   + ("; its half-finished uncommitted edits were discarded so the "
                                      "next turn starts from a clean, known state."

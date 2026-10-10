@@ -658,10 +658,95 @@ async def test_a_finished_command_stops_protecting_the_turn(db_url):
         await db.dispose()
 
 
-def test_declared_timeout_parsing():
-    from app.worker.command_watch import declared_timeout_s as d
-    assert d("bash", {"command": "timeout 900 pytest"}) == 900
-    assert d("bash", {"command": "timeout -k 10 5m pytest"}) == 300
-    assert d("bash", {"command": "timeout 2m a && timeout 1h b"}) == 3720
-    assert d("bash", {"command": "pytest", "timeout": 45}) == 45
-    assert d("bash", {"command": "pytest -q tests"}) is None
+def _budget(cmd, default=1800.0):
+    from app.worker.command_watch import budget_s, parse_command
+    plan, prog = parse_command(cmd)
+    return budget_s(plan, default)[0], prog
+
+
+def test_timeout_parsing_uses_the_timeout_of_what_is_running():
+    assert _budget("timeout 900 pytest") == (900, "pytest")
+    assert _budget("cd x && timeout 900 python -m pytest -q tests 2>&1 | tail -3")[0] == 900
+    assert _budget("timeout -k 10 5m pytest")[0] == 300
+    assert _budget("timeout -k5 10m pytest")[0] == 600
+    assert _budget("timeout --kill-after=5 600 pytest")[0] == 600
+    assert _budget("/usr/bin/timeout 2h pytest")[0] == 7200
+    assert _budget("FOO=1 timeout 90s pytest")[0] == 90
+    assert _budget("timeout 2m a && timeout 1h b")[0] == 3720          # sequential: both budgets
+
+
+def test_an_untimed_segment_gets_the_default_not_its_neighbours_timeout():
+    # `timeout 120 ruff ...; pytest`: pytest must NOT be given 120 s
+    assert _budget("timeout 120 ruff check . 2>&1 | tail -5; python -m pytest -q tests")[0] == 120 + 1800
+    assert _budget("python -m pytest -q tests")[0] == 1800
+
+
+def test_quoted_timeout_text_and_timeout_zero_are_not_budgets():
+    assert _budget("grep -rn 'timeout 5' app; python -m pytest -q")[0] == 1800 + 1800
+    assert _budget("echo \"timeout 5\" && pytest")[0] == 1800
+    assert _budget("timeout 0 pytest")[0] == 1800                       # 0 = no timeout
+    assert _budget("timeout $T pytest")[0] == 1800                      # unparseable: default
+    assert _budget("pytest --timeout 900")[0] == 1800
+
+
+async def test_overlapping_commands_every_one_is_judged(db_url):
+    """A newer hung `timeout 10` beside an older `timeout 3000` is not protected by the older one."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _bound_busy(orch, "effort-overlap", [_ev_start("a", "timeout 3000 long-job"),
+                                                   _ev_start("b", "timeout 10 hang")])
+        _frozen_for(orch, 900)
+        await orch._sweep_stalled_efforts()
+        for oc in orch._command_watch[_W1].open.values():
+            oc.seen_at = datetime.now(timezone.utc) - timedelta(seconds=60 if oc.call_id == "a" else 400)
+        _frozen_for(orch, 900)
+        orch._command_watch[_W1].open["b"].seen_at = datetime.now(timezone.utc) - timedelta(seconds=400)
+        orch._command_watch[_W1].open["a"].seen_at = datetime.now(timezone.utc) - timedelta(seconds=500)
+        await orch._sweep_stalled_efforts()
+        assert (_W1, "task-c") in orch.harness.cancelled
+        pl = await _last_payload(orch, "effort-overlap", "stall_recovered")
+        assert pl["rule"] == "command_overran" and pl["timeout_s"] == 10 and pl["program"] == "hang"
+    finally:
+        await db.dispose()
+
+
+_SECRETS = ["ghs_AbCdEf0123456789SecretTokenXYZ", "sk-live-9f8e7d6c5b4a39281706", "hunter2-db-password-77"]
+_SECRET_CMD = ("timeout 10 git push https://x-access-token:ghs_AbCdEf0123456789SecretTokenXYZ@github.com/o/r.git HEAD"
+               " && curl -H 'Authorization: Bearer sk-live-9f8e7d6c5b4a39281706' https://x"
+               " && DB_PASSWORD=hunter2-db-password-77 ./run.sh")
+
+
+async def test_no_secret_from_a_command_reaches_any_audit_payload_or_post(db_url):
+    """The daemon's raw pi event stream is NOT redacted: nothing of the command line may be kept."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _bound_busy(orch, "effort-sec", [_ev_start("c1", _SECRET_CMD)])
+        _frozen_for(orch, 900)
+        await orch._sweep_stalled_efforts()
+        orch._command_watch[_W1].open["c1"].seen_at = datetime.now(timezone.utc) - timedelta(seconds=4000)
+        _frozen_for(orch, 4000)
+        await orch._sweep_stalled_efforts()
+        assert (_W1, "task-c") in orch.harness.cancelled
+        async with orch.db.session_factory() as s:
+            blob = " ".join(str(e.payload) for e in (await s.execute(select(Event))).scalars().all())
+        blob += " ".join(str(p) for p in chat.posted)
+        blob += repr(orch._command_watch)
+        for sec in _SECRETS + ["x-access-token", "Authorization", "DB_PASSWORD"]:
+            assert sec not in blob, sec
+        pl = await _last_payload(orch, "effort-sec", "stall_recovered")
+        assert pl["rule"] == "command_ceiling" and pl["program"] == "git"
+    finally:
+        await db.dispose()
+
+
+async def test_operator_text_units_ceiling_and_overrun_wording(db_url):
+    orch, chat, db = await _orch(db_url)
+    try:
+        t = orch._silence_reason_text
+        s10 = t({"rule": "command_overran", "program": "hang", "ran_s": 130, "timeout_s": 10})
+        assert "10 s timeout" in s10 and "0 min" not in s10 and "silent" not in s10
+        c = t({"rule": "command_ceiling", "program": "pytest", "ran_s": 3600, "ceiling_s": 3600})
+        assert "ceiling" in c and "60 min" in c and "silent" not in c
+        assert "went silent" in t({"rule": "silent"})
+    finally:
+        await db.dispose()
