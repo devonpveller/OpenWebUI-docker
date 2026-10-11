@@ -11,12 +11,15 @@ them; it holds no clock of its own (the caller passes `now`) so it is trivially 
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
 _UNIT = {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
-_DUR_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhd]?)$")
+# bounded digit runs: a model in a digit-repetition loop must not yield float("inf") (ao-silence round 3)
+_DUR_RE = re.compile(r"^(\d{1,9}(?:\.\d{1,3})?)([smhd]?)$")
+_MAX_DECLARED_S = 10_000_000.0       # ~115 days: anything longer is nonsense -> treated as undeclared
 _SHELL_TOOLS = {"bash", "shell", "sh"}
 # builtins that return at once: they add nothing to how long a chain can run
 _INSTANT = {"cd", "export", "set", "unset", "pwd", "echo", "true", "false", ":", "exit", "pushd", "popd",
@@ -24,7 +27,6 @@ _INSTANT = {"cd", "export", "set", "unset", "pwd", "echo", "true", "false", ":",
 # stream filters after a pipe: they end when their producer ends
 _FILTERS = {"tail", "head", "grep", "egrep", "fgrep", "wc", "sort", "uniq", "tee", "cat", "awk", "sed",
             "cut", "tr", "less", "more", "xargs"}
-_SAFE_NAME = re.compile(r"^[A-Za-z0-9_.+-]{1,40}$")
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
@@ -82,16 +84,16 @@ def _timeout_of(toks: list[str]) -> tuple[float | None, list[str]]:
     if not m:
         return None, toks[i + 1:]
     secs = float(m.group(1)) * _UNIT[m.group(2)]
-    return (secs if secs > 0 else None), toks[i + 1:]
+    ok = math.isfinite(secs) and 0 < secs <= _MAX_DECLARED_S      # 0 = no timeout; huge = nonsense
+    return (secs if ok else None), toks[i + 1:]
 
 
-def parse_command(cmd: str) -> tuple[list[list[float | None]], str]:
-    """(plan, program) for a shell command line. `plan` is a list of sequential groups (`;`, `&&`, `||`,
+def parse_command(cmd: str) -> list[list[float | None]]:
+    """The budget plan for a shell command line. `plan` is a list of sequential groups (`;`, `&&`, `||`,
     newline); each group is its pipeline stages' budgets: a positive number = that stage's own `timeout`,
     None = runs untimed (the caller applies its default), 0.0 = returns at once / a stream filter.
-    `program` is the first real program's basename, only if it is a plain name (never arguments)."""
+    Nothing else is returned: no word of the command line is kept (the raw stream is unredacted)."""
     groups: list[list[float | None]] = []
-    program = ""
     stage_idx = 0
     for toks, op in _split(cmd):
         k = 0
@@ -109,10 +111,8 @@ def parse_command(cmd: str) -> tuple[list[list[float | None]], str]:
             groups[-1].append(0.0)
         else:
             groups[-1].append(declared)
-        if not program and name and name not in _INSTANT and _SAFE_NAME.match(name):
-            program = name
         stage_idx = stage_idx + 1 if op == "|" else 0
-    return groups, program
+    return groups
 
 
 def budget_s(plan: list[list[float | None]], default_s: float) -> tuple[float, bool]:
@@ -128,11 +128,9 @@ def budget_s(plan: list[list[float | None]], default_s: float) -> tuple[float, b
 @dataclass
 class OpenCommand:
     """A running command. The raw command line is NEVER kept: the daemon's pi event stream is not
-    redacted, and anything stored here can reach an audit payload. Only the parsed budget plan and the
-    program's plain name survive."""
+    redacted, and anything stored here can reach an audit payload. Only the parsed budget plan survives."""
     call_id: str
     plan: list[list[float | None]]
-    program: str
     seen_at: datetime                  # when the bridge first saw it start (a tick, so >= the true start)
 
 
@@ -162,11 +160,12 @@ class CommandWatch:
                 # only shell-like calls can legitimately run long; read/grep/edit that never end are hangs
                 if tool in _SHELL_TOOLS or "command" in args:
                     cmd = args.get("command")
-                    plan, program = parse_command(cmd if isinstance(cmd, str) else "")
+                    plan = parse_command(cmd if isinstance(cmd, str) else "")
                     t = args.get("timeout")
-                    if isinstance(t, (int, float)) and not isinstance(t, bool) and t > 0:
+                    if (isinstance(t, (int, float)) and not isinstance(t, bool)
+                            and math.isfinite(t) and 0 < t <= _MAX_DECLARED_S):
                         plan = [[float(t)]]            # the tool's own timeout argument governs
-                    self.open[cid] = OpenCommand(cid, plan, program, now)
+                    self.open[cid] = OpenCommand(cid, plan, now)
             elif kind == "tool_execution_end":
                 self.open.pop(cid, None)
 
@@ -177,7 +176,7 @@ def judge_frozen(watch: CommandWatch | None, silent_s: float, now: datetime, *, 
     hung one is not protected by an older one's budget). `info["rule"]`: `command_running` (alive),
     `silent` (nothing running, silent for `silence_s`), `command_overran` (past its own timeout +
     grace) or `command_ceiling` (a command held the turn for the absolute ceiling). The info carries
-    only non-sensitive facts: program name, seconds, rule."""
+    only non-sensitive facts: seconds, whether a timeout was declared, rule. NO word of any command."""
     cmds = list(watch.open.values()) if watch is not None else []
     if not cmds:
         if silent_s >= silence_s:
@@ -187,7 +186,11 @@ def judge_frozen(watch: CommandWatch | None, silent_s: float, now: datetime, *, 
     for cmd in sorted(cmds, key=lambda c: c.seen_at):
         ran = (now - cmd.seen_at).total_seconds()
         budget, declared = budget_s(cmd.plan, default_timeout_s)
-        info = {"program": cmd.program, "ran_s": int(ran), "timeout_s": int(budget), "declared": declared}
+        if not math.isfinite(budget) or budget <= 0:
+            budget = default_timeout_s
+        if ceiling_s > 0:
+            budget = min(budget, ceiling_s)               # clamp BEFORE any int()
+        info = {"ran_s": int(min(ran, 1e9)), "timeout_s": int(budget), "declared": declared}
         if ceiling_s > 0 and ran >= ceiling_s:
             return True, {**info, "rule": "command_ceiling", "ceiling_s": int(ceiling_s)}
         if ran >= budget + grace_s:
