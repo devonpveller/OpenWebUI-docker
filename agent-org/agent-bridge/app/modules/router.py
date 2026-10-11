@@ -158,6 +158,9 @@ class Router:
         # longer the live one → WIPE. A fresh clone at task start always carries the CURRENT base
         # commit, which is the determinism the commit-id check is for.
         self._ws_focus: dict[str, tuple[str, str, str]] = {}
+        # ao-attempt: effort -> the worker instance of its last CODING (non-plan) wake: the
+        # workspace that holds the attempt when several workers are focused on one effort.
+        self._coding_ws: dict[str, str] = {}
         # Optional async hook `(repo, upstream) -> str | None`, tried when a focus reports the
         # upstream bake FAILED. A truthy return means the caller RECOVERED (e.g. the orchestrator
         # verified the registry upstream is wrong via the forge API and corrected it) and is the
@@ -467,6 +470,7 @@ class Router:
         withhold_goal: bool = False,
         loop_guard: LoopGuard | None = None,
         turn_label: str | None = None,
+        pre_turn_check: str | None = None,
     ) -> WorkResult | None:
         """Wake a worker on an effort and post its reply in-thread. Returns None if the
         effort is frozen (the composition rule refuses to dispatch) or no capacity. If `repo`
@@ -653,6 +657,15 @@ class Router:
                         )
                     except Exception as exc:  # noqa: BLE001 — best-effort; first delivery has no branch
                         log.debug("delivery-branch sync for %s failed: %s", effort_id, exc)
+                # ao-attempt: a deterministic probe of the workspace AFTER focus/sync and BEFORE the
+                # turn - the exact tree this attempt starts from. Best-effort; never blocks a turn.
+                pre_turn_out: str | None = None
+                if pre_turn_check:
+                    try:
+                        pre_turn_out = await self.harness.pre_turn_probe(
+                            inst.base_url, pre_turn_check)
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("pre-turn probe for %s failed: %s", effort_id, exc)
                 # Stream the worker's activity to the effort THREAD as it happens (observability =
                 # safety, governance §5/§7). Notification discipline (CM.6): coalesce rapid *successful*
                 # commands into one post; failures/denials always post immediately + in context so a
@@ -736,6 +749,10 @@ class Router:
                     inst.base_url, session_id, prompt, on_update=_stream, **extra,
                 )
                 await _flush()  # defensive: surface any tail commands if no answer callback fired
+                result.pre_turn_output = pre_turn_out
+                result.instance_id = inst.id
+                if repo and not plan_only:
+                    self._coding_ws[effort_id] = inst.id
                 # POLL TIMEOUT = the bridge stopped waiting, but the daemon is STILL running the
                 # turn — cancel it, or the orphaned task keeps the worker busy and the next
                 # dispatch 409s (live 2026-07-08: both burn-down part turns outlived the window
@@ -917,7 +934,7 @@ class Router:
     async def exec_check(
         self, effort_id: str, *, command: str, session_id: str, repo: str | None = None,
         repo_token: str | None = None, recurse_submodules: bool = False, timeout: int = 900,
-        fresh: bool = False, label: str | None = None, require_focus: bool = False,
+        fresh: bool = False, label: str | None = None, require_instance: str | None = None,
     ) -> tuple[int | None, str, bool]:
         """Run ONE verification command on a pooled worker DETERMINISTICALLY (the daemon's
         `/check` — real exit code + output, no model in the loop). Build verification is a
@@ -928,11 +945,12 @@ class Router:
         populate). Exceptions propagate — the orchestrator falls back to the LLM verifier."""
         inst = await self.scheduler.acquire(effort_id, "verifier", session_id)
         try:
-            # ao-attempt: a command that changes the EXISTING workspace (repo=None) must only run
-            # on the worker whose workspace was focused for THIS effort - never on a pool worker
-            # that holds another effort's tree.
-            if require_focus and (self._ws_focus.get(inst.id) or ("",))[0] != effort_id:
-                raise RuntimeError("this worker's workspace is not focused on the effort")
+            # ao-attempt: a command that changes the EXISTING workspace (repo=None) runs only on
+            # the ONE worker that holds the effort's attempt - never on another pool worker, even
+            # one focused on the same effort (a plan wake can land there).
+            if require_instance and (inst.id != require_instance
+                                     or (self._ws_focus.get(inst.id) or ("",))[0] != effort_id):
+                raise RuntimeError("not the worker that holds this effort's workspace")
             if repo:
                 ok, detail, _ = await self.harness.set_project(
                     inst.base_url, repo, token=repo_token,
@@ -954,16 +972,21 @@ class Router:
         finally:
             await self.scheduler.release(inst.id)
 
-    async def focus_session(self, effort_id: str) -> str | None:
-        """ao-attempt: the session of the worker whose workspace is focused on this effort, so a
-        deterministic command reaches THAT workspace by affinity. None when no worker holds it
-        (e.g. after a bridge restart: the focus map is in memory)."""
+    async def focus_target(self, effort_id: str) -> tuple[str, str] | None:
+        """ao-attempt: (instance id, session id) of the worker whose workspace holds this effort's
+        attempt: the worker of the effort's last CODING wake when it is still focused on the
+        effort, else the only worker focused on it. Two candidates and no coding wake -> None
+        (fail closed). None too when no worker holds it (after a bridge restart: in memory)."""
         ids = [wid for wid, rec in self._ws_focus.items() if rec and rec[0] == effort_id]
-        if not ids:
+        coder = self._coding_ws.get(effort_id)
+        wid = coder if coder in ids else (ids[0] if len(ids) == 1 else None)
+        if wid is None:
             return None
         async with self.db.session_factory() as s:
-            inst = await s.get(WorkerInstance, ids[0])
-            return inst.session_id if inst is not None and inst.session_id else None
+            inst = await s.get(WorkerInstance, wid)
+            if inst is None or not inst.session_id:
+                return None
+            return wid, inst.session_id
 
     # ── A->B hand-off provenance (P5.4) ──────────────────────────────────────
     async def last_owner(self, path: str, workspace: str = "/workspace") -> str | None:

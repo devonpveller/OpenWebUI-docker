@@ -624,6 +624,10 @@ class EffortAttempt(Base):
     plan_no: Mapped[int] = mapped_column(Integer, default=0)
     steps: Mapped[list] = mapped_column(JSON, default=list)          # snapshot of the plan steps
     start_sha: Mapped[str] = mapped_column(String(64), default="")
+    # the branch the attempt lives on ("HEAD" = detached) and where `start_sha` came from:
+    # "wake" (probed right before the first coding turn), "plan" (after the plan turn), "park"
+    start_branch: Mapped[str] = mapped_column(String(200), default="")
+    start_src: Mapped[str] = mapped_column(String(16), default="")
     head_sha: Mapped[str] = mapped_column(String(64), default="")    # HEAD before the park commit
     park_sha: Mapped[str] = mapped_column(String(64), default="")
     ref: Mapped[str] = mapped_column(String(160), default="")

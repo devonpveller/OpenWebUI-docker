@@ -210,15 +210,22 @@ async def test_plan_gate_stop_rotates_the_next_runs_session(db_url):
         await orch.projects.add("app", "https://github.com/acme/app.git")
         await orch.projects.set_standing_intent("app", "never reintroduce `NuGet` references")
         eid, chan, root = await orch.router.open_effort("rerun", project="app")
-        harness.output_queue += ["PLAN: 1. use NuGet", "PLAN: 1. re-add NuGet anyway"]
+        # ao-attempt: the steps declare their anchor item, so the stop below is the
+        # misaligned-twice stop this test is named for (not the undeclared-steps refusal)
+        harness.output_queue += ["ANCHOR ITEMS: A1: the build passes\nPLAN: 1. use NuGet [anchor: A1]",
+                                 "ANCHOR ITEMS: A1: the build passes\n"
+                                 "PLAN: 1. re-add NuGet anyway [anchor: A1]"]
         for _ in range(2):
             orch.models._client.queue_structured(
                 MonitorVerdict(deviates=True, trigger="deviation", level="steering",
                                rationale="reintroduces the forbidden NuGet wiring"))
         await orch.delegate(eid, chan, root, "fix the build")   # -> misaligned twice -> stop
+        assert await orch._event_count(eid, "worker_plan_rejected") == 2
+        assert await orch._event_count(eid, "plan_steps_undeclared") == 0
         n = len(harness.wakes)
         # the operator's re-run starts from a FRESH session (worker_plan_stopped rotates)
-        harness.output_queue.append("PLAN: 1. port to the vendored engine")
+        harness.output_queue.append("ANCHOR ITEMS: A1: the build passes\n"
+                                    "PLAN: 1. port to the vendored engine [anchor: A1]")
         orch.models._client.queue_structured(MonitorVerdict(deviates=False))
         await orch.delegate(eid, chan, root, "fix the build")
         # the generation is what rotated; P17 F16 appends `~plan` to plan-turn sessions
