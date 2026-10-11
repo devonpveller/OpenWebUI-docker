@@ -21,6 +21,21 @@ running inside open-terminal (journaled as a `bash` tool_call sourced from the
   isError } })`) matches the bundled little-coder extensions (e.g.
   `extra-tools`). The file uses only `import type` + node builtins, so it has
   no runtime dependency to resolve.
+- **It must never block pi's event loop** (ao-asyncexec, 2026-10-11). The
+  command runs with an async `spawn`, never `spawnSync`: pi's `--mode json`
+  writer flushes one line per write callback, so a synchronous spawn kept the
+  call's `tool_execution_start` out of the events file until the command had
+  ended, and the agent-bridge's command watch, the daemon's tool counters and
+  the flail guard saw no running command. The tool is registered with
+  `executionMode: "sequential"` (pi-agent-core runs a batch containing such a
+  call one call at a time, each start emitted just before its call), which keeps
+  spawnSync's one-command-at-a-time behaviour; without it two calls in one
+  assistant message would run concurrently in the same workspace. Unchanged:
+  the 64 MB output cap (stdout + stderr together; past it the child gets
+  SIGTERM, exit 1), the result text and exit codes, and no timeout of its own
+  (ot-exec applies `LC_EXEC_TIMEOUT`, exit 124). New: pi's abort signal stops
+  the command. Contract test: `tests/node/open_terminal_exec.test.mjs` (run by
+  `tests/test_open_terminal_exec_ext.py`).
 - `docker/entrypoint-agent.sh` installs it into little-coder's own
   `.pi/extensions/` directory (alongside the bundled extensions: 35 in 1.20.0,
   of which the entrypoint removes `shell-session`, `bg-shell`, `browser` and

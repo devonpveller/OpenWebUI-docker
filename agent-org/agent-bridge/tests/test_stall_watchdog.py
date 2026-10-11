@@ -866,3 +866,95 @@ async def test_no_command_word_reaches_payloads_posts_or_state_whatever_its_shap
             assert set(pl) <= {"reason", "n", "rule", "ran_s", "timeout_s", "declared", "ceiling_s"}, pl
     finally:
         await db.dispose()
+
+
+# ── ao-asyncexec: GOLDEN pi event streams captured from a real run ─────────────────────────────────
+# The hand-built `_ev_start` lines above assumed the start of a running command is in the daemon's
+# events file while it runs. It was not (findings ao-silence-ineffective-2026-10-11): the
+# open-terminal-exec extension ran bash with spawnSync, which froze pi's event loop, and pi's
+# `--mode json` writer flushes a line per write callback. These fixtures are pi's REAL stdout,
+# captured 2026-10-11 from the little-coder 1.20.0 image (bundled pi 0.83.0, launcher + entrypoint-
+# installed extension, LC_ROUTE_EXEC=1), a scripted stub model issuing one `bash` call `sleep 20` and
+# a stub ot-exec; the "running" files are snapshots of the events file taken 10 s into the sleep:
+#   pi_events_bash_running_async.jsonl     - the fixed (async spawn, sequential) extension
+#   pi_events_bash_running_spawnsync.jsonl - the pre-fix extension: the stream stops mid-message
+#   pi_events_bash_finished_async.jsonl    - the whole run, after the command and the turn ended
+
+_FXD = ROOT / "tests" / "fixtures"
+
+
+def _golden(name):
+    return [ln for ln in (_FXD / name).read_text("utf-8").splitlines() if ln]   # CRLF checkouts too
+
+
+def _judge(lines):
+    from app.worker.command_watch import CommandWatch, judge_frozen
+    now = datetime.now(timezone.utc)
+    cw = CommandWatch("t")
+    cw.feed(lines, now)
+    return cw, judge_frozen(cw, 600, now + timedelta(seconds=30), silence_s=300, default_timeout_s=1800,
+                            grace_s=120, ceiling_s=3600)
+
+
+def test_golden_running_stream_opens_the_command_and_judges_it_running():
+    lines = _golden("pi_events_bash_running_async.jsonl")
+    assert '"tool_execution_start"' in lines[-1] and not any('"tool_execution_end"' in x for x in lines)
+    cw, (hung, info) = _judge(lines)
+    assert sorted(cw.open) == ["call_sleep20"]
+    assert (hung, info["rule"]) == (False, "command_running")
+
+
+def test_golden_spawnsync_stream_is_what_the_bridge_saw_before_the_fix():
+    """Documents the failure: 10 s into `sleep 20` the file ends inside the assistant message - no
+    start, not even its message_end - so the watch is empty and the turn reads as silent."""
+    lines = _golden("pi_events_bash_running_spawnsync.jsonl")
+    assert not any('"tool_execution_' in x for x in lines)
+    assert not any('"type":"message_end","message":{"role":"assistant"' in x for x in lines)
+    cw, (hung, info) = _judge(lines)
+    assert cw.open == {}
+    assert (hung, info["rule"]) == (True, "silent")
+
+
+def test_golden_finished_stream_closes_the_command():
+    lines = _golden("pi_events_bash_finished_async.jsonl")
+    cw, (hung, info) = _judge(lines)
+    assert cw.open == {}
+    assert info["rule"] == "silent"
+
+
+def test_hand_built_start_lines_have_the_golden_shape():
+    """The hand-built `_ev_start` lines above must stay shaped like pi's real event (same keys)."""
+    real = next(_json.loads(x) for x in _golden("pi_events_bash_running_async.jsonl")
+                if '"tool_execution_start"' in x)
+    built = _json.loads(_ev_start("c1", "sleep 20"))
+    assert set(built) == set(real) and set(built["args"]) == set(real["args"])
+    assert (real["toolName"], real["args"]) == ("bash", {"command": "sleep 20"})
+
+
+async def test_golden_running_stream_through_the_sweep_is_not_cancelled(db_url):
+    """The whole sweep (FakeHarness serving the golden lines as /tasks/{id}/events would) spares the
+    turn: the real stream's start opens the command, which runs inside the default exec wait."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _bound_busy(orch, "effort-golden", _golden("pi_events_bash_running_async.jsonl"))
+        _frozen_for(orch, orch.s.worker_silence_s + 60)
+        await orch._sweep_stalled_efforts()
+        _cmd_started_ago(orch, orch.s.worker_silence_s + 60)
+        await orch._sweep_stalled_efforts()
+        assert orch.harness.cancelled == []
+        assert await orch._event_count("effort-golden", "stall_recovered") == 0
+    finally:
+        await db.dispose()
+
+
+async def test_golden_spawnsync_stream_through_the_sweep_is_cancelled_as_silent(db_url):
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _bound_busy(orch, "effort-golden-old", _golden("pi_events_bash_running_spawnsync.jsonl"))
+        _frozen_for(orch, orch.s.worker_silence_s + 60)
+        await orch._sweep_stalled_efforts()
+        assert (_W1, "task-c") in orch.harness.cancelled
+        pl = await _last_payload(orch, "effort-golden-old", "stall_recovered")
+        assert pl["rule"] == "silent"
+    finally:
+        await db.dispose()
