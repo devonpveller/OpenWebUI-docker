@@ -5,7 +5,8 @@ little-coder daemon (httpx ASGITransport, no socket, no model, no GPU). Two stub
   - the NEW daemon: `model` is a field, checked against an allowlist (422 `model refused: ...`);
   - the OLD daemon: its trigger model has no `model` field and, like the real pre-H3 daemon's
     pydantic model, ignores the unknown key.
-The bridge is the real Orchestrator/Router with the seed profiles (worker-default = local-small).
+The bridge is the real Orchestrator/Router with the seed profiles (worker-default = local-large since
+ao-thinkon; the second model a test switches to is local-small).
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ class StubDaemon:
     """Records every /tasks and /project body; answers /project with `project_reply`."""
 
     def __init__(self, *, knows_model: bool = True,
-                 allowed: tuple[str, ...] = ("local-large", "local-small")) -> None:
+                 allowed: tuple[str, ...] = ("local-small", "local-large")) -> None:
         self.task_bodies: list[dict] = []
         self.project_bodies: list[dict] = []
         self.tasks: dict[str, dict] = {}
@@ -137,19 +138,19 @@ async def _wake(orch, eid, chan, root, **kw):
 async def test_a_worker_wake_sends_the_worker_default_profile_model(db_url, stub):
     orch, chat, db = await _orch(db_url)
     try:
-        assert orch.profiles.get("worker-default").model == "local-small"   # the seed (H2)
+        assert orch.profiles.get("worker-default").model == "local-large"   # the seed (H2)
         eid, chan, root = await orch.router.open_effort("small-job")
         result = await _wake(orch, eid, chan, root)
         assert result.ok
-        assert stub.task_bodies[-1]["model"] == "local-small"
-        # A governed model change reaches the very next turn (no restart, no config write).
-        await orch.profiles.set_model("worker-default", "local-large",
-                                      registered={"local-large", "local-small"})
-        await _wake(orch, eid, chan, root)
         assert stub.task_bodies[-1]["model"] == "local-large"
+        # A governed model change reaches the very next turn (no restart, no config write).
+        await orch.profiles.set_model("worker-default", "local-small",
+                                      registered={"local-small", "local-large"})
+        await _wake(orch, eid, chan, root)
+        assert stub.task_bodies[-1]["model"] == "local-small"
         done = await _events(db, "wake_done")
-        assert [p["model_sent"] for p in done] == ["local-small", "local-large"]
-        assert [p["model_ran"] for p in done] == ["llamacpp/local-small", "llamacpp/local-large"]
+        assert [p["model_sent"] for p in done] == ["local-large", "local-small"]
+        assert [p["model_ran"] for p in done] == ["llamacpp/local-large", "llamacpp/local-small"]
     finally:
         await db.dispose()
 
@@ -159,7 +160,7 @@ async def test_the_project_survey_sends_the_worker_default_profile_model(db_url,
     try:
         await orch.router.survey_project(REPO)
         assert len(stub.task_bodies) == 1
-        assert stub.task_bodies[0]["model"] == "local-small"
+        assert stub.task_bodies[0]["model"] == "local-large"
     finally:
         await db.dispose()
 
@@ -172,14 +173,14 @@ async def test_an_older_daemon_that_ignores_model_still_runs_the_turn(db_url, mo
         eid, chan, root = await orch.router.open_effort("old-daemon")
         result = await _wake(orch, eid, chan, root)
         assert result.ok and result.status == "done"
-        assert old.task_bodies[-1]["model"] == "local-small"      # sent, and ignored
+        assert old.task_bodies[-1]["model"] == "local-large"      # sent, and ignored
         assert old.ran == ["llamacpp/agent-default"]              # the old daemon ran its own
     finally:
         await db.dispose()
 
 
 async def test_a_model_the_daemon_refuses_is_reported_and_nothing_runs(db_url, monkeypatch):
-    strict = StubDaemon(allowed=("local-large",))
+    strict = StubDaemon(allowed=("local-small",))
     _route_harness_to(monkeypatch, strict)
     orch, chat, db = await _orch(db_url)
     try:
@@ -187,9 +188,9 @@ async def test_a_model_the_daemon_refuses_is_reported_and_nothing_runs(db_url, m
         with pytest.raises(httpx.HTTPStatusError):
             await _wake(orch, eid, chan, root)
         assert strict.tasks == {}                                  # no task was created
-        assert any("refused model `local-small`" in p["message"] for p in chat.posted)
+        assert any("refused model `local-large`" in p["message"] for p in chat.posted)
         (refusal,) = await _events(db, "worker_model_refused")
-        assert refusal["model"] == "local-small" and refusal["role"] == "worker-default"
+        assert refusal["model"] == "local-large" and refusal["role"] == "worker-default"
         # Not a worker fault: the worker was not quarantined.
         assert await _events(db, "worker_dispatch_failed") == []
     finally:
@@ -357,9 +358,9 @@ async def test_wake_done_records_the_model_that_ran_beside_the_model_sent(db_url
     try:
         eid, chan, root = await orch.router.open_effort("ran")
         result = await _wake(orch, eid, chan, root)
-        assert result.model == "llamacpp/local-small"   # the daemon's report, not the sent key
+        assert result.model == "llamacpp/local-large"   # the daemon's report, not the sent key
         (done,) = await _events(db, "wake_done")
-        assert done["model_sent"] == "local-small" and done["model_ran"] == "llamacpp/local-small"
+        assert done["model_sent"] == "local-large" and done["model_ran"] == "llamacpp/local-large"
     finally:
         await db.dispose()
 
@@ -375,7 +376,7 @@ async def test_an_old_daemon_turn_records_the_model_that_ran_as_unknown(db_url, 
         assert "model" not in old.tasks["t1"]                     # the old task view
         assert result.ok and result.model is None
         (done,) = await _events(db, "wake_done")
-        assert done["model_sent"] == "local-small" and done["model_ran"] is None
+        assert done["model_sent"] == "local-large" and done["model_ran"] is None
     finally:
         await db.dispose()
 
@@ -388,7 +389,7 @@ async def test_a_model_refusal_is_not_re_run_by_the_stall_watchdog(db_url, monke
 
     from sqlalchemy import update
 
-    strict = StubDaemon(allowed=("local-large",))
+    strict = StubDaemon(allowed=("local-small",))
     _route_harness_to(monkeypatch, strict)
     orch, chat, db = await _orch(db_url)
     try:
@@ -418,7 +419,7 @@ async def test_a_turn_that_runs_after_a_refusal_is_watched_again(db_url, monkeyp
 
     from sqlalchemy import update
 
-    strict = StubDaemon(allowed=("local-large",))
+    strict = StubDaemon(allowed=("local-small",))
     _route_harness_to(monkeypatch, strict)
     orch, chat, db = await _orch(db_url)
     try:
@@ -426,8 +427,8 @@ async def test_a_turn_that_runs_after_a_refusal_is_watched_again(db_url, monkeyp
         with pytest.raises(httpx.HTTPStatusError):
             await _wake(orch, eid, chan, root)
         assert await orch._model_refusal_unresolved(eid)
-        await orch.profiles.set_model("worker-default", "local-large",
-                                      registered={"local-large", "local-small"})
+        await orch.profiles.set_model("worker-default", "local-small",
+                                      registered={"local-small", "local-large"})
         assert (await _wake(orch, eid, chan, root)).ok
         assert not await orch._model_refusal_unresolved(eid)
         old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
@@ -443,15 +444,15 @@ async def test_a_turn_that_runs_after_a_refusal_is_watched_again(db_url, monkeyp
 async def test_a_refused_project_survey_is_audited(db_url, monkeypatch):
     """TF3: the survey degrades to "" as before, but the refusal is in the audit record and the
     project_survey audit says which model was sent."""
-    strict = StubDaemon(allowed=("local-large",))
+    strict = StubDaemon(allowed=("local-small",))
     _route_harness_to(monkeypatch, strict)
     orch, chat, db = await _orch(db_url)
     try:
         assert await orch.router.survey_project(REPO) == ""
         (refusal,) = await _events(db, "worker_model_refused")
-        assert refusal["model"] == "local-small" and refusal["survey"] is True
+        assert refusal["model"] == "local-large" and refusal["survey"] is True
         (survey,) = await _events(db, "project_survey")
-        assert survey["model_sent"] == "local-small" and survey["ok"] is False
+        assert survey["model_sent"] == "local-large" and survey["ok"] is False
     finally:
         await db.dispose()
 
@@ -461,8 +462,8 @@ async def test_a_good_project_survey_audits_the_model(db_url, stub):
     try:
         await orch.router.survey_project(REPO)
         (survey,) = await _events(db, "project_survey")
-        assert survey["model_sent"] == "local-small"
-        assert survey["model_ran"] == "llamacpp/local-small"     # read back, not copied from sent
+        assert survey["model_sent"] == "local-large"
+        assert survey["model_ran"] == "llamacpp/local-large"     # read back, not copied from sent
     finally:
         await db.dispose()
 
@@ -492,7 +493,7 @@ class _Down:
 class _Hang:
     """A daemon that accepts the task and reports it running forever; optional repeating activity."""
 
-    def __init__(self, *, activity: list | None = None, model="llamacpp/local-large") -> None:
+    def __init__(self, *, activity: list | None = None, model="llamacpp/local-small") -> None:
         app = FastAPI()
         self.posts = 0
 
@@ -571,14 +572,14 @@ async def _flatten(db, eid, hours=2):
 
 async def _refuse_then_fix(orch, monkeypatch, name):
     """A dispatch refused for its model, then the operator's fix (profile -> an allowed model)."""
-    sw = _Switch(StubDaemon(allowed=("local-large",)))
+    sw = _Switch(StubDaemon(allowed=("local-small",)))
     _route_harness_to(monkeypatch, sw)
     eid, chan, root = await orch.router.open_effort(name)
     with pytest.raises(httpx.HTTPStatusError):
         await _wake(orch, eid, chan, root)
     assert await orch._model_refusal_unresolved(eid)
-    await orch.profiles.set_model("worker-default", "local-large",
-                                  registered={"local-large", "local-small"})
+    await orch.profiles.set_model("worker-default", "local-small",
+                                  registered={"local-small", "local-large"})
     return sw, eid, chan, root
 
 
@@ -641,7 +642,7 @@ async def test_d1_a_frozen_effort_after_a_refusal_still_gets_its_freeze_recovery
 
     from app.models import Effort
 
-    strict = StubDaemon(allowed=("local-large",))
+    strict = StubDaemon(allowed=("local-small",))
     _route_harness_to(monkeypatch, strict)
     orch, chat, db = await _orch(db_url)
     try:
@@ -665,7 +666,7 @@ async def test_d1_a_frozen_effort_after_a_refusal_still_gets_its_freeze_recovery
 
 async def test_d1_repeated_refusals_with_no_later_dispatch_stay_with_the_operator(db_url, monkeypatch):
     """TF2 kept: every dispatch refused, nothing else started - never re-run, never escalated."""
-    strict = StubDaemon(allowed=("local-large",))
+    strict = StubDaemon(allowed=("local-small",))
     _route_harness_to(monkeypatch, strict)
     orch, chat, db = await _orch(db_url)
     try:
@@ -686,7 +687,7 @@ async def test_d1_repeated_refusals_with_no_later_dispatch_stay_with_the_operato
 async def test_d1_equal_timestamps_are_ordered_by_write_order(db_url, monkeypatch):
     """Boundary, decided: order is the append-only event id, so an identical clock reading cannot
     flip the answer either way. Refusal last -> unresolved; a later dispatch -> resolved."""
-    strict = StubDaemon(allowed=("local-large",))
+    strict = StubDaemon(allowed=("local-small",))
     sw = _Switch(strict)
     _route_harness_to(monkeypatch, sw)
     orch, chat, db = await _orch(db_url)
@@ -696,8 +697,8 @@ async def test_d1_equal_timestamps_are_ordered_by_write_order(db_url, monkeypatc
             await _wake(orch, eid, chan, root)
         await _flatten(db, eid)
         assert await orch._model_refusal_unresolved(eid)          # refused, nothing after
-        await orch.profiles.set_model("worker-default", "local-large",
-                                      registered={"local-large", "local-small"})
+        await orch.profiles.set_model("worker-default", "local-small",
+                                      registered={"local-small", "local-large"})
         sw.cur = _Down(500)
         with pytest.raises(httpx.HTTPStatusError):
             await _wake(orch, eid, chan, root)
@@ -710,7 +711,7 @@ async def test_d1_equal_timestamps_are_ordered_by_write_order(db_url, monkeypatc
 async def test_d2_the_delegate_path_gives_one_actionable_message(db_url, monkeypatch):
     """D2: the effort thread gets the router's actionable refusal only (no generic HTTP error
     post), and the operator's conversation gets the same advice, not a raw 422."""
-    strict = StubDaemon(allowed=("local-large",))
+    strict = StubDaemon(allowed=("local-small",))
     _route_harness_to(monkeypatch, strict)
     orch, chat, db = await _orch(db_url)
     try:
@@ -723,7 +724,7 @@ async def test_d2_the_delegate_path_gives_one_actionable_message(db_url, monkeyp
         assert len(in_thread) == 1
         up = [m for m in msgs if "couldn't run" in m]
         assert len(up) == 1
-        assert "refused model `local-small`" in up[0] and "set profile worker-default model" in up[0]
+        assert "refused model `local-large`" in up[0] and "set profile worker-default model" in up[0]
         assert "agent.allowed_models" in up[0]
     finally:
         await db.dispose()
@@ -746,7 +747,7 @@ def test_d2_a_raw_model_refusal_reads_as_actionable():
 
 @pytest.mark.parametrize("view_model, expect", [
     (None, None), ("", None), (5, None), (["x"], None), ({"a": 1}, None),
-    ("llamacpp/local-large", "llamacpp/local-large"),
+    ("llamacpp/local-small", "llamacpp/local-small"),
 ])
 async def test_pin_model_ran_is_only_a_non_empty_string_from_the_daemon_view(
         db_url, monkeypatch, view_model, expect):
@@ -769,22 +770,22 @@ async def test_pin_model_ran_is_only_a_non_empty_string_from_the_daemon_view(
         eid, chan, root = await orch.router.open_effort("pin-ran")
         r = await _wake(orch, eid, chan, root)
         (done,) = await _events(db, "wake_done")
-        assert done["model_sent"] == "local-small"
+        assert done["model_sent"] == "local-large"
         assert r.model == expect and done["model_ran"] == expect
     finally:
         await db.dispose()
 
 
 async def test_pin_a_poll_timeout_keeps_the_model_the_daemon_reported(db_url, monkeypatch):
-    _route_harness_to(monkeypatch, _Hang(model="llamacpp/local-small"))
+    _route_harness_to(monkeypatch, _Hang(model="llamacpp/local-large"))
     orch, chat, db = await _orch(db_url)
     orch.harness.poll_timeout, orch.harness.poll_interval = 0.05, 0.01
     try:
         eid, chan, root = await orch.router.open_effort("pin-timeout")
         r = await _wake(orch, eid, chan, root)
-        assert r.status == "error" and r.model == "llamacpp/local-small"
+        assert r.status == "error" and r.model == "llamacpp/local-large"
         (done,) = await _events(db, "wake_done")
-        assert done["model_ran"] == "llamacpp/local-small"
+        assert done["model_ran"] == "llamacpp/local-large"
     finally:
         await db.dispose()
 
@@ -793,10 +794,10 @@ def test_pin_the_flail_path_keeps_the_model_the_daemon_reported(monkeypatch):
     import asyncio
 
     act = [{"command": "cat a", "ok": True}] * 4
-    _route_harness_to(monkeypatch, _Hang(activity=act, model="llamacpp/local-small"))
+    _route_harness_to(monkeypatch, _Hang(activity=act, model="llamacpp/local-large"))
     r = asyncio.run(LittleCoderHarness(poll_interval_s=0.0, poll_timeout_s=5.0).wake(
-        W1, "s", "p", max_repeat=3, model="local-small"))
-    assert r.status == "flail" and r.model == "llamacpp/local-small"
+        W1, "s", "p", max_repeat=3, model="local-large"))
+    assert r.status == "flail" and r.model == "llamacpp/local-large"
 
 
 @pytest.mark.parametrize("code, detail", [(422, "empty prompt"), (500, "boom"),

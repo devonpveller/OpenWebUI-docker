@@ -64,6 +64,28 @@ profile's model with every worker turn. See
 The pooled workers read generated copies of this config, so after editing `allowed_models`,
 run `python agent-org/scripts/gen-worker-configs.py`.
 
+## Thinking: no client-side cap
+
+Upstream little-coder ships a `thinking-budget` extension that aborts a thought at about 14.3k
+characters (its `thinking_budget` 4,096 tokens x 3.5; the profile value shadows
+`LITTLE_CODER_THINKING_BUDGET`) and re-asks "[thinking budget exceeded] Please commit...". pi
+drops an aborted message from every later request, so the thought is lost. The image does not
+load it: the build step `docker/remove-thinking-cap.mjs` parks it in
+`/opt/little-coder/disabled-extensions/` (never discovered: the launcher loads only
+`<npm root>/little-coder/.pi/extensions/*/index.ts`). There is no client steer either. A thought
+is bounded only by the server's reasoning budget (llama-swap `--reasoning-budget`, from
+`inference/.env`), then by the daemon's turn limits and the progress guard.
+
+The seam, so it survives an upstream sync: the step lives in this repo and runs after every
+`npm install`; it fails the build if `thinking-budget` was renamed or no longer holds its abort, or
+if any file in the discovered set or in our `pi-extension/` reads thinking (`thinking_delta` /
+`thinking_start` / `thinking_end`, a `"thinking"` content block, `.thinking`, `reasoning_content`) or
+holds the abort. On an upstream bump, re-read upstream's extensions and adapt the script
+deliberately. Not scanned: `LITTLE_CODER_EXTRA_EXTENSIONS` (unset by us) and the user extensions dir
+(pinned empty, root-owned). Rollback: drop the step from `Dockerfile.agent` and rebuild (the cap
+comes back with its 4,096-token default). Evidence: plan store `agent-org-rework-2026-10`, item
+`ao-thinkon`.
+
 ## Daemon API access: `LC_DAEMON_TOKEN`
 
 The control daemon (`:8090`) runs agent tasks, clears the agent's stop-gates

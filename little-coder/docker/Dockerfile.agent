@@ -81,6 +81,16 @@ COPY agent-knowledge ./agent-knowledge
 # pi extension routing the agent's shell tool into open-terminal — installed
 # into the agent user's pi config by the entrypoint (see pi-extension/README).
 COPY pi-extension/ /opt/little-coder/pi-extensions/
+
+# Thinking: no client-side cap (ao-thinkon, 2026-10-11). Upstream's bundled `thinking-budget`
+# aborts a thought at ~14.3k chars and re-asks with the thought discarded. It is parked (never
+# loaded); the server's reasoning budget (llama-swap --reasoning-budget) is the only bound. Fails
+# the build if upstream renamed/changed the cap, or if any bundled extension or ours reads thinking
+# (no extension may read or abort on thinking). See little-coder/README.md.
+COPY docker/remove-thinking-cap.mjs /tmp/remove-thinking-cap.mjs
+RUN node /tmp/remove-thinking-cap.mjs /opt/little-coder/disabled-extensions /opt/little-coder/pi-extensions \
+ && rm -f /tmp/remove-thinking-cap.mjs
+
 COPY docker/entrypoint-agent.sh /usr/local/bin/entrypoint-agent.sh
 RUN chmod +x /usr/local/bin/entrypoint-agent.sh \
  && useradd --create-home --uid 10002 lc \
