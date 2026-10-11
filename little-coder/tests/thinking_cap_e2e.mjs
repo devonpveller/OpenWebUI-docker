@@ -2,7 +2,7 @@
 // against a model server and report what happened to the thought. Numbers only on stdout (no
 // thought text). No dependencies; run INSIDE the agent image (node 22), offline:
 //
-//   node thinking_cap_e2e.mjs <mode> [--chars N] [--port P] [--secs S]
+//   node thinking_cap_e2e.mjs <mode> [--chars N] [--port P] [--secs S] [--one]
 //
 // mode stub-long     a stub OpenAI-compatible server on 127.0.0.1:<port> streams ONE reasoning block
 //                    of --chars characters (varied, non-repetitive sentences), then the answer "done".
@@ -30,6 +30,7 @@ const opt = (name, dflt) => {
 const CHARS = opt("--chars", 30000);
 const PORT = opt("--port", 18080);
 const SECS = opt("--secs", 300);
+const ONE = argv.includes("--one");     // stop the run after the first assistant message ends
 if (!["stub-long", "stub-endless", "external"].includes(mode)) {
   console.error("mode: stub-long | stub-endless | external");
   process.exit(2);
@@ -110,15 +111,19 @@ function startStub() {
 
 // ── the real launcher ──────────────────────────────────────────────────────────────────────────
 function piExtensions() {
-  // the extension list pi was actually started with (Linux /proc; the launcher spawns pi as a child)
+  // what pi was actually started with: the launcher records every --extension it passes in
+  // LITTLE_CODER_EXTENSION_MANIFEST in pi's environment (bin/little-coder.mjs; pi renames its own
+  // process title, so the cmdline is not readable). Linux /proc only.
   try {
     for (const pid of readdirSync("/proc").filter((d) => /^\d+$/.test(d))) {
-      let cmd;
-      try { cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0"); } catch { continue; }
-      if (!cmd.includes("--extension")) continue;
-      const ext = [];
-      cmd.forEach((a, k) => { if (a === "--extension") ext.push(basename(dirname(cmd[k + 1]))); });
-      return ext;
+      let env;
+      try { env = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0"); } catch { continue; }
+      const kv = env.find((e) => e.startsWith("LITTLE_CODER_EXTENSION_MANIFEST="));
+      if (!kv) continue;
+      const m = JSON.parse(kv.slice(kv.indexOf("=") + 1));
+      const name = (p) => basename(dirname(p));
+      return { bundled: (m.bundled || []).map(name), env: (m.env || []).map(name),
+        user: (m.user || []).map(name), piDiscovery: m.piDiscovery ?? null };
     }
   } catch { /* not Linux */ }
   return null;
@@ -135,6 +140,7 @@ let extensions = null;
 const assistants = [];
 const userMsgs = [];
 let deltaChars = 0;
+const thinkingTexts = [];   // external mode only: counted in tokens by the server, never printed
 let stderrBytes = 0;
 child.stderr.on("data", (d) => { stderrBytes += d.length; });
 child.stdout.on("data", (d) => {
@@ -152,12 +158,16 @@ child.stdout.on("data", (d) => {
       const m = ev.message;
       const blocks = Array.isArray(m.content) ? m.content : [{ type: "text", text: String(m.content ?? "") }];
       if (m.role === "assistant") {
+        const thinking = blocks.filter((b) => b.type === "thinking").map((b) => b.thinking || "").join("");
+        if (mode === "external" && thinking) thinkingTexts.push([assistants.length, thinking]);
         assistants.push({
           thinking_chars: blocks.filter((b) => b.type === "thinking").reduce((a, b) => a + (b.thinking || "").length, 0),
           text_chars: blocks.filter((b) => b.type === "text").reduce((a, b) => a + (b.text || "").length, 0),
           tool_calls: blocks.filter((b) => b.type === "toolCall").length,
           stopReason: m.stopReason ?? null,
+          output_tokens: m.usage?.output ?? null,
         });
+        if (ONE) child.kill("SIGTERM");
       } else if (m.role === "user") {
         const t = blocks.map((b) => b.text || "").join(" ");
         userMsgs.push({ chars: t.length, budget_exceeded: t.includes("[thinking budget exceeded]") });
@@ -169,6 +179,15 @@ const killer = setTimeout(() => { child.kill("SIGTERM"); }, SECS * 1000);
 const exit = await new Promise((r) => child.on("close", (code, sig) => r(code ?? sig)));
 clearTimeout(killer);
 if (srv) srv.close();
+// external mode: the server's own token count of each thought (llama.cpp POST /tokenize), so a thought
+// can be compared with --reasoning-budget. The text goes to the server only.
+for (const [k, text] of thinkingTexts) {
+  try {
+    const r = await fetch(`http://127.0.0.1:${PORT}/tokenize`, { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ content: text }) });
+    assistants[k].thinking_tokens = (await r.json()).tokens.length;
+  } catch { assistants[k].thinking_tokens = null; }
+}
 process.stdout.write(JSON.stringify({
   mode, chars: mode === "stub-long" ? CHARS : null, exit, elapsed_s: Math.round((Date.now() - t0) / 100) / 10,
   stub_streamed_reasoning_chars: srv ? streamedReasoning : null, requests, assistants,
