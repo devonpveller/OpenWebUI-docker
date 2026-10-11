@@ -14,10 +14,103 @@
  *
  * Uses only `import type` (erased at compile) + node builtins, so there is no
  * runtime dependency to resolve.
+ *
+ * ao-asyncexec (2026-10-11): the command runs with an ASYNC `spawn`, never
+ * `spawnSync`. A synchronous spawn froze pi's event loop for the whole
+ * command, and pi's `--mode json` writer only flushes a line per write
+ * callback, so the call's `tool_execution_start` reached the events file only
+ * after the command had ended: the bridge's command watch, the daemon's tool
+ * counters and the flail guard never saw a running command. What stays as it
+ * was under spawnSync:
+ *   - one command at a time: `executionMode: "sequential"` (pi-agent-core
+ *     runs a batch that contains a sequential tool call by call, emitting each
+ *     start just before that call executes);
+ *   - the output cap: 64 MB counted over stdout + stderr together; past it the
+ *     child gets SIGTERM and the output read so far is kept (spawnSync's
+ *     maxBuffer/ENOBUFS behaviour);
+ *   - the result: stdout, then stderr after a newline, "(no output)" when both
+ *     are empty, details.exitCode = the exit status, or 1 when there is none
+ *     (killed by a signal, could not start), isError = exitCode !== 0;
+ *   - timeouts: none of our own; ot-exec applies LC_EXEC_TIMEOUT and its
+ *     exit code / message pass through unchanged.
+ * New: pi's abort signal is honoured (the child gets SIGTERM; the result says
+ * "Command aborted"). The child stays in pi's process group, so the daemon's
+ * process-group kill on cancel still reaches it exactly as before.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+
+const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+
+type ExecResult = {
+  content: { type: "text"; text: string }[];
+  details: { exitCode: number };
+  isError: boolean;
+};
+
+function result(stdout: string, stderr: string, exitCode: number, note?: string): ExecResult {
+  let text = stdout;
+  if (stderr) text += (text ? "\n" : "") + stderr;
+  if (!text) text = "(no output)";
+  if (note) text += "\n\n" + note;
+  return { content: [{ type: "text", text }], details: { exitCode }, isError: exitCode !== 0 };
+}
+
+function runOtExec(command: string, signal: AbortSignal | undefined): Promise<ExecResult> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve(result("", "", 1, "Command aborted"));
+      return;
+    }
+    // ot-exec is on $PATH; it reads LC_OPEN_TERMINAL_URL / _KEY / WORKSPACE
+    // / EVENT_STREAM from the env the AgentRunner set (littlecoder/agent.py).
+    const child = spawn("ot-exec", ["-c", command], { stdio: ["pipe", "pipe", "pipe"] });
+    child.stdin?.end(); // spawnSync gave the child an empty, closed stdin
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    let total = 0;
+    let capped = false;
+    let aborted = false;
+    let done = false;
+    const take = (sink: Buffer[]) => (chunk: Buffer) => {
+      if (capped) return;
+      sink.push(chunk);
+      total += chunk.length;
+      if (total > MAX_OUTPUT_BYTES) {
+        capped = true;
+        child.kill("SIGTERM");
+      }
+    };
+    child.stdout?.on("data", take(out));
+    child.stderr?.on("data", take(err));
+    const onAbort = () => {
+      aborted = true;
+      child.kill("SIGTERM");
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const finish = (status: number | null) => {
+      if (done) return;
+      done = true;
+      signal?.removeEventListener("abort", onAbort);
+      resolve(
+        result(
+          Buffer.concat(out).toString("utf-8"),
+          Buffer.concat(err).toString("utf-8"),
+          status ?? 1,
+          aborted ? "Command aborted" : undefined,
+        ),
+      );
+    };
+    // could not start (ENOENT ...): spawnSync returned no output and no status.
+    // An 'error' for a child that DID start (e.g. a failed kill) is not the end:
+    // its 'close' still comes, so one command at a time holds.
+    child.on("error", () => {
+      if (child.pid === undefined) finish(null);
+    });
+    child.on("close", (code: number | null) => finish(code));
+  });
+}
 
 export default function (pi: ExtensionAPI) {
   pi.registerTool({
@@ -37,22 +130,9 @@ export default function (pi: ExtensionAPI) {
       },
       required: ["command"],
     } as any,
-    async execute(_id: string, args: { command: string }) {
-      // ot-exec is on $PATH; it reads LC_OPEN_TERMINAL_URL / _KEY / WORKSPACE
-      // / EVENT_STREAM from the env the AgentRunner set (littlecoder/agent.py).
-      const r = spawnSync("ot-exec", ["-c", args.command], {
-        encoding: "utf-8",
-        maxBuffer: 64 * 1024 * 1024,
-      });
-      const exitCode = r.status ?? 1;
-      let text = r.stdout ?? "";
-      if (r.stderr) text += (text ? "\n" : "") + r.stderr;
-      if (!text) text = "(no output)";
-      return {
-        content: [{ type: "text", text }],
-        details: { exitCode },
-        isError: exitCode !== 0,
-      };
+    executionMode: "sequential",
+    async execute(_id: string, args: { command: string }, signal?: AbortSignal) {
+      return await runOtExec(args.command, signal);
     },
   });
 }
