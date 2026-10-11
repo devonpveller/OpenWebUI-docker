@@ -20,7 +20,8 @@ from app.worker.harness import FakeHarness
 
 ROOT = Path(__file__).resolve().parents[1]
 
-_FLAIL_OUT = ("FLAIL-GUARD: stopped the turn — 25 read-only tool calls with zero file edits. "
+_FLAIL_OUT = ("FLAIL-GUARD: stopped the turn — rule=stale: 10 calls in a row brought back nothing "
+              "new (window 10, novel 24/34, edits 0, since edit 34). "
               "The approach wasn't converging; a fresh plan is needed.")
 
 

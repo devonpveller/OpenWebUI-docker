@@ -189,16 +189,33 @@ class TasksConfig(_Strict):
 
 
 class FlailConfig(_Strict):
-    """Flail guard (agent-org bridge, 2026-07-14): a coding turn that keeps READING without ever
-    EDITING is lost — "too many thinking turns / time iterating on read without editing" is the
-    operator's stop signal. Opt-in per task (`flail_guard` on the trigger; the bridge sets it on
-    coding step wakes only — plan/publish/survey turns are exempt). Tripping kills the turn with
-    a FLAIL-GUARD answer marker; the bridge then forks a fresh session from the original goal and
-    re-asks in plan mode. Trip = ZERO edit/write tool executions AND (tool_calls reached, OR
-    seconds elapsed with at least min_tool_calls executions — so a slow, thoughtful task with a
-    couple of reads is never killed on time alone)."""
+    """Flail guard (agent-org bridge, 2026-07-14; progress-based since ao-progress, 2026-10-10):
+    a coding turn that has stopped making PROGRESS is lost. Opt-in per task (`flail_guard` on the
+    trigger; the bridge sets it on coding step wakes only — plan/publish/survey turns are
+    exempt). Tripping kills the turn with a FLAIL-GUARD answer marker; the bridge then forks a
+    fresh session from the original goal and re-asks in plan mode.
 
-    tool_calls: int = 25            # read-only tool executions before the count trip
+    Trip rules (progress.py; the reason names the rule and numbers only):
+    stale = the last `stale_calls` finished tool calls brought back nothing new (no unseen result
+    line; a short result counts as new only for arguments not run before); cap = `tool_calls`
+    calls since the last successful edit/write (or the turn start); time = `seconds` elapsed with
+    ZERO edits and at least `min_tool_calls` calls. A successful edit/write resets stale and cap.
+
+    Until 2026-10-10 the trip was a fixed 25 read-only calls with zero edits. The C7 bake-off
+    showed it killed 28 of 32 agent-org coding turns before their first edit while each was still
+    reading new code; bare little-coder's passing runs made their first edit at calls 14-35."""
+
+    # Hard cap: tool calls since the last successful edit (or the turn start), novel or not.
+    # 120: above every stretch without an edit in bare little-coder's 7 passing C1 runs (longest
+    # 104, a per-file regression sweep after the last edit; longest before a first edit 35).
+    tool_calls: int = Field(default=120, ge=1, le=100_000)
+    # Stale window: this many finished calls in a row with nothing new trips. 10: in the 12 C1
+    # runs the longest stale run was 2 once background-job polling (ShellLog/ShellList, tools the
+    # agent-org workers do not have) is set aside; a loop over the same files/commands is
+    # stopped about 10 calls (under a minute at C7's ~4 s per call) after it starts.
+    stale_calls: int = Field(default=10, ge=1, le=100_000)
+    # A result is new when it holds at least this many unseen lines.
+    min_new_lines: int = Field(default=1, ge=1, le=100_000)
     seconds: int = 900              # elapsed (15 min) before the time trip
     min_tool_calls: int = 8         # time trip requires at least this much activity
     poll_seconds: float = 20.0      # watcher scan cadence
