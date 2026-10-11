@@ -145,8 +145,11 @@ class Settings(BaseSettings):
     # `off` = never, `risky` = high-blast-radius efforts only (default), `all` = every effort.
     worker_plan_gate: str = "risky"
     # FLAIL GUARD arming (P9 Phase 0 instrument, 2026-07-16). The daemon kills a coding turn that
-    # reads for 25 calls / 15 min without ever editing; the bridge then forks a FRESH session from
-    # the base goal. That fork is a SUSPECT in the P8 quality regression: it is the one mechanism
+    # has stopped making progress (ao-progress, 2026-10-10; little-coder FlailConfig/progress.py):
+    # `stale_calls` (10) tool calls in a row that brought back nothing new, `tool_calls` (120)
+    # calls since its last edit, or 15 min with zero edits; an edit resets the window. The bridge
+    # then forks a FRESH session from the base goal. (Until 2026-10-10: 25 read-only calls.)
+    # That fork is a SUSPECT in the P8 quality regression: it is the one mechanism
     # that discards the worker's model of the code mid-effort, and P9's thesis is that quality
     # comes from the worker holding a coherent model. This field exists to MEASURE that, not to
     # fix it — turn it off for one round and let the operator judge the product. Defaults to the

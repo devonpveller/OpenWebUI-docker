@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -26,8 +27,11 @@ import time
 from .config import Config
 from .journals import Journals
 from .openterminal import OpenTerminalClient
+from .progress import EDIT_TOOLS, EventFeed, ProgressMeter
 from .sanitize import redact_secrets
 from .tasks import TaskContext, digest
+
+_log = logging.getLogger(__name__)
 
 
 # Where upstream little-coder (1.12.0+) looks for USER extensions, pinned to a root-owned,
@@ -160,54 +164,45 @@ FLAIL_MARKER = "FLAIL-GUARD:"
 
 # Tool executions that CHANGE the workspace. `bash` is deliberately not counted as an edit —
 # it's the exploration surface here (grep/find/build probes route through it), and a worker
-# genuinely progressing edits via the edit/write tools.
-_EDIT_TOOLS = ("edit", "write")
+# genuinely progressing edits via the edit/write tools. (A bash edit still shows as progress
+# to the guard: the next read of the file brings back new lines.)
+_EDIT_TOOLS = EDIT_TOOLS
 
 
-def count_tool_executions(pi_events_path: str) -> tuple[int, int]:
-    """(total, edit_write) `tool_execution_start` counts from the live pi `--mode json` stream.
-    Safe mid-run — a partial trailing line is skipped (same contract as read_activity_file)."""
-    total = edits = 0
-    try:
-        with open(pi_events_path, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or '"tool_execution_start"' not in line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if ev.get("type") != "tool_execution_start":
-                    continue
-                total += 1
-                if str(ev.get("toolName", "")).lower() in _EDIT_TOOLS:
-                    edits += 1
-    except OSError:
-        pass
-    return total, edits
+def flail_tripped(meter: ProgressMeter, elapsed_s: float, cfg) -> str | None:
+    """WHY this turn is flailing, or None (ao-progress, 2026-10-10: measure progress, not
+    activity). Three rules, each named in the reason with numbers only:
 
-
-def flail_tripped(total: int, edits: int, elapsed_s: float, cfg) -> str | None:
-    """WHY this turn is flailing (operator 2026-07-14: "too many thinking turns or time
-    iterating on read without editing anything"), or None. Trips only with ZERO edit/write
-    executions; the time trip additionally requires `min_tool_calls` of activity so a slow,
-    thoughtful turn with a couple of reads is never killed on elapsed time alone."""
-    if edits > 0:
-        return None
-    if total >= cfg.tool_calls:
-        return f"{total} read-only tool calls with zero file edits"
-    if elapsed_s >= cfg.seconds and total >= cfg.min_tool_calls:
-        return (f"{int(elapsed_s // 60)} min iterating on reads ({total} tool calls) "
-                f"with zero file edits")
+    - stale: the last `cfg.stale_calls` finished tool calls brought back nothing new
+      (see progress.py for what "new" means); a successful edit/write resets the window.
+    - cap: `cfg.tool_calls` tool calls since the last successful edit (or the turn start) -
+      the backstop for a turn that is always slightly new and never moves.
+    - time: (unchanged) `cfg.seconds` elapsed with ZERO edits and at least `cfg.min_tool_calls`
+      calls, so a slow, thoughtful turn with a couple of reads is never killed on time alone.
+    """
+    trip = meter.tripped()
+    if trip is not None:
+        return trip.detail
+    if meter.edits == 0 and elapsed_s >= cfg.seconds and meter.calls >= cfg.min_tool_calls:
+        n = meter.numbers()
+        return (f"rule=time: {int(elapsed_s // 60)} min with zero file edits "
+                f"({n['calls']} tool calls, {n['novel']} novel)")
     return None
 
 
+def new_progress_meter(cfg) -> ProgressMeter:
+    return ProgressMeter(cfg.stale_calls, cfg.tool_calls, cfg.min_new_lines)
+
+
 class _FlailWatcher(threading.Thread):
-    """Watches a running agent turn for read-without-edit flailing and kills it when it trips
-    (opt-in via the task's `flail_guard`). The kill is reported through the answer: `run_task`
+    """Watches a running agent turn for lack of progress and kills it when it trips (opt-in
+    via the task's `flail_guard`). The kill is reported through the answer: `run_task`
     prefixes the FLAIL-GUARD marker so the bridge can fork a fresh session and re-plan instead
-    of treating this as an ordinary failure."""
+    of treating this as an ordinary failure.
+
+    It reads the pi events file incrementally (only what was appended since the last scan) into
+    one ProgressMeter for the turn. A scan that raises is logged and skipped - the watcher keeps
+    running (an unhandled error used to end the thread and silently disarm the guard)."""
 
     def __init__(self, proc, pi_events: str, cfg, ctx: "TaskContext") -> None:
         super().__init__(daemon=True, name="flail-watcher")
@@ -217,16 +212,26 @@ class _FlailWatcher(threading.Thread):
         self.ctx = ctx
         self._stop = threading.Event()
         self.started_at = time.monotonic()
+        self.meter = new_progress_meter(cfg)
+        self.feed = EventFeed(pi_events, self.meter)
 
     def stop(self) -> None:
         self._stop.set()
+
+    def check(self) -> str | None:
+        """One scan: feed what was appended, then judge. Returns the trip reason or None."""
+        self.feed.poll()
+        return flail_tripped(self.meter, time.monotonic() - self.started_at, self.cfg)
 
     def run(self) -> None:
         while not self._stop.wait(self.cfg.poll_seconds):
             if self.proc.poll() is not None:
                 return
-            total, edits = count_tool_executions(self.pi_events)
-            reason = flail_tripped(total, edits, time.monotonic() - self.started_at, self.cfg)
+            try:
+                reason = self.check()
+            except Exception:  # noqa: BLE001 - one bad scan must not disarm the guard
+                _log.exception("flail watcher: scan failed; the guard stays armed")
+                continue
             if reason is None:
                 continue
             self.ctx.state.signal = "flail_guard"

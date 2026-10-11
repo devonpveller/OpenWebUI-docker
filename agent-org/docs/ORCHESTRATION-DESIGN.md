@@ -435,6 +435,30 @@ The signal must be **agent-loop activity specifically** — not "is the containe
 (dominated by health-check noise = a false heartbeat), and not shell-command activity (frozen
 during long generation/edit phases). *This piece is built and deployed.*
 
+### 8.1 The flail guard — progress, not activity (2026-10-10)
+
+Silence catches a worker that stopped; the flail guard catches one that keeps moving without
+getting anywhere. It is the little-coder daemon's, armed by the bridge on coding turns only
+(`worker_flail_guard`), and a trip forks a fresh plan-first session (`flail_replanned`).
+
+The question it asks is **"is anything new happening?"**, not "how many calls has it made?". Until
+2026-10-10 it killed a turn at 25 read-only tool calls; in the C7 bake-off that killed 28 of 32
+coding turns before their first edit, each still reading code it had not seen, while bare
+little-coder on the same model made its first edit at calls 14-35 in its passing runs. Now
+(`little-coder/src/littlecoder/progress.py`, `FlailConfig`):
+
+- a tool call is **new** when its result holds a line the turn has not seen (numbers and spacing
+  ignored), or, for a short result, when that exact call was not made before;
+- **stale** trips after `stale_calls` (10) calls in a row with nothing new: re-reading the same
+  files, cycling the same commands, re-running a check that prints what it printed;
+- **cap** trips after `tool_calls` (120) calls since the last edit, new or not — the backstop that
+  keeps "always slightly new" from becoming "never stop";
+- **time** trips after 15 min with zero edits and some activity;
+- a successful edit or write resets the window.
+
+The trip reason names the rule and carries numbers only (no command, path or output text). The
+bridge's own loop guard (`loop_guard_*`, identical-command windows) is separate and unchanged.
+
 ---
 
 ## 9. Security — the same loop, standing
@@ -583,6 +607,7 @@ Two forks are genuinely undecided and shape what gets built:
 | Piece | State |
 |---|---|
 | Worker liveness (silence detector, §8) | **BUILT + DEPLOYED + validated** |
+| Progress-based flail guard (§8.1) | **BUILT** (ao-progress, 2026-10-10): replayed on recorded C7/C1 turns; its effect on C7 is measured in a separate run |
 | Finding → durable check pipeline (§10) | **BUILT + DEPLOYED + PROVEN** — gym-007 (PR#15): a recurring operator finding (missing `reopen`), captured once as a durable check, forced the third round's org to ship a *working* reopen the goal never asked for. The recurrence is broken; the human's judgment compounded. Auto-conversion + scale still pending. |
 | CDCL constraint learning + fixed-point drain (§5–6) | **BUILT + DEPLOYED** — failures become durable clauses (infra never learned), injected into every retry; `seen_sigs` set makes the burn-down a real fixed point. *Still open: per-task executable goal-posts, first-class diff-check, adversarial task-drain.* |
 | Frontier / OpenRouter oracle (§7) | designed, not built |

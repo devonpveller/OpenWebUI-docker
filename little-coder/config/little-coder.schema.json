@@ -98,8 +98,15 @@
     },
     "FlailConfig": {
       "additionalProperties": false,
-      "description": "Flail guard (agent-org bridge, 2026-07-14): a coding turn that keeps READING without ever\nEDITING is lost \u2014 \"too many thinking turns / time iterating on read without editing\" is the\noperator's stop signal. Opt-in per task (`flail_guard` on the trigger; the bridge sets it on\ncoding step wakes only \u2014 plan/publish/survey turns are exempt). Tripping kills the turn with\na FLAIL-GUARD answer marker; the bridge then forks a fresh session from the original goal and\nre-asks in plan mode. Trip = ZERO edit/write tool executions AND (tool_calls reached, OR\nseconds elapsed with at least min_tool_calls executions \u2014 so a slow, thoughtful task with a\ncouple of reads is never killed on time alone).",
+      "description": "Flail guard (agent-org bridge, 2026-07-14; progress-based since ao-progress, 2026-10-10):\na coding turn that has stopped making PROGRESS is lost. Opt-in per task (`flail_guard` on the\ntrigger; the bridge sets it on coding step wakes only \u2014 plan/publish/survey turns are\nexempt). Tripping kills the turn with a FLAIL-GUARD answer marker; the bridge then forks a\nfresh session from the original goal and re-asks in plan mode.\n\nTrip rules (progress.py; the reason names the rule and numbers only):\nstale = the last `stale_calls` finished tool calls brought back nothing new (no unseen result\nline; a short result counts as new only for arguments not run before); cap = `tool_calls`\ncalls since the last successful edit/write (or the turn start); time = `seconds` elapsed with\nZERO edits and at least `min_tool_calls` calls. A successful edit/write resets stale and cap.\n\nUntil 2026-10-10 the trip was a fixed 25 read-only calls with zero edits. The C7 bake-off\nshowed it killed 28 of 32 agent-org coding turns before their first edit while each was still\nreading new code; bare little-coder's passing runs made their first edit at calls 14-35.",
       "properties": {
+        "min_new_lines": {
+          "default": 1,
+          "maximum": 100000,
+          "minimum": 1,
+          "title": "Min New Lines",
+          "type": "integer"
+        },
         "min_tool_calls": {
           "default": 8,
           "title": "Min Tool Calls",
@@ -115,8 +122,17 @@
           "title": "Seconds",
           "type": "integer"
         },
+        "stale_calls": {
+          "default": 10,
+          "maximum": 100000,
+          "minimum": 1,
+          "title": "Stale Calls",
+          "type": "integer"
+        },
         "tool_calls": {
-          "default": 25,
+          "default": 120,
+          "maximum": 100000,
+          "minimum": 1,
           "title": "Tool Calls",
           "type": "integer"
         }

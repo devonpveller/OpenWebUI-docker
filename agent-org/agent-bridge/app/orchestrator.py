@@ -13476,7 +13476,7 @@ class Orchestrator:
             await self.router.update_effort_card(effort_id, "needs-attention")
             return
         what = ("looping on the same commands" if getattr(result, "loop_trip", None) is not None
-                else "reading and thinking without a single edit")
+                else "going round without making progress")
         note = (f"🌀 The worker was spinning — {what} "
                 f"({head}). I stopped it, and I'm **forking a fresh session from the original "
                 f"goal and re-asking in plan mode** so it commits to an approach before touching "
