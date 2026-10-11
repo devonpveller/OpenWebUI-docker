@@ -14128,7 +14128,11 @@ class Orchestrator:
         # ao-attempt — PARK the previous attempt before the plan turn (commit + per-effort ref),
         # so the plan turn starts clean and the write check below stays exactly right; the parked
         # attempt and its FACTS go to the planner for a KEEP / DISCARD verdict.
-        pre = await self._park_attempt(effort_id, goal) if repo else None
+        try:
+            pre = await self._park_attempt(effort_id, goal) if repo else None
+        except Exception as exc:  # noqa: BLE001 — never a gate blocker: behave as before
+            log.warning("parking the attempt failed for %s: %s", effort_id, exc)
+            pre = None
         att = (pre or {}).get("attempt")
         plan_row = await self._effort_plan_row(effort_id)
         fmt = self._plan_format_block(plan_row)
@@ -14339,7 +14343,12 @@ class Orchestrator:
                 # anchor items) BEFORE delegation, and open the next attempt at the resulting tree.
                 nxt_head = (pre or {}).get("head") or ""
                 if att is not None and verdict is not None:
-                    res = await self._apply_attempt_verdict(effort_id, att, verdict)
+                    try:
+                        res = await self._apply_attempt_verdict(effort_id, att, verdict)
+                    except Exception as exc:  # noqa: BLE001 — the attempt stays on its ref
+                        log.warning("applying the verdict failed for %s: %s", effort_id, exc)
+                        res = {"escalate": "the verdict on the previous attempt could not be "
+                                           f"applied (it is intact on `{att.get('ref')}`)"}
                     nxt_head = res.get("head") or nxt_head
                     if res.get("escalated"):
                         return None          # three discards of one step: escalated (posted)
