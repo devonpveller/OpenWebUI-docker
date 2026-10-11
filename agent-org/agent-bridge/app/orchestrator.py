@@ -89,9 +89,10 @@ from sqlalchemy import delete, func, select
 
 from .models import (
     Concern as ConcernRow,
-    Effort, EffortConstraint, Event, GlobalState, LensReport, Project, ProjectSurvey,
-    ScopeNode, ScopeTask, WorkerInstance,
+    Effort, EffortAttempt, EffortConstraint, EffortPlan, Event, GlobalState, LensReport, Project,
+    ProjectSurvey, ScopeNode, ScopeTask, WorkerInstance,
 )
+from .modules import attempts as _att
 from .modules.pending_store import PendingStore
 from .schemas import (
     AlignmentVerdict, Concern, Decision, EscalationVerdict, Level, LifecyclePlan, LifecycleStep, MonitorVerdict, OperatorIntent, Trigger,
@@ -7131,7 +7132,13 @@ class Orchestrator:
                     "\n\nYour plan below was REVIEWED and APPROVED — execute exactly that plan "
                     "now. It was written in a separate read-only turn, so re-read any file you "
                     "need rather than assuming what is in front of you.\n\n"
-                    f"--- APPROVED PLAN ---\n{approved_plan.strip()[:4000]}\n--- END PLAN ---")
+                    f"--- APPROVED PLAN ---\n{approved_plan.strip()[:4000]}\n--- END PLAN ---"
+                    # ao-attempt — the worker holds the scope: it chooses the checks that evidence
+                    # each step; the bridge runs them at the attempt's start and end.
+                    "\n\nREPORT YOUR CHECKS: when you stop, end your reply with a CHECKS section "
+                    "- one line per check you chose, `step <n>: <command>` (the tests or commands "
+                    "that show that plan step done; for pytest use -v or -rA so every test's "
+                    "result is listed). The bridge runs them at your attempt's start and end.")
             last = None
             for i, step in enumerate(steps, 1):
                 if i < start_step:   # resuming after a park — earlier steps already ran
@@ -7175,8 +7182,10 @@ class Orchestrator:
                                           thread_id=self._mgmt_thread_of(effort_id))
                     await self.router.update_effort_card(effort_id, "needs-attention")
                     return
+                await self._expire_attempts(effort_id)   # ao-attempt: refs expire at delivery
                 await self._finish_effort(effort_id, last, delivery=delivery)
             else:
+                await self._expire_attempts(effort_id)
                 await self._finish_effort(effort_id, last)
         except ModelBackpressureError:
             # A step was shed by the saturated GPU — PARK (machine B suspended), don't fail. The
@@ -7317,6 +7326,10 @@ class Orchestrator:
             checkout_branch=(self._effort_branch(effort_id) if self.s.sync_delivery_branch else None),
             expected_base=eb.get("sha") or None,
         )
+        # ao-attempt — the worker's own chosen checks ride its reply; keep them with the attempt
+        # (also on a loop-guard stop: whatever it reported before the stop is evidence).
+        if result is not None and repo:
+            await self._record_worker_checks(effort_id, result.output or "")
         # FLAIL GUARD tripped (operator 2026-07-14: "too many thinking turns or time iterating on
         # read without editing anything is a good indicator to stop, fork from original user
         # prompt and re-ask in plan mode"). The daemon killed a turn that kept reading without a
@@ -13566,6 +13579,464 @@ class Orchestrator:
             return (getattr(verdict, "rationale", "") or "the PM judged it off-goal")[:300]
         return None
 
+    # ── ao-attempt: the turn boundary (park -> facts -> verdict -> keep / discard) ────────────
+    #
+    # Operator model 2026-10-11: when planning begins, the previous attempt's work is KEPT as
+    # completed plan steps or DISCARDED as a failed attempt - never left as clutter, never
+    # silently wiped. C7a: `_revert_plan_turn_writes` wiped the coding turn's uncommitted edits in
+    # 3 of 10 editing turns because the re-plan ran in the still-dirty tree. Parking the attempt
+    # (a commit + a per-effort ref) BEFORE the plan turn makes the tree clean, so that unchanged
+    # check is correct again, and nothing the plan turn can reach is trusted as evidence.
+    # Commands and parsers: app/modules/attempts.py (proxy-legal git, open-terminal framing).
+
+    async def _attempt_exec(self, effort_id: str, command: str, *, timeout: int = 120,
+                            label: str = "ao-attempt") -> str | None:
+        """One deterministic /check in the worker's EXISTING workspace (repo=None: no focus, no
+        clone), on the worker whose workspace is focused on this effort (affinity by its session;
+        `require_focus` refuses any other worker). None on any failure or timeout. The audit
+        records `label`, never the command (it can carry a worker's check command)."""
+        try:
+            fs = getattr(self.router, "focus_session", None)
+            sid = (await fs(effort_id) if fs is not None else None) or f"{effort_id}~planclean"
+            _rc, out, timed = await self.router.exec_check(
+                effort_id, command=command, session_id=sid, repo=None, repo_token=None,
+                timeout=timeout, label=label, require_focus=True)
+        except Exception as exc:  # noqa: BLE001 — best-effort; callers treat None as untrusted
+            log.debug("attempt exec failed for %s: %s", effort_id, exc)
+            return None
+        return None if timed else out
+
+    async def _effort_plan_row(self, effort_id: str) -> dict:
+        try:
+            async with self.db.session_factory() as s:
+                r = await s.get(EffortPlan, effort_id)
+                if r is None:
+                    return {"plan_no": 0, "items": {}, "steps": [], "done": [], "discards": {},
+                            "escalated": []}
+                return {"plan_no": r.plan_no, "items": dict(r.items or {}),
+                        "steps": list(r.steps or []), "done": list(r.done or []),
+                        "discards": dict(r.discards or {}), "escalated": list(r.escalated or [])}
+        except Exception as exc:  # noqa: BLE001
+            log.debug("plan row read failed for %s: %s", effort_id, exc)
+            return {"plan_no": 0, "items": {}, "steps": [], "done": [], "discards": {},
+                    "escalated": []}
+
+    async def _save_effort_plan(self, effort_id: str, **fields) -> None:
+        async with self.db.session_factory() as s:
+            r = await s.get(EffortPlan, effort_id)
+            if r is None:
+                r = EffortPlan(effort_id=effort_id)
+                s.add(r)
+            for k, v in fields.items():
+                setattr(r, k, v)
+            await s.commit()
+
+    @staticmethod
+    def _attempt_dict(r: EffortAttempt) -> dict:
+        return {"id": r.id, "n": r.n, "state": r.state, "plan_no": r.plan_no,
+                "steps": list(r.steps or []), "start_sha": r.start_sha, "head_sha": r.head_sha,
+                "park_sha": r.park_sha, "ref": r.ref, "checks": list(r.checks or []),
+                "facts": dict(r.facts or {}), "verdict": dict(r.verdict or {}),
+                "note": r.note, "expired": r.expired}
+
+    async def _current_attempt(self, effort_id: str) -> dict | None:
+        """The newest attempt still in play (open or parked)."""
+        async with self.db.session_factory() as s:
+            r = (await s.execute(
+                select(EffortAttempt).where(EffortAttempt.effort_id == effort_id,
+                                            EffortAttempt.state.in_(["open", "parked"]))
+                .order_by(EffortAttempt.n.desc()).limit(1))).scalar_one_or_none()
+            return self._attempt_dict(r) if r is not None else None
+
+    async def _new_attempt(self, effort_id: str, *, start_sha: str, plan_no: int,
+                           steps: list) -> dict:
+        async with self.db.session_factory() as s:
+            n = int((await s.execute(select(func.coalesce(func.max(EffortAttempt.n), 0)).where(
+                EffortAttempt.effort_id == effort_id))).scalar_one()) + 1
+            r = EffortAttempt(id=f"{effort_id}:a{n}", effort_id=effort_id, n=n, state="open",
+                              plan_no=plan_no, steps=steps,
+                              start_sha=start_sha if _att.is_sha(start_sha) else "")
+            s.add(r)
+            await s.commit()
+            return self._attempt_dict(r)
+
+    async def _update_attempt(self, attempt_id: str, **fields) -> None:
+        async with self.db.session_factory() as s:
+            r = await s.get(EffortAttempt, attempt_id)
+            if r is None:
+                return
+            for k, v in fields.items():
+                setattr(r, k, v)
+            await s.commit()
+
+    async def _record_worker_checks(self, effort_id: str, output: str) -> None:
+        """The worker chooses the checks that evidence its step and reports them with the attempt
+        (operator 2026-10-11: the delegation holds the anchor, the worker holds the scope). Stored
+        on the open attempt; the audit carries counts and step numbers only, never the commands."""
+        checks = _att.parse_checks(output or "")
+        if not checks:
+            return
+        try:
+            att = await self._current_attempt(effort_id)
+            if att is None or att["state"] != "open":
+                plan = await self._effort_plan_row(effort_id)
+                att = await self._new_attempt(effort_id, start_sha="", plan_no=plan["plan_no"],
+                                              steps=plan["steps"])
+            await self._update_attempt(att["id"], checks=checks)
+            await self.audit.log("attempt_checks_reported", effort_id=effort_id, payload={
+                "attempt": att["id"], "n_checks": len(checks),
+                "steps": sorted({c["step"] for c in checks})})
+        except Exception as exc:  # noqa: BLE001 — evidence capture must never break a step
+            log.debug("recording worker checks failed for %s: %s", effort_id, exc)
+
+    async def _run_attempt_checks(self, effort_id: str, checks: list) -> dict | None:
+        out = await self._attempt_exec(
+            effort_id, _att.checks_cmd(checks),
+            timeout=min(1800, 60 + _att.CHECK_TIMEOUT_S * min(len(checks), _att.MAX_CHECKS)))
+        return _att.parse_checks_run(out, len(checks))
+
+    async def _attempt_checkout(self, effort_id: str, target: str) -> _att.Probe | None:
+        recs = _att.records(await self._attempt_exec(effort_id, _att.checkout_cmd(target)))
+        if recs is None:
+            return None
+        head = (_att.first(recs, "HEAD") or "").strip()
+        dirty = _att._int(_att.first(recs, "DIRTY"))
+        if not _att.is_sha(head) or dirty is None:
+            return None
+        return _att.Probe(head=head, branch="", dirty=dirty)
+
+    async def _park_attempt(self, effort_id: str, goal: str) -> dict | None:
+        """PARK - at a plan wake, commit the previous attempt and point a per-effort ref at it, so
+        the plan turn starts on a clean tree. Then measure the FACTS against the attempt's start.
+
+        Returns None when the workspace could not be probed (the plan gate then behaves as before),
+        else {"head": the HEAD the plan turn must leave untouched, "attempt": the parked attempt
+        or None (nothing to park), "park_failed": bool}."""
+        cur = await self._current_attempt(effort_id)
+        start = (cur or {}).get("start_sha") or ""
+        probe = _att.parse_probe(await self._attempt_exec(effort_id, _att.probe_cmd(start)))
+        if probe is None:
+            await self.audit.log("attempt_probe_failed", effort_id=effort_id, payload={})
+            return None
+        if cur is not None and cur["state"] == "parked":
+            if probe.dirty == 0 and probe.head == cur["park_sha"]:
+                return {"head": probe.head, "attempt": cur, "park_failed": False}  # still parked
+            # work landed on top of a parked attempt (an operator re-run): fold it into a new one
+            await self._update_attempt(cur["id"], state="superseded")
+        if start and probe.start_is_ancestor is not True:
+            start = ""                     # the start is not in this history: attempt = the tree
+        if probe.dirty == 0 and (not start or probe.head == start):
+            return {"head": probe.head, "attempt": None, "park_failed": False}
+        if not start:
+            start = probe.head
+        plan = await self._effort_plan_row(effort_id)
+        if cur is None or cur["state"] != "open":
+            cur = await self._new_attempt(effort_id, start_sha=start, plan_no=plan["plan_no"],
+                                          steps=(cur or {}).get("steps") or plan["steps"])
+        steps = cur["steps"] or [{"n": 1, "text": "the previous attempt (no stored plan)",
+                                  "anchor": "GOAL"}]
+        park = _att.parse_park(await self._attempt_exec(
+            effort_id, _att.park_cmd(effort_id, cur["n"], commit=probe.dirty > 0)))
+        committed = park is not None and park.head != probe.head
+        if (park is None or park.dirty != 0 or park.ref_sha != park.head
+                or (probe.dirty > 0 and not committed)):
+            await self.audit.log("attempt_park_failed", effort_id=effort_id, payload={
+                "attempt": cur["id"], "probe_dirty": probe.dirty,
+                "committed": bool(committed), "ref_ok": bool(park and park.ref_sha == park.head)})
+            # A COMMITTED tree is clean whatever happened to the ref: the plan turn cannot wipe it.
+            return {"head": park.head if (park and park.dirty == 0) else probe.head,
+                    "attempt": None, "park_failed": True}
+        ref = _att.ref_name(effort_id, cur["n"])
+        diff = _att.parse_numstat(await self._attempt_exec(
+            effort_id, _att.numstat_cmd(start, park.head)))
+        checks = cur.get("checks") or []
+        before = after = None
+        restored = True
+        if checks:
+            after = await self._run_attempt_checks(effort_id, checks)
+            co = await self._attempt_checkout(effort_id, start)
+            if co is not None and co.head == start and co.dirty == 0:
+                before = await self._run_attempt_checks(effort_id, checks)
+            back = await self._attempt_checkout(
+                effort_id, probe.branch if probe.branch and probe.branch != "HEAD" else park.head)
+            if back is None or back.head != park.head or back.dirty != 0:
+                back = await self._attempt_checkout(effort_id, park.head)
+            restored = back is not None and back.head == park.head and back.dirty == 0
+        tests = _att.classify(checks, before, after, steps,
+                              set((diff or {}).get("new_paths") or []))
+        facts = {"diff": diff, "tests": tests, "measured_before": before is not None}
+        await self._update_attempt(
+            cur["id"], state="parked", start_sha=start, head_sha=probe.head, park_sha=park.head,
+            ref=ref, facts=facts, steps=steps)
+        await self.audit.log("attempt_parked", effort_id=effort_id, payload={
+            "attempt": cur["id"], "ref": ref, "committed": committed,
+            "n_files": (diff or {}).get("n_files"), "added": (diff or {}).get("added"),
+            "deleted": (diff or {}).get("deleted"),
+            "files": [f["path"] for f in (diff or {}).get("files", [])[:20]],
+            "n_checks": len(checks), "measured_before": before is not None})
+        await self.audit.log("attempt_facts", effort_id=effort_id,
+                             payload={"attempt": cur["id"], **_att.fact_ids(tests)})
+        if not restored:
+            await self.audit.log("attempt_restore_failed", effort_id=effort_id,
+                                 payload={"attempt": cur["id"]})
+            return {"head": park.head, "attempt": None, "park_failed": True}
+        att = await self._current_attempt(effort_id)
+        return {"head": park.head, "attempt": att, "park_failed": False}
+
+    async def _restore_head_after_plan_turn(self, effort_id: str, expected: str) -> None:
+        """A plan turn that COMMITS or STAGES is still a plan-turn write. Move the branch (and the
+        index) back to where the plan turn started - `reset` without --hard keeps the work tree - so
+        the unchanged write check sees those files dirty and reverts them. (Its `checkout -- .`
+        restores from the INDEX, so a staged plan-turn change would otherwise survive it.)"""
+        probe = _att.parse_probe(await self._attempt_exec(effort_id, _att.probe_cmd()))
+        if probe is None or (probe.head == expected and probe.dirty == 0):
+            return
+        await self._attempt_exec(effort_id, _att.reset_mixed_cmd(expected))
+        if probe.head != expected:
+            await self.audit.log("plan_turn_moved_head", effort_id=effort_id,
+                                 payload={"expected": expected[:12], "found": probe.head[:12]})
+
+    def _attempt_notes_block(self, notes: list[str]) -> str:
+        if not notes:
+            return ""
+        shown = "\n".join(f"  - {n}" for n in notes[-_att.NOTES_CAP:])
+        return ("\n\nWHAT NOT TO DO (earlier attempts on this effort were DISCARDED; each note says "
+                "why, against the anchor item it was meant to serve):\n" + shown)
+
+    async def _attempt_notes(self, effort_id: str) -> list[str]:
+        return [c["body"] for c in await self._list_constraints(effort_id)
+                if c.get("kind") == "attempt_discard"]
+
+    def _plan_format_block(self, plan: dict) -> str:
+        known = plan.get("items") or {}
+        listed = "\n".join(f"  {k}: {v}" for k, v in sorted(known.items())) if known else ""
+        return (
+            "\nANCHOR ITEMS: the acceptance items this goal is checked against, one per line as "
+            "`A1: <what must be true>`."
+            + (f" REUSE these ids from the stored plan (add new ids only for items not listed):\n"
+               f"{listed}" if listed else "")
+            + "\nEvery numbered PLAN step must END with the anchor item it serves, e.g. "
+              "`1. update parser.py to ... [anchor: A1]`. A step without one is refused.")
+
+    def _attempt_section(self, att: dict, plan: dict) -> str:
+        facts = att.get("facts") or {}
+        steps = att.get("steps") or []
+        items = plan.get("items") or {}
+        step_lines = "\n".join(
+            f"  {s['n']}. {s.get('text', '')[:200]} [anchor: {s.get('anchor') or '?'}"
+            + (f" - {items[s['anchor']][:120]}" if s.get("anchor") in items else "") + "]"
+            for s in steps)
+        body = _att.facts_text(facts.get("tests") or {}, facts.get("diff"), steps,
+                               att.get("checks") or [])
+        return (
+            f"\n\nPREVIOUS ATTEMPT - parked by the bridge: committed and kept on ref "
+            f"`{att.get('ref')}`; the work tree now holds it as the latest commit. It worked on "
+            f"these plan steps:\n{step_lines}\n"
+            f"FACTS (measured by the bridge against the attempt's start):\n{body}\n"
+            "Judge the attempt by its VALUE TOWARD THE ANCHOR ITEMS, not by whether the worker's "
+            "own checks pass: does its evidence actually demonstrate the anchor item of each step "
+            "it worked on? Evidence that does not bear on the item is a reason to discard or "
+            "re-scope. A REGRESSION is the default reason to DISCARD unless the goal asks for that "
+            "behaviour change.\n"
+            "Add exactly ONE line to your reply:\n"
+            "VERDICT: KEEP <numbers of the steps above the attempt COMPLETED, e.g. 1,2>\n"
+            "or\n"
+            "VERDICT: DISCARD <one step number> <deviation|no-solution>: <why it did not advance "
+            "that step's anchor item>\n"
+            "KEEP turns the attempt into one commit per completed step. DISCARD resets the tree to "
+            "the attempt's start (the attempt stays retrievable) and records your reason as a note "
+            "for the next attempt. Then PLAN what remains AFTER your verdict.")
+
+    async def _apply_attempt_verdict(self, effort_id: str, att: dict, v: _att.Verdict) -> dict:
+        """Carry out the planner's verdict on a parked attempt. Returns {"ok": bool, "head": the
+        tree the next attempt starts from, "escalate": reason or ""}."""
+        steps = att.get("steps") or []
+        plan = await self._effort_plan_row(effort_id)
+        by_n = {int(s["n"]): s for s in steps}
+        if v.kind == "keep":
+            diff = (att.get("facts") or {}).get("diff") or {}
+            commits = _att.attribute_paths(steps, v.steps, [f["path"] for f in diff.get("files", [])])
+            parked_from = att["head_sha"] if att["park_sha"] != att["head_sha"] else None
+            recs = _att.records(await self._attempt_exec(
+                effort_id, _att.keep_cmd(effort_id, parked_from, att["park_sha"], commits)))
+            head = (_att.first(recs or [], "HEAD") or "").strip()
+            ok = (recs is not None and (_att.first(recs, "SAME") or "").strip() == "0"
+                  and (_att._int(_att.first(recs, "DIRTY")) == 0) and _att.is_sha(head)
+                  and all((_att.first(recs, f"C{i}") or "").strip() == "0"
+                          for i in range(len(commits) if parked_from else 0)))
+            anchors = [by_n[n].get("anchor") or "" for n in v.steps if n in by_n]
+            await self._update_attempt(att["id"], state="kept",
+                                       verdict={"kind": "keep", "steps": v.steps})
+            await self._save_effort_plan(effort_id, done=sorted(set(plan["done"]) | set(anchors)))
+            await self.audit.log("attempt_kept", effort_id=effort_id, payload={
+                "attempt": att["id"], "steps": v.steps, "anchors": anchors,
+                "commits": len(commits) if parked_from else 0, "verified": ok})
+            if not ok:
+                return {"ok": False, "head": head,
+                        "escalate": "the kept attempt could not be verified as one commit per "
+                                    f"step (it is intact on `{att['ref']}`)"}
+            await self.comms.post(
+                Intent.worker_activity,
+                f"♻️ Kept the previous attempt as completed step(s) {', '.join(map(str, v.steps))} "
+                f"({len(commits) if parked_from else 0} commit(s)); the new plan continues from it.",
+                effort_id=effort_id)
+            return {"ok": True, "head": head, "escalate": ""}
+        # DISCARD
+        n = v.steps[0]
+        step = by_n.get(n) or {"n": n, "anchor": ""}
+        anchor = step.get("anchor") or "GOAL"
+        if not (att.get("ref") and _att.is_sha(att.get("park_sha")) and _att.is_sha(att.get("start_sha"))):
+            await self.audit.log("attempt_discard_refused", effort_id=effort_id,
+                                 payload={"attempt": att["id"], "why": "no verified ref"})
+            return {"ok": False, "head": att.get("park_sha") or "",
+                    "escalate": "the attempt could not be discarded safely (no verified ref); it "
+                                "is kept parked"}
+        recs = _att.records(await self._attempt_exec(
+            effort_id, _att.discard_cmd(att["start_sha"], att["ref"], att["park_sha"])))
+        head = (_att.first(recs or [], "HEAD") or "").strip()
+        ok = (recs is not None and (_att.first(recs, "RC") or "").strip() == "0"
+              and head == att["start_sha"] and _att._int(_att.first(recs, "DIRTY")) == 0
+              and (_att.first(recs, "REF2") or "").strip() == att["park_sha"])
+        if not ok:
+            await self.audit.log("attempt_discard_refused", effort_id=effort_id,
+                                 payload={"attempt": att["id"], "why": "unverified reset"})
+            return {"ok": False, "head": head,
+                    "escalate": f"the discard of attempt {att['n']} could not be verified (the "
+                                f"attempt is intact on `{att['ref']}`)"}
+        facts = att.get("facts") or {}
+        tests = facts.get("tests") or {}
+        klass = v.klass or ("deviation" if tests.get("regression") else "no-solution")
+        anchor_text = (plan.get("items") or {}).get(anchor) or (
+            "the effort goal" if anchor == "GOAL" else "")
+        note = _att.discard_note(step=n, anchor=anchor, anchor_text=anchor_text,
+                                 attempt_no=att["n"], klass=klass, diff=facts.get("diff"),
+                                 facts=tests, reason=v.reason)
+        lr = _att.learning_record(effort_id=effort_id, attempt_id=att["id"], ref=att["ref"],
+                                  anchor=anchor, anchor_text=anchor_text, note=note, facts=tests,
+                                  klass=klass, created_at=_now_iso())
+        await self._update_attempt(att["id"], state="discarded", note=note, learning_record=lr,
+                                   verdict={"kind": "discard", "step": n, "class": klass,
+                                            "anchor": anchor})
+        await self._store_attempt_note(effort_id, att["id"], note)
+        discards = dict(plan["discards"])
+        discards[anchor] = int(discards.get(anchor, 0)) + 1
+        await self._save_effort_plan(effort_id, discards=discards)
+        await self.audit.log("attempt_discarded", effort_id=effort_id, payload={
+            "attempt": att["id"], "step": n, "anchor": anchor, "ref": att["ref"],
+            "class": klass, "discards_of_item": discards[anchor],
+            "n_files": (facts.get("diff") or {}).get("n_files")})
+        await self.audit.log("attempt_learning_record", effort_id=effort_id, payload={
+            "attempt": att["id"], "anchor": anchor, "class": klass,
+            **{k: v2 for k, v2 in lr["red"].items() if k.startswith("n_")}})
+        mem = getattr(self, "memory", None)
+        if mem is not None and getattr(mem, "enabled", False):
+            try:
+                await self._write_failure_signature(
+                    effort_id, self._failure_sig(note), note, f"attempt-discard {att['id']}")
+            except Exception as exc:  # noqa: BLE001 — learning is never a blocker
+                log.debug("learning record write-through failed for %s: %s", effort_id, exc)
+        await self.comms.post(
+            Intent.worker_activity,
+            f"🗑️ Discarded attempt {att['n']} (step {n}, anchor {anchor}): the tree is back at its "
+            f"start; the attempt is kept on `{att['ref']}` for salvage, and why it did not advance "
+            f"{anchor} is now in the plan.",
+            effort_id=effort_id)
+        if discards[anchor] >= _att.DISCARDS_ESCALATE and anchor not in plan["escalated"]:
+            await self._escalate_attempt_step(effort_id, anchor, anchor_text)
+            return {"ok": True, "head": head, "escalate": "", "escalated": True}
+        return {"ok": True, "head": head, "escalate": ""}
+
+    async def _store_attempt_note(self, effort_id: str, attempt_id: str, note: str) -> None:
+        """Append the note to the plan's WHAT NOT TO DO (an EffortConstraint, so the coding turn's
+        LEARNED CONSTRAINTS carries it too). Capped: beyond NOTES_CAP the oldest is deactivated
+        (it stays on its attempt row)."""
+        cid = "ec-" + hashlib.sha1(f"{effort_id}|attempt|{attempt_id}".encode()).hexdigest()[:12]
+        async with self.db.session_factory() as s:
+            if await s.get(EffortConstraint, cid) is None:
+                s.add(EffortConstraint(id=cid, effort_id=effort_id, signature=self._failure_sig(note),
+                                       kind="attempt_discard", body=note[:_att.NOTE_MAX],
+                                       origin_note=f"attempt {attempt_id}"[:512]))
+            await s.commit()
+            rows = (await s.execute(select(EffortConstraint).where(
+                EffortConstraint.effort_id == effort_id,
+                EffortConstraint.kind == "attempt_discard",
+                EffortConstraint.active.is_(True)).order_by(EffortConstraint.created_at))
+            ).scalars().all()
+            for r in rows[:-_att.NOTES_CAP] if len(rows) > _att.NOTES_CAP else []:
+                r.active = False
+            await s.commit()
+
+    async def _escalate_attempt_step(self, effort_id: str, anchor: str, anchor_text: str) -> str:
+        """The same step (anchor item) discarded three times: escalate ONCE through the
+        orchestrator, with the attempts and their notes, classified."""
+        async with self.db.session_factory() as s:
+            rows = (await s.execute(select(EffortAttempt).where(
+                EffortAttempt.effort_id == effort_id, EffortAttempt.state == "discarded")
+                .order_by(EffortAttempt.n))).scalars().all()
+        mine = [r for r in rows
+                if (r.verdict or {}).get("anchor") == anchor][-_att.DISCARDS_ESCALATE:]
+        klass = _att.classify_discards(
+            [(r.verdict or {}).get("class", "") for r in mine],
+            [bool(((r.facts or {}).get("tests") or {}).get("regression")) for r in mine])
+        plan = await self._effort_plan_row(effort_id)
+        await self._save_effort_plan(effort_id, escalated=sorted(set(plan["escalated"]) | {anchor}))
+        await self.audit.log("attempt_step_escalated", effort_id=effort_id, payload={
+            "anchor": anchor, "discards": len(mine), "class": klass,
+            "attempts": [r.id for r in mine], "refs": [r.ref for r in mine]})
+        listed = "\n".join(f"- attempt {r.n} (`{r.ref}`): {r.note}" for r in mine)
+        msg = (f"⛔ **{effort_id}** — the step serving anchor item **{anchor}**"
+               + (f" ({_att.scrub(anchor_text, 120)})" if anchor_text else "")
+               + f" was discarded {len(mine)} times. Classified: **{klass}**.\n{listed}\n"
+               "Each attempt is kept on its ref for salvage. Steer the approach (or re-scope the "
+               "item), or say “re-run it”.")
+        await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
+        await self.comms.post(Intent.operator_reply, msg, thread_id=self._mgmt_thread_of(effort_id))
+        await self.router.update_effort_card(effort_id, "needs-attention")
+        return f"anchor item {anchor} was discarded {len(mine)} times ({klass})"
+
+    async def _store_plan(self, effort_id: str, decl: _att.PlanDecl, *, start_sha: str) -> None:
+        """Store the approved plan - each step with the anchor item it serves - BEFORE delegation,
+        and open the attempt that will carry it (starting at `start_sha`)."""
+        try:
+            plan = await self._effort_plan_row(effort_id)
+            items = {**plan["items"], **decl.items}
+            plan_no = plan["plan_no"] + 1
+            await self._save_effort_plan(effort_id, plan_no=plan_no, items=items, steps=decl.steps)
+            async with self.db.session_factory() as s:
+                for r in (await s.execute(select(EffortAttempt).where(
+                        EffortAttempt.effort_id == effort_id,
+                        EffortAttempt.state == "open"))).scalars().all():
+                    r.state = "superseded"
+                await s.commit()
+            await self._new_attempt(effort_id, start_sha=start_sha, plan_no=plan_no,
+                                    steps=decl.steps)
+            await self.audit.log("plan_steps_stored", effort_id=effort_id, payload={
+                "plan_no": plan_no, "n_steps": len(decl.steps),
+                "anchors": [st["anchor"] for st in decl.steps], "items": sorted(items),
+                "nothing_remains": decl.nothing_remains})
+        except Exception as exc:  # noqa: BLE001 — bookkeeping never blocks an approved plan
+            log.warning("storing the plan for %s failed: %s", effort_id, exc)
+
+    async def _expire_attempts(self, effort_id: str) -> None:
+        """Attempt refs expire at delivery: no longer offered for salvage. The proxy forbids
+        deleting a branch, and delivery pushes its own branch by name, so the refs never leave the
+        worker's workspace; the next fresh focus drops them with it."""
+        try:
+            async with self.db.session_factory() as s:
+                rows = (await s.execute(select(EffortAttempt).where(
+                    EffortAttempt.effort_id == effort_id,
+                    EffortAttempt.expired.is_(False)))).scalars().all()
+                for r in rows:
+                    r.expired = True
+                    if r.state in ("open", "parked"):
+                        r.state = "delivered"
+                await s.commit()
+            if rows:
+                await self.audit.log("attempt_refs_expired", effort_id=effort_id,
+                                     payload={"n": len(rows)})
+        except Exception as exc:  # noqa: BLE001 — bookkeeping never blocks a delivery
+            log.debug("attempt expiry failed for %s: %s", effort_id, exc)
+
     async def _revert_plan_turn_writes(self, effort_id: str) -> bool:
         """P17 F1/F15 — undo anything a supposedly read-only plan turn wrote. Returns True when it
         had in fact written something.
@@ -13654,6 +14125,15 @@ class Orchestrator:
             "it against the goal before any code changes.",
             effort_id=effort_id,
         )
+        # ao-attempt — PARK the previous attempt before the plan turn (commit + per-effort ref),
+        # so the plan turn starts clean and the write check below stays exactly right; the parked
+        # attempt and its FACTS go to the planner for a KEEP / DISCARD verdict.
+        pre = await self._park_attempt(effort_id, goal) if repo else None
+        att = (pre or {}).get("attempt")
+        plan_row = await self._effort_plan_row(effort_id)
+        fmt = self._plan_format_block(plan_row)
+        notes = self._attempt_notes_block(await self._attempt_notes(effort_id))
+        att_sec = self._attempt_section(att, plan_row) if att else ""
         # P17 F16 — this turn runs in a FRESH session with NO memory of any previous turn, which is
         # the point: the plan must come from the repository, not from recollection. That cuts both
         # ways, so the instruction is explicit about it. Without the first line a context-free
@@ -13679,16 +14159,22 @@ class Orchestrator:
             "UNDERSTANDING: the goal in your own words (1-2 lines)\n"
             "ALREADY DONE: what you OBSERVED to be working, each with the command or file that "
             "shows it (write 'nothing' if the work has not been started)\n"
+            "ANCHOR ITEMS: the acceptance items the goal is checked against (`A1: ...` per line)\n"
             "PLAN: numbered steps for what REMAINS — name the files you'll touch and what changes "
-            "in each (write 'nothing remains' if your observations show the goal is already met)\n"
+            "in each, and END each step with `[anchor: Ax]` (write 'nothing remains' if your "
+            "observations show the goal is already met)\n"
             "WON'T DO: what you will NOT change (out of scope for this goal)\n"
-            "RISKS: what could go wrong / anything you're unsure of\n\n"
+            "RISKS: what could go wrong / anything you're unsure of\n"
+            f"{fmt}{notes}{att_sec}\n\n"
             f"The goal:\n{goal}"
         )
         reason: str | None = None
         misaligned = 0
         empties = 0
         stubs = 0
+        undeclared = 0
+        verdict_asks = 0
+        verdict: _att.Verdict | None = None
         # P13.2 — JUDGE THE PLAN AGAINST THE SCOPE IN FORCE. When the drain dispatches a bounded
         # scope, the goal text carries that scope's border, and declining out-of-scope work with
         # `ESCALATE:` is the PRESCRIBED protocol (`_scope_context`), not a refusal. gym-011 blocked
@@ -13724,6 +14210,10 @@ class Orchestrator:
             # then wiped 24 seconds later). Reverting here makes the violation visible and the
             # workspace honest, whichever mechanism the worker used.
             if repo:
+                # ao-attempt — a plan turn that COMMITTED is undone first (branch back to where the
+                # turn began, files left dirty), so the unchanged check below reverts its files.
+                if pre and pre.get("head"):
+                    await self._restore_head_after_plan_turn(effort_id, pre["head"])
                 await self._revert_plan_turn_writes(effort_id)
             if result is None:
                 await self._report_completion(effort_id, None)
@@ -13796,8 +14286,67 @@ class Orchestrator:
                     "done, with the commit. Do NOT change any file this turn."
                 )
                 continue
+            # ao-attempt — RELEVANCE IS DECIDED HERE, TOP-DOWN: every step declares the anchor item
+            # it serves before it is delegated. Refused back to the planner once, then escalated.
+            decl = _att.parse_plan(out, plan_row["items"])
+            if decl.problems:
+                undeclared += 1
+                await self.audit.log("plan_steps_undeclared", effort_id=effort_id, payload={
+                    "problems": [p_[:80] for p_ in decl.problems[:10]], "ask": undeclared})
+                if undeclared <= 1:
+                    await self.comms.post(
+                        Intent.worker_activity,
+                        "↩️ The plan's steps don't all declare the anchor item they serve — "
+                        "asking for the plan again with them.",
+                        effort_id=effort_id,
+                    )
+                    instr = (
+                        "Your plan was REFUSED: " + "; ".join(decl.problems[:6]) + ".\n"
+                        "Write the WHOLE plan again (UNDERSTANDING / ALREADY DONE / ANCHOR ITEMS / "
+                        "PLAN / WON'T DO / RISKS" + (" / VERDICT" if att else "") + ")."
+                        + fmt + "\nDo NOT change any file this turn.")
+                    continue
+                reason = ("the plan's steps did not declare the anchor items they serve, even "
+                          "after one refusal")
+                break
+            # ao-attempt — the verdict on the parked attempt. Untrusted model output: one exact
+            # VERDICT line naming steps of THAT attempt's plan, else unparseable -> the attempt
+            # stays parked, one re-ask, then escalate. Never an automatic discard.
+            if att is not None:
+                verdict = _att.parse_verdict(out, {int(s_["n"]) for s_ in att["steps"]})
+                if verdict is None:
+                    verdict_asks += 1
+                    await self.audit.log("attempt_verdict_unparseable", effort_id=effort_id,
+                                         payload={"attempt": att["id"], "ask": verdict_asks})
+                    if verdict_asks <= 1:
+                        await self.comms.post(
+                            Intent.worker_activity,
+                            "↩️ The plan has no usable VERDICT on the previous attempt — asking once "
+                            "more. The attempt stays parked; nothing is discarded.",
+                            effort_id=effort_id,
+                        )
+                        instr = (
+                            "Your reply had no single, valid VERDICT line for the PREVIOUS ATTEMPT. "
+                            "Write the WHOLE plan again, including exactly one VERDICT line."
+                            + att_sec + fmt + "\nDo NOT change any file this turn.")
+                        continue
+                    reason = ("no parseable verdict on the previous attempt, even after one "
+                              "re-ask - the attempt is kept parked, nothing was discarded")
+                    break
             reason = await self._plan_misalignment(effort_id, goal, out, scope_goal=scope_goal)
             if reason is None:
+                # ao-attempt — carry out the verdict, then store the approved plan (steps + their
+                # anchor items) BEFORE delegation, and open the next attempt at the resulting tree.
+                nxt_head = (pre or {}).get("head") or ""
+                if att is not None and verdict is not None:
+                    res = await self._apply_attempt_verdict(effort_id, att, verdict)
+                    nxt_head = res.get("head") or nxt_head
+                    if res.get("escalated"):
+                        return None          # three discards of one step: escalated (posted)
+                    if res.get("escalate"):
+                        reason = res["escalate"]
+                        break
+                await self._store_plan(effort_id, decl, start_sha=nxt_head)
                 await self.audit.log("worker_plan_approved", effort_id=effort_id,
                                      payload={"attempt": misaligned + 1})
                 await self.comms.post(
@@ -13823,8 +14372,9 @@ class Orchestrator:
                 )
                 instr = (
                     f"Your plan is NOT aligned with the goal: {reason}\n"
-                    f"Write a REVISED plan in the same format (UNDERSTANDING / PLAN / WON'T DO / "
-                    f"RISKS) that fixes this. Do NOT change any file this turn."
+                    "Write a REVISED plan in the same format (UNDERSTANDING / ANCHOR ITEMS / PLAN "
+                    "/ WON'T DO / RISKS" + (" / VERDICT" if att else "") + ") that fixes this. "
+                    "Every step still ends with `[anchor: Ax]`. Do NOT change any file this turn."
                 )
         # The stop event ALSO rotates _session_for's generation, so the operator's "re-run it"
         # starts from a fresh session instead of re-entering the one that just failed here.

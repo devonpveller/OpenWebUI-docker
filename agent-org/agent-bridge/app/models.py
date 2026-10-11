@@ -581,3 +581,56 @@ class ProjectSurvey(Base):
     base_sha: Mapped[str] = mapped_column(String(64), default="")
     summary: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[str] = mapped_column(default=now_iso, onupdate=now_iso)
+
+
+class EffortPlan(Base):
+    """ao-attempt - the effort's CURRENT approved plan, stored by the bridge before delegation.
+
+    Relevance is decided top-down, at planning (operator 2026-10-11): every step declares the
+    anchor acceptance item it serves, and the bridge keeps that tie here so a later attempt's test
+    facts inherit it. `items` are the anchor items ({id: text}) - kept across re-plans so a step's
+    identity (its anchor item) survives renumbering; `steps` is [{n, text, anchor}];
+    `discards` counts discarded attempts per anchor item; `escalated` lists the items already
+    escalated (three discards escalate ONCE). New table: `create_all` picks it up."""
+
+    __tablename__ = "effort_plans"
+
+    effort_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    plan_no: Mapped[int] = mapped_column(Integer, default=0)
+    items: Mapped[dict] = mapped_column(JSON, default=dict)
+    steps: Mapped[list] = mapped_column(JSON, default=list)
+    done: Mapped[list] = mapped_column(JSON, default=list)        # anchor items whose step was kept
+    discards: Mapped[dict] = mapped_column(JSON, default=dict)
+    escalated: Mapped[list] = mapped_column(JSON, default=list)
+    updated_at: Mapped[str] = mapped_column(default=now_iso, onupdate=now_iso)
+
+
+class EffortAttempt(Base):
+    """ao-attempt - one coding attempt between two plan turns.
+
+    Opened when a plan is approved (`start_sha` = the tree the attempt starts from), it collects
+    the worker's own chosen checks, and is PARKED at the next plan wake (the bridge commits the
+    dirty tree and points a per-effort ref at it). The planner's verdict then KEEPS it (one commit
+    per completed step) or DISCARDS it (tree back to `start_sha`; the attempt stays on `ref` for
+    salvage until delivery expires it). `facts` holds paths, counts, test ids and anchor item ids
+    only; `checks` holds the worker's command text and is never copied into audit or notes."""
+
+    __tablename__ = "effort_attempts"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    effort_id: Mapped[str] = mapped_column(String(64), index=True)
+    n: Mapped[int] = mapped_column(Integer, default=1)
+    state: Mapped[str] = mapped_column(String(16), default="open")  # open|parked|kept|discarded
+    plan_no: Mapped[int] = mapped_column(Integer, default=0)
+    steps: Mapped[list] = mapped_column(JSON, default=list)          # snapshot of the plan steps
+    start_sha: Mapped[str] = mapped_column(String(64), default="")
+    head_sha: Mapped[str] = mapped_column(String(64), default="")    # HEAD before the park commit
+    park_sha: Mapped[str] = mapped_column(String(64), default="")
+    ref: Mapped[str] = mapped_column(String(160), default="")
+    checks: Mapped[list] = mapped_column(JSON, default=list)
+    facts: Mapped[dict] = mapped_column(JSON, default=dict)
+    verdict: Mapped[dict] = mapped_column(JSON, default=dict)
+    note: Mapped[str] = mapped_column(Text, default="")
+    learning_record: Mapped[dict] = mapped_column(JSON, default=dict)
+    expired: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[str] = mapped_column(default=now_iso)

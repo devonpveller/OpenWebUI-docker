@@ -199,7 +199,8 @@ async def test_the_plan_turn_runs_in_its_own_session_not_the_builders(db_url):
         harness.output_queue.append(
             "UNDERSTANDING: build the CLI\n"
             "ALREADY DONE: nothing — todo.py does not exist (ls showed no such file)\n"
-            "PLAN: 1. write todo.py with add/list/done\n"
+            "ANCHOR ITEMS: A1: the CLI adds, lists and completes todos\n"
+            "PLAN: 1. write todo.py with add/list/done [anchor: A1]\n"
             "WON'T DO: no new dependencies\nRISKS: none")
         orch.models._client.queue_text("ALIGNED")
         plan = await orch._worker_plan_gate(eid, chan, root, GOAL, REPO, None, None, None)
@@ -221,7 +222,8 @@ async def test_the_approved_plan_is_carried_as_an_artifact(db_url):
         harness.output_queue.append(
             "UNDERSTANDING: add delete\n"
             "ALREADY DONE: add and list work (ran `python3 todo.py --help`)\n"
-            "PLAN: 1. add cmd_delete to todo.py\n"
+            "ANCHOR ITEMS: A1: todos can be deleted\n"
+            "PLAN: 1. add cmd_delete to todo.py [anchor: A1]\n"
             "WON'T DO: no schema change\nRISKS: none")
         orch.models._client.queue_text("ALIGNED")
         plan = await orch._worker_plan_gate(eid, chan, root, GOAL, REPO, None, None, None)
@@ -246,7 +248,8 @@ async def test_the_plan_turn_is_told_it_has_no_memory(db_url):
 
         orch.router.wake = _spy
         harness.output_queue.append(
-            "UNDERSTANDING: x\nALREADY DONE: nothing\nPLAN: 1. do x\nWON'T DO: y\nRISKS: none")
+            "UNDERSTANDING: x\nALREADY DONE: nothing\nANCHOR ITEMS: A1: x\n"
+            "PLAN: 1. do x [anchor: A1]\nWON'T DO: y\nRISKS: none")
         orch.models._client.queue_text("ALIGNED")
         await orch._worker_plan_gate(eid, chan, root, GOAL, REPO, None, None, None)
         text = instr["text"]

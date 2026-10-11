@@ -95,7 +95,9 @@ async def test_flail_forks_a_fresh_session_and_replans_even_with_gate_off(db_url
         # "Final test run and commit:" as if it were the worker's plan.
         harness.output_queue.append(
             "UNDERSTANDING: port the parser to the new API.\n"
-            "PLAN:\n1. update parser.py to the new call shape\n2. run the tests\n"
+            "ANCHOR ITEMS:\nA1: the parser uses the new API\n"
+            "PLAN:\n1. update parser.py to the new call shape [anchor: A1]\n"
+            "2. run the tests [anchor: A1]\n"
             "WON'T DO: no unrelated refactors\nRISKS: none known")
         await orch.delegate(eid, chan, root, "port the parser to the new API")
         await _drain(orch)                          # the queued re-dispatch runs

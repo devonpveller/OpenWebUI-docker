@@ -25,7 +25,7 @@ from sqlalchemy import func, select
 
 from ..config import Settings
 from ..db import Database
-from ..models import Effort, SessionMap, WakeLog
+from ..models import Effort, SessionMap, WakeLog, WorkerInstance
 from ..schemas import Trigger
 from .audit_sink import AuditSink
 from .governance_gate import GovernanceGate
@@ -917,7 +917,7 @@ class Router:
     async def exec_check(
         self, effort_id: str, *, command: str, session_id: str, repo: str | None = None,
         repo_token: str | None = None, recurse_submodules: bool = False, timeout: int = 900,
-        fresh: bool = False,
+        fresh: bool = False, label: str | None = None, require_focus: bool = False,
     ) -> tuple[int | None, str, bool]:
         """Run ONE verification command on a pooled worker DETERMINISTICALLY (the daemon's
         `/check` — real exit code + output, no model in the loop). Build verification is a
@@ -928,6 +928,11 @@ class Router:
         populate). Exceptions propagate — the orchestrator falls back to the LLM verifier."""
         inst = await self.scheduler.acquire(effort_id, "verifier", session_id)
         try:
+            # ao-attempt: a command that changes the EXISTING workspace (repo=None) must only run
+            # on the worker whose workspace was focused for THIS effort - never on a pool worker
+            # that holds another effort's tree.
+            if require_focus and (self._ws_focus.get(inst.id) or ("",))[0] != effort_id:
+                raise RuntimeError("this worker's workspace is not focused on the effort")
             if repo:
                 ok, detail, _ = await self.harness.set_project(
                     inst.base_url, repo, token=repo_token,
@@ -941,11 +946,24 @@ class Router:
                 inst.base_url, command, timeout=timeout)
             await self.audit.log(
                 "check_exec", effort_id=effort_id, actor=inst.id,
-                payload={"command": command[:200], "exit_code": exit_code,
+                # ao-attempt: `label` replaces the command text when the command carries text
+                # that must not reach the audit (a worker's check command, paths in a commit).
+                payload={"command": (label or command)[:200], "exit_code": exit_code,
                          "timed_out": timed_out})
             return exit_code, output, timed_out
         finally:
             await self.scheduler.release(inst.id)
+
+    async def focus_session(self, effort_id: str) -> str | None:
+        """ao-attempt: the session of the worker whose workspace is focused on this effort, so a
+        deterministic command reaches THAT workspace by affinity. None when no worker holds it
+        (e.g. after a bridge restart: the focus map is in memory)."""
+        ids = [wid for wid, rec in self._ws_focus.items() if rec and rec[0] == effort_id]
+        if not ids:
+            return None
+        async with self.db.session_factory() as s:
+            inst = await s.get(WorkerInstance, ids[0])
+            return inst.session_id if inst is not None and inst.session_id else None
 
     # ── A->B hand-off provenance (P5.4) ──────────────────────────────────────
     async def last_owner(self, path: str, workspace: str = "/workspace") -> str | None:

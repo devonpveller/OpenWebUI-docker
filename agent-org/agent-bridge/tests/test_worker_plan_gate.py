@@ -64,9 +64,11 @@ async def _shutdown(orch, db):
 # and commit:" as though it were the worker's plan.
 _PLAN = "\n".join([
     "UNDERSTANDING: port the callers to the new API.",
+    "ANCHOR ITEMS:",
+    "A1: the callers use the new API",
     "PLAN:",
-    "1. update the call sites in parser.py",
-    "2. run the test suite",
+    "1. update the call sites in parser.py [anchor: A1]",
+    "2. run the test suite [anchor: A1]",
     "WON'T DO: no unrelated refactors",
     "RISKS: none known",
 ])
@@ -100,8 +102,10 @@ async def test_lens_rejecting_both_plans_stops_before_any_execution(db_url):
             "app", "vendored engine only — never reintroduce `NuGet` package references")
         eid, chan, root = await orch.router.open_effort("drifty", project="app")
         harness.output_queue += [
-            "PLAN: 1. revert the engine wiring back to NuGet packages",
-            "PLAN: 1. keep using NuGet, it's easier",
+            "ANCHOR ITEMS: A1: the build passes\n"
+            "PLAN: 1. revert the engine wiring back to NuGet packages [anchor: A1]",
+            "ANCHOR ITEMS: A1: the build passes\n"
+            "PLAN: 1. keep using NuGet, it's easier [anchor: A1]",
         ]
         for why in ("the plan reverts to the forbidden NuGet wiring",
                     "the revision still keeps the forbidden NuGet dependency"):
