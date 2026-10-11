@@ -66,6 +66,9 @@ function runOtExec(command: string, signal: AbortSignal | undefined): Promise<Ex
     // ot-exec is on $PATH; it reads LC_OPEN_TERMINAL_URL / _KEY / WORKSPACE
     // / EVENT_STREAM from the env the AgentRunner set (littlecoder/agent.py).
     const child = spawn("ot-exec", ["-c", command], { stdio: ["pipe", "pipe", "pipe"] });
+    // A stream error (EPIPE on stdin, a failed spawn) must never become an
+    // uncaught exception in pi's process; the child's 'close'/'error' decide.
+    for (const s of [child.stdin, child.stdout, child.stderr]) s?.on("error", () => {});
     child.stdin?.end(); // spawnSync gave the child an empty, closed stdin
     const out: Buffer[] = [];
     const err: Buffer[] = [];
