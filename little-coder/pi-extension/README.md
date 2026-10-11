@@ -58,3 +58,10 @@ docker exec little-coder sh -c 'cat $(npm root -g)/little-coder/.pi/extensions/e
 
 Then adjust `open-terminal-exec/index.ts` to match, or set `LC_ROUTE_EXEC=0`
 while you do.
+
+## No extension here may read thinking
+
+The image build (`docker/remove-thinking-cap.mjs`, ao-thinkon) scans this dir along with
+little-coder's bundled extension set and fails if any file reads thinking (`thinking_delta`, a
+`"thinking"` content block, `reasoning_content`, ...). A thought is bounded by the server's
+reasoning budget only; see [../README.md](../README.md#thinking-no-client-side-cap).

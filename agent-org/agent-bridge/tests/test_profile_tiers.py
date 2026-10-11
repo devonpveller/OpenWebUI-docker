@@ -11,6 +11,7 @@ command and writes nothing. Fakes only (FakeModelClient, FakeHarness); no networ
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -18,14 +19,16 @@ import pytest
 from app.config import Settings
 from app.modules.profiles import TIERS, parse_tier_models, tier_model
 
-from test_profile_model_intent import _events, _orch, _profiles_on, _rows
+from test_profile_model_intent import _events, _orch, _rows
 from authtok import OP_HEADERS, OP_TOKEN
 
 ROOT = Path(__file__).resolve().parents[1]
 
 #: Task kind -> the profile it already runs under (the call sites in app/), and the tier the
 #: operator's rule gives that kind. Planning / decomposition / review / monitoring are long-horizon
-#: judgement -> large; a file-scoped edit is narrow -> small.
+#: judgement -> large. The coding worker was small (a file-scoped edit is narrow) until ao-thinkon
+#: (2026-10-11, principle 4 "thinking is part of the work"): on the local lane small and large are
+#: the same 27B and small differs only in having thinking OFF, so the worker moved to large.
 TASK_KINDS = {
     "planning (plan generation, readiness)": ("planner", "large"),
     "decomposition (lifecycle plan, intent)": ("po", "large"),
@@ -34,8 +37,31 @@ TASK_KINDS = {
     "review: ethics lens": ("reviewer-ethics", "large"),
     "review: scope lens": ("reviewer-scope", "large"),
     "review: security lens": ("reviewer-security", "large"),
-    "file-scoped edit (domain worker)": ("worker-default", "small"),
+    "coding turn (domain worker; thinking on since ao-thinkon)": ("worker-default", "large"),
 }
+
+
+def _pre_ao_think(tmp_path: Path) -> Path:
+    """The shipped profiles as an install seeded BEFORE ao-thinkon has them in its database: every
+    judgement role on local-large, the worker on local-small (mt-policy's seed). The tier is read
+    from the seed file (large now); the model is what the database kept."""
+    d = tmp_path / "profiles"
+    shutil.copytree(ROOT / "profiles", d)
+    f = d / "worker-default.json"
+    data = json.loads(f.read_text(encoding="utf-8"))
+    data["model"] = "local-small"
+    f.write_text(json.dumps(data), encoding="utf-8")
+    return d
+
+
+def _small_worker(tmp_path: Path) -> Path:
+    """A profile set whose worker is on the SMALL tier (the rollback shape: `"tier": "small"`)."""
+    d = _pre_ao_think(tmp_path)
+    f = d / "worker-default.json"
+    data = json.loads(f.read_text(encoding="utf-8"))
+    data["tier"] = "small"
+    f.write_text(json.dumps(data), encoding="utf-8")
+    return d
 
 
 def _seeds() -> dict[str, dict]:
@@ -83,9 +109,9 @@ def test_a_malformed_tier_model_spec_is_loud(spec):
         parse_tier_models(spec)
 
 
-async def test_a_planning_task_routes_to_local_large_and_a_file_edit_to_local_small(db_url):
+async def test_every_shipped_role_routes_to_local_large_the_worker_included(db_url):
     """End to end through the EXISTING path: profile -> ModelRouter -> the model the gateway is
-    asked for (FakeModelClient records it)."""
+    asked for (FakeModelClient records it). ao-thinkon: the worker asks for the thinking role too."""
     orch, chat, db = await _orch(db_url, ROOT / "profiles")
     try:
         client = orch.models._get_client()
@@ -93,33 +119,45 @@ async def test_a_planning_task_routes_to_local_large_and_a_file_edit_to_local_sm
         await orch.models.complete("reviewer-correctness", "sys", "review this")
         await orch.models.complete("worker-default", "sys", "edit one file")
         asked = [c["model"] for c in client.calls if c["kind"] == "complete"][-3:]
-        assert asked == ["local-large", "local-large", "local-small"]
+        assert asked == ["local-large", "local-large", "local-large"]
+        assert orch.profiles.tier_drift(orch.s) == []
+    finally:
+        await db.dispose()
+
+
+async def test_a_small_tier_profile_still_routes_to_local_small(db_url, tmp_path):
+    """The small tier stays defined (rollback: the worker's seed back to `"tier": "small"`)."""
+    orch, chat, db = await _orch(db_url, _small_worker(tmp_path))
+    try:
+        client = orch.models._get_client()
+        await orch.models.complete("worker-default", "sys", "edit one file")
+        assert [c["model"] for c in client.calls if c["kind"] == "complete"][-1:] == ["local-small"]
         assert orch.profiles.tier_drift(orch.s) == []
     finally:
         await db.dispose()
 
 
 async def test_an_existing_install_moves_only_through_the_governed_intent(db_url, tmp_path):
-    """An install seeded before the tiers (every profile local-large) is NOT moved by the new seed
-    files; tier_drift names the one command, and sending it - the landing step - clears it."""
-    orch, chat, db = await _orch(db_url, _profiles_on(tmp_path, "local-large"))
+    """The ao-thinkon landing: an install seeded before it (worker on local-small) is NOT moved by
+    the new seed file; tier_drift names the one command, and sending it clears it."""
+    orch, chat, db = await _orch(db_url, _pre_ao_think(tmp_path))
     try:
-        assert orch.profiles.get("worker-default").tier == "small"      # the tier is read...
-        assert orch.profiles.get("worker-default").model == "local-large"  # ...the model is not moved
+        assert orch.profiles.get("worker-default").tier == "large"      # the tier is read...
+        assert orch.profiles.get("worker-default").model == "local-small"  # ...the model is not moved
         drift = orch.profiles.tier_drift(orch.s)
-        assert drift == [{"profile": "worker-default", "tier": "small", "lane": "local",
-                          "model": "local-large", "expected": "local-small",
-                          "command": "set profile worker-default model local-small"}]
+        assert drift == [{"profile": "worker-default", "tier": "large", "lane": "local",
+                          "model": "local-small", "expected": "local-large",
+                          "command": "set profile worker-default model local-large"}]
         assert [r.version for r in await _rows(db, "worker-default")] == [1]   # read-only
         mgmt = await orch.mgmt_channel_id()
         await orch.nl_intake(drift[0]["command"], mgmt, thread_id="t1",
-                             actor="operator-api:landing-mt-policy")
-        assert orch.profiles.get("worker-default").model == "local-small"
-        assert orch.profiles.get("worker-default").tier == "small"      # survives the new version
+                             actor="operator-api:landing-ao-thinkon")
+        assert orch.profiles.get("worker-default").model == "local-large"
+        assert orch.profiles.get("worker-default").tier == "large"      # survives the new version
         assert orch.profiles.tier_drift(orch.s) == []
         ev = await _events(db, "profile_model_set")
         assert [(e.payload["profile"], e.payload["before"], e.payload["after"]) for e in ev] == [
-            ("worker-default", "local-large", "local-small")]
+            ("worker-default", "local-small", "local-large")]
     finally:
         await db.dispose()
 
@@ -148,7 +186,7 @@ async def test_get_profiles_reports_tier_and_drift(db_url, tmp_path):
     from app.orchestrator import Orchestrator
     from app.worker.harness import FakeHarness
 
-    d = _profiles_on(tmp_path, "local-large")
+    d = _pre_ao_think(tmp_path)
     settings = Settings(
         _env_file=None, chat_adapter="fake", database_url=db_url, profiles_dir=str(d),
         charters_dir=str(ROOT / "charters"), floor_dir=str(ROOT / "floor"),
@@ -161,8 +199,8 @@ async def test_get_profiles_reports_tier_and_drift(db_url, tmp_path):
                                      headers=OP_HEADERS) as c:
             body = (await c.get("/profiles")).json()
     assert body["profiles"]["planner"]["tier"] == "large"
-    assert body["profiles"]["worker-default"]["tier"] == "small"
-    assert [x["command"] for x in body["tier_drift"]] == ["set profile worker-default model local-small"]
+    assert body["profiles"]["worker-default"]["tier"] == "large"
+    assert [x["command"] for x in body["tier_drift"]] == ["set profile worker-default model local-large"]
 
 
 # ── attempt 2 (tester F4): a malformed tier-model spec must not 500 the profile listing ──
@@ -176,7 +214,7 @@ async def _get_profiles(db_url, tmp_path, **extra) -> tuple[int, dict]:
     from app.orchestrator import Orchestrator
     from app.worker.harness import FakeHarness
 
-    d = _profiles_on(tmp_path, "local-large")
+    d = _pre_ao_think(tmp_path)
     settings = Settings(
         _env_file=None, chat_adapter="fake", database_url=db_url, profiles_dir=str(d),
         charters_dir=str(ROOT / "charters"), floor_dir=str(ROOT / "floor"),

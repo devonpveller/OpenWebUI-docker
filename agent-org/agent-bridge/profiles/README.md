@@ -8,7 +8,7 @@ config). The bridge seeds the DB from these JSON files at boot; lane-flips persi
 
 ## Lanes — the pre-P0.5 default is **local**
 
-Every profile ships `lane: "local"`, on its TIER's model role (see "Tiers" below: `local-large`, the resident 27B, for every judgement role; `local-small` for the file-scoped worker - see `inference/README.md`). This is the honest, fail-safe
+Every profile ships `lane: "local"`, on its TIER's model role (see "Tiers" below: `local-large`, the resident 27B with thinking, for every role since ao-thinkon, the worker included - see `inference/README.md`). This is the honest, fail-safe
 pre-decision posture: until the **P0.5 capability-floor test** decides whether local 27B
 judgment is strong enough, *everything runs local on the same model* (zero swap thrash;
 governance §2.1 "default everything local").
@@ -61,7 +61,19 @@ profile carries a `tier`, and the tier names its model role per lane
 | monitoring: deviation, alignment, plan gate, triage | `pm` | large | `local-large` |
 | review (every lens) | `reviewer-*` | large | `local-large` |
 | operator-facing synthesis | `pm-voice` | large | `local-large` |
-| file-scoped edits, mechanical steps | `worker-default` | small | `local-small` |
+| coding turns: reading, editing, testing (since ao-thinkon) | `worker-default` | large | `local-large` |
+
+`worker-default` moved to large on 2026-10-11 (ao-thinkon; plan store
+`agent-org-rework-2026-10/00-PRINCIPLES.md` principle 4, "thinking is part of the work"). On this
+lane the two roles are the SAME 27B; `local-small` differs only in having thinking off. With
+thinking off, agent-org workers generated about 100 tokens per call and read one file per call;
+bare little-coder on the same model, thinking on, reached its first edit where the org's workers
+did not (agent-bakeoff `findings/c7-analysis-2026-10-10.md`). A worker turn's thinking is bounded
+by the server's reasoning budget (llama-swap `--reasoning-budget`), the turn's time limit and the
+progress guard. No client-side cap and no client steer: the little-coder image drops upstream's
+`thinking-budget` length cap (`little-coder/README.md`, "Thinking: no client-side cap").
+The `small` tier stays defined (`AO_PROFILE_TIER_MODELS_LOCAL`); no shipped profile uses it now.
+Back to no-think workers: `set profile worker-default model local-small` and `"tier": "small"` here.
 
 `pm-voice` stays large on purpose: what it writes is what the operator believes, and its
 charter calls a confident wrong answer the worst thing it can produce - not a mechanical step.

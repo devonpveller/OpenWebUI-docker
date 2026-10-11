@@ -74,15 +74,15 @@ async def test_T3_gap_bridge_dies_between_rerun_and_acquire(db_url, monkeypatch)
     """The attempt-3 tester's repro, asserting. Refuse -> fix -> re-run ("Dispatching workers now")
     -> the bridge dies before acquire. After a restart the effort is NOT read as refused, and the
     watchdog recovers it once (base: unresolved=True, three sweeps (0, 0), zero posts)."""
-    strict = StubDaemon(allowed=("local-large",))
+    strict = StubDaemon(allowed=("local-small",))
     _route_harness_to(monkeypatch, strict)
     orch, chat, db = await _orch(db_url)
     eid, chan, root = await orch.router.open_effort("t3-gap")
     await orch.charters.set_goal(eid, "edit one file", created_by="po")
     with pytest.raises(httpx.HTTPStatusError):
         await _wake(orch, eid, chan, root)
-    await orch.profiles.set_model("worker-default", "local-large",
-                                  registered={"local-large", "local-small"})
+    await orch.profiles.set_model("worker-default", "local-small",
+                                  registered={"local-small", "local-large"})
     mgmt = await _rerun_then_die(orch, monkeypatch, eid)
     assert mgmt and "Dispatching workers now" in mgmt[-1]       # the operator's last word
     await db.dispose()
@@ -102,7 +102,7 @@ async def test_g1_a_still_refused_effort_is_not_re_run_in_a_loop_after_a_lost_di
     """Threat model: refuse, NO fix, re-run, bridge dies before acquire. After the restart the lost
     dispatch is recovered once; that re-run is refused again (its intent and acquire precede its
     refusal), so the effort re-pins and later sweeps re-run nothing."""
-    strict = StubDaemon(allowed=("local-large",))
+    strict = StubDaemon(allowed=("local-small",))
     _route_harness_to(monkeypatch, strict)
     orch, chat, db = await _orch(db_url)
     eid, chan, root = await orch.router.open_effort("g1-loop")
@@ -130,7 +130,7 @@ async def test_g1_a_still_refused_effort_is_not_re_run_in_a_loop_after_a_lost_di
 async def test_g1_an_operator_re_run_refused_again_stays_pinned(db_url, monkeypatch):
     """Threat model, no crash: the intent `_reengage`/`delegate` log does not unpin a re-run that is
     itself refused - the refusal is newer than both its intent and its acquire."""
-    strict = StubDaemon(allowed=("local-large",))
+    strict = StubDaemon(allowed=("local-small",))
     _route_harness_to(monkeypatch, strict)
     orch, chat, db = await _orch(db_url)
     try:
@@ -156,7 +156,7 @@ async def test_g1_an_operator_re_run_refused_again_stays_pinned(db_url, monkeypa
 async def test_refusal_is_resolved_only_by_the_same_efforts_later_dispatch(db_url, monkeypatch):
     """Another effort's acquire/intent and the project survey's never resolve a refusal; removing
     `Event.effort_id == eid` from `_model_refusal_unresolved` turns this red."""
-    sw = _Switch(StubDaemon(allowed=("local-large",)))
+    sw = _Switch(StubDaemon(allowed=("local-small",)))
     _route_harness_to(monkeypatch, sw)
     orch, chat, db = await _orch(db_url)
     try:
@@ -164,7 +164,7 @@ async def test_refusal_is_resolved_only_by_the_same_efforts_later_dispatch(db_ur
         b, chan_b, root_b = await orch.router.open_effort("pin-b")
         with pytest.raises(httpx.HTTPStatusError):
             await _wake(orch, a, chan, root)
-        sw.cur = StubDaemon(allowed=("local-large", "local-small"))
+        sw.cur = StubDaemon(allowed=("local-small", "local-large"))
         assert (await _wake(orch, b, chan_b, root_b)).ok
         await orch.audit.log("dispatch_intent", effort_id=b, payload={"source": "test"})
         await orch.router.survey_project(REPO)
@@ -197,7 +197,7 @@ async def test_o1_a_refused_effort_thread_reply_is_not_replayed_on_restart(db_ur
     """The reply is refused for its model: posted once, the event is processed, and a restart's
     catch-up does not dispatch it again (base: dispatch raises, the event stays unprocessed, the
     restart replays it - a second refusal post and a second /tasks)."""
-    strict = StubDaemon(allowed=("local-large",))
+    strict = StubDaemon(allowed=("local-small",))
     _route_harness_to(monkeypatch, strict)
     orch, chat, db = await _orch(db_url)
     eid, chan, root = await orch.router.open_effort("o1-reply")
