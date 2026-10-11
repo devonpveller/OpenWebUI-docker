@@ -379,6 +379,14 @@ class WorkerHarness(Protocol):
         unlike `has_running_task`, which a hang holds True forever. None on any error / no running task."""
         ...
 
+    async def task_event_lines(
+        self, base_url: str, task_id: str, offset: int = 0,
+    ) -> tuple[list[str], int] | None:
+        """ao-silence: the raw pi event lines of `task_id` from line `offset`, and the next offset
+        (`/tasks/{id}/events`). The stall sweep folds them into the commands still running. None on
+        any error (the sweep then falls back to the plain silence rule)."""
+        ...
+
 
 class LittleCoderHarness:
     """Drives the little-coder control daemon. One instance addresses many daemons
@@ -644,6 +652,20 @@ class LittleCoderHarness:
         except (httpx.HTTPError, ValueError, TypeError):
             return None
 
+    async def task_event_lines(
+        self, base_url: str, task_id: str, offset: int = 0,
+    ) -> tuple[list[str], int] | None:
+        try:
+            async with self._client(base_url, 15.0) as c:
+                e = await c.get(f"/tasks/{task_id}/events", params={"offset": max(0, int(offset))})
+                if e.status_code != 200:
+                    return None
+                body = e.json() or {}
+                lines = [x for x in (body.get("events") or []) if isinstance(x, str)]
+                return lines, int(body.get("next_offset", offset + len(lines)))
+        except (httpx.HTTPError, ValueError, TypeError):
+            return None
+
 
 #: FakeHarness `stream_commands` entry standing for a file edit (an edit/write tool call).
 FAKE_EDIT = "<fake-edit>"
@@ -705,6 +727,8 @@ class FakeHarness:
         self.progress_task_ids: dict[str, str] = {}
         self.progress_totals: dict[str, int] = {}     # if set: emulate the daemon's line-count semantics
         self.progress_calls: list[tuple[str, str, int]] = []   # (url, task_id, effective since_offset)
+        # ao-silence: raw pi event lines per url (the stall sweep folds them into running commands)
+        self.event_lines: dict[str, list[str]] = {}
         # Optional answer text streamed via on_update (default "ok") — set long text to exercise
         # the answer-chunking path.
         self.answer_text: str | None = None
@@ -840,3 +864,11 @@ class FakeHarness:
         if total is not None:                       # emulate the daemon: next_offset = offset + len(lines[offset:])
             return (tid, since_offset + max(0, total - since_offset))
         return (tid, self.progress_offsets.get(base_url, 0))
+
+    async def task_event_lines(
+        self, base_url: str, task_id: str, offset: int = 0,
+    ) -> tuple[list[str], int] | None:
+        lines = self.event_lines.get(base_url)
+        if lines is None:
+            return None
+        return lines[offset:], max(offset, len(lines))

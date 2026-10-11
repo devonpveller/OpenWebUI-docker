@@ -97,6 +97,7 @@ from .schemas import (
     AlignmentVerdict, Concern, Decision, EscalationVerdict, Level, LifecyclePlan, LifecycleStep, MonitorVerdict, OperatorIntent, Trigger,
 )
 from .worker.harness import FakeHarness, LittleCoderHarness, WorkerHarness
+from .worker.command_watch import CommandWatch, judge_frozen
 
 log = logging.getLogger("agent_bridge.orchestrator")
 
@@ -1245,6 +1246,9 @@ class Orchestrator:
         # WHEN. The offset climbing = alive; frozen past `worker_silence_s` = hung. Empty after a
         # restart (we can't know pre-restart silence, so the clock starts fresh — the safe default).
         self._worker_progress: dict[str, tuple[str, int, datetime]] = {}
+        # ao-silence: {base_url: CommandWatch} — the commands the sweep has seen start and not yet end
+        # on each worker's running task (a long command is alive within its own timeout).
+        self._command_watch: dict[str, CommandWatch] = {}
 
     def _spawn(self, coro) -> None:
         """Run a coroutine in the background, keeping a reference so it isn't GC'd."""
@@ -2379,6 +2383,83 @@ class Orchestrator:
             await self.router.update_effort_card(eid, "waiting")
         return True
 
+    async def _watch_commands(self, url: str, task_id: str, now) -> "CommandWatch | None":
+        """ao-silence: fold the task's new pi events into the commands now running. None when the
+        daemon cannot say (then only the plain silence rule applies)."""
+        cw = self._command_watch.get(url)
+        if cw is None or cw.task_id != task_id:               # first sight or a new task: start from 0
+            cw = self._command_watch[url] = CommandWatch(task_id)
+        try:
+            got = await self.harness.task_event_lines(url, task_id, cw.offset)
+        except Exception:  # noqa: BLE001 — a probe failure must not stall the sweep
+            got = None
+        if got is None:
+            return None
+        lines, cw.offset = got
+        cw.feed(lines, now)
+        return cw
+
+    @staticmethod
+    def _fmt_s(sec: float) -> str:
+        sec = int(sec)
+        return f"{sec} s" if sec < 120 else f"{sec // 60} min"
+
+    def _silence_reason_text(self, why: dict) -> str:
+        """What the operator is told, per the rule that fired (no raw command text, ever)."""
+        rule, f = why.get("rule"), self._fmt_s
+        if rule == "command_ceiling":
+            return (f"ran a command for {f(why.get('ran_s', 0))}, which hit the {f(why.get('ceiling_s', 0))} "
+                    f"absolute ceiling")
+        if rule == "command_overran":
+            return f"ran a command for {f(why.get('ran_s', 0))} against its {f(why.get('timeout_s', 0))} timeout"
+        return f"went silent mid-turn (no progress for ~{f(self.s.worker_silence_s)})"
+
+    async def _recover_hung_worker(self, url: str, task_id: str, eid: str | None, why: dict,
+                                   parked: set, mgmt) -> None:
+        await self.harness.cancel_task(url, task_id)   # free the daemon (orphaned turn) …
+        self._worker_progress.pop(url, None)
+        self._command_watch.pop(url, None)
+        if not eid or eid in parked or self._waiting_on(eid) is not None:
+            return
+        self._delegating.discard(eid)                 # … its delegate coroutine is dead now
+        # P31 — the hung turn is cancelled (daemon freed); but if the WHOLE fleet is
+        # unreachable this silence is the environment, not the worker. Hold, don't escalate.
+        if await self._env_wait_hold(eid, "hung"):
+            return
+        n = await self._event_count(eid, "stall_recovered")
+        if n >= self.s.stall_max_recoveries:
+            await self.audit.log("stall_escalated", effort_id=eid,
+                                 payload={"reason": "worker_silent", "recoveries": n, **why})
+            body = (f"🧰 **{eid}**'s worker hung mid-turn and my {n} recoveries didn't take — "
+                    f"stopping auto-retry to avoid a loop. Say **“re-run it”** when clear.")
+            await self.comms.post(Intent.escalation, body, effort_id=eid)
+            await self.comms.post(Intent.operator_reply, body,
+                                  thread_id=self._mgmt_thread_of(eid))
+            await self.router.update_effort_card(eid, "needs-attention")
+            return
+        await self.audit.log("stall_recovered", effort_id=eid,
+                             payload={"reason": "worker_silent", "n": n + 1, **why})
+        # P16 — A RECOVERED TURN MUST START FROM THE LAST COMMITTED STATE. gym-014
+        # (2026-07-20): a worker abandoned mid-edit leaving `tests/test_todo.py` modified
+        # and the suite FAILING (2 errors). The recovery re-engaged onto that same tree, so
+        # the next worker inherited a broken suite it had not caused, spent its whole turn
+        # chasing it, and abandoned too — three turns lost to one partial edit. The org
+        # then told the operator "something structural is blocking it… not your code",
+        # which was wrong: the daemon, queue and GPU were all healthy.
+        #
+        # Uncommitted work from a turn that DIED is not work — it is wreckage the next
+        # worker cannot distinguish from intent. Discard it. Anything committed survives,
+        # which is the line that matters.
+        discarded = await self._discard_uncommitted(url, eid)
+        await self._reengage(
+            [eid], mgmt_channel=mgmt, mgmt_thread=self._mgmt_thread_of(eid),
+            reply_prefix=(f"🔧 **{eid}**'s worker " + self._silence_reason_text(why)
+                          + " — I stopped the hung "
+                          "turn and re-engaged it. Committed work is intact"
+                          + ("; its half-finished uncommitted edits were discarded so the "
+                             "next turn starts from a clean, known state."
+                             if discarded else ".")))
+
     async def _sweep_stalled_efforts(self) -> None:
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
@@ -2394,10 +2475,12 @@ class Orchestrator:
         # mid-turn holds status `running` forever, so a status-only busy-defer sat idle 20 min while the
         # GPU was at 0%. So we ask the daemon for each running worker's per-agent-step event OFFSET
         # (advances on generation/tool/edit): offset climbing = alive → defer to it; offset FROZEN past
-        # `worker_silence_s` = hung → cancel the turn and recover the bound effort now. This never
-        # interrupts legitimate long work (a working worker keeps bumping the offset).
+        # `worker_silence_s` = hung → cancel the turn and recover the bound effort now. A frozen
+        # offset is not by itself a hang: a command still running inside its own timeout keeps the turn
+        # alive (ao-silence; `judge_frozen`), and only silence with no command running, a command past
+        # its timeout + grace, or the absolute command ceiling cancels it.
         alive = False
-        hung: list[tuple[str, str, str | None]] = []          # (base_url, task_id, effort_id)
+        hung: list[tuple[str, str, str | None, dict]] = []    # (base_url, task_id, effort_id, rule info)
         if self.s.worker_silence_s > 0:
             for w in await self._worker_urls():
                 url = w["base_url"]
@@ -2413,60 +2496,40 @@ class Orchestrator:
                     prog = None
                 if prog is None:                              # idle daemon (no running task)
                     self._worker_progress.pop(url, None)
+                    self._command_watch.pop(url, None)
                     continue
                 task_id, offset = prog
+                try:
+                    watch = await self._watch_commands(url, task_id, now)
+                except Exception:  # noqa: BLE001 — a bad event stream must not stop the sweep
+                    log.exception("stall sweep: command watch failed for %s; plain silence rule", url)
+                    watch = None
                 if prev is not None and prev[0] == task_id and offset <= prev[1]:
-                    # same task, no new agent-loop events since we last looked
-                    if (now - prev[2]).total_seconds() >= self.s.worker_silence_s:
-                        hung.append((url, task_id, w.get("effort_id")))
+                    # same task, no new agent-loop events since we last looked. ao-silence: a command
+                    # still executing inside its own timeout is alive; only a silent turn with NO
+                    # command running, or a command past its timeout/ceiling, is hung.
+                    silent_s = (now - prev[2]).total_seconds()
+                    kw = dict(silence_s=self.s.worker_silence_s,
+                              default_timeout_s=self.s.worker_command_default_timeout_s,
+                              grace_s=self.s.worker_command_grace_s,
+                              ceiling_s=self.s.worker_command_ceiling_s)
+                    try:
+                        is_hung, why = judge_frozen(watch, silent_s, now, **kw)
+                    except Exception:  # noqa: BLE001 — degenerate data for ONE turn: plain silence rule for it
+                        log.exception("stall sweep: judging %s failed; plain silence rule", url)
+                        is_hung, why = judge_frozen(None, silent_s, now, **kw)
+                    if is_hung:
+                        hung.append((url, task_id, w.get("effort_id"), why))
                         continue
-                    alive = True                              # silent but still within the grace window
+                    alive = True                              # silent but within its grace / command window
                 else:                                         # first sight, new task, or offset advanced
                     self._worker_progress[url] = (task_id, offset, now)
                     alive = True
-            for url, task_id, eid in hung:                    # recover each genuinely-hung worker
-                await self.harness.cancel_task(url, task_id)   # free the daemon (orphaned turn) …
-                self._worker_progress.pop(url, None)
-                if not eid or eid in parked or self._waiting_on(eid) is not None:
-                    continue
-                self._delegating.discard(eid)                 # … its delegate coroutine is dead now
-                # P31 — the hung turn is cancelled (daemon freed); but if the WHOLE fleet is
-                # unreachable this silence is the environment, not the worker. Hold, don't escalate.
-                if await self._env_wait_hold(eid, "hung"):
-                    continue
-                n = await self._event_count(eid, "stall_recovered")
-                if n >= self.s.stall_max_recoveries:
-                    await self.audit.log("stall_escalated", effort_id=eid,
-                                         payload={"reason": "worker_silent", "recoveries": n})
-                    body = (f"🧰 **{eid}**'s worker hung mid-turn and my {n} recoveries didn't take — "
-                            f"stopping auto-retry to avoid a loop. Say **“re-run it”** when clear.")
-                    await self.comms.post(Intent.escalation, body, effort_id=eid)
-                    await self.comms.post(Intent.operator_reply, body,
-                                          thread_id=self._mgmt_thread_of(eid))
-                    await self.router.update_effort_card(eid, "needs-attention")
-                    continue
-                await self.audit.log("stall_recovered", effort_id=eid,
-                                     payload={"reason": "worker_silent", "n": n + 1})
-                # P16 — A RECOVERED TURN MUST START FROM THE LAST COMMITTED STATE. gym-014
-                # (2026-07-20): a worker abandoned mid-edit leaving `tests/test_todo.py` modified
-                # and the suite FAILING (2 errors). The recovery re-engaged onto that same tree, so
-                # the next worker inherited a broken suite it had not caused, spent its whole turn
-                # chasing it, and abandoned too — three turns lost to one partial edit. The org
-                # then told the operator "something structural is blocking it… not your code",
-                # which was wrong: the daemon, queue and GPU were all healthy.
-                #
-                # Uncommitted work from a turn that DIED is not work — it is wreckage the next
-                # worker cannot distinguish from intent. Discard it. Anything committed survives,
-                # which is the line that matters.
-                discarded = await self._discard_uncommitted(url, eid)
-                await self._reengage(
-                    [eid], mgmt_channel=mgmt, mgmt_thread=self._mgmt_thread_of(eid),
-                    reply_prefix=(f"🔧 **{eid}**'s worker went silent mid-turn (no progress for "
-                                  f"~{int(self.s.worker_silence_s // 60)} min) — I stopped the hung "
-                                  f"turn and re-engaged it. Committed work is intact"
-                                  + ("; its half-finished uncommitted edits were discarded so the "
-                                     "next turn starts from a clean, known state."
-                                     if discarded else ".")))
+            for url, task_id, eid, why in hung:               # recover each genuinely-hung worker
+                try:                                          # one bad turn never stops the watchdog
+                    await self._recover_hung_worker(url, task_id, eid, why, parked, mgmt)
+                except Exception:  # noqa: BLE001
+                    log.exception("stall sweep: recovering hung worker %s failed; continuing", url)
         if alive:
             return                                            # a worker is genuinely progressing
         for e in await self.gate.snapshot(open_only=True):
