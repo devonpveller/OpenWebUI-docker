@@ -884,7 +884,7 @@ _FXD = ROOT / "tests" / "fixtures"
 
 
 def _golden(name):
-    return [ln for ln in (_FXD / name).read_text("utf-8").split("\n") if ln]
+    return [ln for ln in (_FXD / name).read_text("utf-8").splitlines() if ln]   # CRLF checkouts too
 
 
 def _judge(lines):
