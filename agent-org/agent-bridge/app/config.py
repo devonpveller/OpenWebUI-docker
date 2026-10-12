@@ -501,12 +501,15 @@ class Settings(BaseSettings):
         import os
         return bool(self.github_app_id) and os.path.isfile(self.github_app_private_key_path)
 
-    # ── Project-context anchor (UX-FLOW Stage 1, P3.8) ──────────────────────
-    # Before the readiness gate, run a ONE-TIME read-only worker survey of the repo (languages,
-    # structure, conventions) and cache it per project, so the gate ANCHORS to the real codebase
-    # instead of guessing (and stops asking placement/language/pattern questions). Only fires when
-    # a real repo is focused (default_repo / per-project repo); the sandbox has nothing to survey.
-    project_survey_enabled: bool = True
+    # ── Project orientation map (ao-orient; replaced the worker "project survey") ──────────
+    # A deterministic, model-free map of the project's repo (tree, languages, key files, test
+    # folders + likely test command, README headings, recent paths), read by the BRIDGE through
+    # the GitHub App's REST API - no worker turn, no pooled slot, no model. It anchors the readiness
+    # gate and rides the first coding wake as PROJECT ORIENTATION. Cached per project + commit;
+    # a failed build is never cached. Needs the App (and a repo on the App's account).
+    project_orientation_enabled: bool = True
+    # Wall-clock bound for one build (head lookup + reads); a slower repo gets "unavailable".
+    project_orientation_timeout_s: float = 20.0
 
     # ── Charters / rule store (P3) ──────────────────────────────────────────
     charters_dir: str = "charters"

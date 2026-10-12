@@ -154,16 +154,6 @@ async def test_a_worker_wake_sends_the_worker_default_profile_model(db_url, stub
         await db.dispose()
 
 
-async def test_the_project_survey_sends_the_worker_default_profile_model(db_url, stub):
-    orch, chat, db = await _orch(db_url)
-    try:
-        await orch.router.survey_project(REPO)
-        assert len(stub.task_bodies) == 1
-        assert stub.task_bodies[0]["model"] == "local-small"
-    finally:
-        await db.dispose()
-
-
 async def test_an_older_daemon_that_ignores_model_still_runs_the_turn(db_url, monkeypatch):
     old = StubDaemon(knows_model=False)
     _route_harness_to(monkeypatch, old)
@@ -222,7 +212,8 @@ def test_an_unset_model_is_not_sent(stub):
 def test_every_worker_dispatch_call_site_resolves_the_worker_default_profile():
     """The call sites: every `self.router.wake(...)` in orchestrator.py names its profile as a
     literal `role=` and it is `worker-default`; Router.wake turns `role` into the profile's model.
-    The other harness.wake caller, Router.survey_project, asks for worker-default by name."""
+    Router.wake is the only harness.wake caller (the project survey that also called it was
+    retired by ao-orient)."""
     tree = ast.parse((ROOT / "app" / "orchestrator.py").read_text(encoding="utf-8"))
     roles = []
     for node in ast.walk(tree):
@@ -235,8 +226,7 @@ def test_every_worker_dispatch_call_site_resolves_the_worker_default_profile():
             roles.append(ast.literal_eval(kw["role"]))
     assert roles and set(roles) == {"worker-default"}, roles
     router_src = (ROOT / "app" / "modules" / "router.py").read_text(encoding="utf-8")
-    assert router_src.count("self.harness.wake(") == 2
-    assert 'self.worker_turn_model("worker-default")' in router_src
+    assert router_src.count("self.harness.wake(") == 1
     assert "self.worker_turn_model(role)" in router_src
 
 
@@ -436,33 +426,6 @@ async def test_a_turn_that_runs_after_a_refusal_is_watched_again(db_url, monkeyp
             await s.commit()
         await orch._sweep_stalled_efforts()
         assert await orch._event_count(eid, "stall_recovered") == 1
-    finally:
-        await db.dispose()
-
-
-async def test_a_refused_project_survey_is_audited(db_url, monkeypatch):
-    """TF3: the survey degrades to "" as before, but the refusal is in the audit record and the
-    project_survey audit says which model was sent."""
-    strict = StubDaemon(allowed=("local-large",))
-    _route_harness_to(monkeypatch, strict)
-    orch, chat, db = await _orch(db_url)
-    try:
-        assert await orch.router.survey_project(REPO) == ""
-        (refusal,) = await _events(db, "worker_model_refused")
-        assert refusal["model"] == "local-small" and refusal["survey"] is True
-        (survey,) = await _events(db, "project_survey")
-        assert survey["model_sent"] == "local-small" and survey["ok"] is False
-    finally:
-        await db.dispose()
-
-
-async def test_a_good_project_survey_audits_the_model(db_url, stub):
-    orch, chat, db = await _orch(db_url)
-    try:
-        await orch.router.survey_project(REPO)
-        (survey,) = await _events(db, "project_survey")
-        assert survey["model_sent"] == "local-small"
-        assert survey["model_ran"] == "llamacpp/local-small"     # read back, not copied from sent
     finally:
         await db.dispose()
 
@@ -797,15 +760,3 @@ def test_pin_the_flail_path_keeps_the_model_the_daemon_reported(monkeypatch):
     r = asyncio.run(LittleCoderHarness(poll_interval_s=0.0, poll_timeout_s=5.0).wake(
         W1, "s", "p", max_repeat=3, model="local-small"))
     assert r.status == "flail" and r.model == "llamacpp/local-small"
-
-
-@pytest.mark.parametrize("code, detail", [(422, "empty prompt"), (500, "boom"),
-                                          (422, "model is fine")])
-async def test_pin_a_non_model_survey_error_is_not_a_refusal(db_url, monkeypatch, code, detail):
-    _route_harness_to(monkeypatch, _Down(code, detail))
-    orch, chat, db = await _orch(db_url)
-    try:
-        assert await orch.router.survey_project(REPO) == ""
-        assert await _events(db, "worker_model_refused") == []
-    finally:
-        await db.dispose()

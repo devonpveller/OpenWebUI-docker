@@ -25,7 +25,7 @@ from app.models import Event, Profile
 from app.modules.profiles import ConcurrentProfileChange, ProfileRegistry
 from tests.test_profile_lane_errors import _HookDb, _app
 from tests.test_worker_model import (
-    REPO, StubDaemon, _Down, _Switch, _backdate, _orch, _route_harness_to, _wake,
+    StubDaemon, _Down, _Switch, _backdate, _orch, _route_harness_to, _wake,
 )
 
 
@@ -154,7 +154,7 @@ async def test_g1_an_operator_re_run_refused_again_stays_pinned(db_url, monkeypa
 # ── the per-effort filter (test gap from attempt 3) ───────────────────────────────────────────
 
 async def test_refusal_is_resolved_only_by_the_same_efforts_later_dispatch(db_url, monkeypatch):
-    """Another effort's acquire/intent and the project survey's never resolve a refusal; removing
+    """Another effort's acquire/intent never resolves a refusal; removing
     `Event.effort_id == eid` from `_model_refusal_unresolved` turns this red."""
     sw = _Switch(StubDaemon(allowed=("local-large",)))
     _route_harness_to(monkeypatch, sw)
@@ -167,7 +167,6 @@ async def test_refusal_is_resolved_only_by_the_same_efforts_later_dispatch(db_ur
         sw.cur = StubDaemon(allowed=("local-large", "local-small"))
         assert (await _wake(orch, b, chan_b, root_b)).ok
         await orch.audit.log("dispatch_intent", effort_id=b, payload={"source": "test"})
-        await orch.router.survey_project(REPO)
         assert await orch._model_refusal_unresolved(a)
         assert not await orch._model_refusal_unresolved(b)
     finally:

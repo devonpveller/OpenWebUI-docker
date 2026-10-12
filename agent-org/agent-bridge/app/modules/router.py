@@ -52,9 +52,6 @@ def slugify(name: str) -> str:
     return s or "untitled"
 
 
-# Reserved effort id for the read-only project survey (UX-FLOW Stage 1 anchor). It exists only so
-# the survey respects the scheduler's concurrency semaphore (surveys yield to real work).
-SURVEY_EFFORT = "__survey__"
 CAPABILITY_EFFORT = "__capability__"  # reserved effort for operator-plane git ops (compose/submodule)
 
 
@@ -99,15 +96,6 @@ def _model_refusal(exc: Exception) -> str:
         return ""
     return detail if isinstance(detail, str) and detail.startswith("model refused") else ""
 
-
-_SURVEY_PROMPT = (
-    "PROJECT SURVEY (READ-ONLY — do not modify, create, or delete any files; do not run tests that "
-    "mutate state). In 8–12 terse lines, give a FACTUAL summary of THIS repository so future work "
-    "can anchor to it: primary language(s) + framework; top-level structure (key directories); the "
-    "build/deps manifest; the test framework + how tests are run; the naming + code conventions you "
-    "actually observe; and where a new small feature or utility would conventionally live. Facts "
-    "only — no recommendations, no changes."
-)
 
 # A context builder returns the full prompt injected into a worker on wake
 # (goal + floor + steering + plan). Wired to charters.build_context by the
@@ -171,8 +159,8 @@ class Router:
     def worker_turn_model(self, role: str) -> tuple[str | None, str]:
         """(model, note) for a worker turn dispatched under `role` (ef-worker-model, tracker H3).
 
-        `role` is the profile the call site already resolves (every worker wake and the survey
-        use `worker-default`). The model is sent only when that profile is on the LOCAL lane: a
+        `role` is the profile the call site already resolves (every worker wake uses
+        `worker-default`). The model is sent only when that profile is on the LOCAL lane: a
         worker is a local little-coder, and its model must be a role behind the local gateway. A
         cloud-lane profile (out of scope) sends no model, so the worker runs little-coder's own
         agent.model, as before; `note` says why for the audit."""
@@ -826,55 +814,6 @@ class Router:
             finally:
                 if not quarantined:
                     await self.scheduler.release(inst.id)
-
-    # ── project survey — read-only Stage-1 anchor for the readiness gate (P3.8) ─
-    async def survey_project(self, repo: str) -> str:
-        """Run a ONE-TIME read-only survey of `repo` on a pooled worker and return its factual
-        summary (languages/structure/conventions). Best-effort: returns "" if no repo, no free
-        slot, or the survey fails — the caller degrades to conventions-only anchoring. Respects the
-        concurrency semaphore via a reserved survey effort so it yields to real work."""
-        if not repo:
-            return ""
-        await self.gate.ensure_effort(SURVEY_EFFORT, "project survey")
-        try:
-            inst = await self.scheduler.acquire(SURVEY_EFFORT, "worker-default", SURVEY_EFFORT)
-        except (FrozenEffortError, NoCapacityError):
-            return ""
-        model, _note = self.worker_turn_model("worker-default")
-        try:
-            ok, _detail, _upstream_ok = await self.harness.set_project(inst.base_url, repo)
-            if not ok:  # a non-empty tuple is always truthy — unpack ok explicitly (was a latent bug)
-                return ""
-            result = await self.harness.wake(
-                inst.base_url, f"survey-{slugify(repo)}", _SURVEY_PROMPT,
-                **({"model": model} if model else {}),
-            )
-            summary = (result.output or "").strip() if result else ""
-            await self.audit.log(
-                "project_survey", actor=inst.id,
-                payload={"repo": repo, "ok": bool(result and result.ok), "len": len(summary),
-                         "model_sent": model, "model_ran": getattr(result, "model", None)},
-            )
-            return summary if (result and result.ok) else ""
-        except Exception as exc:  # noqa: BLE001 - survey is advisory; never block intake
-            refused = _model_refusal(exc) if model else ""
-            if refused:
-                # TF3 — the survey degrades to conventions-only either way, but a refusal is a config
-                # mismatch the operator must see in the record, exactly as for a worker wake.
-                await self.audit.log(
-                    "worker_model_refused", effort_id=SURVEY_EFFORT, actor=inst.id,
-                    payload={"role": "worker-default", "model": model, "detail": refused[:200],
-                             "repo": repo, "survey": True},
-                )
-                await self.audit.log(
-                    "project_survey", actor=inst.id,
-                    payload={"repo": repo, "ok": False, "len": 0, "model_sent": model,
-                             "model_ran": None, "refused": True},
-                )
-            log.warning("project survey failed for %s: %s", repo, exc)
-            return ""
-        finally:
-            await self.scheduler.release(inst.id)
 
     # ── operator-plane composition (autonomous-project-lifecycle P-APL.1b) ──────
     async def compose_submodules(

@@ -61,7 +61,7 @@ async def _orch(db_url, *, drain_loop=True, qa_gate="report", tier_walk=True, pl
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
-        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        max_concurrent_workers=1, database_url=db_url,
         review_mode="off", plan_approval="off", qa_gate=qa_gate, drain_loop=drain_loop,
         drain_tier_walk=tier_walk, drain_plan_split=plan_split, drain_round_cap=round_cap,
     )

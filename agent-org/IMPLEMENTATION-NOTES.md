@@ -575,6 +575,10 @@ Fixes from the first real conversational tests (**119 tests green**):
    Best-effort + cached (survey failure → conventions-only; empty result cached so it isn't retried
    per request; `invalidate` forces a refresh). Off for the sandbox (nothing to survey). New setting
    `AO_PROJECT_SURVEY_ENABLED` (default true; only fires with a repo). Tests: `test_project_context.py` (6).
+   *Retired 2026-10-11 (ao-orient):* the worker survey raced real work for pooled slots and cached its
+   failures; it was replaced by a deterministic orientation map the bridge builds itself through the
+   GitHub App (`modules/orientation.py`, `AO_PROJECT_ORIENTATION_ENABLED`); `project_context.py` and its
+   tests are in `scripts/archive/project-survey/`.
 
    *Model-capability note (answering the operator's P0.5 question):* P0.5 measured **three** batteries
    — instruction/charter-following (18/18, incl. a benign "no-escalate" case), structured-output
