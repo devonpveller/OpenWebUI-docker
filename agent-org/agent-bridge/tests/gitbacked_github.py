@@ -96,6 +96,7 @@ class GitBackedGitHub:
         self.requests: list[str] = []
         self.fail: int | None = None
         self.fail_on: tuple[str, ...] = ()   # with `fail`: only requests whose path+query match
+        self.fail_body: object = None        # with `fail`: the JSON body to answer (e.g. 200 + {})
         self.gate: asyncio.Event | None = None
         self.hold_paths: tuple[str, ...] = ()
         self.held = asyncio.Event()       # set when a request starts waiting on the gate
@@ -117,12 +118,17 @@ class GitBackedGitHub:
         if self.delay_s:
             await asyncio.sleep(self.delay_s)
         if self.fail is not None and (not self.fail_on or any(h in full for h in self.fail_on)):
-            return httpx.Response(self.fail, json={"message": "injected"})
+            return httpx.Response(self.fail, json=(self.fail_body if self.fail_body is not None
+                                                   else {"message": "injected"}))
+        # git runs in a worker thread, like the C7 stub's own process: the stand-in must not block
+        # the event loop, or a loop-lag measurement would charge the stand-in's work to the bridge
+        return await asyncio.to_thread(self._answer, path, dict(request.url.params))
+
+    def _answer(self, path: str, q: dict) -> httpx.Response:
         prefix = f"/repos/{self.owner}/{self.repo}"
         if not path.startswith(prefix):
             return httpx.Response(404, json={"message": "Not Found"})
         rest = path[len(prefix):]
-        q = dict(request.url.params)
         if rest in ("", "/"):
             return httpx.Response(200, json={"default_branch": "main", "full_name":
                                              f"{self.owner}/{self.repo}"})

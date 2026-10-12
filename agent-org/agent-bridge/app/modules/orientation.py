@@ -54,6 +54,7 @@ log = logging.getLogger("agent_bridge.orientation")
 # ── bounds (a huge or hostile repo must not stall intake) ─────────────────────────────────────
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024    # any single API response
 MAX_TREE_ENTRIES = 20_000               # paths considered at all
+MAX_PATH_CHARS = 1024                   # a longer path is ignored (git allows any length)
 BFS_LISTING_BUDGET = 150                # directory listings when the trees endpoint is absent
 BFS_CONCURRENCY = 6
 BFS_MAX_DEPTH = 8
@@ -123,21 +124,33 @@ _TEST_FILE = re.compile(
 # long token-shaped run mixing letters and digits is masked whatever its prefix. Over-redaction of a
 # heading or a file name costs nothing; a leaked secret costs a rotation.
 REDACTED = "[REDACTED]"
+# LINEAR BY CONSTRUCTION (round 3: a hostile heading drove two of these into quadratic
+# backtracking and stalled the event loop for 80 s). Rules for every pattern here:
+#   * every repetition has an upper bound ({m,N}, N small), so the work per start position is
+#     bounded by a constant and a scan is O(len * N);
+#   * no nested or adjacent ambiguous quantifiers over the same characters;
+#   * they only ever see text already cut to its display bound (`clean` cuts FIRST), so N * len
+#     is a few thousand steps at most.
+# tests/test_project_orientation.py::test_every_redaction_pattern_is_linear times each one on
+# adversarial input of growing size.
 _SECRET_SHAPES = [
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(-----END [A-Z ]*PRIVATE KEY-----|$)", re.S),
-    re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s:/@]+:[^\s@/]+@"),       # scheme://user:secret@
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
-    re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
-    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"),
-    re.compile(r"(?i)\b(api[_-]?key|secret|token|password|passwd|pwd|access[_-]?key)\b\s*[:=]\s*\S+"),
-    re.compile(r"\b[rs]k_(live|test)_[A-Za-z0-9]{10,}"),                   # Stripe
-    re.compile(r"\bxapp-[A-Za-z0-9-]{10,}"),                               # Slack app token
-    # the house Sanitizer's PII shapes (little-coder sanitize.py `_PII_PATTERNS`)
-    re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"),   # email
+    # a PEM header masks the rest of the (single, cleaned) line
+    re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----.*", re.S),
+    # scheme://user:secret@ - anchored on the literal "://" with bounded parts
+    re.compile(r"(?i)[a-z][a-z0-9+.-]{0,31}://[^\s:/@]{1,128}:[^\s@/]{1,256}@"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,255}"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,255}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"sk-[A-Za-z0-9_-]{16,255}"),
+    re.compile(r"xox[abposre]-[A-Za-z0-9.-]{10,255}"),
+    re.compile(r"eyJ[A-Za-z0-9_-]{1,512}\.eyJ[A-Za-z0-9_-]{1,2048}\.[A-Za-z0-9_-]{1,1024}"),
+    re.compile(r"(?i)bearer[ \t]{1,8}[A-Za-z0-9._~+/=-]{8,512}"),
+    re.compile(r"(?i)(api[_-]?key|secret|token|password|passwd|pwd|access[_-]?key)[ \t]{0,8}[:=]"
+               r"[ \t]{0,8}[^\s]{1,256}"),
+    re.compile(r"[rs]k_(live|test)_[A-Za-z0-9]{10,255}"),                 # Stripe
+    re.compile(r"xapp-[A-Za-z0-9-]{10,255}"),                             # Slack app token
+    # the house Sanitizer's PII shapes (little-coder sanitize.py `_PII_PATTERNS`), bounded
+    re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63}){0,8}\.[A-Za-z]{2,24}"),
     re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b"),  # IPv4
 ]
 # Shape-agnostic rules for secrets with no known prefix (both are deliberately conservative about
@@ -149,7 +162,7 @@ _SECRET_SHAPES = [
 #   lowercase letters, or 3+ lowercase letters); a random token (base62 or hex, e.g.
 #   Zq81mXv04TtPo9LwKs27Hb or a commit sha) is not.
 _B64_40 = re.compile(r"(?<![A-Za-z0-9/+=])[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])")
-_LONG_RUN = re.compile(r"[A-Za-z0-9]{20,}")
+_LONG_RUN = re.compile(r"[A-Za-z0-9]{20,512}")
 _WORDISH = re.compile(r"[A-Z][a-z]{2,}|[a-z]{3,}")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
 
@@ -180,13 +193,27 @@ def redact(text: str) -> str:
     return _LONG_RUN.sub(_mask_run, text)
 
 
+_TOKEN_TAIL = re.compile(r"[A-Za-z0-9_+/=.:@%-]{1,512}$")
+
+
 def clean(text: str, limit: int) -> str:
-    """One safe display line from untrusted text: control/format characters (newlines, bidi
-    overrides, zero-width) become '?', whitespace collapses, then redaction, then the length bound."""
-    text = _CONTROL.sub("?", text or "")
-    text = re.sub(r"\s+", " ", text).strip()
+    """One safe display line from untrusted text. The text is CUT TO ITS DISPLAY BOUND FIRST (no
+    regex ever sees more than ~`limit` characters of untrusted input), then control/format
+    characters (newlines, bidi overrides, zero-width) become '?', whitespace collapses, and
+    redaction runs. A cut that lands inside a token drops that token's visible start, so a secret
+    split by the cut cannot leak its prefix."""
+    text = (text or "")[: limit * 4]             # bound the input of every pass below
+    text = _CONTROL.sub("?", text)
+    text = " ".join(text.split())
+    cut = len(text) > limit
+    if cut:
+        text = text[: limit - 1]
+        text = _TOKEN_TAIL.sub("", text)          # the partial token at the cut
     text = redact(text)
-    return text if len(text) <= limit else text[: limit - 1] + "~"
+    if len(text) > limit:                         # a redaction marker can lengthen the line
+        text = text[: limit - 1]
+        cut = True
+    return text + "~" if cut else text
 
 
 # ── the repo reader seam ──────────────────────────────────────────────────────────────────────
@@ -258,7 +285,10 @@ class GitHubRestSource:
         except httpx.HTTPError as exc:
             raise OrientationError(f"GET {path[:80]} failed: {type(exc).__name__}") from exc
         try:
-            return status, json.loads(bytes(buf) or b"null")
+            data = bytes(buf) or b"null"
+            parsed = (json.loads(data) if len(data) < 64 * 1024
+                      else await asyncio.to_thread(json.loads, data))
+            return status, parsed
         except ValueError as exc:
             raise OrientationError(f"GET {path[:80]}: not JSON") from exc
 
@@ -276,23 +306,7 @@ class GitHubRestSource:
     async def list_tree(self, sha: str) -> tuple[list[Entry], str]:
         st, body = await self._get(f"/git/trees/{quote(sha, safe='')}?recursive=1")
         if st == 200 and isinstance(body, dict) and isinstance(body.get("tree"), list):
-            out: list[Entry] = []
-            for t in body["tree"][:MAX_TREE_ENTRIES]:
-                if not isinstance(t, dict) or not isinstance(t.get("path"), str):
-                    continue
-                typ, mode, path = t.get("type"), str(t.get("mode", "")), t["path"]
-                segs = path.split("/")
-                if any(seg in SKIP_DIRS for seg in segs[:-1]):
-                    continue                        # inside a skipped dir
-                kind = ("dir" if typ == "tree" else "submodule" if typ == "commit"
-                        else "link" if mode == "120000" else "file")
-                if kind == "dir" and segs[-1] in SKIP_DIRS:
-                    kind = "skipped"
-                out.append(Entry(path, kind))
-            note = "tree (truncated by the server)" if body.get("truncated") else "tree"
-            if len(body["tree"]) > MAX_TREE_ENTRIES:
-                note = f"tree (first {MAX_TREE_ENTRIES} entries)"
-            return out, note
+            return await asyncio.to_thread(_entries_from_tree, body)
         if st not in (404, 405, 409, 422, 501):
             raise OrientationError(f"tree unreadable (HTTP {st})")
         return await self._walk_contents(sha)
@@ -320,16 +334,18 @@ class GitHubRestSource:
             results = await asyncio.gather(*(listing(d) for d in batch))
             nxt: list[str] = []
             for d, (st, body) in results:
-                if st == 404 and d:
-                    continue                    # gone at this commit: genuinely not there
-                if st != 200 or not isinstance(body, list):
-                    # anything else (5xx, 429, 403, a malformed body) fails the build: a map with a
-                    # silently missing directory would be cached as if it were the repo
+                # every dir listed here was named by a listing of the SAME immutable commit, so it
+                # exists: a 404 (replica lag, a stub's git error), any other status, a malformed
+                # body or an empty list (git has no empty dirs) all fail the build - a map with a
+                # silently missing directory would be cached as if it were the repo
+                if st != 200 or not isinstance(body, list) or not body:
                     raise OrientationError(f"listing {d or '/'} unreadable (HTTP {st})")
                 for it in body:
                     if not isinstance(it, dict) or not isinstance(it.get("path"), str):
                         continue
                     typ, path = it.get("type"), it["path"]
+                    if len(path) > MAX_PATH_CHARS:
+                        continue                    # hostile path length: not listed, not walked
                     name = path.rsplit("/", 1)[-1]
                     if typ == "dir":
                         if name in SKIP_DIRS:
@@ -349,12 +365,14 @@ class GitHubRestSource:
 
     async def read_file(self, path: str, sha: str) -> bytes | None:
         st, body = await self._get(f"/contents/{quote(path)}?ref={quote(sha, safe='')}")
-        if st == 404:
-            return None      # not there
+        # Only paths this build just listed at the same immutable commit are read, so a 404 is
+        # not "absent" (replica lag, a stub's git error) and fails the build like any other
+        # non-200 - a transient/denied read must not pass for "this manifest says nothing".
         if st != 200:
-            # a transient/denied read must not pass for "this manifest says nothing"
             raise OrientationError(f"read of {path[:80]} failed (HTTP {st})")
-        if not isinstance(body, dict) or body.get("type") != "file":
+        if not isinstance(body, dict) or "type" not in body:
+            raise OrientationError(f"read of {path[:80]}: malformed answer")
+        if body.get("type") != "file":
             return None      # a symlink/submodule/dir is never read through
         if int(body.get("size") or 0) > MAX_BLOB_BYTES or body.get("encoding") != "base64":
             return None
@@ -369,9 +387,8 @@ class GitHubRestSource:
         cur, oldest = sha, ""
         for _ in range(RECENT_COMMITS):
             st, body = await self._get(f"/commits/{quote(cur, safe='')}")
-            if st == 404:
-                break
-            if st != 200 or not isinstance(body, dict):
+            # the base and every parent named by the API exist: no 404 is "absent" here
+            if st != 200 or not isinstance(body, dict) or "parents" not in body:
                 raise OrientationError(f"commit {cur[:12]} unreadable (HTTP {st})")
             parents = body.get("parents") or []
             if not parents or not isinstance(parents[0], dict) or not parents[0].get("sha"):
@@ -380,9 +397,7 @@ class GitHubRestSource:
         if not oldest:
             return []
         st, cmp_ = await self._get(f"/compare/{quote(oldest, safe='')}...{quote(sha, safe='')}")
-        if st == 404:
-            return []
-        if st != 200 or not isinstance(cmp_, dict):
+        if st != 200 or not isinstance(cmp_, dict) or not isinstance(cmp_.get("files"), list):
             raise OrientationError(f"compare unreadable (HTTP {st})")
         seen: list[str] = []
         for f in cmp_.get("files") or []:
@@ -390,6 +405,29 @@ class GitHubRestSource:
             if isinstance(name, str) and name not in seen:
                 seen.append(name)
         return seen
+
+
+def _entries_from_tree(body: dict) -> tuple[list[Entry], str]:
+    """The trees endpoint's answer as entries (CPU work: called in a worker thread)."""
+    out: list[Entry] = []
+    for t in body["tree"][:MAX_TREE_ENTRIES]:
+        if not isinstance(t, dict) or not isinstance(t.get("path"), str):
+            continue
+        typ, mode, path = t.get("type"), str(t.get("mode", "")), t["path"]
+        if len(path) > MAX_PATH_CHARS:
+            continue                                # hostile path length: not listed
+        segs = path.split("/")
+        if any(seg in SKIP_DIRS for seg in segs[:-1]):
+            continue                                # inside a skipped dir
+        kind = ("dir" if typ == "tree" else "submodule" if typ == "commit"
+                else "link" if mode == "120000" else "file")
+        if kind == "dir" and segs[-1] in SKIP_DIRS:
+            kind = "skipped"
+        out.append(Entry(path, kind))
+    note = "tree (truncated by the server)" if body.get("truncated") else "tree"
+    if len(body["tree"]) > MAX_TREE_ENTRIES:
+        note = f"tree (first {MAX_TREE_ENTRIES} entries)"
+    return out, note
 
 
 def rest_source_for(github, repo_url: str, *, api_base: str,
@@ -442,7 +480,7 @@ def _test_command(name: str, content: str) -> str | None:
     if name == "Cargo.toml":
         return "cargo test"
     if name == "Makefile":
-        return "make test" if re.search(r"(?m)^test\s*:", content) else None
+        return "make test" if re.search(r"(?m)^test[ \t]{0,64}:", content) else None
     if name == "pom.xml":
         return "mvn test"
     if name in ("build.gradle", "build.gradle.kts"):
@@ -458,24 +496,33 @@ def _test_command(name: str, content: str) -> str | None:
     return None
 
 
-_MD_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+def _heading(line: str) -> tuple[int, str] | None:
+    """(level, text) of a Markdown ATX heading, without a regex over the untrusted line: the line
+    is cut to a few display widths first, then parsed with plain string operations."""
+    s = line[: HEADING_CHARS * 4].strip()
+    level = len(s) - len(s.lstrip("#"))
+    if not 1 <= level <= 6 or len(s) == level or s[level] not in (" ", chr(9)):
+        return None
+    body = s[level:].strip().rstrip("#").strip()     # optional closing hashes
+    return (level, body) if body else None
 
 
 def readme_headings(raw: bytes) -> list[str]:
-    """Markdown ATX headings outside code fences, bounded and cleaned. Nothing else of the file."""
+    """Markdown ATX headings outside code fences, bounded and cleaned. Nothing else of the file.
+    Linear: at most HEADING_CHARS * 4 characters of any line are looked at."""
     text = raw[:MAX_BLOB_BYTES].decode("utf-8", "replace")
     out: list[str] = []
     fence = False
     for line in text.splitlines():
-        s = line.strip()
+        s = line[: HEADING_CHARS * 4].lstrip()
         if s.startswith("```") or s.startswith("~~~"):
             fence = not fence
             continue
         if fence:
             continue
-        m = _MD_HEADING.match(s)
-        if m:
-            out.append("#" * len(m.group(1)) + " " + clean(m.group(2), HEADING_CHARS))
+        h = _heading(s)
+        if h:
+            out.append("#" * h[0] + " " + clean(h[1], HEADING_CHARS))
             if len(out) >= README_HEADINGS:
                 break
     return out
@@ -552,7 +599,7 @@ def render(f: _Facts) -> str:
     if f.commands:
         lines.append("Likely test commands (from manifests):")
         for d, cmd, src in f.commands[:6]:
-            where = f"cd {P(d)} && {cmd}" if d else cmd
+            where = f"cd {_q(P(d))} && {cmd}" if d else cmd
             lines.append(f"  {where}   [{P(src)}]")
         if len(f.commands) > 6:
             lines.append(f"  ... {len(f.commands) - 6} more")
@@ -616,23 +663,33 @@ def _ecosystem(cmd: str) -> str:
     return "dotnet" if cmd.startswith("dotnet test") else _CMD_ECOSYSTEM.get(cmd, "*")
 
 
+def _test_root_of(path: str) -> str | None:
+    """The runner root of a test file, or None when the file is not a test: the dir above the
+    outermost `tests`-like segment, else (a test-named file) its own folder."""
+    segs = path.split("/")
+    idx = next((i for i, s in enumerate(segs[:-1]) if s in TEST_DIR_NAMES), None)
+    if idx is not None:
+        return "/".join(segs[:idx])
+    if _TEST_FILE.match(segs[-1][-256:]):
+        return "/".join(segs[:-1])
+    return None
+
+
+def _is_test_path(path: str) -> bool:
+    return _test_root_of(path) is not None
+
+
 def test_roots(entries: list[Entry]) -> dict[str, Counter]:
-    """{project root of a test folder: Counter of test files per ecosystem}. A test folder is a dir
-    named like `tests/` or one holding test-named files; its ROOT is the dir above the outermost
-    `tests`-like segment (where a runner is started), else the folder itself. Paths only."""
+    """{project root of a test folder: Counter of test files per ecosystem}. Paths only."""
     roots: dict[str, Counter] = {}
     for e in entries:
         if e.kind != "file":
             continue
-        segs = e.path.split("/")
-        idx = next((i for i, s in enumerate(segs[:-1]) if s in TEST_DIR_NAMES), None)
-        if idx is not None:
-            root = "/".join(segs[:idx])
-        elif _TEST_FILE.match(segs[-1]):
-            root = "/".join(segs[:-1])
-        else:
+        root = _test_root_of(e.path)
+        if root is None:
             continue
-        ext = segs[-1].rsplit(".", 1)[-1].lower() if "." in segs[-1] else ""
+        name = e.path.rsplit("/", 1)[-1]
+        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
         lang = _TEST_LANG.get(ext)
         if lang:
             roots.setdefault(root, Counter())[lang] += 1
@@ -649,27 +706,35 @@ def _runs(cmd: tuple[str, str, str], root: str, lang: str) -> bool:
     return _covers(cmd[0], root) and (eco == "*" or eco == lang)
 
 
+# A test project's name ends in Test/Tests/Spec(s) after a separator or a lower->upper boundary
+# (App.Tests, AppTests, App.UnitTests, app_tests), not in "test" inside a word (Attestation, Contest).
+_DOTNET_TEST_PROJECT = re.compile(r"(?:^|[._-]|(?<=[a-z0-9]))(?:Unit|Integration|Functional|E2E)?"
+                                  r"(?:Tests?|Specs?)$|(?i:(?:^|[._-])tests?$)")
+
+
+def _q(s: str) -> str:
+    """Quote a path for a shell command when it needs it (spaces, quotes, $, etc.)."""
+    return s if re.fullmatch(r"[A-Za-z0-9._/+@:=-]{1,1024}", s) else "'" + s.replace("'", "'\\''") + "'"
+
+
 def dotnet_commands(files: list[Entry]) -> list[tuple[str, str, str]]:
     """`dotnet test` from paths only (nothing read): every solution, else every test-named project
     no solution covers. The command names the solution/project; the dir is where it lives."""
     out: list[tuple[str, str, str]] = []
     slns = [e.path for e in files if e.path.endswith((".sln", ".slnx"))]
     for p in sorted(slns, key=lambda p: (_depth(p), p)):
-        out.append((_dir_of(p), f"dotnet test {p.rsplit('/', 1)[-1]}", p))
+        out.append((_dir_of(p), f"dotnet test {_q(p.rsplit('/', 1)[-1])}", p))
     for p in sorted(e.path for e in files if e.path.endswith((".csproj", ".fsproj", ".vbproj"))):
-        if not re.search(r"(?i)test", p.rsplit("/", 1)[-1]):
+        if not _DOTNET_TEST_PROJECT.search(p.rsplit("/", 1)[-1].rsplit(".", 1)[0]):
             continue
         if any(_covers(d, _dir_of(p)) for d, _c, _s in out):
             continue
-        out.append((_dir_of(p), f"dotnet test {p.rsplit('/', 1)[-1]}", p))
+        out.append((_dir_of(p), f"dotnet test {_q(p.rsplit('/', 1)[-1])}", p))
     return out
 
 
-async def build_map(source: RepoSource, sha: str) -> str:
-    """Read the facts through `source` and render the bounded map. Raises OrientationError, also
-    when any single read inside the build fails with anything but "not there" (a partial map is
-    never produced, so it can never be cached)."""
-    entries, note = await source.list_tree(sha)
+def _plan(entries: list[Entry]) -> tuple[list[Entry], dict[str, Counter], list[Entry], str]:
+    """CPU part 1 (runs in a worker thread): which files to read."""
     if not any(e.kind == "file" for e in entries):
         raise OrientationError("no files in the tree")
     files = [e for e in entries if e.kind == "file"]
@@ -684,9 +749,13 @@ async def build_map(source: RepoSource, sha: str) -> str:
                        key=relevance)[:MAX_MANIFEST_READS]
     readme = next((e.path for e in sorted(files, key=lambda e: e.path)
                    if "/" not in e.path and e.path.lower() in ("readme.md", "readme.markdown")), "")
-    reads = [m.path for m in manifests] + ([readme] if readme else [])
-    blobs = dict(zip(reads, await asyncio.gather(*(source.read_file(p, sha) for p in reads))))
+    return files, roots, manifests, readme
 
+
+def _compose(sha: str, note: str, entries: list[Entry], files: list[Entry],
+             roots: dict[str, Counter], manifests: list[Entry], readme: str,
+             blobs: dict[str, bytes | None], recent: list[str]) -> str:
+    """CPU part 2 (runs in a worker thread): commands, headings, the rendered map."""
     commands: list[tuple[str, str, str]] = dotnet_commands(files)
     for m in manifests:
         raw = blobs.get(m.path)
@@ -697,11 +766,20 @@ async def build_map(source: RepoSource, sha: str) -> str:
         if cmd and not any(c[0] == d and c[1] == cmd for c in commands):
             commands.append((d, cmd, m.path))
     # pytest-style tests no manifest declares a runner for are still a pytest project - but only
-    # where Python test files ARE the tests of that root (a stray test_*.py in a dotnet repo yields
-    # at most a command rooted at its own folder, never one at the repo root)
+    # where Python test files ARE tests of that root. If the root is shared with another
+    # ecosystem (a python test inside a dotnet repo's tests/), the command is rooted at the python
+    # files' own folders, never at the shared root.
     for r in sorted(roots, key=lambda p: (_depth(p), p)):
-        if roots[r].get("py") and not any(_runs(c, r, "py") for c in commands):
+        if not roots[r].get("py") or any(_runs(c, r, "py") for c in commands):
+            continue
+        if len(roots[r]) == 1:
             commands.append((r, "python -m pytest",
+                             "pytest-style test files; no manifest declares a runner"))
+            continue
+        own = sorted({_dir_of(e.path) for e in files if e.path.endswith(".py")
+                      and _test_root_of(e.path) == r and _is_test_path(e.path)})
+        for d in own[:3]:
+            commands.append((d, "python -m pytest",
                              "pytest-style test files; no manifest declares a runner"))
 
     # the dominant build system first: by how many test files each command reaches
@@ -709,10 +787,23 @@ async def build_map(source: RepoSource, sha: str) -> str:
         return sum(n for r, langs in roots.items() for lang, n in langs.items() if _runs(c, r, lang))
     commands.sort(key=lambda c: (-weight(c), _depth(c[0]) if c[0] else -1, c[0], c[1]))
     headings = readme_headings(blobs[readme]) if readme and blobs.get(readme) else []
-    recent = [p for p in await source.recent_paths(sha)
-              if not any(seg in SKIP_DIRS for seg in p.split("/")[:-1])]
+    recent = [p for p in recent if not any(seg in SKIP_DIRS for seg in p.split("/")[:-1])]
     return render(_Facts(sha=sha, tree_note=note, entries=entries, commands=commands,
                          headings=headings, readme=readme, recent=recent, roots=roots))
+
+
+async def build_map(source: RepoSource, sha: str) -> str:
+    """Read the facts through `source` and render the bounded map. Raises OrientationError, also
+    when any single read inside the build fails (a partial map is never produced, so it can never
+    be cached). All CPU work runs in worker threads, so the event loop keeps ticking and the
+    caller's time limits can fire whatever the repo contains."""
+    entries, note = await source.list_tree(sha)
+    files, roots, manifests, readme = await asyncio.to_thread(_plan, entries)
+    reads = [m.path for m in manifests] + ([readme] if readme else [])
+    blobs = dict(zip(reads, await asyncio.gather(*(source.read_file(p, sha) for p in reads))))
+    recent = await source.recent_paths(sha)
+    return await asyncio.to_thread(_compose, sha, note, entries, files, roots, manifests, readme,
+                                   blobs, recent)
 
 
 # ── the per-project cache + the one entry point the orchestrator calls ─────────────────────────
@@ -801,7 +892,7 @@ class ProjectOrientation:
                 task = asyncio.ensure_future(self._build(key, source, sha, remaining, effort_id))
                 handed = True
                 self._inflight[(key, sha)] = task
-                task.add_done_callback(lambda _t, k=(key, sha): self._inflight.pop(k, None))
+                task.add_done_callback(lambda t, k=(key, sha): self._done(k, t))
             if wait_s is not None:
                 left = max(0.0, wait_s - (time.monotonic() - t0))
                 done, _ = await asyncio.wait({task}, timeout=left)
@@ -825,6 +916,11 @@ class ProjectOrientation:
                                ms=int((time.monotonic() - t0) * 1000))
         return Orientation(text=text, ok=True, attempted=True, sha=sha, cached=shared,
                            ms=int((time.monotonic() - t0) * 1000))
+
+    def _done(self, k: tuple[str, str], t: asyncio.Task) -> None:
+        self._inflight.pop(k, None)
+        if not t.cancelled():
+            t.exception()            # retrieved: already audited by _build
 
     async def _build(self, key: str, source: RepoSource, sha: str, timeout_s: float,
                      effort_id: str | None) -> str:

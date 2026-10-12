@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 import httpx
+import pytest
 from sqlalchemy import func, select
 
 from app.adapters.chat import FakeChatAdapter
@@ -305,5 +306,96 @@ async def test_a_slow_build_never_holds_intake_and_the_first_wake_still_gets_the
         await _drain_bg(orch)
         first = [p for p in _coding_prompts(harness) if "--verbose" in p][0]
         assert "PROJECT ORIENTATION MAP" in first and "python -m pytest" in first
+    finally:
+        await db.dispose()
+
+
+# ── round 3: hostile repos through the REAL intake - the event loop keeps ticking ─────────────
+
+class _LoopLag:
+    """Max gap between 10 ms ticks of a task on the event loop (a blocked loop shows as a gap)."""
+
+    def __init__(self) -> None:
+        self.max_gap = 0.0
+        self._task: asyncio.Task | None = None
+
+    async def _run(self) -> None:
+        last = time.monotonic()
+        while True:
+            await asyncio.sleep(0.01)
+            now = time.monotonic()
+            self.max_gap = max(self.max_gap, now - last)
+            last = now
+
+    def __enter__(self):
+        self._task = asyncio.ensure_future(self._run())
+        return self
+
+    def __exit__(self, *exc):
+        self._task.cancel()
+
+
+def _hostile_repo(tmp_path: Path, kind: str) -> Path:
+    cap = 256 * 1024                          # the bridge's read cap for a README
+    base = {"pyproject.toml": "[tool.pytest.ini_options]\n", "tests/test_h.py": "def test_h(): pass\n",
+            "src/h/core.py": "X = 1\n"}
+    if kind == "dots-heading":                # 'a.' * n up to the read cap, one heading
+        base["README.md"] = "# " + "a." * ((cap - 4) // 2)
+    elif kind == "huge-headings":             # 25 headings of ~10 KiB, each an adversarial shape
+        shapes = ["a.b@" * 2500, "a-" * 5000, "eyJ" * 3300, "a:" * 5000, "ab://" * 2000]
+        base["README.md"] = "\n".join("## " + shapes[i % 5] for i in range(25))[:cap]
+    elif kind == "long-paths":                # deep, long, and over-long paths
+        seg = "d" * 200
+        for i in range(30):
+            base["/".join([seg + str(i)] * 4) + "/f.py"] = "x"
+        base["/".join(["z" * 250] * 6) + "/too_long.py"] = "x"          # > MAX_PATH_CHARS
+        base["README.md"] = "# " + "a." * 1000
+    return make_repo(tmp_path / kind, [base])
+
+
+@pytest.mark.parametrize("kind", ["dots-heading", "huge-headings", "long-paths"])
+async def test_hostile_repos_never_stall_the_loop_or_intake(db_url, tmp_path, kind):
+    stand = GitBackedGitHub(_hostile_repo(tmp_path, kind), owner=OWNER, repo="hostile", trees=False)
+    orch, harness, db, acquired = await _orch(db_url, tmp_path, {"hostile": stand},
+                                              project_orientation_intake_wait_s=2.0,
+                                              project_orientation_timeout_s=30.0)
+    try:
+        with _LoopLag() as lag:
+            t0 = time.monotonic()
+            eid = await _intake(orch, "hostile", "h", "add a --verbose flag")
+            intake_s = time.monotonic() - t0
+            await _drain_bg(orch)
+        assert lag.max_gap < 0.5, f"event loop stalled {lag.max_gap:.2f}s"
+        assert intake_s < 2.0 + 3.0, f"intake took {intake_s:.1f}s"
+        first = [p for p in _coding_prompts(harness) if "--verbose" in p][0]
+        assert "PROJECT ORIENTATION MAP" in first and "python -m pytest" in first
+        mp = first[first.index("PROJECT ORIENTATION MAP"):]
+        assert len(mp) <= 4100
+        assert all(len(ln) <= 1200 for ln in mp.splitlines())
+        cached = orch.orientation.cached("hostile")
+        assert cached and "python -m pytest" in cached[1] and "tests/ (1)" in cached[1]
+        assert set(acquired) == {eid}
+    finally:
+        await db.dispose()
+
+
+async def test_a_build_slower_than_its_bound_is_cut_and_not_cached_with_the_loop_ticking(
+        db_url, tmp_path):
+    stand = GitBackedGitHub(_hostile_repo(tmp_path, "dots-heading"), owner=OWNER, repo="hostile",
+                            trees=False)
+    stand.delay_s = 0.4                        # every read slow: the walk needs > 2 s
+    orch, harness, db, acquired = await _orch(db_url, tmp_path, {"hostile": stand},
+                                              project_orientation_intake_wait_s=0.5,
+                                              project_orientation_timeout_s=2.0)
+    try:
+        with _LoopLag() as lag:
+            t0 = time.monotonic()
+            await _intake(orch, "hostile", "h", "add a --verbose flag")
+            assert time.monotonic() - t0 < 3.0
+            await _drain_bg(orch)
+        assert lag.max_gap < 0.5
+        first = [p for p in _coding_prompts(harness) if "--verbose" in p][0]
+        assert "PROJECT ORIENTATION: unavailable for this effort (timed out" in first
+        assert orch.orientation.cached("hostile") is None
     finally:
         await db.dispose()

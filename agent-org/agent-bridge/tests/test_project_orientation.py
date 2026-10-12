@@ -294,12 +294,37 @@ async def test_one_failed_read_fails_the_build_and_the_next_call_rebuilds_in_ful
     assert kinds == ["project_orientation_failed", "project_orientation"]
 
 
-async def test_a_404_inside_a_build_is_absence_not_failure(tmp_path):
-    gh = GitBackedGitHub(_small_repo(tmp_path), trees=True)
+# (mode, a path this build lists before it reads it, the injected status, the injected body)
+LISTED_THEN_GONE = [
+    ("trees", "/contents/web/package.json", 404, None),     # a listed manifest
+    ("trees", "/contents/README.md", 404, None),            # the listed README
+    ("walk", "/contents/tests?ref=", 404, None),            # a listed directory
+    ("walk", "/contents/web?ref=", 404, None),
+    ("walk", "/contents/tests?ref=", 200, []),              # a listed dir answered as empty
+    ("trees", "/contents/pyproject.toml", 200, {}),         # a wrong-shape file answer
+    ("trees", "/commits/", 404, None),                      # a commit the API itself named
+    ("trees", "/commits/", 200, {}),
+    ("trees", "/compare/", 404, None),
+    ("trees", "/compare/", 200, {}),
+]
+
+
+@pytest.mark.parametrize("mode, path, status, body", LISTED_THEN_GONE,
+                         ids=[f"{m}:{p}:{s}:{b!r}" for m, p, s, b in LISTED_THEN_GONE])
+async def test_a_404_or_wrong_shape_on_a_path_the_build_listed_fails_the_build(
+        tmp_path, mode, path, status, body):
+    """Round 3: at an immutable commit a path the same build just listed exists, so a 404 (replica
+    lag after a push, the C7 stub's answer to any git error) or a wrong-shape answer is a failed
+    read, not absence: unavailable, not cached, the next call rebuilds the full map."""
+    gh = GitBackedGitHub(_small_repo(tmp_path), trees=(mode == "trees"))
     po = _orientation(gh)
-    gh.fail, gh.fail_on = 404, ("/contents/web/package.json",)
-    res = await po.get("gym", GH_REPO, gh.head())
-    assert res.ok and "npm test" not in res.text and "python -m pytest" in res.text
+    sha = gh.head()
+    gh.fail, gh.fail_on, gh.fail_body = status, (path,), body
+    bad = await po.get("gym", GH_REPO, sha)
+    assert not bad.ok and bad.attempted and po.cached("gym") is None, bad
+    gh.fail, gh.fail_on, gh.fail_body = None, (), None
+    good = await po.get("gym", GH_REPO, sha)
+    assert good.ok and "cd web && npm test" in good.text and "# Gym CLI" in good.text
 
 
 # ── round 2: dotnet and mixed repos ────────────────────────────────────────────────────────────
@@ -377,6 +402,49 @@ def test_identifiers_are_not_masked_and_tokens_still_are():
                    "192.0.2.10"):
         out = om.clean(f"x {secret} y", 400)
         assert secret not in out and "[REDACTED]" in out, secret
+
+
+# ── round 3: hostile text cannot buy CPU time (linear patterns, bounded inputs) ──────────────
+
+# inputs built to make a backtracking regex go quadratic or worse (round-2 tester: "a." * n drove
+# the URL-credential and email patterns quadratic)
+def _adversarial(n: int) -> list[str]:
+    return ["a." * (n // 2), "a-" * (n // 2), "a@" * (n // 2), "a:" * (n // 2), "eyJ" * (n // 3),
+            "-----BEGIN " * (n // 11), "x" * n, "1." * (n // 2), "a.b@" * (n // 4),
+            "ab://" * (n // 5), "bearer " * (n // 7), "token=" * (n // 6), "#" * n, "a1" * (n // 2)]
+
+
+def _slowest(fn, inputs) -> float:
+    import time as _t
+    worst = 0.0
+    for s in inputs:
+        t0 = _t.perf_counter()
+        fn(s)
+        worst = max(worst, _t.perf_counter() - t0)
+    return worst
+
+
+def test_every_redaction_pattern_is_linear():
+    """Every pattern, on its own, over 16 000 adversarial characters (the quadratic ones took
+    seconds here at this size): each run must stay well under 0.25 s."""
+    pats = list(om._SECRET_SHAPES) + [om._B64_40, om._LONG_RUN, om._WORDISH, om._CONTROL,
+                                      om._TOKEN_TAIL]
+    inputs = _adversarial(16_000)
+    for pat in pats:
+        assert _slowest(lambda s, p=pat: p.sub("", s), inputs) < 0.25, pat.pattern
+
+
+def test_clean_and_headings_cut_before_any_regex():
+    big = _adversarial(256 * 1024)
+    assert _slowest(lambda s: om.clean(s, om.PATH_CHARS), big) < 0.05
+    for s in big:
+        assert len(om.clean(s, om.HEADING_CHARS)) <= om.HEADING_CHARS
+    readmes = [("# " + s).encode()[: om.MAX_BLOB_BYTES] for s in big]
+    readmes.append(("\n".join("# " + "a." * 200 for _ in range(5000))).encode()[: om.MAX_BLOB_BYTES])
+    assert _slowest(om.readme_headings, readmes) < 0.25
+    # a token cut by the bound does not leak its visible start
+    out = om.clean("x" * (om.HEADING_CHARS - 10) + " " + GHP, om.HEADING_CHARS)
+    assert "ghp_" not in out and out.endswith("~")
 
 
 # ── evidence on the four bake-off item repos (sealed clones), when they are provided ─────────
