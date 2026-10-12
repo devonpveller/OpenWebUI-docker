@@ -613,28 +613,154 @@ def discard_cmd(start_sha: str, ref: str, park_sha: str, branch: str) -> str:
 
 
 # ── grammars: plan declaration, worker checks, verdict ───────────────────────────────────────
-_ITEMS_HDR = re.compile(r"^\s*\**ANCHOR ITEMS\**\s*:\s*(.*)$", re.I)
+#
+# ao-attempt2 B1: these parse UNTRUSTED MODEL TEXT the bridge does not own, so they are TOLERANT
+# of the forms the real model writes and were tested on its real replies (tests/fixtures/
+# c7_plan_corpus.json: 13 C7/C7a/C7b plans, 9 of which round 4's strict `PLAN:` grammar refused):
+#   headers   `PLAN:`, `**PLAN:**`, `PLAN (files to touch):`, `**PLAN (what remains):**`,
+#             `## PLAN`, `REVISED PLAN:`, `Plan - next turn:` - a keyword at the start of the line
+#             (markdown allowed), in CAPITALS or Title case, an optional qualifier in brackets or
+#             after a dash/`for`/`of`, then a colon (or nothing else on the line);
+#   steps     `1.`, `1)`, `**1.**`, `### 1.`, `- 1.`, `Step 1:`, `Step 1 -`; a numbered line
+#             indented deeper than the first step, or numbered no higher than the step before it,
+#             is a sub-item of that step; every other line up to the next step belongs to it;
+#   tags      `[anchor: A1]`, `[anchor: A1, A2]` (the FIRST id), `(anchor: A1)`, `[anchor A1]`,
+#             `(anchor item A1)`, `- anchor A1`, `[A1]` - anywhere in the step, continuation
+#             lines included, never inside a code span.
+# A grammar miss costs at most one re-ask: the gate maps still-untagged steps (`map_unanchored`)
+# instead of stopping the effort.
+_SECTION_KW = (r"UNDERSTANDING|Understanding|ALREADY DONE|Already done|Already Done|PLAN|Plan|"
+               r"WON['’`]?T DO|Won['’`]?t do|Won['’`]?t Do|RISKS|Risks|VERDICT|Verdict|"
+               r"ANCHOR ITEMS|Anchor items|Anchor Items|CHECKS|Checks")
+_LEAD = r"^[ ]{0,3}(?:>\s*)?(?:#{1,6}\s*)?[*_]{0,3}\s*"
+# a qualifier: "(files to touch)", "[x]", " - what remains", " for the next turn", " of record"
+_QUAL = r"(?:\s*[(\[][^)\]\n]{0,120}[)\]]|\s*[-–—][^:\n]{0,100}?|\s+(?:for|of)\s[^:\n]{0,80}?)?"
+
+
+def _hdr(kw: str, *, lead_words: bool = False) -> re.Pattern:
+    """A section header for keyword(s) `kw`: `<kw><qualifier>:` + the rest of the line, or the
+    header alone on its line (no colon, nothing after it)."""
+    pre = r"(?:[A-Z][A-Za-z]{2,15}\s+){0,2}" if lead_words else ""
+    return re.compile(
+        _LEAD + pre + r"(?:" + kw + r")\b" + _QUAL + r"[*_]{0,3}\s*"
+        r"(?::[*_]{0,3}\s*(?P<rest>.*?)|(?P<alone>))\s*[*_]{0,3}\s*$")
+
+
+_SECTION = _hdr(_SECTION_KW, lead_words=True)
+_PLAN_HDR = _hdr(r"PLAN|Plan", lead_words=True)
+_ITEMS_HDR = _hdr(r"ANCHOR ITEMS|Anchor items|Anchor Items")
 _ITEM_LINE = re.compile(r"^\s*(?:[-*]\s*)?\**(A\d{1,3})\**\s*[:.)\-]\s*(.+?)\s*$", re.I)
-_SECTION = re.compile(r"^\s*\**(UNDERSTANDING|ALREADY DONE|PLAN|WON'?T DO|RISKS|VERDICT|"
-                      r"ANCHOR ITEMS|CHECKS)\**\s*:", re.I)
-_PLAN_HDR = re.compile(r"^\s*\**PLAN\**\s*:\s*(.*)$", re.I)
-_STEP_LINE = re.compile(r"^\s*(?:[-*]\s*)?(?:step\s*)?(\d{1,3})\s*[.):]\s*(.+?)\s*$", re.I)
-_ANCHOR_TAG = re.compile(r"\[\s*anchor\s*:\s*(A\d{1,3})\s*\]", re.I)
+_STEP_LINE = re.compile(
+    r"^(?P<ind>[ \t]*)(?:[-*+]\s+)?(?:#{1,6}\s*)?[*_]{0,3}\s*(?P<word>step\s*#?\s*)?"
+    r"(?P<n>\d{1,3})(?![\d,])\s*[*_]{0,3}\s*(?P<sep>[.:](?!\d)|\)|[-–—](?!\d))[*_]{0,3}\s*"
+    r"(?P<body>.*?)\s*$", re.I)
+_ID = r"[Aa]\d{1,3}"
+_ANCHOR_TAG = re.compile(
+    r"\*{0,2}[\[(]\s*anchors?(?:\s+items?)?\s*[:=#]?\s*(" + _ID + r")\b(?:\s*(?:,|/|&|\+|\band\b)"
+    r"\s*" + _ID + r")*\s*[\])]\*{0,2}"                       # [anchor: A1, A2] (anchor A1)
+    r"|\s*[-–—]?\s*\banchors?(?:\s+items?)?\s*[:=#]?\s*(" + _ID + r")\b"   # - anchor A1
+    r"|[\[(]\s*(" + _ID + r")(?:\s*(?:,|/|&|\+|\band\b)\s*" + _ID + r")*\s*[\])]",   # [A1]
+    re.I)
+_CODE = re.compile(r"`[^`\n]*`")
 _NOTHING = re.compile(r"\bnothing remains\b|^\s*(?:none|nothing)\.?\s*$", re.I)
+STEP_TEXT_MAX = 2000   # per step (continuation lines included); the prompt shows 200
+MAX_STEPS = 40         # numbered lines past this attach to the last step (bounded)
+REPLY_MAX = 200_000     # a model reply is parsed as its first and last 100 KB (real plans: <= 12 KB)
 
 
-def _section_lines(text: str, hdr: re.Pattern, *, last: bool = False) -> list[str] | None:
+def _bounded(text: str | None) -> str:
+    t = text or ""
+    if len(t) <= REPLY_MAX:
+        return t
+    half = REPLY_MAX // 2
+    return t[:half] + "\n" + t[-half:]
+
+
+def _section_lines(text: str, hdr: re.Pattern, *, last: bool = False,
+                   all_: bool = False) -> list[str] | list[list[str]] | None:
+    """The lines of the first (or last) section `hdr` opens, up to the next section header.
+    `all_` returns every such section."""
     lines = (text or "").splitlines()
     idx = [i for i, ln in enumerate(lines) if hdr.match(ln)]
-    for i in (idx[-1:] if last else idx[:1]):
+    found: list[list[str]] = []
+    for i in idx:
         m = hdr.match(lines[i])
-        out = [m.group(1)] if m.group(1).strip() else []
+        rest = (m.group("rest") or "") if "rest" in m.groupdict() else ""
+        out = [rest] if rest.strip() else []
         for nxt in lines[i + 1:]:
             if _SECTION.match(nxt):
                 break
             out.append(nxt)
-        return out
-    return None
+        found.append(out)
+    if all_:
+        return found
+    if not found:
+        return None
+    return found[-1] if last else found[0]
+
+
+_NOT_PLAN = re.compile(r"ALREADY|WON|RISK|VERDICT|ANCHOR|CHECK", re.I)
+
+
+def _outside_sections(text: str) -> list[str]:
+    """For a plan written WITHOUT a PLAN header: the lines before any section header and those
+    under UNDERSTANDING - never ALREADY DONE / WON'T DO / RISKS / VERDICT / CHECKS / ANCHOR
+    ITEMS (their numbered lists are not steps)."""
+    out, skip = [], False
+    for ln in (text or "").splitlines():
+        m = _SECTION.match(ln)
+        if m:
+            skip = bool(_NOT_PLAN.search(ln[:m.start("rest") if m.group("rest") is not None
+                                            else len(ln)]))
+            rest = m.group("rest") or ""
+            if not skip and rest.strip():
+                out.append(rest)
+            continue
+        if not skip:
+            out.append(ln)
+    return out
+
+
+def _indent(s: str) -> int:
+    return len(s.replace("\t", "    "))
+
+
+def _tag(text: str) -> tuple[str, str]:
+    """(first anchor id named in `text`, `text` without its tags) - code spans never count."""
+    bare = _CODE.sub(lambda m: " " * len(m.group(0)), text)
+    m = _ANCHOR_TAG.search(bare)
+    if not m:
+        return "", text
+    aid = next(g for g in m.groups() if g).upper()
+    out, pos = [], 0
+    for t in _ANCHOR_TAG.finditer(bare):
+        out.append(text[pos:t.start()])
+        pos = t.end()
+    out.append(text[pos:])
+    return aid, "".join(out)
+
+
+def _steps(lines: list[str]) -> list[dict]:
+    """Top-level numbered steps with their continuation (and sub-item) lines attached."""
+    steps: list[dict] = []
+    base: int | None = None
+    for ln in lines:
+        m = _STEP_LINE.match(ln)
+        if m and m.group("sep") not in ".):" and not m.group("word"):
+            m = None                       # `2 - 3 retries` is not a step; `Step 2 - x` is
+        new = False
+        if m and m.group("body").strip():
+            ind = _indent(m.group("ind"))
+            n = int(m.group("n"))
+            if base is None:
+                base, new = ind, True
+            elif ind <= base and n > steps[-1]["n"] and len(steps) < MAX_STEPS:
+                new = True
+        if new:
+            steps.append({"n": int(m.group("n")), "lines": [m.group("body")]})
+        elif steps and ln.strip() and len(steps[-1]["lines"]) < 200:
+            steps[-1]["lines"].append(ln.strip()[:2000])
+    return steps
 
 
 @dataclass
@@ -643,13 +769,18 @@ class PlanDecl:
     steps: list = field(default_factory=list)       # [{"n", "text", "anchor"}]
     problems: list = field(default_factory=list)    # step numbers / reasons - ids only
     nothing_remains: bool = False
+    unanchored: list = field(default_factory=list)  # step numbers with no usable anchor id
+    headerless: bool = False                        # steps found outside any PLAN section
 
 
 def parse_plan(text: str, known_items: dict | None = None, *, fixed: bool = False) -> PlanDecl:
-    """Read the PLAN's numbered steps. Every step must end with `[anchor: Ax]`. With `fixed`
-    (round 3: the effort's items are fixed at acceptance) only `known_items` count and any
-    ANCHOR ITEMS section the planner wrote is IGNORED - it cannot define, renumber or redefine
-    an item. A plan whose PLAN says 'nothing remains' needs no steps."""
+    """Read the PLAN's numbered steps and the anchor item each names (tolerant; see above).
+    With `fixed` (round 3: the effort's items are fixed at acceptance) only `known_items` count and
+    any ANCHOR ITEMS section the planner wrote is IGNORED - it cannot define, renumber or redefine
+    an item. A plan whose PLAN says 'nothing remains' needs no steps. The first PLAN section that
+    has numbered steps is read; with no PLAN header at all, numbered lines outside every known
+    section are."""
+    text = _bounded(text)
     d = PlanDecl()
     if not fixed:
         for ln in _section_lines(text, _ITEMS_HDR) or []:
@@ -657,39 +788,74 @@ def parse_plan(text: str, known_items: dict | None = None, *, fixed: bool = Fals
             if m:
                 d.items[m.group(1).upper()] = m.group(2)[:240]
     known = {k.upper() for k in (known_items or {})} | set(d.items)
-    plan = _section_lines(text, _PLAN_HDR)
-    if plan is None:
-        d.problems.append("no PLAN section")
-        return d
-    for ln in plan:
-        m = _STEP_LINE.match(ln)
-        if not m:
-            continue
-        n, body = int(m.group(1)), m.group(2)
-        tag = _ANCHOR_TAG.search(body)
-        anchor = tag.group(1).upper() if tag else ""
-        clean = _ANCHOR_TAG.sub("", body).strip()
-        d.steps.append({"n": n, "text": clean[:300], "anchor": anchor})
-        if not anchor:
-            d.problems.append(f"step {n}: no [anchor: Ax]")
-        elif anchor not in known:
-            d.problems.append(f"step {n}: anchor {anchor} is not a declared item")
+    sections = _section_lines(text, _PLAN_HDR, all_=True) or []
+    raw = next((s for s in (_steps(sec) for sec in sections) if s), [])
+    plan_lines = sections[0] if sections else []
+    if not raw and not sections:
+        raw = _steps(_outside_sections(text))
+        d.headerless = bool(raw)
+    for st in raw:
+        n = st["n"]
+        aid, clean = "", []
+        for ln in st["lines"]:
+            a, rest = _tag(ln)
+            aid = aid or a
+            clean.append(rest.strip())
+        body = " ".join(" ".join(x for x in clean if x).split())
+        d.steps.append({"n": n, "text": body[:STEP_TEXT_MAX], "anchor": aid})
+        if not aid:
+            d.problems.append(f"step {n} names no anchor item (end it with [anchor: A1])")
+            d.unanchored.append(n)
+        elif aid not in known:
+            d.problems.append(f"step {n}: {aid} is not an anchor item of this effort")
+            d.unanchored.append(n)
     if not d.steps:
-        if any(_NOTHING.search(ln) for ln in plan):
+        if any(_NOTHING.search(ln) for ln in plan_lines):
             d.nothing_remains = True
         else:
-            d.problems.append("PLAN has no numbered steps")
+            d.problems.append("no numbered PLAN steps found" if sections or d.headerless
+                              else "no PLAN section with numbered steps")
     return d
 
 
-_CHECKS_HDR = re.compile(r"^\s*\**CHECKS\**\s*:\s*(.*)$", re.I)
-_CHECK_LINE = re.compile(r"^\s*(?:[-*]\s*)?step\s*(\d{1,3})\s*[:\-]\s*(.+?)\s*$", re.I)
+#: the anchor a step is MAPPED to when it still names no item of the effort after the one
+#: re-ask: the effort's only item, or GOAL = all of its items (it did not say which one)
+GOAL = "GOAL"
+
+
+def mapped_anchor(items: dict | None) -> str:
+    ids = sorted((items or {}), key=lambda k: int(k[1:]) if k[1:].isdigit() else 0)
+    if len(ids) <= 1:
+        return ids[0] if ids else "A1"
+    return GOAL
+
+
+def map_unanchored(decl: PlanDecl, items: dict | None) -> tuple[str, list[int]]:
+    """Give every step without a usable anchor id the mapped anchor (marked `mapped`); the plan
+    then counts as declared. Returns (the anchor used, the step numbers mapped)."""
+    to = mapped_anchor(items)
+    done = []
+    for s in decl.steps:
+        if s["n"] in decl.unanchored:
+            s["anchor"] = to
+            s["mapped"] = True
+            done.append(s["n"])
+    decl.problems = [p for p in decl.problems if not p.startswith("step ")]
+    decl.unanchored = []
+    return to, done
+
+
+_CHECKS_HDR = _hdr(r"CHECKS|Checks")
+_CHECK_LINE = re.compile(
+    r"^\s*(?:[-*+]\s+)?[*_]{0,3}\s*step\s*#?\s*(\d{1,3})\s*[*_]{0,3}\s*[:\-–—)]"
+    r"[*_]{0,3}\s*(.+?)\s*$", re.I)
 
 
 def parse_checks(text: str) -> list[dict]:
     """The worker's own checks from its reply's CHECKS section: `step <n>: <command>` per line.
     Single-line commands only, capped in count and length. Backticks around a command are
     dropped."""
+    text = _bounded(text)
     out: list[dict] = []
     # the LAST CHECKS section wins (a worker may quote the instruction earlier in its reply)
     lines = _section_lines(text, _CHECKS_HDR, last=True)
@@ -708,12 +874,16 @@ def parse_checks(text: str) -> list[dict]:
     return out
 
 
-_VERDICT_LINE = re.compile(r"^\s*\**VERDICT\**\s*:\s*(.*?)\s*$", re.I | re.M)
-_NUMSPEC = r"\d{1,3}(?:\s*-\s*\d{1,3})?(?:\s*(?:,|\band\b|\s)\s*\d{1,3}(?:\s*-\s*\d{1,3})?)*"
-_KEEP = re.compile(r"^KEEP\b\s*(?:steps?\s*)?(" + _NUMSPEC + r")\s*(?:[.:;].*|-\s*\D.*)?$", re.I)
-_DISCARD = re.compile(
-    r"^DISCARD\b\s*(?:step\s*)?(\d{1,3})\b\s*(?:\(?\s*(deviation|no-solution)\s*\)?)?\s*[:\-]\s*(.+)$",
-    re.I)
+_VERDICT_HDR = re.compile(
+    _LEAD + r"(?:VERDICT|Verdict)\b" + r"(?:\s*[(\[][^)\]\n]{0,80}[)\]])?" + r"[*_]{0,3}\s*"
+    r"(?:[:\-–—][*_]{0,3}\s*(?P<rest>.*?)|(?P<alone>))\s*$")
+_NUMSPEC = r"\d{1,3}(?:\s*-\s*\d{1,3})?(?:\s*(?:,|\band\b|&|\s)\s*\d{1,3}(?:\s*-\s*\d{1,3})?)*"
+_KEEP = re.compile(r"^KEEP\b\s*(?:(?:the\s+)?steps?\b\s*|#\s*)?(?:(?P<all>all\b)|(?P<nums>"
+                   + _NUMSPEC + r"))(?P<tail>.*)$", re.I)
+_DISCARD = re.compile(r"^DISCARD\b\s*(?:(?:the\s+)?(?:attempt\b|steps?\b)\s*|#\s*)?"
+                      r"(?P<n>\d{1,3})?\b(?P<tail>.*)$", re.I)
+_KLASS = re.compile(r"^\s*[(\[]?\s*(deviation(?:[- ]from[- ]anchor)?|no[- ]solution"
+                    r"(?:[- ]identified)?)\s*[)\]]?", re.I)
 
 
 @dataclass
@@ -724,42 +894,86 @@ class Verdict:
     reason: str = ""
 
 
+def _verdict_values(text: str) -> list[str]:
+    lines = (text or "").splitlines()
+    vals = []
+    for i, ln in enumerate(lines):
+        m = _VERDICT_HDR.match(ln)
+        if not m:
+            continue
+        v = (m.group("rest") or "").strip()
+        if not v:      # `VERDICT:` alone - the verdict is on the next non-empty line
+            v = next((x.strip() for x in lines[i + 1:i + 3] if x.strip()), "")
+        # bold markers go; backticks and underscores STAY (the DISCARD reason is scrubbed of
+        # code spans later - stripping them here would let code through as prose)
+        v = " ".join(v.replace("*", "").split())
+        if len(v) > 2 and v[0] == "`" and v[-1] == "`" and "`" not in v[1:-1]:
+            v = v[1:-1].strip()                  # a verdict written as one code span
+        # a verdict is KEEP / DISCARD; prose after "Verdict:" and the prompt's own template
+        # echoed back (`KEEP <numbers ...>`) are not verdicts
+        if not re.match(r"(?:KEEP|DISCARD)\b", v, re.I) or ("<" in v and ">" in v):
+            continue
+        vals.append(v)
+    return vals
+
+
 def parse_verdict(text: str, step_nos: set[int]) -> Verdict | None:
-    """Exactly one VERDICT line, naming steps of the PARKED attempt's plan. Anything else -
-    missing, two different verdicts, an unknown step, a DISCARD without a reason - is None:
-    unparseable, and an unparseable verdict never discards."""
-    found = [m.group(1) for m in _VERDICT_LINE.finditer(text or "")]
-    found = [f for f in found if f]
-    if len({f.strip().lower() for f in found}) != 1:
+    """Exactly one verdict (repeated identically is fine), naming steps of the PARKED attempt's
+    plan. Tolerant of markdown, a qualifier after VERDICT, a dash for the colon, the verdict on
+    the line after `VERDICT:`, `KEEP all`, `KEEP steps 1 & 2`, `DISCARD step 2 (deviation) -
+    why`, `DISCARD: why` when the attempt had one step. Still None (unparseable - and an
+    unparseable verdict never discards): no verdict, two different verdicts, an unknown step, a
+    KEEP without steps, a DISCARD without a reason."""
+    text = _bounded(text)
+    found = _verdict_values(text)
+    if len({f.lower() for f in found}) != 1:
         return None
-    v = found[0].strip().strip("*").strip()
+    v = found[0]
     m = _KEEP.match(v)
     if m:
-        nums: set[int] = set()
-        spec = re.sub(r"\s*-\s*", "-", m.group(1).strip())
-        for part in re.split(r"\s*(?:,|\band\b|\s)\s*", spec):
-            if not part:
-                continue
-            r = re.fullmatch(r"(\d{1,3})\s*-\s*(\d{1,3})|(\d{1,3})", part)
-            if not r:
-                return None
-            if r.group(3):
-                nums.add(int(r.group(3)))
-            else:
-                lo, hi = int(r.group(1)), int(r.group(2))
-                if lo > hi or hi - lo > 50:
+        if m.group("all"):
+            nums = set(step_nos)
+        else:
+            tail = m.group("tail")
+            if re.match(r"\s*-?\s*\d", tail) or re.search(r"\bDISCARD\b", tail, re.I):
+                return None                     # trailing numbers, or a mixed KEEP/DISCARD
+            nums = set()
+            spec = re.sub(r"\s*-\s*", "-", m.group("nums").strip())
+            for part in re.split(r"\s*(?:,|\band\b|&|\s)\s*", spec):
+                if not part:
+                    continue
+                r = re.fullmatch(r"(\d{1,3})-(\d{1,3})|(\d{1,3})", part)
+                if not r:
                     return None
-                nums.update(range(lo, hi + 1))
+                if r.group(3):
+                    nums.add(int(r.group(3)))
+                else:
+                    lo, hi = int(r.group(1)), int(r.group(2))
+                    if lo > hi or hi - lo > 50:
+                        return None
+                    nums.update(range(lo, hi + 1))
         if not nums or any(x not in step_nos for x in nums):
             return None
         return Verdict("keep", steps=sorted(nums))
     m = _DISCARD.match(v)
     if m:
-        n = int(m.group(1))
-        reason = m.group(3).strip()
+        if m.group("n"):
+            n = int(m.group("n"))
+        elif len(step_nos) == 1:
+            n = next(iter(step_nos))
+        else:
+            return None
+        tail = m.group("tail")
+        km = _KLASS.match(tail)
+        klass = ""
+        if km:
+            klass = "deviation" if km.group(1).lower().startswith("dev") else "no-solution"
+            tail = tail[km.end():]
+        reason = re.sub(r"^[\s:;,.)\]\-–—]*(?:because\b|as\b|since\b)?\s*", "", tail,
+                        flags=re.I).strip()
         if n not in step_nos or not reason:
             return None
-        return Verdict("discard", steps=[n], klass=(m.group(2) or "").lower(), reason=reason)
+        return Verdict("discard", steps=[n], klass=klass, reason=reason)
     return None
 
 
@@ -946,6 +1160,31 @@ def discard_note(*, step: int, anchor: str, anchor_text: str, attempt_no: int, k
     return note[:NOTE_MAX]
 
 
+_ANCHOR_CODE = re.compile(r"^(?:A\d{1,3}|GOAL)$")
+_KLASSES = ("deviation", "no-solution")
+
+
+def memory_note(*, step: int, anchor: str, attempt_no: int, klass: str, diff: dict | None,
+                facts: dict, discards_of_item: int) -> str:
+    """F4 - what a discard sends to the MEMORY PLANE: an allow-list of codes and counts only.
+    Every value is an int, an anchor id (A<n> or GOAL), a class from a closed set, or an outcome
+    name from OUTCOMES - no anchor-item text, no planner reason, no path, no test id, no command.
+    Anything outside the allow-list is replaced by '?', never shown."""
+    def _n(v) -> int:
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return 0
+    a = anchor if isinstance(anchor, str) and _ANCHOR_CODE.match(anchor) else "?"
+    k = klass if klass in _KLASSES else "?"
+    d = diff or {}
+    counts = ", ".join(f"{o} {_n(facts.get(f'n_{o}'))}" for o in OUTCOMES)
+    return (f"agent-org attempt discarded: attempt {_n(attempt_no)}, step {_n(step)}, anchor "
+            f"item {a}, class {k}, discards of this item {_n(discards_of_item)}; changed files "
+            f"{_n(d.get('n_files'))} (+{_n(d.get('added'))}/-{_n(d.get('deleted'))}); "
+            f"worker checks: {counts}")
+
+
 def learning_record(*, effort_id: str, attempt_id: str, ref: str, anchor: str, anchor_text: str,
                     note: str, facts: dict, klass: str, created_at: str) -> dict:
     """The discard as a learning record in the harness's v1 shape
@@ -988,12 +1227,46 @@ _LIST_ITEM = re.compile(r"^\s*(?:[-*\u2022]|\d{1,2}[.)])\s+(.+?)\s*$")
 MAX_ITEMS = 8
 
 
-def derive_items(goal: str) -> dict:
+MAX_TOTAL_ITEMS = 12    # intake items + those a clarification adds
+
+
+def _item_lines(text: str) -> list[str]:
+    lines = [m.group(1) for m in (_LIST_ITEM.match(ln) for ln in text.splitlines()) if m]
+    if not lines:
+        flat = " ".join(text.split())
+        lines = [x.strip() for x in re.split(r"(?<=[.!?;])\s+", flat) if len(x.split()) >= 2] or (
+            [flat] if flat else [])
+    return [" ".join(t.split())[:240] for t in lines]
+
+
+def append_items(items: dict, text: str) -> dict:
+    """F2 - `items` plus the list lines / sentences of `text` as A<n+1>..., in order. Stored ids are
+    never renumbered or reworded; a line whose text already is an item, or of fewer than two words,
+    is skipped; at most MAX_TOTAL_ITEMS (the rest folded into the last new one)."""
+    out = dict(items or {})
+    have = {_norm(v) for v in out.values()}
+    new = [t for t in _item_lines((text or "").strip())
+           if len(t.split()) >= 2 and _norm(t) not in have]
+    nxt = max((int(k[1:]) for k in out if k[1:].isdigit()), default=0) + 1
+    room = MAX_TOTAL_ITEMS - len(out)
+    if room <= 0 or not new:
+        return out
+    if len(new) > room:
+        new = new[:room - 1] + ["; ".join(new[room - 1:])[:240]]
+    for i, t in enumerate(new):
+        out[f"A{nxt + i}"] = t
+    return out
+
+
+def derive_items(goal: str, *, cut: bool = True) -> dict:
     """The effort's ANCHOR ITEMS, derived deterministically from its ACCEPTED goal (the first goal
     version, set at intake), ids A1..An by position. Pure: the same goal always gives the same
     items, so an id can never name a different goal. List lines (- / * / 1.) are the items;
-    without a list, the goal's sentences; at most MAX_ITEMS (the rest folded into the last)."""
-    text = _INJECTED.split(goal or "", maxsplit=1)[0].strip()
+    without a list, the goal's sentences; at most MAX_ITEMS (the rest folded into the last).
+    `cut` drops everything from the first bridge clause on (goal v1 carries them); the operator's
+    raw request at intake is derived with cut=False (F3: it has no bridge clause, so the cut could
+    only drop the operator's own paragraph that happens to start with a header word)."""
+    text = (_INJECTED.split(goal or "", maxsplit=1)[0] if cut else (goal or "")).strip()
     lines = [m.group(1) for m in (_LIST_ITEM.match(ln) for ln in text.splitlines()) if m]
     if not lines:
         flat = " ".join(text.split())

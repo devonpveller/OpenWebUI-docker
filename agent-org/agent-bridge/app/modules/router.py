@@ -943,13 +943,20 @@ class Router:
         clone for compositions), runs, releases. `fresh` FORCES a clean re-clone of the focus
         (self-heals a partial/parked workspace — e.g. a composition whose nested submodules didn't
         populate). Exceptions propagate — the orchestrator falls back to the LLM verifier."""
-        inst = await self.scheduler.acquire(effort_id, "verifier", session_id)
+        # ao-attempt: a command that changes the EXISTING workspace (repo=None) runs only on the ONE
+        # worker that holds the effort's attempt - never on another pool worker, even one focused
+        # on the same effort (a plan wake can land there). ao-attempt2 F5: checked BEFORE the
+        # acquire, and the acquire may take ONLY that worker - a refused command never rebinds
+        # another worker's session/effort (acquire's fallback writes them onto any free worker).
+        if require_instance and (self._ws_focus.get(require_instance) or ("",))[0] != effort_id:
+            raise RuntimeError("not the worker that holds this effort's workspace")
+        if require_instance:
+            inst = await self.scheduler.acquire(effort_id, "verifier", session_id,
+                                                only_instance=require_instance)
+        else:
+            inst = await self.scheduler.acquire(effort_id, "verifier", session_id)
         try:
-            # ao-attempt: a command that changes the EXISTING workspace (repo=None) runs only on
-            # the ONE worker that holds the effort's attempt - never on another pool worker, even
-            # one focused on the same effort (a plan wake can land there).
-            if require_instance and (inst.id != require_instance
-                                     or (self._ws_focus.get(inst.id) or ("",))[0] != effort_id):
+            if require_instance and inst.id != require_instance:   # defensive; acquire enforces
                 raise RuntimeError("not the worker that holds this effort's workspace")
             if repo:
                 ok, detail, _ = await self.harness.set_project(

@@ -694,8 +694,12 @@ async def test_case4_c7a_replay_keeps_the_coding_turns_edits(db_url, tmp_path, r
     await _c7a(db_url, LocalWS(tmp_path), run)
 
 
-# ── Case 5: plan steps carry a declared anchor item; refused once, then escalated ─────────────
-async def test_case5_a_plan_without_anchor_items_is_refused_once_then_escalated(db_url, tmp_path):
+# ── Case 5: plan steps carry a declared anchor item; refused once, then MAPPED ────────────────
+async def test_case5_a_plan_without_anchor_items_is_refused_once_then_mapped(db_url, tmp_path):
+    """ao-attempt2 B1 CHANGED THIS CASE ON PURPOSE (round 4: refused once, then the gate STOPPED).
+    The second untagged reply is no longer a stop: its steps are mapped to the effort's items
+    (GOAL here - the goal has two items and the step named neither) and the plan is stored with
+    them. Only a reply with no steps at all still stops (tests/test_attempts2.py)."""
     ws = LocalWS(tmp_path)
     _base(ws)
     orch, db = await _orch(db_url)
@@ -703,12 +707,15 @@ async def test_case5_a_plan_without_anchor_items_is_refused_once_then_escalated(
     try:
         eid, chan, root = await _effort(orch)
         bare = "UNDERSTANDING: x\nPLAN:\n1. edit a.py\nWON'T DO: y\nRISKS: none"
-        assert await _gate(orch, eid, chan, root, bare, bare) is None
+        assert await _gate(orch, eid, chan, root, bare, bare) is not None
         assert await orch._event_count(eid, "plan_steps_undeclared") == 2
-        assert await orch._event_count(eid, "worker_plan_stopped") == 1
-        assert all(w["plan_only"] for w in orch.harness.wakes)        # nothing delegated
-        assert "REFUSED" in orch.harness.wakes[1]["prompt"]
-        assert await orch._event_count(eid, "plan_steps_stored") == 0
+        assert await orch._event_count(eid, "worker_plan_stopped") == 0
+        mapped = await _events(orch, eid, "plan_steps_mapped")
+        assert len(mapped) == 1 and mapped[0]["payload"]["to"] == "GOAL"
+        assert all(w["plan_only"] for w in orch.harness.wakes)        # nothing delegated here
+        assert len(orch.harness.wakes) == 2 and "REFUSED" in orch.harness.wakes[1]["prompt"]
+        stored = await _events(orch, eid, "plan_steps_stored")
+        assert len(stored) == 1 and stored[0]["payload"]["anchors"] == ["GOAL"]
     finally:
         await _shutdown(orch, db)
 
@@ -737,7 +744,10 @@ async def test_case5_refused_once_then_a_declared_plan_is_stored_before_delegati
 
 
 # ── Case 6: an unparseable verdict never discards; a KEEP that mis-attributes is asked again ──
-async def test_case6_an_unparseable_verdict_keeps_the_attempt_parked_and_escalates(db_url, tmp_path):
+async def test_case6_an_unparseable_verdict_keeps_the_attempt_parked_and_continues(db_url, tmp_path):
+    """ao-attempt2 B1 CHANGED THIS CASE ON PURPOSE (round 4: re-asked once, then the gate STOPPED).
+    A second miss leaves the attempt exactly as parked (never a discard) and the plan continues
+    from it - see test_attempts2 for the next attempt's start."""
     att = _a()
     ws = LocalWS(tmp_path)
     _base(ws)
@@ -748,10 +758,11 @@ async def test_case6_an_unparseable_verdict_keeps_the_attempt_parked_and_escalat
         assert await _gate(orch, eid, chan, root, PLAN_1) is not None
         await _code(orch, eid, chan, root, _edits)
         no_verdict = _plan_next("maybe later")
-        assert await _gate(orch, eid, chan, root, no_verdict, no_verdict) is None
+        assert await _gate(orch, eid, chan, root, no_verdict, no_verdict) is not None
         assert await orch._event_count(eid, "attempt_verdict_unparseable") == 2
         assert await orch._event_count(eid, "attempt_discarded") == 0
-        assert await orch._event_count(eid, "worker_plan_stopped") == 1
+        assert await orch._event_count(eid, "worker_plan_stopped") == 0
+        assert await orch._event_count(eid, "attempt_unjudged") == 1
         assert CONTENT_MARK in ws.read("a.py") and CONTENT_MARK in ws.read("b.py")
         ref = att.ref_name(eid, 1)
         assert ws.git("rev-parse", ref).strip() == ws.git("rev-parse", "HEAD").strip()
@@ -868,10 +879,14 @@ async def test_case7_a_replan_cannot_redefine_or_renumber_an_anchor_item(db_url,
                            replan.replace("KEEP 1-2", "DISCARD 1 no-solution: farewell still missing")) is not None
         notes = await _notes(orch, eid)
         assert notes and "anchor item A1 (greet() returns a greeting)" in notes[-1]
-        # an id the effort does not have is refused (once, then stop)
+        # an id the effort does not have is refused once; then (ao-attempt2 B1, CHANGED ON PURPOSE:
+        # round 4 stopped here) the step is MAPPED to the effort's items - never to A9
         made_up = replan.replace("[anchor: A1]", "[anchor: A9]").replace("VERDICT: KEEP 1-2", "")
-        assert await _gate(orch, eid, chan, root, made_up, made_up) is None
+        assert await _gate(orch, eid, chan, root, made_up, made_up) is not None
         assert await orch._event_count(eid, "plan_steps_undeclared") == 2
+        assert await orch._event_count(eid, "worker_plan_stopped") == 0
+        plan = await orch._effort_plan_row(eid)
+        assert plan["items"] == fixed and [s["anchor"] for s in plan["steps"]] == ["GOAL"]
     finally:
         await _shutdown(orch, db)
 
