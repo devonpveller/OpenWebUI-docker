@@ -98,7 +98,7 @@
     },
     "FlailConfig": {
       "additionalProperties": false,
-      "description": "Flail guard (agent-org bridge, 2026-07-14): a coding turn that keeps READING without ever\nEDITING is lost \u2014 \"too many thinking turns / time iterating on read without editing\" is the\noperator's stop signal. Opt-in per task (`flail_guard` on the trigger; the bridge sets it on\ncoding step wakes only \u2014 plan/publish/survey turns are exempt). Tripping kills the turn with\na FLAIL-GUARD answer marker; the bridge then forks a fresh session from the original goal and\nre-asks in plan mode. Trip = ZERO edit/write tool executions AND (tool_calls reached, OR\nseconds elapsed with at least min_tool_calls executions \u2014 so a slow, thoughtful task with a\ncouple of reads is never killed on time alone).",
+      "description": "Flail guard (agent-org bridge, 2026-07-14): a coding turn that keeps READING without ever\nEDITING is lost \u2014 \"too many thinking turns / time iterating on read without editing\" is the\noperator's stop signal. Opt-in per task (`flail_guard` on the trigger; the bridge sets it on\ncoding step wakes only \u2014 plan/publish turns are exempt). Tripping kills the turn with\na FLAIL-GUARD answer marker; the bridge then forks a fresh session from the original goal and\nre-asks in plan mode. Trip = ZERO edit/write tool executions AND (tool_calls reached, OR\nseconds elapsed with at least min_tool_calls executions \u2014 so a slow, thoughtful task with a\ncouple of reads is never killed on time alone).",
       "properties": {
         "min_tool_calls": {
           "default": 8,

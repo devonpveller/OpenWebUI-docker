@@ -68,7 +68,7 @@ def _github(stands: dict[str, GitBackedGitHub]) -> httpx.MockTransport:
     return httpx.MockTransport(handle)
 
 
-async def _orch(db_url, tmp_path, stands):
+async def _orch(db_url, tmp_path, stands, **over):
     key = tmp_path / "app.pem"
     key.write_text("dummy")
     settings = Settings(
@@ -77,6 +77,7 @@ async def _orch(db_url, tmp_path, stands):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090,http://w2:8090",
         max_concurrent_workers=2, database_url=db_url, review_mode="off", plan_approval="off",
         github_app_id="1", github_app_owner=OWNER, github_app_private_key_path=str(key),
+        **over,
     )
     db = Database(db_url)
     harness = TimedHarness()
@@ -239,5 +240,70 @@ async def test_a_failed_orientation_is_not_cached_and_the_next_effort_gets_the_m
         second = [p for p in _coding_prompts(harness) if "--quiet" in p][0]
         assert "PROJECT ORIENTATION MAP" in second and "python -m pytest" in second
         assert set(acquired) <= {e1, e2}, acquired
+    finally:
+        await db.dispose()
+
+
+# ── round 2 ──────────────────────────────────────────────────────────────────────────────────
+
+def _dotnet(tmp_path: Path) -> Path:
+    return make_repo(tmp_path / "dotnetapp", [{
+        "App.sln": "x", "src/App/App.csproj": "x", "src/App/Program.cs": "class P {}",
+        "tests/App.Tests/App.Tests.csproj": "x", "tests/App.Tests/UserServiceTests.cs": "class T {}",
+        "tests/App.Tests/OrderServiceTests.cs": "class O {}",
+        "scripts/test_release.py": "def test_r(): pass\n", "README.md": "# App\n"}])
+
+
+def _mixed(tmp_path: Path) -> Path:
+    return make_repo(tmp_path / "mixedapp", [{
+        "pyproject.toml": "[tool.pytest.ini_options]\n", "tests/test_a.py": "x", "tests/test_b.py": "x",
+        "tests/test_c.py": "x", "svc/Svc.sln": "x", "svc/tests/Svc.Tests/Svc.Tests.csproj": "x",
+        "svc/tests/Svc.Tests/ATests.cs": "x", "README.md": "# Mixed\n"}])
+
+
+async def test_dotnet_and_mixed_repos_through_the_real_path(db_url, tmp_path):
+    """The live workers run dotnet: a dotnet repo's first coding wake names `dotnet test` with its
+    solution and never a root `python -m pytest` (a stray test_*.py gets its own folder only); a
+    mixed repo lists each system at its own root, the dominant one first."""
+    stands = {"dotnetapp": GitBackedGitHub(_dotnet(tmp_path), owner=OWNER, repo="dotnetapp", trees=False),
+              "mixedapp": GitBackedGitHub(_mixed(tmp_path), owner=OWNER, repo="mixedapp", trees=False)}
+    orch, harness, db, acquired = await _orch(db_url, tmp_path, stands)
+    try:
+        await _intake(orch, "dotnetapp", "dn", "add a --dry-run flag")
+        await _intake(orch, "mixedapp", "mx", "add a --json flag")
+        await _drain_bg(orch)
+        dn = [p for p in _coding_prompts(harness) if "--dry-run" in p][0]
+        mx = [p for p in _coding_prompts(harness) if "--json flag" in p][0]
+        dn_cmds = dn.split("Likely test commands (from manifests):\n", 1)[1].split("\n")
+        assert dn_cmds[0].strip() == "dotnet test App.sln   [App.sln]"
+        assert not any(ln.strip().startswith("python -m pytest") for ln in dn.splitlines())
+        assert "cd scripts && python -m pytest" in dn
+        mx_cmds = [ln.strip() for ln in mx.split("Likely test commands (from manifests):\n", 1)[1]
+                   .split("\n") if ln.startswith("  ")]
+        assert mx_cmds[:2] == ["python -m pytest   [pyproject.toml]",
+                               "cd svc && dotnet test Svc.sln   [svc/Svc.sln]"], mx_cmds
+    finally:
+        await db.dispose()
+
+
+async def test_a_slow_build_never_holds_intake_and_the_first_wake_still_gets_the_map(db_url, tmp_path):
+    """Intake runs on the serial event loop: it waits at most project_orientation_intake_wait_s for
+    the map, then the build goes on in the background and the first coding wake (a background
+    task) gets it - no slot taken while it waits."""
+    stand = GitBackedGitHub(_repo(tmp_path, "alpha"), owner=OWNER, repo="alpha", trees=False)
+    orch, harness, db, acquired = await _orch(db_url, tmp_path, {"alpha": stand},
+                                              project_orientation_intake_wait_s=1.0)
+    try:
+        await orch.projects.add("alpha", f"https://github.com/{OWNER}/alpha")
+        stand.gate, stand.hold_paths = asyncio.Event(), (f"ref={stand.head()}",)
+        t0 = time.monotonic()
+        await _intake(orch, "alpha", "slow", "add a --verbose flag")
+        assert time.monotonic() - t0 < 5.0, "intake must not wait for the whole build"
+        assert not _coding_prompts(harness) or "PROJECT ORIENTATION" not in _coding_prompts(harness)[0]
+        assert await _computing(orch) == 0
+        stand.gate.set()
+        await _drain_bg(orch)
+        first = [p for p in _coding_prompts(harness) if "--verbose" in p][0]
+        assert "PROJECT ORIENTATION MAP" in first and "python -m pytest" in first
     finally:
         await db.dispose()

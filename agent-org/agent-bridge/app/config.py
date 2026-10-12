@@ -508,8 +508,15 @@ class Settings(BaseSettings):
     # gate and rides the first coding wake as PROJECT ORIENTATION. Cached per project + commit;
     # a failed build is never cached. Needs the App (and a repo on the App's account).
     project_orientation_enabled: bool = True
-    # Wall-clock bound for one build (head lookup + reads); a slower repo gets "unavailable".
-    project_orientation_timeout_s: float = 20.0
+    # Wall-clock bound for one build (head lookup + reads); a slower repo gets "unavailable" for that
+    # effort (never cached). 60 s, not 20: on real GitHub a build is one trees call (~2 s), but the C7
+    # GitHub stand-in has no trees endpoint and serves the contents walk with blocking git calls
+    # (measured 16-18 s on this host for the bake-off repos, slower under a CPU-model smoke).
+    project_orientation_timeout_s: float = 60.0
+    # How long INTAKE waits for the map before the readiness gate (intake runs on the serial event
+    # loop, so a slow build must not hold every operator message). A build still running goes on in
+    # the background and the first coding wake (a background task) waits for it within the bound.
+    project_orientation_intake_wait_s: float = 8.0
 
     # ── Charters / rule store (P3) ──────────────────────────────────────────
     charters_dir: str = "charters"

@@ -858,7 +858,7 @@ def cmd_execute(n: int) -> int:
     )
     # FINAL RAIL (proven across 4 revisions, 2026-08-23): a BARE /nl project
     # goal is the ONLY inlet that registers the objective verbatim in
-    # goal_versions AND auto-flows survey→readiness→risk→dispatch. The
+    # goal_versions AND auto-flows orientation→readiness→risk→dispatch. The
     # steer-by-name path ("for effort <id>: …") registers NO goal (steering
     # plane ≠ goal plane) — efforts dispatched that way are skipped with
     # "no goal recorded". Named-rerun hijack of prior efforts is prevented by
@@ -872,7 +872,7 @@ def cmd_execute(n: int) -> int:
             return json.loads(resp.read().decode() or "{}")
     out = bridge("/nl", {"message": goal})
     print(f"dispatched issue #{n} via bare /nl — {json.dumps(out)[:160]}")
-    print("(a fresh effort auto-flows survey→readiness→risk→dispatch; watch the audit stream)")
+    print("(a fresh effort auto-flows orientation→readiness→risk→dispatch; watch the audit stream)")
     p = plan_path(n)
     p.write_text(p.read_text(encoding="utf-8").replace("status: planned", "status: executing", 1),
                  encoding="utf-8")

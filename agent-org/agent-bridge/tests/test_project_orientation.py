@@ -254,6 +254,131 @@ def test_redaction_shapes():
         assert om.clean(ok, 400) == ok
 
 
+# ── round 2: one failed read inside an otherwise good build is a FAILED build (never cached) ─────
+
+# (mode, the read that fails) - every read kind a build makes. 404 is "not there" and is tested
+# separately; every other status must fail the whole build.
+READ_KINDS = [
+    ("trees", "/git/trees/"),                         # trees call itself (non-404)
+    ("trees", "/contents/pyproject.toml"),            # a manifest read
+    ("trees", "/contents/web/package.json"),          # a nested manifest read
+    ("trees", "/contents/README.md"),                 # the README read
+    ("trees", "/commits/"),                           # the recent-paths walk
+    ("trees", "/compare/"),                           # the recent-paths compare
+    ("walk", "/contents?ref="),                       # the root listing
+    ("walk", "/contents/tests?ref="),                 # a sub-listing
+    ("walk", "/contents/web/src?ref="),               # a deeper sub-listing
+    ("walk", "/contents/pyproject.toml"),             # a manifest read in walk mode
+    ("walk", "/compare/"),
+]
+
+
+@pytest.mark.parametrize("status", [502, 500, 429, 403])
+@pytest.mark.parametrize("mode, path", READ_KINDS, ids=[f"{m}:{p}" for m, p in READ_KINDS])
+async def test_one_failed_read_fails_the_build_and_the_next_call_rebuilds_in_full(
+        tmp_path, mode, path, status):
+    gh = GitBackedGitHub(_small_repo(tmp_path), trees=(mode == "trees"))
+    po = _orientation(gh)
+    sha = gh.head()
+    gh.fail, gh.fail_on = status, (path,)
+    bad = await po.get("gym", GH_REPO, sha)
+    assert not bad.ok and bad.attempted and str(status) in bad.reason, bad.reason
+    assert po.cached("gym") is None, "a build with a failed read must not be cached"
+    gh.fail, gh.fail_on = None, ()                    # GitHub recovers
+    good = await po.get("gym", GH_REPO, sha)
+    assert good.ok and not good.cached
+    for fact in ("python -m pytest   [pyproject.toml]", "cd web && npm test   [web/package.json]",
+                 "tests/ (1)", "# Gym CLI", "src/gym/util.py"):
+        assert fact in good.text, fact
+    kinds = [k for k, _ in po.events]
+    assert kinds == ["project_orientation_failed", "project_orientation"]
+
+
+async def test_a_404_inside_a_build_is_absence_not_failure(tmp_path):
+    gh = GitBackedGitHub(_small_repo(tmp_path), trees=True)
+    po = _orientation(gh)
+    gh.fail, gh.fail_on = 404, ("/contents/web/package.json",)
+    res = await po.get("gym", GH_REPO, gh.head())
+    assert res.ok and "npm test" not in res.text and "python -m pytest" in res.text
+
+
+# ── round 2: dotnet and mixed repos ────────────────────────────────────────────────────────────
+
+def _dotnet_repo(tmp_path: Path, *, sln: bool = True) -> Path:
+    files = {
+        "src/App/App.csproj": "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>",
+        "src/App/Program.cs": "class P {}", "src/App/UserService.cs": "class U {}",
+        "tests/App.Tests/App.Tests.csproj": "<Project><ItemGroup><PackageReference "
+                                            "Include=\"xunit\" /></ItemGroup></Project>",
+        "tests/App.Tests/UserAuthenticationService2Tests.cs": "class T {}",
+        "tests/App.Tests/UserServiceTests.cs": "class T2 {}",
+        "scripts/test_release.py": "def test_r(): pass\n",        # a stray python test
+        "README.md": "# App\n",
+    }
+    if sln:
+        files["App.sln"] = "Microsoft Visual Studio Solution File\n"
+    return make_repo(tmp_path, [files, {"src/App/OAuth2AuthorizationServerConfig.cs": "class C {}"}])
+
+
+@pytest.mark.parametrize("trees", [True, False], ids=["github-trees", "c7-stub-contents-walk"])
+async def test_a_dotnet_repo_gets_dotnet_test_and_never_a_root_pytest(tmp_path, trees):
+    text, _ = await _map(_dotnet_repo(tmp_path), trees=trees)
+    lines = text.splitlines()
+    i = lines.index("Likely test commands (from manifests):")
+    assert lines[i + 1].strip() == "dotnet test App.sln   [App.sln]"     # the dominant system first
+    assert not any(ln.strip().startswith("python -m pytest") for ln in lines)  # never at the root
+    assert "cd scripts && python -m pytest" in text                       # the stray file: its own root
+    assert "App.sln" in text.split("Key files: ", 1)[1].split("\n", 1)[0]
+    assert "tests/App.Tests/App.Tests.csproj" in text
+    assert "C# " in text
+    assert "OAuth2AuthorizationServerConfig.cs" in text                   # an identifier, not a token
+
+
+async def test_a_dotnet_repo_without_a_solution_tests_the_test_project(tmp_path):
+    text, _ = await _map(_dotnet_repo(tmp_path, sln=False), trees=True)
+    assert "cd tests/App.Tests && dotnet test App.Tests.csproj   [tests/App.Tests/App.Tests.csproj]" in text
+    assert not any(ln.strip().startswith("python -m pytest") for ln in text.splitlines())
+
+
+async def test_a_mixed_repo_lists_each_system_at_its_own_root(tmp_path):
+    gd = make_repo(tmp_path, [{
+        "pyproject.toml": "[tool.pytest.ini_options]\n",
+        "tests/test_a.py": "x", "tests/test_b.py": "x", "tests/test_c.py": "x",
+        "web/package.json": '{"scripts": {"test": "jest"}}', "web/src/a.test.ts": "x",
+        "svc/Svc.sln": "x", "svc/Svc/Svc.csproj": "x",
+        "svc/tests/Svc.Tests/Svc.Tests.csproj": "x", "svc/tests/Svc.Tests/ATests.cs": "x",
+        "svc/tests/Svc.Tests/BTests.cs": "x",
+    }])
+    text, _ = await _map(gd, trees=True)
+    block = text.split("Likely test commands (from manifests):\n", 1)[1].split("\n")
+    cmds = [ln.strip() for ln in block if ln.startswith("  ")]
+    assert cmds[:3] == ["python -m pytest   [pyproject.toml]",
+                        "cd svc && dotnet test Svc.sln   [svc/Svc.sln]",
+                        "cd web && npm test   [web/package.json]"], cmds
+
+
+async def test_a_testing_helpers_package_is_not_a_test_folder(tmp_path):
+    gd = make_repo(tmp_path, [{"src/lib/testing/helpers.py": "x", "src/lib/core.py": "x",
+                               "tests/test_core.py": "x"}])
+    text, _ = await _map(gd, trees=True)
+    folders = text.split("Test folders (files): ", 1)[1].split("\n", 1)[0]
+    assert "testing" not in folders and "tests/ (1)" in folders
+
+
+def test_identifiers_are_not_masked_and_tokens_still_are():
+    for name in ("src/OAuth2AuthorizationServerConfig.java", "tests/UserAuthenticationService2Tests.cs",
+                 "pkg/k8sControllerRuntimeAdapterV2/x.go", "src/Base64UrlEncoderUtility.ts",
+                 "docs/RFC7519JsonWebTokenNotes.md", "Microsoft.Extensions.DependencyInjection2",
+                 "## Upgrading to Net8AndAspNetCoreHosting"):
+        assert om.clean(name, 400) == name, name
+    aws = "wJalrXUtnFEMI/K7MDENG/bPxRfiCY" + "EXAMPLEKEY"
+    for secret in (GENERIC, "e04b3bb4550d9f8a7c6b5d4e3f2a1b0c9d8e7f6a", aws,
+                   "rk_" + "live_" + "a1B2c3D4e5F6g7H8", "xa" + "pp-1-A0B1C2D3E4-5678", "ops@example.com",
+                   "192.0.2.10"):
+        out = om.clean(f"x {secret} y", 400)
+        assert secret not in out and "[REDACTED]" in out, secret
+
+
 # ── evidence on the four bake-off item repos (sealed clones), when they are provided ─────────
 
 SEALED = os.environ.get("AO_ORIENT_SEALED_REPOS", "")

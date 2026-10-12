@@ -83,7 +83,7 @@ LANGUAGES = {
     ".py": "Python", ".pyi": "Python", ".ts": "TypeScript", ".tsx": "TypeScript",
     ".js": "JavaScript", ".jsx": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript",
     ".go": "Go", ".rs": "Rust", ".java": "Java", ".kt": "Kotlin", ".kts": "Kotlin",
-    ".cs": "C#", ".c": "C", ".h": "C/C++ header", ".cc": "C++", ".cpp": "C++", ".hpp": "C++",
+    ".cs": "C#", ".fs": "F#", ".vb": "Visual Basic", ".c": "C", ".h": "C/C++ header", ".cc": "C++", ".cpp": "C++", ".hpp": "C++",
     ".rb": "Ruby", ".php": "PHP", ".swift": "Swift", ".scala": "Scala", ".lua": "Lua",
     ".sh": "Shell", ".bash": "Shell", ".ps1": "PowerShell", ".psm1": "PowerShell",
     ".sql": "SQL", ".html": "HTML", ".css": "CSS", ".scss": "CSS", ".vue": "Vue",
@@ -103,14 +103,16 @@ CONFIG_FILES = frozenset({
     "Dockerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
     "tsconfig.json", "ruff.toml", ".ruff.toml", "mypy.ini", ".pre-commit-config.yaml",
     "jest.config.js", "jest.config.ts", "vitest.config.ts", "vitest.config.js", "conftest.py",
-    "noxfile.py", ".gitmodules", ".env.example",
+    "noxfile.py", ".gitmodules", ".env.example", "global.json", "Directory.Build.props",
+    "Directory.Packages.props", "nuget.config", "NuGet.Config",
 })
 ENTRY_POINTS = frozenset({
     "main.py", "__main__.py", "app.py", "manage.py", "cli.py", "server.py", "wsgi.py", "asgi.py",
     "index.js", "index.ts", "main.js", "main.ts", "server.js", "server.ts", "main.go",
     "main.rs", "lib.rs", "Program.cs", "main.c", "main.cpp",
 })
-TEST_DIR_NAMES = frozenset({"tests", "test", "__tests__", "spec", "specs", "testing", "e2e"})
+# not "testing": src/x/testing/ is usually a library's public test helpers, not its tests
+TEST_DIR_NAMES = frozenset({"tests", "test", "__tests__", "spec", "specs", "e2e"})
 _TEST_FILE = re.compile(
     r"(^test_.*\.py$|.*_test\.py$|.*_test\.go$|.*\.(test|spec)\.[cm]?[jt]sx?$|.*Tests?\.cs$"
     r"|.*_spec\.rb$|.*Test\.java$|^test-.*\.ps1$|.*\.Tests\.ps1$)")
@@ -132,9 +134,28 @@ _SECRET_SHAPES = [
     re.compile(r"\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"),
     re.compile(r"(?i)\b(api[_-]?key|secret|token|password|passwd|pwd|access[_-]?key)\b\s*[:=]\s*\S+"),
+    re.compile(r"\b[rs]k_(live|test)_[A-Za-z0-9]{10,}"),                   # Stripe
+    re.compile(r"\bxapp-[A-Za-z0-9-]{10,}"),                               # Slack app token
+    # the house Sanitizer's PII shapes (little-coder sanitize.py `_PII_PATTERNS`)
+    re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"),   # email
+    re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b"),  # IPv4
 ]
+# Shape-agnostic rules for secrets with no known prefix (both are deliberately conservative about
+# names: a heading or a file name is orientation, and masking it costs the worker the fact):
+# * a 40-char base64-with-slash run mixing upper, lower and digits (an AWS secret access key);
+# * a run of >= 20 letters+digits that mixes both and does NOT read as an identifier. An identifier
+#   (OAuth2AuthorizationServerConfig, UserAuthenticationService2Tests, RFC7519JsonWebTokenNotes,
+#   k8sControllerRuntimeAdapterV2) is mostly (>= 60%) made of word-like runs (a capital and 2+
+#   lowercase letters, or 3+ lowercase letters); a random token (base62 or hex, e.g.
+#   Zq81mXv04TtPo9LwKs27Hb or a commit sha) is not.
+_B64_40 = re.compile(r"(?<![A-Za-z0-9/+=])[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])")
 _LONG_RUN = re.compile(r"[A-Za-z0-9]{20,}")
+_WORDISH = re.compile(r"[A-Z][a-z]{2,}|[a-z]{3,}")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def _identifier_like(s: str) -> bool:
+    return sum(len(m.group(0)) for m in _WORDISH.finditer(s)) >= 0.6 * len(s)
 
 
 def redact(text: str) -> str:
@@ -144,11 +165,18 @@ def redact(text: str) -> str:
     for pat in _SECRET_SHAPES:
         text = pat.sub(REDACTED, text)
 
+    def _mask_b64(m: re.Match[str]) -> str:
+        s = m.group(0)
+        mixed = (any(c.isupper() for c in s) and any(c.islower() for c in s)
+                 and any(c.isdigit() for c in s) and "/" in s)
+        return REDACTED if mixed else s
+    text = _B64_40.sub(_mask_b64, text)
+
     def _mask_run(m: re.Match[str]) -> str:
         s = m.group(0)
         has_digit = any(ch.isdigit() for ch in s)
         has_alpha = any(ch.isalpha() for ch in s)
-        return REDACTED if has_digit and has_alpha else s
+        return REDACTED if has_digit and has_alpha and not _identifier_like(s) else s
     return _LONG_RUN.sub(_mask_run, text)
 
 
@@ -292,10 +320,12 @@ class GitHubRestSource:
             results = await asyncio.gather(*(listing(d) for d in batch))
             nxt: list[str] = []
             for d, (st, body) in results:
+                if st == 404 and d:
+                    continue                    # gone at this commit: genuinely not there
                 if st != 200 or not isinstance(body, list):
-                    if d == "":
-                        raise OrientationError(f"root listing unreadable (HTTP {st})")
-                    continue
+                    # anything else (5xx, 429, 403, a malformed body) fails the build: a map with a
+                    # silently missing directory would be cached as if it were the repo
+                    raise OrientationError(f"listing {d or '/'} unreadable (HTTP {st})")
                 for it in body:
                     if not isinstance(it, dict) or not isinstance(it.get("path"), str):
                         continue
@@ -319,7 +349,12 @@ class GitHubRestSource:
 
     async def read_file(self, path: str, sha: str) -> bytes | None:
         st, body = await self._get(f"/contents/{quote(path)}?ref={quote(sha, safe='')}")
-        if st != 200 or not isinstance(body, dict) or body.get("type") != "file":
+        if st == 404:
+            return None      # not there
+        if st != 200:
+            # a transient/denied read must not pass for "this manifest says nothing"
+            raise OrientationError(f"read of {path[:80]} failed (HTTP {st})")
+        if not isinstance(body, dict) or body.get("type") != "file":
             return None      # a symlink/submodule/dir is never read through
         if int(body.get("size") or 0) > MAX_BLOB_BYTES or body.get("encoding") != "base64":
             return None
@@ -334,8 +369,10 @@ class GitHubRestSource:
         cur, oldest = sha, ""
         for _ in range(RECENT_COMMITS):
             st, body = await self._get(f"/commits/{quote(cur, safe='')}")
-            if st != 200 or not isinstance(body, dict):
+            if st == 404:
                 break
+            if st != 200 or not isinstance(body, dict):
+                raise OrientationError(f"commit {cur[:12]} unreadable (HTTP {st})")
             parents = body.get("parents") or []
             if not parents or not isinstance(parents[0], dict) or not parents[0].get("sha"):
                 break
@@ -343,8 +380,10 @@ class GitHubRestSource:
         if not oldest:
             return []
         st, cmp_ = await self._get(f"/compare/{quote(oldest, safe='')}...{quote(sha, safe='')}")
-        if st != 200 or not isinstance(cmp_, dict):
+        if st == 404:
             return []
+        if st != 200 or not isinstance(cmp_, dict):
+            raise OrientationError(f"compare unreadable (HTTP {st})")
         seen: list[str] = []
         for f in cmp_.get("files") or []:
             name = f.get("filename") if isinstance(f, dict) else None
@@ -451,7 +490,7 @@ class _Facts:
     headings: list[str]
     readme: str
     recent: list[str]
-    roots: dict[str, int]
+    roots: dict[str, Counter]
 
 
 def render(f: _Facts) -> str:
@@ -492,7 +531,8 @@ def render(f: _Facts) -> str:
     def by_shallow(paths):
         return sorted(paths, key=lambda p: (_depth(p), p))
     names = {e.path: e.path.rsplit("/", 1)[-1] for e in files}
-    key = by_shallow(p for p, n in names.items() if n in MANIFESTS or n in CONFIG_FILES)
+    key = by_shallow(p for p, n in names.items()
+                     if n in MANIFESTS or n in CONFIG_FILES or n.endswith(DOTNET_PROJECT_EXT))
     entry = by_shallow(p for p, n in names.items() if n in ENTRY_POINTS)
 
     tdirs = Counter()
@@ -558,21 +598,45 @@ def render(f: _Facts) -> str:
     return out
 
 
-def test_roots(entries: list[Entry]) -> dict[str, int]:
-    """{project root of a test folder: test files under it}. A test folder is a dir named like
-    `tests/` or one holding test-named files; its ROOT is the dir above the outermost `tests`-like
-    segment (where a runner is started), else the folder itself. Paths only."""
-    roots: Counter = Counter()
+_TEST_LANG = {
+    "py": "py", "cs": "dotnet", "fs": "dotnet", "vb": "dotnet", "js": "js", "jsx": "js",
+    "ts": "js", "tsx": "js", "mjs": "js", "cjs": "js", "go": "go", "rs": "rs", "java": "jvm",
+    "kt": "jvm", "rb": "rb", "ex": "ex", "exs": "ex", "php": "php", "ps1": "ps",
+}
+# Which test files a command runs ("*" = any: make test can run anything).
+_CMD_ECOSYSTEM = {
+    "python -m pytest": "py", "tox": "py", "npm test": "js", "deno test": "js",
+    "go test ./...": "go", "cargo test": "rs", "mvn test": "jvm", "gradle test": "jvm",
+    "mix test": "ex", "bundle exec rspec": "rb", "composer test": "php", "make test": "*",
+}
+DOTNET_PROJECT_EXT = (".sln", ".slnx", ".csproj", ".fsproj", ".vbproj")
+
+
+def _ecosystem(cmd: str) -> str:
+    return "dotnet" if cmd.startswith("dotnet test") else _CMD_ECOSYSTEM.get(cmd, "*")
+
+
+def test_roots(entries: list[Entry]) -> dict[str, Counter]:
+    """{project root of a test folder: Counter of test files per ecosystem}. A test folder is a dir
+    named like `tests/` or one holding test-named files; its ROOT is the dir above the outermost
+    `tests`-like segment (where a runner is started), else the folder itself. Paths only."""
+    roots: dict[str, Counter] = {}
     for e in entries:
         if e.kind != "file":
             continue
         segs = e.path.split("/")
         idx = next((i for i, s in enumerate(segs[:-1]) if s in TEST_DIR_NAMES), None)
         if idx is not None:
-            roots["/".join(segs[:idx])] += 1
+            root = "/".join(segs[:idx])
         elif _TEST_FILE.match(segs[-1]):
-            roots["/".join(segs[:-1])] += 1
-    return dict(roots)
+            root = "/".join(segs[:-1])
+        else:
+            continue
+        ext = segs[-1].rsplit(".", 1)[-1].lower() if "." in segs[-1] else ""
+        lang = _TEST_LANG.get(ext)
+        if lang:
+            roots.setdefault(root, Counter())[lang] += 1
+    return roots
 
 
 def _covers(d: str, root: str) -> bool:
@@ -580,8 +644,31 @@ def _covers(d: str, root: str) -> bool:
     return d == "" or root == d or root.startswith(d + "/")
 
 
+def _runs(cmd: tuple[str, str, str], root: str, lang: str) -> bool:
+    eco = _ecosystem(cmd[1])
+    return _covers(cmd[0], root) and (eco == "*" or eco == lang)
+
+
+def dotnet_commands(files: list[Entry]) -> list[tuple[str, str, str]]:
+    """`dotnet test` from paths only (nothing read): every solution, else every test-named project
+    no solution covers. The command names the solution/project; the dir is where it lives."""
+    out: list[tuple[str, str, str]] = []
+    slns = [e.path for e in files if e.path.endswith((".sln", ".slnx"))]
+    for p in sorted(slns, key=lambda p: (_depth(p), p)):
+        out.append((_dir_of(p), f"dotnet test {p.rsplit('/', 1)[-1]}", p))
+    for p in sorted(e.path for e in files if e.path.endswith((".csproj", ".fsproj", ".vbproj"))):
+        if not re.search(r"(?i)test", p.rsplit("/", 1)[-1]):
+            continue
+        if any(_covers(d, _dir_of(p)) for d, _c, _s in out):
+            continue
+        out.append((_dir_of(p), f"dotnet test {p.rsplit('/', 1)[-1]}", p))
+    return out
+
+
 async def build_map(source: RepoSource, sha: str) -> str:
-    """Read the facts through `source` and render the bounded map. Raises OrientationError."""
+    """Read the facts through `source` and render the bounded map. Raises OrientationError, also
+    when any single read inside the build fails with anything but "not there" (a partial map is
+    never produced, so it can never be cached)."""
     entries, note = await source.list_tree(sha)
     if not any(e.kind == "file" for e in entries):
         raise OrientationError("no files in the tree")
@@ -600,7 +687,7 @@ async def build_map(source: RepoSource, sha: str) -> str:
     reads = [m.path for m in manifests] + ([readme] if readme else [])
     blobs = dict(zip(reads, await asyncio.gather(*(source.read_file(p, sha) for p in reads))))
 
-    commands: list[tuple[str, str, str]] = []
+    commands: list[tuple[str, str, str]] = dotnet_commands(files)
     for m in manifests:
         raw = blobs.get(m.path)
         if raw is None:
@@ -609,17 +696,18 @@ async def build_map(source: RepoSource, sha: str) -> str:
         d = _dir_of(m.path)
         if cmd and not any(c[0] == d and c[1] == cmd for c in commands):
             commands.append((d, cmd, m.path))
-    # pytest-style tests with no manifest declaring a runner are still a pytest project
-    paths = [e.path for e in files]
+    # pytest-style tests no manifest declares a runner for are still a pytest project - but only
+    # where Python test files ARE the tests of that root (a stray test_*.py in a dotnet repo yields
+    # at most a command rooted at its own folder, never one at the repo root)
     for r in sorted(roots, key=lambda p: (_depth(p), p)):
-        if any(_covers(d, r) for d, _c, _s in commands):
-            continue
-        pyish = any(p.endswith(".py") and _covers(r, _dir_of(p)) and (
-            p.rsplit("/", 1)[-1].startswith("test_") or p.endswith("_test.py")) for p in paths)
-        if pyish:
+        if roots[r].get("py") and not any(_runs(c, r, "py") for c in commands):
             commands.append((r, "python -m pytest",
                              "pytest-style test files; no manifest declares a runner"))
-    commands.sort(key=lambda c: (_depth(c[0]) if c[0] else -1, c[0]))
+
+    # the dominant build system first: by how many test files each command reaches
+    def weight(c: tuple[str, str, str]) -> int:
+        return sum(n for r, langs in roots.items() for lang, n in langs.items() if _runs(c, r, lang))
+    commands.sort(key=lambda c: (-weight(c), _depth(c[0]) if c[0] else -1, c[0], c[1]))
     headings = readme_headings(blobs[readme]) if readme and blobs.get(readme) else []
     recent = [p for p in await source.recent_paths(sha)
               if not any(seg in SKIP_DIRS for seg in p.split("/")[:-1])]
@@ -634,6 +722,7 @@ class Orientation:
     text: str = ""           # the map ("" unless ok)
     ok: bool = False
     attempted: bool = False  # False = skipped (disabled / no repo / the App cannot read it)
+    pending: bool = False    # the caller stopped waiting; the build goes on in the background
     reason: str = ""
     sha: str = ""
     cached: bool = False
@@ -643,7 +732,7 @@ class Orientation:
         """What goes into the first coding wake: the map, the 'unavailable' line, or nothing."""
         if self.ok:
             return "\n\n" + self.text
-        if self.attempted:
+        if self.attempted or self.pending:
             return (f"\n\n{HEADER}: unavailable for this effort ({clean(self.reason, 160)}); "
                     "orient yourself from the repository as usual.")
         return ""
@@ -661,7 +750,7 @@ class ProjectOrientation:
     next call builds again. Concurrent callers for the same project + commit share ONE build.
     Nothing here touches the worker pool."""
 
-    def __init__(self, source_fn: SourceFn, *, enabled: bool = True, timeout_s: float = 20.0,
+    def __init__(self, source_fn: SourceFn, *, enabled: bool = True, timeout_s: float = 60.0,
                  audit: AuditFn | None = None, max_projects: int = 64) -> None:
         self._source_fn = source_fn
         self._enabled = enabled
@@ -675,9 +764,12 @@ class ProjectOrientation:
         return self._cache.get(project)
 
     async def get(self, project: str, repo: str, base_sha: str = "", *,
-                  effort_id: str | None = None) -> Orientation:
-        """The map for `repo` at `base_sha` (the default-branch head when not given). Bounded by
-        `timeout_s` in total; never raises (except cancellation)."""
+                  effort_id: str | None = None, wait_s: float | None = None) -> Orientation:
+        """The map for `repo` at `base_sha` (the default-branch head when not given). The build is
+        bounded by `timeout_s`; this CALL waits at most `wait_s` when given (intake: it runs on the
+        serial event loop) and otherwise up to the build's bound. A build still running when the
+        caller stops waiting keeps going in the background (`pending`); its success is cached for
+        the next caller. Never raises (except cancellation)."""
         if not self._enabled:
             return Orientation(reason="disabled")
         if not repo:
@@ -689,9 +781,11 @@ class ProjectOrientation:
         t0 = time.monotonic()
         sha = base_sha
         shared = False
+        handed = False             # the source belongs to a build task from then on
+        limit = self._timeout_s if wait_s is None else max(0.1, min(wait_s, self._timeout_s))
         try:
             if not sha:
-                sha = await asyncio.wait_for(source.resolve_head(), self._timeout_s)
+                sha = await asyncio.wait_for(source.resolve_head(), limit)
             hit = self._cache.get(key)
             if hit is not None and hit[0] == sha:
                 self._cache.move_to_end(key)
@@ -705,15 +799,27 @@ class ProjectOrientation:
             else:
                 remaining = max(1.0, self._timeout_s - (time.monotonic() - t0))
                 task = asyncio.ensure_future(self._build(key, source, sha, remaining, effort_id))
+                handed = True
                 self._inflight[(key, sha)] = task
                 task.add_done_callback(lambda _t, k=(key, sha): self._inflight.pop(k, None))
-            text = await asyncio.shield(task)
+            if wait_s is not None:
+                left = max(0.0, wait_s - (time.monotonic() - t0))
+                done, _ = await asyncio.wait({task}, timeout=left)
+                if not done:
+                    return Orientation(pending=True, sha=sha,
+                                       reason="still building (continues in the background)",
+                                       ms=int((time.monotonic() - t0) * 1000))
+                text = task.result()
+            else:
+                text = await asyncio.shield(task)
         except asyncio.CancelledError:
-            await source.aclose()
+            if not handed:
+                await source.aclose()
             raise
         except Exception as exc:  # noqa: BLE001 - orientation is a bonus; never block intake/dispatch
-            await source.aclose()
-            reason = (f"timed out after {self._timeout_s:.0f}s"
+            if not handed:
+                await source.aclose()
+            reason = (f"timed out after {limit:.0f}s"
                       if isinstance(exc, asyncio.TimeoutError) else str(exc) or type(exc).__name__)
             return Orientation(attempted=True, reason=reason, sha=sha,
                                ms=int((time.monotonic() - t0) * 1000))

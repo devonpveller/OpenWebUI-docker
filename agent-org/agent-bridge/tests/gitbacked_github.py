@@ -9,7 +9,7 @@ including a symlink coming back from the contents API as `type: "symlink"` (real
 file whose content is the link target (the stub).
 
 Every git call uses an explicit `--git-dir` (never repo discovery), so nothing here can touch a
-repository other than the one it was given. Fault injection: `fail` (status to answer instead),
+repository other than the one it was given. Fault injection: `fail` (status to answer instead; with `fail_on`, only for matching requests),
 `gate` (an asyncio.Event every request waits on), `hold_paths` (only requests whose path+query contains
 one of these wait on the gate), `delay_s`.
 """
@@ -95,6 +95,7 @@ class GitBackedGitHub:
         self.symlink_as_file = (not trees) if symlink_as_file is None else symlink_as_file
         self.requests: list[str] = []
         self.fail: int | None = None
+        self.fail_on: tuple[str, ...] = ()   # with `fail`: only requests whose path+query match
         self.gate: asyncio.Event | None = None
         self.hold_paths: tuple[str, ...] = ()
         self.held = asyncio.Event()       # set when a request starts waiting on the gate
@@ -115,7 +116,7 @@ class GitBackedGitHub:
             await self.gate.wait()
         if self.delay_s:
             await asyncio.sleep(self.delay_s)
-        if self.fail is not None:
+        if self.fail is not None and (not self.fail_on or any(h in full for h in self.fail_on)):
             return httpx.Response(self.fail, json={"message": "injected"})
         prefix = f"/repos/{self.owner}/{self.repo}"
         if not path.startswith(prefix):

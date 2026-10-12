@@ -6396,7 +6396,8 @@ class Orchestrator:
         repo = await self._effort_repo(effort_id) or ""
         workspace_ctx = f"existing project: #{project}" + (f" (repo: {repo})" if repo else "")
         if repo:
-            orientation = await self.orientation.get(project, repo, effort_id=effort_id)
+            orientation = await self.orientation.get(
+                project, repo, effort_id=effort_id, wait_s=self.s.project_orientation_intake_wait_s)
             if orientation.ok:
                 workspace_ctx += "\n\n" + orientation.text
         verdict = None

@@ -192,7 +192,7 @@ class FlailConfig(_Strict):
     """Flail guard (agent-org bridge, 2026-07-14): a coding turn that keeps READING without ever
     EDITING is lost — "too many thinking turns / time iterating on read without editing" is the
     operator's stop signal. Opt-in per task (`flail_guard` on the trigger; the bridge sets it on
-    coding step wakes only — plan/publish/survey turns are exempt). Tripping kills the turn with
+    coding step wakes only — plan/publish turns are exempt). Tripping kills the turn with
     a FLAIL-GUARD answer marker; the bridge then forks a fresh session from the original goal and
     re-asks in plan mode. Trip = ZERO edit/write tool executions AND (tool_calls reached, OR
     seconds elapsed with at least min_tool_calls executions — so a slow, thoughtful task with a
