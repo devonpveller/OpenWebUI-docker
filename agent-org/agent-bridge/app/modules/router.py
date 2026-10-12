@@ -956,7 +956,10 @@ class Router:
         else:
             inst = await self.scheduler.acquire(effort_id, "verifier", session_id)
         try:
-            if require_instance and inst.id != require_instance:   # defensive; acquire enforces
+            # and AGAIN after the acquire (round 4's check, kept): the focus can move while acquire
+            # awaits the gate/DB - the worker must still hold THIS effort's workspace now
+            if require_instance and (inst.id != require_instance
+                                     or (self._ws_focus.get(inst.id) or ("",))[0] != effort_id):
                 raise RuntimeError("not the worker that holds this effort's workspace")
             if repo:
                 ok, detail, _ = await self.harness.set_project(

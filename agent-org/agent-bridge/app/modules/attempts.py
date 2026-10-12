@@ -31,6 +31,7 @@ WHY THE COMMANDS LOOK LIKE THIS (ao-planrevert's two failed rounds, findings/ao-
 
 from __future__ import annotations
 
+import hashlib
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -633,27 +634,40 @@ _SECTION_KW = (r"UNDERSTANDING|Understanding|ALREADY DONE|Already done|Already D
                r"WON['’`]?T DO|Won['’`]?t do|Won['’`]?t Do|RISKS|Risks|VERDICT|Verdict|"
                r"ANCHOR ITEMS|Anchor items|Anchor Items|CHECKS|Checks")
 _LEAD = r"^[ ]{0,3}(?:>\s*)?(?:#{1,6}\s*)?[*_]{0,3}\s*"
+# a numbered SECTION header ("### 3. Plan", "2. PLAN:") - the number is not a step
+_NUM_LEAD = r"^[ ]{0,3}(?:>\s*)?(?:#{1,6}\s*)?[*_]{0,3}\s*\d{1,2}[.)]\s+[*_]{0,3}\s*"
 # a qualifier: "(files to touch)", "[x]", " - what remains", " for the next turn", " of record"
 _QUAL = r"(?:\s*[(\[][^)\]\n]{0,120}[)\]]|\s*[-–—][^:\n]{0,100}?|\s+(?:for|of)\s[^:\n]{0,80}?)?"
 
 
-def _hdr(kw: str, *, lead_words: bool = False) -> re.Pattern:
+def _hdr(kw: str, *, lead_words: bool = False, lead: str = _LEAD) -> re.Pattern:
     """A section header for keyword(s) `kw`: `<kw><qualifier>:` + the rest of the line, or the
     header alone on its line (no colon, nothing after it)."""
     pre = r"(?:[A-Z][A-Za-z]{2,15}\s+){0,2}" if lead_words else ""
     return re.compile(
-        _LEAD + pre + r"(?:" + kw + r")\b" + _QUAL + r"[*_]{0,3}\s*"
+        lead + pre + r"(?:" + kw + r")\b" + _QUAL + r"[*_]{0,3}\s*"
         r"(?::[*_]{0,3}\s*(?P<rest>.*?)|(?P<alone>))\s*[*_]{0,3}\s*$")
 
 
 _SECTION = _hdr(_SECTION_KW, lead_words=True)
+_SECTION_NUM = _hdr(_SECTION_KW, lead_words=True, lead=_NUM_LEAD)
 _PLAN_HDR = _hdr(r"PLAN|Plan", lead_words=True)
+_PLAN_HDR_NUM = _hdr(r"PLAN|Plan", lead_words=True, lead=_NUM_LEAD)
+# "Revised plan:", "Implementation plan:", "My plan:", "The plan is as follows:", "Here is my
+# plan:" - any case, ALONE on its line (nothing after the colon), so prose is never a header
+_PLAN_LOOSE = re.compile(
+    _LEAD + r"(?:[A-Za-z'’]{1,15}\s+){0,4}plan\b(?:\s+(?:is|as|for|of|below|follows|steps|here|"
+    r"now|then|going)\b[^:\n]{0,30})?[*_]{0,3}\s*:[*_]{0,3}\s*$", re.I)
 _ITEMS_HDR = _hdr(r"ANCHOR ITEMS|Anchor items|Anchor Items")
 _ITEM_LINE = re.compile(r"^\s*(?:[-*]\s*)?\**(A\d{1,3})\**\s*[:.)\-]\s*(.+?)\s*$", re.I)
 _STEP_LINE = re.compile(
     r"^(?P<ind>[ \t]*)(?:[-*+]\s+)?(?:#{1,6}\s*)?[*_]{0,3}\s*(?P<word>step\s*#?\s*)?"
-    r"(?P<n>\d{1,3})(?![\d,])\s*[*_]{0,3}\s*(?P<sep>[.:](?!\d)|\)|[-–—](?!\d))[*_]{0,3}\s*"
+    r"(?P<n>\d{1,3})(?![\d,])\s*[*_]{0,3}"
+    r"(?P<sep>\s*[.:](?!\d)|\s*\)|\s*[-–—](?!\d)|\s+[-–—]\s)[*_]{0,3}\s*"
     r"(?P<body>.*?)\s*$", re.I)
+_TABLE_STEP = re.compile(r"^(?P<ind>\s*)\|\s*(?P<n>\d{1,3})\s*[.)]?\s*\|(?P<body>.*?)\|?\s*$")
+_BULLET = re.compile(r"^(?P<ind>[ \t]*)[-*+•]\s+(?P<body>\S.*?)\s*$")
+_FENCE = re.compile(r"^\s*(```|~~~)")
 _ID = r"[Aa]\d{1,3}"
 _ANCHOR_TAG = re.compile(
     r"\*{0,2}[\[(]\s*anchors?(?:\s+items?)?\s*[:=#]?\s*(" + _ID + r")\b(?:\s*(?:,|/|&|\+|\band\b)"
@@ -676,22 +690,79 @@ def _bounded(text: str | None) -> str:
     return t[:half] + "\n" + t[-half:]
 
 
+def _fenced(text: str) -> list[tuple[str, bool]]:
+    """Every line with whether it is inside (or delimits) a ``` / ~~~ code block. A fenced line is
+    never a header, a step or a tag: a reply quoting the plan FORMAT before its real plan, or a
+    code block inside a step, cannot become the plan."""
+    out, inside = [], False
+    for ln in (text or "").splitlines():
+        if _FENCE.match(ln):
+            out.append((ln, True))
+            inside = not inside
+            continue
+        out.append((ln, inside))
+    return out
+
+
+def _num_header(ln: str, num_hdr: re.Pattern):
+    """A NUMBERED section header counts only alone on its line (`### 3. Plan`, `2. PLAN:`):
+    `3. Plan (phase 2): migrate the DB` is a step."""
+    m = num_hdr.match(ln)
+    return m if m is not None and not (m.group("rest") or "").strip() else None
+
+
+def _header_match(ln: str, hdr: re.Pattern, num_hdr: re.Pattern | None = None):
+    m = hdr.match(ln)
+    if m is None and num_hdr is not None:
+        m = _num_header(ln, num_hdr)
+    return m
+
+
+def _is_terminator(ln: str) -> bool:
+    """Does `ln` end the section it is in? A section header at column 0 (markdown allowed), or a
+    numbered section header. An INDENTED `Checks:`/`Risks:` (a step's continuation) never ends
+    a section, and neither does a plain Title-case `Risks: ...` line with text after it (prose)
+    - only CAPITALS, a markdown header/bold, or the header alone on its line do."""
+    if _num_header(ln, _SECTION_NUM):
+        return True
+    m = _SECTION.match(ln)
+    if m is None or ln[:1] in (" ", "\t"):
+        return False
+    body = ln.lstrip("> #*_")
+    upper = body[:1].isupper() and body.split(":")[0].split("(")[0].strip().isupper()
+    marked = ln.lstrip()[:1] in ("#", "*", "_", ">")
+    return bool(upper or marked or not (m.group("rest") or "").strip())
+
+
+def _sections(text: str, hdr: re.Pattern, num_hdr: re.Pattern | None = None,
+              loose: re.Pattern | None = None) -> list[list[tuple[str, bool]]]:
+    """Every section `hdr` (or `num_hdr` / `loose`) opens, as (line, fenced) pairs, up to the next
+    terminator. Fenced lines never open or end a section."""
+    lines = _fenced(text)
+    found: list[list[tuple[str, bool]]] = []
+    for i, (ln, fz) in enumerate(lines):
+        if fz:
+            continue
+        m = _header_match(ln, hdr, num_hdr)
+        if m is None and loose is not None and loose.match(ln):
+            m = loose.match(ln)
+        if m is None:
+            continue
+        rest = (m.groupdict().get("rest") or "")
+        out = [(rest, False)] if rest.strip() else []
+        for nxt, nfz in lines[i + 1:]:
+            if not nfz and _is_terminator(nxt):
+                break
+            out.append((nxt, nfz))
+        found.append(out)
+    return found
+
+
 def _section_lines(text: str, hdr: re.Pattern, *, last: bool = False,
                    all_: bool = False) -> list[str] | list[list[str]] | None:
-    """The lines of the first (or last) section `hdr` opens, up to the next section header.
-    `all_` returns every such section."""
-    lines = (text or "").splitlines()
-    idx = [i for i, ln in enumerate(lines) if hdr.match(ln)]
-    found: list[list[str]] = []
-    for i in idx:
-        m = hdr.match(lines[i])
-        rest = (m.group("rest") or "") if "rest" in m.groupdict() else ""
-        out = [rest] if rest.strip() else []
-        for nxt in lines[i + 1:]:
-            if _SECTION.match(nxt):
-                break
-            out.append(nxt)
-        found.append(out)
+    """The lines of the first (or last) section `hdr` opens (fenced lines included as text, never
+    as headers). `all_` returns every such section."""
+    found = [[ln for ln, _f in sec] for sec in _sections(text, hdr)]
     if all_:
         return found
     if not found:
@@ -702,22 +773,22 @@ def _section_lines(text: str, hdr: re.Pattern, *, last: bool = False,
 _NOT_PLAN = re.compile(r"ALREADY|WON|RISK|VERDICT|ANCHOR|CHECK", re.I)
 
 
-def _outside_sections(text: str) -> list[str]:
+def _outside_sections(text: str) -> list[tuple[str, bool]]:
     """For a plan written WITHOUT a PLAN header: the lines before any section header and those
     under UNDERSTANDING - never ALREADY DONE / WON'T DO / RISKS / VERDICT / CHECKS / ANCHOR
     ITEMS (their numbered lists are not steps)."""
     out, skip = [], False
-    for ln in (text or "").splitlines():
-        m = _SECTION.match(ln)
-        if m:
-            skip = bool(_NOT_PLAN.search(ln[:m.start("rest") if m.group("rest") is not None
-                                            else len(ln)]))
+    for ln, fz in _fenced(text):
+        if not fz and _is_terminator(ln):
+            m = _header_match(ln, _SECTION, _SECTION_NUM)
+            head = ln[:m.start("rest")] if m.group("rest") is not None else ln
+            skip = bool(_NOT_PLAN.search(head))
             rest = m.group("rest") or ""
             if not skip and rest.strip():
-                out.append(rest)
+                out.append((rest, False))
             continue
         if not skip:
-            out.append(ln)
+            out.append((ln, fz))
     return out
 
 
@@ -740,26 +811,54 @@ def _tag(text: str) -> tuple[str, str]:
     return aid, "".join(out)
 
 
-def _steps(lines: list[str]) -> list[dict]:
-    """Top-level numbered steps with their continuation (and sub-item) lines attached."""
+def _step_match(ln: str):
+    """(indent, n, body) of a numbered step line, or None."""
+    m = _STEP_LINE.match(ln)
+    if m:
+        sep = m.group("sep").strip()
+        if sep in "-–—" and not m.group("word") and not re.match(
+                r"^\s*(?:[-*+]\s+)?[#*_\s]*\d{1,3}[*_]*\s+[-–—]\s", ln):
+            m = None                       # `2-3 retries` is not a step; `2 - x`, `Step 2 - x` are
+    hdr_body = m and _SECTION.match(m.group("body"))
+    if m and m.group("body").strip() and not (hdr_body and not (hdr_body.group("rest") or "").strip()):
+        return _indent(m.group("ind")), int(m.group("n")), m.group("body")
+    t = _TABLE_STEP.match(ln)
+    if t and t.group("body").strip(" |"):
+        return _indent(t.group("ind")), int(t.group("n")), t.group("body").replace("|", " ")
+    return None
+
+
+def _steps(lines: list[tuple[str, bool]]) -> list[dict]:
+    """Top-level numbered steps with their continuation (and sub-item) lines attached; with no
+    numbered step at all, the top-level BULLETS are the steps (numbered 1..n)."""
     steps: list[dict] = []
     base: int | None = None
-    for ln in lines:
-        m = _STEP_LINE.match(ln)
-        if m and m.group("sep") not in ".):" and not m.group("word"):
-            m = None                       # `2 - 3 retries` is not a step; `Step 2 - x` is
+    for ln, fz in lines:
+        sm = None if fz or _num_header(ln, _SECTION_NUM) else _step_match(ln)
         new = False
-        if m and m.group("body").strip():
-            ind = _indent(m.group("ind"))
-            n = int(m.group("n"))
+        if sm:
+            ind, n, _b = sm
             if base is None:
                 base, new = ind, True
             elif ind <= base and n > steps[-1]["n"] and len(steps) < MAX_STEPS:
                 new = True
         if new:
-            steps.append({"n": int(m.group("n")), "lines": [m.group("body")]})
+            steps.append({"n": sm[1], "lines": [(sm[2], False)]})
         elif steps and ln.strip() and len(steps[-1]["lines"]) < 200:
-            steps[-1]["lines"].append(ln.strip()[:2000])
+            steps[-1]["lines"].append((ln.strip()[:2000], fz))
+    if steps:
+        return steps
+    bullets = [(i, _BULLET.match(ln)) for i, (ln, fz) in enumerate(lines) if not fz]
+    bullets = [(i, b) for i, b in bullets if b]
+    if not bullets:
+        return []
+    top = min(_indent(b.group("ind")) for _i, b in bullets)
+    for i, (ln, fz) in enumerate(lines):
+        b = None if fz else _BULLET.match(ln)
+        if b and _indent(b.group("ind")) == top and len(steps) < MAX_STEPS:
+            steps.append({"n": len(steps) + 1, "lines": [(b.group("body"), False)]})
+        elif steps and ln.strip() and len(steps[-1]["lines"]) < 200:
+            steps[-1]["lines"].append((ln.strip()[:2000], fz))
     return steps
 
 
@@ -774,12 +873,13 @@ class PlanDecl:
 
 
 def parse_plan(text: str, known_items: dict | None = None, *, fixed: bool = False) -> PlanDecl:
-    """Read the PLAN's numbered steps and the anchor item each names (tolerant; see above).
-    With `fixed` (round 3: the effort's items are fixed at acceptance) only `known_items` count and
-    any ANCHOR ITEMS section the planner wrote is IGNORED - it cannot define, renumber or redefine
-    an item. A plan whose PLAN says 'nothing remains' needs no steps. The first PLAN section that
-    has numbered steps is read; with no PLAN header at all, numbered lines outside every known
-    section are."""
+    """Read the PLAN's steps and the anchor item each names (tolerant; see above). With `fixed`
+    (round 3: the effort's items are fixed at acceptance) only `known_items` count and any ANCHOR
+    ITEMS section the planner wrote is IGNORED - it cannot define, renumber or redefine an item. A
+    plan whose PLAN says 'nothing remains' needs no steps. The LAST PLAN section that has steps
+    is read (a reply that writes its original plan and then a REVISED PLAN means the revision);
+    with no PLAN section that has steps, numbered (else bulleted) lines outside every non-plan
+    section are. Fenced code never counts."""
     text = _bounded(text)
     d = PlanDecl()
     if not fixed:
@@ -788,16 +888,20 @@ def parse_plan(text: str, known_items: dict | None = None, *, fixed: bool = Fals
             if m:
                 d.items[m.group(1).upper()] = m.group(2)[:240]
     known = {k.upper() for k in (known_items or {})} | set(d.items)
-    sections = _section_lines(text, _PLAN_HDR, all_=True) or []
-    raw = next((s for s in (_steps(sec) for sec in sections) if s), [])
-    plan_lines = sections[0] if sections else []
-    if not raw and not sections:
+    sections = _sections(text, _PLAN_HDR, _PLAN_HDR_NUM, _PLAN_LOOSE)
+    parsed = [s for s in (_steps(sec) for sec in sections) if s]
+    raw = parsed[-1] if parsed else []
+    plan_lines = [ln for ln, _f in sections[-1]] if sections else []
+    if not raw:
         raw = _steps(_outside_sections(text))
         d.headerless = bool(raw)
     for st in raw:
         n = st["n"]
         aid, clean = "", []
-        for ln in st["lines"]:
+        for ln, fz in st["lines"]:
+            if fz:
+                clean.append(ln.strip())
+                continue
             a, rest = _tag(ln)
             aid = aid or a
             clean.append(rest.strip())
@@ -810,11 +914,11 @@ def parse_plan(text: str, known_items: dict | None = None, *, fixed: bool = Fals
             d.problems.append(f"step {n}: {aid} is not an anchor item of this effort")
             d.unanchored.append(n)
     if not d.steps:
-        if any(_NOTHING.search(ln) for ln in plan_lines):
+        if any(_NOTHING.search(ln) for sec in sections for ln, _f in sec) or any(
+                _NOTHING.search(ln) for ln in plan_lines):
             d.nothing_remains = True
         else:
-            d.problems.append("no numbered PLAN steps found" if sections or d.headerless
-                              else "no PLAN section with numbered steps")
+            d.problems.append("no numbered or bulleted plan steps found")
     return d
 
 
@@ -875,15 +979,26 @@ def parse_checks(text: str) -> list[dict]:
 
 
 _VERDICT_HDR = re.compile(
-    _LEAD + r"(?:VERDICT|Verdict)\b" + r"(?:\s*[(\[][^)\]\n]{0,80}[)\]])?" + r"[*_]{0,3}\s*"
+    _LEAD + r"(?i:verdict)\b" + r"(?:\s*[(\[][^)\]\n]{0,80}[)\]])?" + r"[*_]{0,3}\s*"
     r"(?:[:\-–—][*_]{0,3}\s*(?P<rest>.*?)|(?P<alone>))\s*$")
 _NUMSPEC = r"\d{1,3}(?:\s*-\s*\d{1,3})?(?:\s*(?:,|\band\b|&|\s)\s*\d{1,3}(?:\s*-\s*\d{1,3})?)*"
 _KEEP = re.compile(r"^KEEP\b\s*(?:(?:the\s+)?steps?\b\s*|#\s*)?(?:(?P<all>all\b)|(?P<nums>"
                    + _NUMSPEC + r"))(?P<tail>.*)$", re.I)
 _DISCARD = re.compile(r"^DISCARD\b\s*(?:(?:the\s+)?(?:attempt\b|steps?\b)\s*|#\s*)?"
                       r"(?P<n>\d{1,3})?\b(?P<tail>.*)$", re.I)
-_KLASS = re.compile(r"^\s*[(\[]?\s*(deviation(?:[- ]from[- ]anchor)?|no[- ]solution"
+_KLASS = re.compile(r"^\s*[:\-–—]?\s*[(\[]?\s*(deviation(?:[- ]from[- ]anchor)?|no[- ]solution"
                     r"(?:[- ]identified)?)\s*[)\]]?", re.I)
+# ao-attempt2 round 2: a DISCARD destroys the attempt's work on the branch (it stays on its ref),
+# so it is STRICT: its line may hold exactly one directive. Any second verdict word, a
+# conditional, or another step number makes the WHOLE verdict unparseable -> the attempt is left
+# unjudged, never discarded. (`DISCARD 2 and KEEP 1` was read as a discard of everything.)
+_DISCARD_AMBIGUOUS = re.compile(
+    r"\b(?:keep|kept|discard|otherwise|else|if|unless|except|instead)\b"
+    r"|\b(?:steps?|plus|and)\s*#?\s*\d|[,&/+]\s*#?\s*\d|#\s*\d", re.I)
+# another directive-shaped line anywhere in the reply (outside the verdict line itself)
+_DIRECTIVE_LINE = re.compile(
+    r"^\W*(?:keep|discard)\s+(?:the\s+)?(?:steps?\s*#?\s*\d|#?\d|all\b|attempt\b|everything\b)",
+    re.I)
 
 
 @dataclass
@@ -894,16 +1009,21 @@ class Verdict:
     reason: str = ""
 
 
-def _verdict_values(text: str) -> list[str]:
+def _verdict_values(text: str) -> list[tuple[int, str]]:
+    """(line index of the value, value) for every VERDICT line (any case) whose value is a
+    KEEP / DISCARD directive."""
     lines = (text or "").splitlines()
     vals = []
     for i, ln in enumerate(lines):
         m = _VERDICT_HDR.match(ln)
         if not m:
             continue
-        v = (m.group("rest") or "").strip()
+        v, at = (m.group("rest") or "").strip(), i
         if not v:      # `VERDICT:` alone - the verdict is on the next non-empty line
-            v = next((x.strip() for x in lines[i + 1:i + 3] if x.strip()), "")
+            for j in range(i + 1, min(i + 3, len(lines))):
+                if lines[j].strip():
+                    v, at = lines[j].strip(), j
+                    break
         # bold markers go; backticks and underscores STAY (the DISCARD reason is scrubbed of
         # code spans later - stripping them here would let code through as prose)
         v = " ".join(v.replace("*", "").split())
@@ -913,26 +1033,17 @@ def _verdict_values(text: str) -> list[str]:
         # echoed back (`KEEP <numbers ...>`) are not verdicts
         if not re.match(r"(?:KEEP|DISCARD)\b", v, re.I) or ("<" in v and ">" in v):
             continue
-        vals.append(v)
+        vals.append((at, v))
     return vals
 
 
-def parse_verdict(text: str, step_nos: set[int]) -> Verdict | None:
-    """Exactly one verdict (repeated identically is fine), naming steps of the PARKED attempt's
-    plan. Tolerant of markdown, a qualifier after VERDICT, a dash for the colon, the verdict on
-    the line after `VERDICT:`, `KEEP all`, `KEEP steps 1 & 2`, `DISCARD step 2 (deviation) -
-    why`, `DISCARD: why` when the attempt had one step. Still None (unparseable - and an
-    unparseable verdict never discards): no verdict, two different verdicts, an unknown step, a
-    KEEP without steps, a DISCARD without a reason."""
-    text = _bounded(text)
-    found = _verdict_values(text)
-    if len({f.lower() for f in found}) != 1:
-        return None
-    v = found[0]
+def _parse_one(v: str, step_nos: set[int]) -> Verdict | None:
     m = _KEEP.match(v)
     if m:
         if m.group("all"):
             nums = set(step_nos)
+            if re.search(r"\b(?:discard|otherwise|except|but|unless)\b", m.group("tail"), re.I):
+                return None
         else:
             tail = m.group("tail")
             if re.match(r"\s*-?\s*\d", tail) or re.search(r"\bDISCARD\b", tail, re.I):
@@ -969,12 +1080,58 @@ def parse_verdict(text: str, step_nos: set[int]) -> Verdict | None:
         if km:
             klass = "deviation" if km.group(1).lower().startswith("dev") else "no-solution"
             tail = tail[km.end():]
+        # STRICT: exactly one directive. A second verdict word, a conditional, or any OTHER
+        # step number in the line -> unparseable (never a discard).
+        bare = _CODE.sub(" ", tail)
+        if _DISCARD_AMBIGUOUS.search(bare):
+            return None
         reason = re.sub(r"^[\s:;,.)\]\-–—]*(?:because\b|as\b|since\b)?\s*", "", tail,
                         flags=re.I).strip()
         if n not in step_nos or not reason:
             return None
         return Verdict("discard", steps=[n], klass=klass, reason=reason)
     return None
+
+
+def _norm_verdict(v: str) -> str:
+    return re.sub(r"\s*([,&\-:;])\s*", r"\1", " ".join(v.lower().split()))
+
+
+def parse_verdict(text: str, step_nos: set[int]) -> Verdict | None:
+    """The planner's verdict on the PARKED attempt. TOLERANT where a miss is safe (an
+    unparseable verdict leaves the attempt unjudged; nothing is discarded), STRICT where a miss
+    destroys work:
+
+    * read: `VERDICT:`/`verdict:`/`**VERDICT:**`/`## Verdict (previous attempt):`/`VERDICT -`,
+      the value on the next line, `KEEP 1,2` / `keep 1, 2` / `KEEP steps 1 & 2` / `KEEP all`;
+      the same KEEP repeated with other spacing or case is one verdict;
+    * a DISCARD is accepted only when it is the ONLY directive in the reply: one VERDICT value
+      (repeats must be identical), no other KEEP/DISCARD-shaped line anywhere, and its line names
+      no second verdict word, no conditional (if/otherwise/unless/except/or/else/instead) and no
+      other step number;
+    * still None: no verdict, conflicting verdicts, an unknown step, a KEEP without steps, a
+      DISCARD without a reason."""
+    text = _bounded(text)
+    found = _verdict_values(text)
+    if not found:
+        return None
+    parsed = [_parse_one(v, step_nos) for _i, v in found]
+    if any(p is None for p in parsed):
+        return None
+    kinds = {p.kind for p in parsed}
+    if kinds == {"keep"}:
+        if len({tuple(p.steps) for p in parsed}) != 1:
+            return None
+        return parsed[0]
+    if kinds != {"discard"} or len({_norm_verdict(v) for _i, v in found}) != 1:
+        return None
+    at = {i for i, _v in found}
+    for i, ln in enumerate(text.splitlines()):
+        if i in at or _VERDICT_HDR.match(ln):
+            continue
+        if _DIRECTIVE_LINE.match(ln):
+            return None                  # another directive elsewhere in the reply: ambiguous
+    return parsed[0]
 
 
 # ── test facts ────────────────────────────────────────────────────────────────────────────────
@@ -1116,9 +1273,25 @@ def fact_ids(facts: dict) -> dict:
     out["checks"] = [{k: f[k] for k in ("check", "step", "anchor", "start", "now", "outcome")}
                      for f in (facts.get("checks") or [])][:MAX_CHECKS]
     tests = facts.get("tests") or {}
-    out["tests"] = {k: [safe_id(t["test"]) for t in (tests.get(k) or [])[:20]] for k in tests}
+    out["tests"] = {k: [audit_id(t["test"]) for t in (tests.get(k) or [])[:20]] for k in tests}
     out["tests_counts"] = dict(facts.get("tests_counts") or {})
     return out
+
+
+_AUDIT_ID = re.compile(r"[A-Za-z0-9_./:\[\]=,+~-]{1,160}")
+_LONG_RUN = re.compile(r"[A-Za-z0-9]{20,}")
+
+
+def audit_id(tid: str) -> str:
+    """A worker test id as it may appear in an AUDIT row or a learning record (ao-attempt2): an
+    ALLOW-LIST, not a mask. Shown whole only when it is made of id characters AND has no run of
+    20+ letters/digits (what a token looks like: `ghp_...`, `sk-...`; test names are split by
+    `_ . : /`); anything else is shown as `#<sha1[:10]>` - countable and comparable, never read.
+    The planner's own prompt (facts_text) still shows `safe_id`."""
+    t = tid or ""
+    if _AUDIT_ID.fullmatch(t) and not _LONG_RUN.search(t):
+        return t
+    return "#" + hashlib.sha1(t.encode("utf-8", "replace")).hexdigest()[:10]
 
 
 # ── the bounded note + learning record ────────────────────────────────────────────────────────

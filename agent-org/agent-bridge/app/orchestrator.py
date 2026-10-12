@@ -14436,6 +14436,7 @@ class Orchestrator:
         empties = 0
         stubs = 0
         undeclared = 0
+        unreadable = 0
         verdict_asks = 0
         verdict: _att.Verdict | None = None
         # P13.2 — JUDGE THE PLAN AGAINST THE SCOPE IN FORCE. When the drain dispatches a bounded
@@ -14581,11 +14582,34 @@ class Orchestrator:
                     )
                 continue
             # ao-attempt — RELEVANCE IS DECIDED HERE, TOP-DOWN: every step declares the anchor item
-            # it serves before it is delegated. Refused back to the planner ONCE; ao-attempt2 B1:
-            # steps that still name no item of the effort are then MAPPED to its items (the only
-            # item, or GOAL = all of them) - a format miss costs one plan turn, never the effort.
-            # Only a reply with no steps at all (and not "nothing remains") still stops.
+            # it serves before it is delegated. ao-attempt2: TOLERANT where a miss is safe. Two
+            # SEPARATE one-re-ask budgets per gate, so the untagged first plan (every real plan so
+            # far) never spends the re-ask a later unreadable revision needs:
+            #   * steps but no (valid) anchor tags -> re-asked once, then MAPPED to the effort's
+            #     items (the only item, or GOAL = all of them); never a stop;
+            #   * no numbered or bulleted steps at all -> re-asked once, then the gate stops, with a
+            #     reason that says exactly that (the accepted residual).
             decl = _att.parse_plan(out, plan_row["items"], fixed=True)
+            if not decl.steps and not decl.nothing_remains:
+                unreadable += 1
+                await self.audit.log("plan_steps_unreadable", effort_id=effort_id, payload={
+                    "ask": unreadable, "chars": len(out)})
+                if unreadable <= 1:
+                    await self.comms.post(
+                        Intent.worker_activity,
+                        "↩️ I couldn't find numbered steps in the plan — asking for it again.",
+                        effort_id=effort_id,
+                    )
+                    instr = (
+                        "Your reply had no numbered plan steps I could read. Write the WHOLE plan "
+                        "again (UNDERSTANDING / ALREADY DONE / PLAN / WON'T DO / RISKS"
+                        + (" / VERDICT" if att else "") + "), the PLAN as numbered steps "
+                        "`1. ...`, `2. ...`." + fmt + att_sec
+                        + "\nDo NOT change any file this turn.")
+                    continue
+                reason = ("its reply had no numbered or bulleted plan steps, and the one re-ask "
+                          "for them got none either")
+                break
             if decl.problems:
                 undeclared += 1
                 await self.audit.log("plan_steps_undeclared", effort_id=effort_id, payload={
@@ -14604,9 +14628,6 @@ class Orchestrator:
                         "PLAN / WON'T DO / RISKS" + (" / VERDICT" if att else "") + ")."
                         + fmt + att_sec + "\nDo NOT change any file this turn.")
                     continue
-                if not decl.steps:
-                    reason = ("the plan had no numbered steps, even after one refusal")
-                    break
                 to, mapped = _att.map_unanchored(decl, plan_row["items"])
                 await self.audit.log("plan_steps_mapped", effort_id=effort_id, payload={
                     "to": to, "steps": mapped[:40], "n_steps": len(decl.steps)})

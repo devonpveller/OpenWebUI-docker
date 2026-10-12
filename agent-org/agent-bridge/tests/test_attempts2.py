@@ -256,7 +256,10 @@ async def test_b1_a_reply_with_no_steps_at_all_is_refused_once_then_stops(db_url
         empty = "UNDERSTANDING: x\nPLAN: I will look into it.\nWON'T DO: y\nRISKS: none"
         assert await _gate(orch, eid, chan, root, empty, empty, repo=None) is None
         kinds = [k for k, _ in await _events(orch, eid)]
-        assert kinds.count("plan_steps_undeclared") == 2 and kinds.count("worker_plan_stopped") == 1
+        # round 2: a reply with no steps is audited `plan_steps_unreadable` (its own re-ask budget),
+        # no longer `plan_steps_undeclared`
+        assert kinds.count("plan_steps_unreadable") == 2 and kinds.count("worker_plan_stopped") == 1
+        assert kinds.count("plan_steps_undeclared") == 0
         assert kinds.count("plan_steps_mapped") == 0
     finally:
         await _shutdown(orch, db)

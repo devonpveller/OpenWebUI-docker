@@ -366,7 +366,13 @@ async def scenario_big_output(orch, ws):
     assert facts["n_untrusted"] == 0
     assert facts["n_regression"] == 2
     assert [c["outcome"] for c in facts["checks"]] == ["regression", "regression"]
-    got = sorted(t.rsplit("_", 1)[-1] for t in facts["tests"]["regressed"])
+    # ao-attempt2 round 2 CHANGED THIS ON PURPOSE: the AUDIT row shows test ids by allow-list (these
+    # carry a 60-x run, the shape of a token, so they are hashed); the regressions themselves are
+    # read from the attempt's stored facts, which keep the full ids - both still reported
+    assert all(t.startswith("#") for t in facts["tests"]["regressed"])
+    row = await _attempt_row(orch, f"{eid}:a1")
+    stored = row.facts["tests"]["tests"]["regressed"]
+    got = sorted(t["test"].rsplit("_", 1)[-1] for t in stored)
     assert got == ["377", "5"]
     _no_denials(ws)
     return eid
@@ -1303,7 +1309,10 @@ async def test_case16_long_test_ids_are_compared_in_full_never_merged(db_url, tm
             _checks_reply("step 1: sh long.sh"))
         assert facts["tests_counts"]["regressed"] == 1 and facts["tests_counts"]["still_failing"] == 1
         shown = facts["tests"]["regressed"][0]
-        assert "~" in shown and len(shown) < 200
+        # ao-attempt2 round 2 CHANGED THIS ON PURPOSE: this is the AUDIT row (`attempt_facts`), and
+        # test ids there are now an allow-list - an id with a 20+ letter/digit run (170 p's here,
+        # the shape of a token) is shown as its hash, never read; the counts above are unchanged
+        assert shown.startswith("#") and len(shown) == 11
     finally:
         await _shutdown(orch, db)
 
