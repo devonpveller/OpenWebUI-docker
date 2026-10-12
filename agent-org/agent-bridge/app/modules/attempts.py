@@ -58,6 +58,7 @@ GIT_ARGVS: list[list[str]] = [
     ["checkout", "-q", "--detach", "SHA"],
     ["checkout", "-q", "BRANCH"],
     ["checkout", "-q", "-b", "BRANCH", "SHA"],
+    ["checkout", "-q", "-B", "REF", "SHA"],
     ["checkout", "-q", "--", "."],
     ["clean", "-fdq"],
     ["reset", "-q", "SHA"],
@@ -71,7 +72,10 @@ MAX_CHECKS = 6
 MAX_CHECK_CHARS = 300
 CHECK_TIMEOUT_S = 300
 CHECK_KILL_S = 10
-ID_MAX = 160            # test ids are cut to this length (in the shell, before any comparison)
+ID_MAX = 160            # test ids are SHOWN up to this length (compared in full)
+ID_SHOW = 140           # a longer id is shown as its first ID_SHOW chars + "~" + its cksum
+CHECKS_BUDGET_S = 1500  # ALL worker checks of one plan wake (both runs) share this wall-clock budget
+HANG_RCS = (124, 137)   # GNU timeout: 124 = timed out, 137 = killed after -k
 MAX_LISTED = 200        # test facts LISTED per check; every count is exact whatever is listed
 MAX_FIXED_LISTED = 30
 MAX_NUMSTAT = 200
@@ -92,7 +96,7 @@ def is_branch(b: str | None) -> bool:
     return bool(b and _BRANCH_RE.match(b) and ".." not in b)
 
 
-_ID_UNSAFE = re.compile(r"[^A-Za-z0-9_.:/\[\]=,+-]")
+_ID_UNSAFE = re.compile(r"[^A-Za-z0-9_.:/\[\]=,+~-]")
 
 
 def safe_id(tid: str) -> str:
@@ -282,6 +286,39 @@ def restore_cmd(branch: str, tip: str, ref: str | None = None) -> str:
     return _wrap([restore_snippet(branch, tip), *_state(ref)])
 
 
+def refs_cmd(refs: list[str]) -> str:
+    """Where each salvage ref points now (R records: `<ref> <sha|missing>`)."""
+    body = [f'printf \'@@R %s %s R@@\' {shlex.quote(r)} "$(git rev-parse --verify -q '
+            f'refs/heads/{r} 2>/dev/null || echo missing)"' for r in refs if is_branch(r)]
+    return _wrap(body or [":"])
+
+
+def parse_refs(out: str | None) -> dict | None:
+    recs = records(out)
+    if recs is None:
+        return None
+    res = {}
+    for t, v in recs:
+        if t == "R" and " " in v:
+            r, sha = v.rsplit(" ", 1)
+            res[r] = sha.strip()
+    return res
+
+
+def repair_ref_cmd(ref: str, sha: str, branch: str, head: str) -> str:
+    """Point a moved salvage ref back at its parked commit, through the proxy: `checkout -B` is
+    the only proxy-legal way to move a branch (`branch -f` and `update-ref` are denied), so the
+    workspace briefly visits the ref and is put back on `branch` at `head` (clean tree only)."""
+    back = restore_snippet(branch, head)
+    return _wrap([
+        f'if [ "$(git status --porcelain --untracked-files=all 2>/dev/null | wc -l)" -eq 0 ]; then '
+        f'git checkout -q -B {shlex.quote(ref)} {sha} >/dev/null 2>&1; fi',
+        back,
+        _rec("R", f'"{ref} $(git rev-parse --verify -q refs/heads/{ref} 2>/dev/null || echo missing)"'),
+        *_state(),
+    ])
+
+
 def numstat_cmd(a: str, b: str) -> str:
     d = f"git diff --no-renames --numstat {a} {b} 2>/dev/null"
     return _wrap([
@@ -321,32 +358,44 @@ def parse_numstat(out: str | None) -> dict | None:
 
 _TEST_GREP = (r"grep -aoE '(PASSED|FAILED|ERROR|XPASS|XFAIL) [^ ]+::[^ ]+|"
               r"[^ ]+::[^ ]+ (PASSED|FAILED|ERROR|XPASS|XFAIL)'")
-# status + id per test, failing wins, ids made safe and cut IN THE SHELL (both runs alike, so the
-# comparison is exact): F <id> / P <id>
+# dotnet test (console logger, normal verbosity): "  Passed Ns.Class.Method [12 ms]"
+_DOTNET_SED = r"sed -nE 's/^[[:space:]]*(Passed|Failed) ([^[:space:]]+).*/\1 \2/p'"
+# status + FULL id per test (no truncation before comparison: two long ids never merge),
+# failing wins: F <id> / P <id>
 _SPLIT_AWK = ("awk '{ if ($1 ~ /::/) { id=$1; st=$2 } else { id=$2; st=$1 }; "
-              "gsub(/[^][A-Za-z0-9_.:\\/=,+-]/, \"?\", id); id=substr(id, 1, %d); "
-              "if (st==\"FAILED\"||st==\"ERROR\"||st==\"XPASS\") f[id]=1; else p[id]=1 } "
+              "if (st==\"FAILED\"||st==\"ERROR\"||st==\"XPASS\"||st==\"Failed\") f[id]=1; "
+              "else p[id]=1 } "
               "END { for (i in f) print \"F \" i; for (i in p) if (!(i in f)) print \"P \" i }'")
 
 
-def check_cmd(cmd: str, *, start: str | None, branch: str, park: str, ref: str) -> str:
-    """ONE worker check, end AND start, in ONE /check (R2: a /check per check, so one big suite
-    cannot push another's facts out of the 64 KB tail):
+def _show_loop(tag: str) -> str:
+    """Emit each `<status> <id>` (or bare `<id>`) line as a record; an id longer than ID_SHOW is
+    shown cut + `~<cksum>` so two shown ids never look the same."""
+    return (f'while IFS= read -r l; do id="$l"; pre=""; case "$l" in "P "*|"A "*|"F "*|"U "*) '
+            f'pre="${{l%% *}} "; id="${{l#* }}";; esac; if [ ${{#id}} -gt {ID_SHOW} ]; then '
+            f'h=$(printf %s "$id" | cksum | cut -d" " -f1); id="$(printf %s "$id" | cut -c1-{ID_SHOW})~$h"; '
+            f'fi; {_rec(tag, chr(34) + "$pre$id" + chr(34))}; done')
 
-    1. run it at the parked commit; 2. `checkout --detach <start>` (verified) and run it there;
-    3. RESTORE the branch (name and tip) and the tree, whatever the check did (R4);
-    4. compare the two runs IN THE SHELL - every failing id at the end gets the start's status
-       (P passed / F failed / A absent = new / U start not measurable) - and emit exact COUNTS
-       plus at most MAX_LISTED ids (regressions first), so a regression is never lost to a cap.
-    Output stays far below 64 KB: ids <= ID_MAX chars, <= MAX_LISTED + MAX_FIXED_LISTED of them."""
+
+def check_cmd(cmd: str, *, start: str | None, branch: str, park: str, ref: str,
+              timeout: int = CHECK_TIMEOUT_S) -> str:
+    """ONE worker check, end AND start, in ONE /check (a /check per check: one big suite cannot
+    push another's facts out of the 64 KB tail):
+
+    1. run it at the parked commit (exit status; 124/137 = it hung and was killed);
+    2. `checkout --detach <start>` (verified, CO record) and run it there;
+    3. RESTORE the branch (name and tip) and the tree, whatever the check did;
+    4. OPTIONAL per-test detail, framework-recognisable lines only (pytest `::` ids, dotnet
+       `Passed`/`Failed` lines): compared on FULL ids in the shell, exact counts + a capped list.
+    The FACT is the check's exit status at start vs now; the per-test detail never decides one."""
     q = shlex.quote(cmd)
-    run = (f"( cd {WS} && NO_COLOR=1 PY_COLORS=0 TERM=dumb timeout -k {CHECK_KILL_S} "
-           f"{CHECK_TIMEOUT_S} bash -c {q} ) </dev/null 2>&1")
-    split = _SPLIT_AWK % ID_MAX
+    run = (f"( cd {WS} && NO_COLOR=1 PY_COLORS=0 TERM=dumb DOTNET_CLI_TELEMETRY_OPTOUT=1 "
+           f"timeout -k {CHECK_KILL_S} {int(timeout)} bash -c {q} ) </dev/null 2>&1")
+    tests = f'{{ {_TEST_GREP} "$OUT"; {_DOTNET_SED} "$OUT"; }} | {_SPLIT_AWK} | LC_ALL=C sort'
     body = [
         'd=$(mktemp -d); : > "$d/a.t"; : > "$d/b.t"; : > "$d/j"; : > "$d/x"',
         f'{run} > "$d/a.out"; rca=$?',
-        f'{_TEST_GREP} "$d/a.out" | {split} | LC_ALL=C sort > "$d/a.t"',
+        tests.replace("$OUT", "$d/a.out") + ' > "$d/a.t"',
         _rec("RCA", '"$rca"'),
     ]
     if is_sha(start):
@@ -355,13 +404,12 @@ def check_cmd(cmd: str, *, start: str | None, branch: str, park: str, ref: str) 
             f"git checkout -q --detach {start} >/dev/null 2>&1; "
             f"git checkout -q -- . >/dev/null 2>&1; git clean -fdq >/dev/null 2>&1",
             f'if [ "$(git rev-parse HEAD 2>/dev/null)" = "{start}" ]; then '
-            f'{run} > "$d/b.out"; rcb=$?; '
-            f'{_TEST_GREP} "$d/b.out" | {split} | LC_ALL=C sort > "$d/b.t"; '
-            + _rec("RCB", '"$rcb"') + "; fi",
+            + _rec("CO", "1") + f'; {run} > "$d/b.out"; rcb=$?; '
+            + tests.replace("$OUT", "$d/b.out") + ' > "$d/b.t"; '
+            + _rec("RCB", '"$rcb"') + "; else " + _rec("CO", "0") + "; fi",
         ]
     body += [
         restore_snippet(branch, park),
-        # join: for every failing id at the end, its status at the start
         'if [ -s "$d/b.t" ]; then awk \'NR==FNR { s[substr($0,3)]=substr($0,1,1); next } '
         '$1=="F" { id=substr($0,3); print ((id in s) ? s[id] : "A") " " id }\' "$d/b.t" "$d/a.t" '
         '> "$d/j"; awk \'NR==FNR { if ($1=="F") f[substr($0,3)]=1; next } '
@@ -373,9 +421,8 @@ def check_cmd(cmd: str, *, start: str | None, branch: str, park: str, ref: str) 
             ("NSTILL", "'^F '", "j"), ("NUNK", "'^U '", "j"))],
         _rec("NFIX", '"$(wc -l < "$d/x")"'),
         f'{{ grep \'^P \' "$d/j"; grep \'^A \' "$d/j"; grep \'^F \' "$d/j"; grep \'^U \' "$d/j"; }} '
-        f'| head -{MAX_LISTED} | while IFS= read -r l; do {_rec("J", chr(34) + "$l" + chr(34))}; done',
-        f'head -{MAX_FIXED_LISTED} "$d/x" | while IFS= read -r l; do '
-        f'{_rec("X", chr(34) + "$l" + chr(34))}; done',
+        f'| head -{MAX_LISTED} | {_show_loop("J")}',
+        f'head -{MAX_FIXED_LISTED} "$d/x" | {_show_loop("X")}',
         'rm -rf "$d"',
         *_state(ref),
     ]
@@ -390,6 +437,7 @@ class CheckRun:
     listed: list                    # [(status, id)]: P regression, A new, F still, U unknown
     fixed: list
     state: State
+    start_checked_out: bool | None = None
 
 
 def parse_check(out: str | None) -> CheckRun | None:
@@ -414,8 +462,9 @@ def parse_check(out: str | None) -> CheckRun | None:
             if len(parts) == 2 and parts[0] in ("P", "A", "F", "U"):
                 listed.append((parts[0], safe_id(parts[1])))
     fixed = [safe_id(v) for t, v in recs if t == "X"]
+    co = first(recs, "CO")
     return CheckRun(rca=rca, rcb=_int(first(recs, "RCB")), counts=counts, listed=listed,
-                    fixed=fixed, state=st)
+                    fixed=fixed, state=st, start_checked_out=None if co is None else co.strip() == "1")
 
 
 def reset_mixed_cmd(sha: str) -> str:
@@ -507,15 +556,17 @@ class PlanDecl:
     nothing_remains: bool = False
 
 
-def parse_plan(text: str, known_items: dict | None = None) -> PlanDecl:
-    """Read ANCHOR ITEMS and the PLAN's numbered steps. Every step must end with
-    `[anchor: Ax]` naming an item declared now or stored from an earlier plan. A plan whose PLAN
-    says 'nothing remains' needs no steps."""
+def parse_plan(text: str, known_items: dict | None = None, *, fixed: bool = False) -> PlanDecl:
+    """Read the PLAN's numbered steps. Every step must end with `[anchor: Ax]`. With `fixed`
+    (round 3: the effort's items are fixed at acceptance) only `known_items` count and any
+    ANCHOR ITEMS section the planner wrote is IGNORED - it cannot define, renumber or redefine
+    an item. A plan whose PLAN says 'nothing remains' needs no steps."""
     d = PlanDecl()
-    for ln in _section_lines(text, _ITEMS_HDR) or []:
-        m = _ITEM_LINE.match(ln)
-        if m:
-            d.items[m.group(1).upper()] = m.group(2)[:240]
+    if not fixed:
+        for ln in _section_lines(text, _ITEMS_HDR) or []:
+            m = _ITEM_LINE.match(ln)
+            if m:
+                d.items[m.group(1).upper()] = m.group(2)[:240]
     known = {k.upper() for k in (known_items or {})} | set(d.items)
     plan = _section_lines(text, _PLAN_HDR)
     if plan is None:
@@ -569,7 +620,8 @@ def parse_checks(text: str) -> list[dict]:
 
 
 _VERDICT_LINE = re.compile(r"^\s*\**VERDICT\**\s*:\s*(.*?)\s*$", re.I | re.M)
-_KEEP = re.compile(r"^KEEP\b\s*(?:steps?\s*)?([0-9][0-9 ,\-and]*?)\s*(?:[.:;].*|\s-\s.*)?$", re.I)
+_NUMSPEC = r"\d{1,3}(?:\s*-\s*\d{1,3})?(?:\s*(?:,|\band\b|\s)\s*\d{1,3}(?:\s*-\s*\d{1,3})?)*"
+_KEEP = re.compile(r"^KEEP\b\s*(?:steps?\s*)?(" + _NUMSPEC + r")\s*(?:[.:;].*|-\s*\D.*)?$", re.I)
 _DISCARD = re.compile(
     r"^DISCARD\b\s*(?:step\s*)?(\d{1,3})\b\s*(?:\(?\s*(deviation|no-solution)\s*\)?)?\s*[:\-]\s*(.+)$",
     re.I)
@@ -595,7 +647,8 @@ def parse_verdict(text: str, step_nos: set[int]) -> Verdict | None:
     m = _KEEP.match(v)
     if m:
         nums: set[int] = set()
-        for part in re.split(r"\s*(?:,|\band\b|\s)\s*", m.group(1).strip()):
+        spec = re.sub(r"\s*-\s*", "-", m.group(1).strip())
+        for part in re.split(r"\s*(?:,|\band\b|\s)\s*", spec):
             if not part:
                 continue
             r = re.fullmatch(r"(\d{1,3})\s*-\s*(\d{1,3})|(\d{1,3})", part)
@@ -622,75 +675,96 @@ def parse_verdict(text: str, step_nos: set[int]) -> Verdict | None:
 
 
 # ── test facts ────────────────────────────────────────────────────────────────────────────────
-def classify(checks: list[dict], runs: list, steps: list[dict]) -> dict:
-    """Deterministic facts from the per-check runs (`runs[k]` = CheckRun or None = untrusted).
+OUTCOMES = ("regression", "hang", "new_not_passing", "still_failing", "could_not_run_at_start",
+            "untrusted", "not_run", "fixed", "new_passing", "passing")
 
-    regression      - a test that PASSED at the attempt's start and fails now
-    new_not_passing - a failing test whose id is ABSENT from the start's results (R1: whatever
-                      file it lives in - a test added to an existing file is new). A RENAMED test
-                      is a new id: it reads as new_not_passing, and its old id is no longer failing
-                      or passing at all (visible only as the passing-count change).
-    still_failing   - failing at the start and now
-    unknown_before  - failing now, the start not measurable (no start, the start's run untrusted,
-                      or it listed no test results at all): never guessed into a regression
-    fixed           - failing at the start, not failing now
-    A whole check whose exit code went 0 -> non-zero with no failing test listed at all is a
-    check-level regression (failing tests explain a failing exit code themselves). Counts are exact (computed in the shell over every test); ids are listed up to a
-    cap and `truncated` says so. Each fact carries the anchor item of the step the worker
-    attributed the check to."""
+
+def _status(rc: int | None) -> str:
+    if rc is None:
+        return "not run"
+    if rc in HANG_RCS:
+        return "HANG"
+    return "PASS" if rc == 0 else f"FAIL (exit {rc})"
+
+
+def _names_path(cmd: str, path: str) -> bool:
+    return bool(path) and (path in cmd or (path.rsplit("/", 1)[-1] in cmd
+                                           and "/" not in path.rsplit("/", 1)[-1]
+                                           and len(path.rsplit("/", 1)[-1]) > 3))
+
+
+def classify(checks: list[dict], runs: list, steps: list[dict],
+             new_paths: list[str] | None = None) -> dict:
+    """CHECK-LEVEL facts, framework-agnostic (round 3): per worker check, its exit status at the
+    attempt's start vs now -
+
+    regression             passed at the start, fails now
+    hang                   timed out now (killed by `timeout`), whatever it did at the start
+    new_not_passing        the check runs a file THIS attempt added (named in its command) and
+                           fails now - at the start there was nothing to run, so not a regression
+    still_failing          failed (or hung) at the start and fails now
+    could_not_run_at_start no start, the start could not be checked out, or the command was not
+                           runnable there (exit 126/127)
+    untrusted              its /check output was cut or incomplete: UNKNOWN, never "no regression"
+    not_run                the plan wake's check-time budget ran out before it
+    fixed / new_passing / passing - the rest
+    Per-test detail (pytest `::` ids, dotnet Passed/Failed lines) is an optional EXTRA under
+    `tests`; no fact above depends on it. Each fact carries its step's anchor item."""
+    new_paths = list(new_paths or [])
     anchor_of = {int(s["n"]): (s.get("anchor") or "") for s in steps}
-    keys = ("regression", "new_not_passing", "still_failing", "unknown_before", "fixed")
-    facts: dict = {k: [] for k in keys}
-    facts.update({f"n_{k}": 0 for k in keys})
-    facts.update({"available": bool(checks), "truncated": False, "untrusted_checks": [],
-                  "passing": []})
-    label = {"P": "regression", "A": "new_not_passing", "F": "still_failing", "U": "unknown_before"}
+    facts: dict = {"available": bool(checks), "checks": [],
+                   "tests": {k: [] for k in ("regressed", "new", "still_failing", "unknown", "fixed")},
+                   "tests_counts": {"regressed": 0, "new": 0, "still_failing": 0, "unknown": 0,
+                                    "fixed": 0}, "tests_truncated": False}
+    facts.update({f"n_{o}": 0 for o in OUTCOMES})
+    label = {"P": "regressed", "A": "new", "F": "still_failing", "U": "unknown"}
     for k, c in enumerate(checks[:MAX_CHECKS]):
         step = int(c["step"])
         base = {"check": f"c{k + 1}", "step": step, "anchor": anchor_of.get(step, "")}
         r = runs[k] if k < len(runs) else None
-        if r is None:
-            facts["untrusted_checks"].append(base["check"])
+        if r == "budget":
+            facts["checks"].append({**base, "start": "not run", "now": "not run", "outcome": "not_run"})
+            facts["n_not_run"] += 1
             continue
+        if r is None:
+            facts["checks"].append({**base, "start": "?", "now": "?", "outcome": "untrusted"})
+            facts["n_untrusted"] += 1
+            continue
+        is_new = any(_names_path(c["cmd"], p) for p in new_paths)
+        start_ran = r.rcb is not None and r.rcb not in (126, 127)
+        now_pass, now_hang = r.rca == 0, r.rca in HANG_RCS
+        if is_new:
+            outcome = "new_passing" if now_pass else "new_not_passing"
+        elif now_hang:
+            outcome = "hang"
+        elif not start_ran:
+            outcome = "could_not_run_at_start"
+        elif r.rcb == 0:
+            outcome = "passing" if now_pass else "regression"
+        else:
+            outcome = "fixed" if now_pass else "still_failing"
+        facts["checks"].append({**base, "start": _status(r.rcb) if r.start_checked_out is not False
+                                else "start not checked out", "now": _status(r.rca),
+                                "outcome": outcome})
+        facts[f"n_{outcome}"] += 1
+        # optional per-test detail
         cn = r.counts
-        before_ok = r.rcb is not None and (cn["NFB"] + cn["NPB"]) > 0
-        n = {"regression": cn["NREG"], "new_not_passing": cn["NNEW"],
-             "still_failing": cn["NSTILL"], "unknown_before": cn["NUNK"], "fixed": cn["NFIX"]}
-        listed = list(r.listed)
-        if r.rcb is not None and not before_ok:
-            # the start ran but listed no results: a "new" there means "unknown", not new
-            listed = [("U", t) if s == "A" else (s, t) for s, t in listed]
-            n["unknown_before"] += n["new_not_passing"]
-            n["new_not_passing"] = 0
-        for s_, tid in listed:
-            facts[label[s_]].append({**base, "test": tid})
+        for s_, tid in r.listed:
+            facts["tests"][label[s_]].append({**base, "test": tid})
         for tid in r.fixed:
-            facts["fixed"].append({**base, "test": tid})
-        if r.rca != 0 and r.rcb == 0 and cn["NFA"] == 0:
-            # the check fails now, passed at the start, and no failing TEST explains it
-            facts["regression"].append({**base, "test": f"check {base['check']} (exit 0 -> {r.rca})"})
-            n["regression"] += 1
-        elif r.rca != 0 and r.rcb is None and cn["NFA"] == 0:
-            facts["unknown_before"].append({**base, "test": f"check {base['check']} (exit {r.rca})"})
-            n["unknown_before"] += 1
-        elif r.rca == 0 and r.rcb not in (0, None) and cn["NFB"] == 0:
-            facts["fixed"].append({**base, "test": f"check {base['check']} (exit {r.rcb} -> 0)"})
-            n["fixed"] += 1
-        for key in keys:
-            facts[f"n_{key}"] += n[key]
-        listed_n = sum(1 for f in facts["regression"] + facts["new_not_passing"]
-                       + facts["still_failing"] + facts["unknown_before"] if f["check"] == base["check"])
-        if listed_n < n["regression"] + n["new_not_passing"] + n["still_failing"] + n["unknown_before"]:
-            facts["truncated"] = True
-        facts["passing"].append({**base, "start": cn["NPB"] if r.rcb is not None else None,
-                                 "now": cn["NPA"]})
+            facts["tests"]["fixed"].append({**base, "test": tid})
+        for key, n in (("regressed", cn["NREG"]), ("new", cn["NNEW"]), ("still_failing", cn["NSTILL"]),
+                       ("unknown", cn["NUNK"]), ("fixed", cn["NFIX"])):
+            facts["tests_counts"][key] += n
+        if len(r.listed) < cn["NREG"] + cn["NNEW"] + cn["NSTILL"] + cn["NUNK"]:
+            facts["tests_truncated"] = True
     return facts
 
 
 def facts_text(facts: dict, diff: dict | None, steps: list[dict], checks: list[dict]) -> str:
-    """The FACTS block for the planner (bounded). Includes the worker's check commands - the
-    planner must judge whether they evidence the anchor item - but this text is a prompt, never
-    an audit payload or a note. Test ids are already safe_id()'d."""
+    """The FACTS block for the planner (bounded): EVERY check's pass/fail at the start and now,
+    with its outcome, then the optional per-test detail. Includes the worker's check commands (the
+    planner judges whether they evidence the anchor item) - a prompt, never audit or a note."""
     lines = []
     if diff:
         shown = ", ".join(f"{f['path']} (+{f['added']}/-{f['deleted']})" for f in diff["files"][:15])
@@ -703,40 +777,47 @@ def facts_text(facts: dict, diff: dict | None, steps: list[dict], checks: list[d
         lines.append("- the worker reported NO checks for this attempt (its turn may have been "
                      "stopped) - there is no test evidence either way")
         return "\n".join(lines)
+    words = {"regression": "REGRESSION (passed at the start, fails now)",
+             "hang": "HANG (killed by its timeout now)",
+             "new_not_passing": "new check (its file is new in this attempt), NOT passing",
+             "new_passing": "new check (its file is new in this attempt), passing",
+             "still_failing": "still failing (failed at the start too)",
+             "could_not_run_at_start": "could not run at the start",
+             "untrusted": "NO FACTS - output cut or incomplete: UNKNOWN, not absent",
+             "not_run": "not run (the check-time budget of this plan wake ran out)",
+             "fixed": "FIXED (failed at the start, passes now)", "passing": "passing (before and now)"}
+    by_k = {f["check"]: f for f in facts.get("checks") or []}
     for k, c in enumerate(checks[:MAX_CHECKS]):
-        anchor = next((s.get("anchor") for s in steps if int(s["n"]) == int(c["step"])), "")
-        lines.append(f"- worker check c{k + 1} for step {c['step']} (anchor {anchor or '?'}): "
-                     f"`{c['cmd'][:160]}`")
-    for key, label in (("regression", "REGRESSIONS (passed at the start, fail now)"),
-                       ("new_not_passing", "new (absent at the start), not yet passing"),
-                       ("still_failing", "failing before and after"),
-                       ("unknown_before", "failing now, start not measurable"),
-                       ("fixed", "failing at the start, not now")):
-        items = facts.get(key) or []
-        total = facts.get(f"n_{key}", len(items))
-        if total:
-            shown = "; ".join(f"{f['test']} [step {f['step']}, anchor {f['anchor'] or '?'}]"
-                              for f in items[:8])
-            more = f"; {total - min(8, len(items))} more not shown" if total > min(8, len(items)) else ""
-            lines.append(f"- {label}: {total}: {shown}{more}")
-    for p in facts.get("passing") or []:
-        if p["start"] is not None and p["now"] < p["start"]:
-            lines.append(f"- {p['check']}: passing tests {p['start']} at the start, {p['now']} now "
-                         "(tests removed or renamed?)")
-    if facts.get("untrusted_checks"):
-        lines.append("- NO FACTS for " + ", ".join(facts["untrusted_checks"]) + ": its output "
-                     "was cut or incomplete - regressions there are UNKNOWN, not absent")
+        f = by_k.get(f"c{k + 1}") or {"start": "?", "now": "?", "outcome": "untrusted",
+                                      "anchor": ""}
+        lines.append(f"- check c{k + 1} [step {c['step']}, anchor {f.get('anchor') or '?'}] "
+                     f"`{c['cmd'][:160]}`: start {f['start']} -> now {f['now']}: "
+                     f"{words.get(f['outcome'], f['outcome'])}")
+    tc = facts.get("tests_counts") or {}
+    if any(tc.values()):
+        parts = []
+        for key, label in (("regressed", "tests passing at the start, failing now"),
+                           ("new", "new failing tests"), ("still_failing", "tests failing both"),
+                           ("fixed", "tests fixed")):
+            items = (facts.get("tests") or {}).get(key) or []
+            if tc.get(key):
+                shown = ", ".join(i["test"] for i in items[:6])
+                parts.append(f"{label}: {tc[key]}" + (f" ({shown}{', ...' if tc[key] > 6 else ''})"
+                                                       if shown else ""))
+        lines.append("- per-test detail (only where the output names tests; informational): "
+                     + "; ".join(parts))
     return "\n".join(lines)
 
 
 def fact_ids(facts: dict) -> dict:
-    """The audit-safe projection: test ids + anchor ids + exact counts."""
-    out = {"truncated": bool(facts.get("truncated")),
-           "untrusted_checks": list(facts.get("untrusted_checks") or [])}
-    for key in ("regression", "new_not_passing", "still_failing", "unknown_before", "fixed"):
-        items = facts.get(key) or []
-        out[key] = [{"test": safe_id(f["test"]), "anchor": f["anchor"]} for f in items[:20]]
-        out[f"n_{key}"] = int(facts.get(f"n_{key}", len(items)))
+    """The audit-safe projection: check ids, step, anchor, start/now status, outcome, counts and
+    (optional) test ids - never a command."""
+    out = {f"n_{o}": int(facts.get(f"n_{o}", 0)) for o in OUTCOMES}
+    out["checks"] = [{k: f[k] for k in ("check", "step", "anchor", "start", "now", "outcome")}
+                     for f in (facts.get("checks") or [])][:MAX_CHECKS]
+    tests = facts.get("tests") or {}
+    out["tests"] = {k: [safe_id(t["test"]) for t in (tests.get(k) or [])[:20]] for k in tests}
+    out["tests_counts"] = dict(facts.get("tests_counts") or {})
     return out
 
 
@@ -763,11 +844,13 @@ def discard_note(*, step: int, anchor: str, anchor_text: str, attempt_no: int, k
         tried = (f"{diff['n_files']} file(s) changed, +{diff['added']}/-{diff['deleted']}"
                  + (f" ({paths}{', ...' if diff['n_files'] > 5 else ''})" if paths else ""))
     ev = []
-    for key, label in (("regression", "regressed"), ("new_not_passing", "new not passing")):
-        items = facts.get(key) or []
-        if items:
-            ev.append(f"{label}: " + ", ".join(safe_id(f["test"])[:80] for f in items[:3])
-                      + (" ..." if len(items) > 3 else ""))
+    for f in (facts.get("checks") or [])[:MAX_CHECKS]:
+        if f.get("outcome") not in ("passing", "new_passing", "fixed"):
+            ev.append(f"check {f['check']} {f['outcome'].replace('_', ' ')}")
+    regressed = ((facts.get("tests") or {}).get("regressed") or [])
+    if regressed:
+        ev.append("tests regressed: " + ", ".join(safe_id(f["test"])[:80] for f in regressed[:3])
+                  + (" ..." if len(regressed) > 3 else ""))
     evidence = "; ".join(ev) or "no test evidence for the item"
     item = f"{anchor} ({scrub(anchor_text, 120)})" if anchor_text else (anchor or "the goal")
     note = (f"Step {step} toward anchor item {item}, attempt {attempt_no}, DISCARDED "
@@ -785,11 +868,11 @@ def learning_record(*, effort_id: str, attempt_id: str, ref: str, anchor: str, a
     attempt ref), the attempt id is outcome evidence. `producer` is "agent-org", which the v1
     enum (harness|job-tree) does not list yet - an operator decision, not changed here."""
     ids = fact_ids(facts)
-    red = (f"anchor item {anchor}: {ids['n_regression']} regression(s), "
-           f"{ids['n_new_not_passing']} new not passing, {ids['n_still_failing']} still failing, "
-           f"{ids['n_unknown_before']} unknown"
-           + ("; regressed: " + ", ".join(f["test"][:80] for f in ids["regression"][:3])
-              if ids["regression"] else ""))
+    red = (f"anchor item {anchor}: checks - {ids['n_regression']} regression(s), "
+           f"{ids['n_hang']} hang(s), {ids['n_new_not_passing']} new not passing, "
+           f"{ids['n_still_failing']} still failing, {ids['n_untrusted']} unknown"
+           + ("; tests regressed: " + ", ".join(t[:80] for t in ids["tests"].get("regressed", [])[:3])
+              if ids["tests"].get("regressed") else ""))
     return {
         "schema_version": 1,
         "fidelity": "iterative",
@@ -810,25 +893,27 @@ def _norm(t: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9 ]+", " ", (t or "").lower()).split())
 
 
-def canonical_items(old: dict, new: dict) -> tuple[dict, dict]:
-    """Merge a re-plan's ANCHOR ITEMS into the stored ones. A stored id is IMMUTABLE (its text is
-    kept); a new id whose text matches a stored item is an ALIAS of it, so renumbering an item
-    on a re-plan cannot reset its discard count. Returns (merged items, {new id: canonical id})."""
-    merged = dict(old)
-    by_text = {_norm(v): k for k, v in old.items()}
-    alias = {}
-    for k, v in new.items():
-        if k in old:
-            alias[k] = k
-            continue
-        same = by_text.get(_norm(v))
-        if same:
-            alias[k] = same
-        else:
-            merged[k] = v
-            by_text[_norm(v)] = k
-            alias[k] = k
-    return merged, alias
+_INJECTED = re.compile(r"\n\n(?:ITERATION |EFFORT ANCHOR|RELEVANT MEMORIES|LEARNED CONSTRAINTS|"
+                       r"ACCEPTANCE CORPUS|HANDOFF|PROJECT ORIENTATION|WORKSPACE PROVENANCE|"
+                       r"WHAT NOT TO DO)")
+_LIST_ITEM = re.compile(r"^\s*(?:[-*\u2022]|\d{1,2}[.)])\s+(.+?)\s*$")
+MAX_ITEMS = 8
+
+
+def derive_items(goal: str) -> dict:
+    """The effort's ANCHOR ITEMS, derived deterministically from its ACCEPTED goal (the first goal
+    version, set at intake), ids A1..An by position. Pure: the same goal always gives the same
+    items, so an id can never name a different goal. List lines (- / * / 1.) are the items;
+    without a list, the goal's sentences; at most MAX_ITEMS (the rest folded into the last)."""
+    text = _INJECTED.split(goal or "", maxsplit=1)[0].strip()
+    lines = [m.group(1) for m in (_LIST_ITEM.match(ln) for ln in text.splitlines()) if m]
+    if not lines:
+        flat = " ".join(text.split())
+        lines = [x.strip() for x in re.split(r"(?<=[.!?;])\s+", flat) if len(x.split()) >= 2] or (
+            [flat] if flat else [])
+    if len(lines) > MAX_ITEMS:
+        lines = lines[:MAX_ITEMS - 1] + ["; ".join(lines[MAX_ITEMS - 1:])]
+    return {f"A{i}": " ".join(t.split())[:240] for i, t in enumerate(lines, 1)}
 
 
 def kept_conflicts(steps: list[dict], kept: list[int], paths: list[str]) -> list[str]:

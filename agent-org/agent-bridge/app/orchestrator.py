@@ -89,7 +89,8 @@ from sqlalchemy import delete, func, select
 
 from .models import (
     Concern as ConcernRow,
-    Effort, EffortAttempt, EffortConstraint, EffortPlan, Event, GlobalState, LensReport, Project,
+    Effort, EffortAttempt, EffortConstraint, EffortPlan, Event, GlobalState, GoalVersion,
+    LensReport, Project,
     ProjectSurvey, ScopeNode, ScopeTask, WorkerInstance,
 )
 from .modules import attempts as _att
@@ -13629,6 +13630,30 @@ class Orchestrator:
             return {"plan_no": 0, "items": {}, "steps": [], "done": [], "discards": {},
                     "escalated": []}
 
+    async def _effort_anchor_items(self, effort_id: str) -> dict:
+        """The effort's ANCHOR ITEMS (round 3): FIXED when the effort is accepted - stored at intake
+        from the accepted goal (goal version 1, `Charters.set_goal`) and derived the same way here
+        for efforts that predate that. Ids A1..An by construction (`attempts.derive_items`); the
+        planner references them and can never add, renumber or redefine one."""
+        plan = await self._effort_plan_row(effort_id)
+        if plan["items"]:
+            return plan["items"]
+        goal = ""
+        try:
+            async with self.db.session_factory() as s:
+                row = (await s.execute(select(GoalVersion).where(
+                    GoalVersion.effort_id == effort_id).order_by(GoalVersion.version).limit(1))
+                ).scalar_one_or_none()
+                goal = row.objective if row is not None else ""
+        except Exception as exc:  # noqa: BLE001
+            log.debug("goal v1 read failed for %s: %s", effort_id, exc)
+        items = _att.derive_items(goal or await self._north_star(effort_id))
+        if items:
+            await self._save_effort_plan(effort_id, items=items)
+            await self.audit.log("anchor_items_fixed", effort_id=effort_id,
+                                 payload={"items": sorted(items), "source": "goal v1"})
+        return items
+
     async def _save_effort_plan(self, effort_id: str, **fields) -> None:
         async with self.db.session_factory() as s:
             r = await s.get(EffortPlan, effort_id)
@@ -13724,13 +13749,15 @@ class Orchestrator:
             log.debug("marking the attempt start failed for %s: %s", effort_id, exc)
 
     async def _run_check_pair(self, effort_id: str, k: int, check: dict, *, start: str,
-                              branch: str, park: str, ref: str) -> tuple:
+                              branch: str, park: str, ref: str,
+                              per_run: int = _att.CHECK_TIMEOUT_S) -> tuple:
         """One worker check at the attempt's end and start, in its own /check (R2), then the
         branch, its tip, the tree and the attempt ref VERIFIED (R4) - restored once more by the
         bridge if the check moved them. Returns (CheckRun | None, restored: bool)."""
         out = await self._attempt_exec(
-            effort_id, _att.check_cmd(check["cmd"], start=start, branch=branch, park=park, ref=ref),
-            timeout=2 * (_att.CHECK_TIMEOUT_S + _att.CHECK_KILL_S) + 120,
+            effort_id, _att.check_cmd(check["cmd"], start=start, branch=branch, park=park, ref=ref,
+                                      timeout=per_run),
+            timeout=2 * (per_run + _att.CHECK_KILL_S) + 120,
             label=f"ao-attempt:check c{k + 1}")
         run = _att.parse_check(out)
         st = run.state if run is not None else None
@@ -13757,6 +13784,8 @@ class Orchestrator:
             await self.audit.log("attempt_probe_failed", effort_id=effort_id, payload={})
             return None
         here = {"head": probe.head, "branch": probe.branch}
+        if probe.dirty == 0:
+            await self._verify_attempt_refs(effort_id, probe.branch, probe.head)
         if not _att.is_branch(probe.branch):
             await self.audit.log("attempt_park_failed", effort_id=effort_id,
                                  payload={"why": "branch name"})
@@ -13809,14 +13838,23 @@ class Orchestrator:
         checks = cur.get("checks") or []
         runs: list = []
         restored = True
+        # ONE wall-clock budget for all checks of this plan wake (both runs of each): a hung suite
+        # cannot hold the gate for an hour; a check the budget cannot cover is reported not_run.
+        t0 = time.monotonic()
         for k, c in enumerate(checks[:_att.MAX_CHECKS]):
+            left = _att.CHECKS_BUDGET_S - (time.monotonic() - t0)
+            per_run = int(min(_att.CHECK_TIMEOUT_S, (left - 30) // 2))
+            if per_run < min(10, _att.CHECK_TIMEOUT_S):
+                runs.append("budget")
+                continue
             run, ok = await self._run_check_pair(effort_id, k, c, start=start,
-                                                 branch=probe.branch, park=park.head, ref=ref)
+                                                 branch=probe.branch, park=park.head, ref=ref,
+                                                 per_run=per_run)
             runs.append(run)
             if not ok:
                 restored = False
                 break
-        tests = _att.classify(checks, runs, steps)
+        tests = _att.classify(checks, runs, steps, (diff or {}).get("new_paths") or [])
         facts = {"diff": diff, "tests": tests}
         await self._update_attempt(cur["id"], facts=facts)
         await self.audit.log("attempt_parked", effort_id=effort_id, payload={
@@ -13830,9 +13868,39 @@ class Orchestrator:
         if not restored:
             await self.audit.log("attempt_restore_failed", effort_id=effort_id,
                                  payload={"attempt": cur["id"]})
-            return {"head": park.head, "branch": probe.branch, "attempt": None, "park_failed": True}
+            return {"head": park.head, "branch": probe.branch, "attempt": None, "park_failed": True,
+                    "restore_failed": True, "ref": ref}
         att = await self._current_attempt(effort_id)
         return {"head": park.head, "branch": probe.branch, "attempt": att, "park_failed": False}
+
+    async def _verify_attempt_refs(self, effort_id: str, branch: str, head: str) -> None:
+        """Every salvage ref must still point at its parked commit. `checkout -B` moves a branch
+        through the proxy (allow:checkout), so a plan turn or a check CAN move one: detect it,
+        audit it (`attempt_ref_moved`), and point it back (proxy-legal `checkout -B`, then the
+        workspace is restored to `branch` at `head`). Never raises."""
+        try:
+            async with self.db.session_factory() as s:
+                rows = (await s.execute(select(EffortAttempt).where(
+                    EffortAttempt.effort_id == effort_id, EffortAttempt.expired.is_(False),
+                    EffortAttempt.ref != "", EffortAttempt.park_sha != ""))).scalars().all()
+                want = {r.ref: (r.id, r.park_sha) for r in rows}
+            if not want or not _att.is_branch(branch):
+                return
+            now = _att.parse_refs(await self._attempt_exec(effort_id, _att.refs_cmd(sorted(want))))
+            if now is None:
+                return
+            for ref, (aid, sha) in want.items():
+                if now.get(ref) == sha:
+                    continue
+                recs = _att.records(await self._attempt_exec(
+                    effort_id, _att.repair_ref_cmd(ref, sha, branch, head), label="ao-attempt:ref"))
+                st = _att.parse_state(recs)
+                fixed = bool(recs) and any(t == "R" and v.endswith(" " + sha) for t, v in recs)
+                await self.audit.log("attempt_ref_moved", effort_id=effort_id, payload={
+                    "attempt": aid, "ref": ref, "found": (now.get(ref) or "")[:12],
+                    "repaired": fixed, "workspace_back": bool(st and st.at(branch, head))})
+        except Exception as exc:  # noqa: BLE001
+            log.debug("attempt ref verification failed for %s: %s", effort_id, exc)
 
     async def _restore_head_after_plan_turn(self, effort_id: str, expected: str,
                                             branch: str = "") -> None:
@@ -13871,12 +13939,10 @@ class Orchestrator:
 
     def _plan_format_block(self, plan: dict) -> str:
         known = plan.get("items") or {}
-        listed = "\n".join(f"  {k}: {v}" for k, v in sorted(known.items())) if known else ""
+        listed = "\n".join(f"  {k}: {v}" for k, v in sorted(known.items(), key=lambda kv: int(kv[0][1:]) if kv[0][1:].isdigit() else 0)) if known else ""
         return (
-            "\nANCHOR ITEMS: the acceptance items this goal is checked against, one per line as "
-            "`A1: <what must be true>`."
-            + (f" REUSE these ids from the stored plan (add new ids only for items not listed):\n"
-               f"{listed}" if listed else "")
+            "\nANCHOR ITEMS of this effort (FIXED when it was accepted - you cannot add, renumber "
+            "or redefine them; do not write an ANCHOR ITEMS section):\n" + listed
             + "\nEvery numbered PLAN step must END with the anchor item it serves, e.g. "
               "`1. update parser.py to ... [anchor: A1]`. A step without one is refused.")
 
@@ -13972,7 +14038,7 @@ class Orchestrator:
                                 f"attempt is intact on `{att['ref']}`)"}
         facts = att.get("facts") or {}
         tests = facts.get("tests") or {}
-        klass = v.klass or ("deviation" if tests.get("regression") else "no-solution")
+        klass = v.klass or ("deviation" if tests.get("n_regression") else "no-solution")
         anchor_text = (plan.get("items") or {}).get(anchor) or (
             "the effort goal" if anchor == "GOAL" else "")
         note = _att.discard_note(step=n, anchor=anchor, anchor_text=anchor_text,
@@ -14044,7 +14110,7 @@ class Orchestrator:
                 if (r.verdict or {}).get("anchor") == anchor][-_att.DISCARDS_ESCALATE:]
         klass = _att.classify_discards(
             [(r.verdict or {}).get("class", "") for r in mine],
-            [bool(((r.facts or {}).get("tests") or {}).get("regression")) for r in mine])
+            [bool(((r.facts or {}).get("tests") or {}).get("n_regression")) for r in mine])
         plan = await self._effort_plan_row(effort_id)
         await self._save_effort_plan(effort_id, escalated=sorted(set(plan["escalated"]) | {anchor}))
         await self.audit.log("attempt_step_escalated", effort_id=effort_id, payload={
@@ -14071,15 +14137,13 @@ class Orchestrator:
         wake then records the exact start (`_mark_attempt_start`)."""
         try:
             plan = await self._effort_plan_row(effort_id)
-            items, alias = _att.canonical_items(plan["items"], decl.items)
-            steps = [{**st, "anchor": alias.get(st["anchor"], st["anchor"])} for st in decl.steps]
-            decl.steps = steps
+            items = await self._effort_anchor_items(effort_id)     # fixed; never from the planner
             plan_no = plan["plan_no"] + 1
             if not _att.is_sha(start_sha) or not _att.is_branch(branch):
                 pr = _att.parse_probe(await self._attempt_exec(effort_id, _att.probe_cmd()))
                 if pr is not None:
                     start_sha, branch = pr.head, pr.branch
-            await self._save_effort_plan(effort_id, plan_no=plan_no, items=items, steps=decl.steps)
+            await self._save_effort_plan(effort_id, plan_no=plan_no, steps=decl.steps)
             async with self.db.session_factory() as s:
                 for r in (await s.execute(select(EffortAttempt).where(
                         EffortAttempt.effort_id == effort_id,
@@ -14212,7 +14276,15 @@ class Orchestrator:
             log.warning("parking the attempt failed for %s: %s", effort_id, exc)
             pre = None
         att = (pre or {}).get("attempt")
+        if pre and pre.get("restore_failed"):
+            # a worker check left the workspace (branch, tip or the attempt ref) where the bridge
+            # could not put it back: never plan on - or deliver - an unjudged parked commit
+            return await self._stop_plan_gate(
+                effort_id, goal,
+                "the workspace could not be restored after the worker's checks; the attempt is "
+                f"parked on `{pre.get('ref')}` and needs a look before anything continues")
         plan_row = await self._effort_plan_row(effort_id)
+        plan_row["items"] = await self._effort_anchor_items(effort_id)
         fmt = self._plan_format_block(plan_row)
         notes = self._attempt_notes_block(await self._attempt_notes(effort_id))
         att_sec = self._attempt_section(att, plan_row) if att else ""
@@ -14241,7 +14313,6 @@ class Orchestrator:
             "UNDERSTANDING: the goal in your own words (1-2 lines)\n"
             "ALREADY DONE: what you OBSERVED to be working, each with the command or file that "
             "shows it (write 'nothing' if the work has not been started)\n"
-            "ANCHOR ITEMS: the acceptance items the goal is checked against (`A1: ...` per line)\n"
             "PLAN: numbered steps for what REMAINS — name the files you'll touch and what changes "
             "in each, and END each step with `[anchor: Ax]` (write 'nothing remains' if your "
             "observations show the goal is already met)\n"
@@ -14298,6 +14369,8 @@ class Orchestrator:
                     await self._restore_head_after_plan_turn(effort_id, pre["head"],
                                                              pre.get("branch") or "")
                 await self._revert_plan_turn_writes(effort_id)
+                if pre and pre.get("head"):
+                    await self._verify_attempt_refs(effort_id, pre.get("branch") or "", pre["head"])
             if result is None:
                 await self._report_completion(effort_id, None)
                 return None
@@ -14371,7 +14444,7 @@ class Orchestrator:
                 continue
             # ao-attempt — RELEVANCE IS DECIDED HERE, TOP-DOWN: every step declares the anchor item
             # it serves before it is delegated. Refused back to the planner once, then escalated.
-            decl = _att.parse_plan(out, plan_row["items"])
+            decl = _att.parse_plan(out, plan_row["items"], fixed=True)
             if decl.problems:
                 undeclared += 1
                 await self.audit.log("plan_steps_undeclared", effort_id=effort_id, payload={
@@ -14385,7 +14458,7 @@ class Orchestrator:
                     )
                     instr = (
                         "Your plan was REFUSED: " + "; ".join(decl.problems[:6]) + ".\n"
-                        "Write the WHOLE plan again (UNDERSTANDING / ALREADY DONE / ANCHOR ITEMS / "
+                        "Write the WHOLE plan again (UNDERSTANDING / ALREADY DONE / "
                         "PLAN / WON'T DO / RISKS" + (" / VERDICT" if att else "") + ")."
                         + fmt + "\nDo NOT change any file this turn.")
                     continue
@@ -14447,7 +14520,12 @@ class Orchestrator:
                                            f"applied (it is intact on `{att.get('ref')}`)"}
                     nxt_head = res.get("head") or nxt_head
                     if res.get("escalated"):
-                        return None          # three discards of one step: escalated (posted)
+                        # three discards of one step: escalated (posted); the stop event also
+                        # rotates the next run's session
+                        await self.audit.log("worker_plan_stopped", effort_id=effort_id, payload={
+                            "reason": "three discards of one step - escalated"})
+                        await self.router.update_effort_card(effort_id, "needs-attention")
+                        return None
                     if res.get("escalate"):
                         reason = res["escalate"]
                         break
@@ -14477,10 +14555,14 @@ class Orchestrator:
                 )
                 instr = (
                     f"Your plan is NOT aligned with the goal: {reason}\n"
-                    "Write a REVISED plan in the same format (UNDERSTANDING / ANCHOR ITEMS / PLAN "
+                    "Write a REVISED plan in the same format (UNDERSTANDING / ALREADY DONE / PLAN "
                     "/ WON'T DO / RISKS" + (" / VERDICT" if att else "") + ") that fixes this. "
                     "Every step still ends with `[anchor: Ax]`. Do NOT change any file this turn."
                 )
+        return await self._stop_plan_gate(effort_id, goal, reason)
+
+    async def _stop_plan_gate(self, effort_id: str, goal: str, reason: str | None) -> None:
+        """The plan gate's honest stop (posted, card needs-attention). Returns None."""
         # The stop event ALSO rotates _session_for's generation, so the operator's "re-run it"
         # starts from a fresh session instead of re-entering the one that just failed here.
         await self.audit.log("worker_plan_stopped", effort_id=effort_id,
