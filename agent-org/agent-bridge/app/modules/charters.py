@@ -203,14 +203,6 @@ class Charters:
                     invalidates_in_progress=invalidates_in_progress,
                 )
             )
-            if ver == 1:
-                # ao-attempt round 3: the ACCEPTED goal fixes the effort's anchor items (ids A1..An
-                # by construction). Stored once, here, at intake; never rewritten by a planner.
-                from ..models import EffortPlan
-                from .attempts import derive_items
-                items = derive_items(objective)
-                if items and await s.get(EffortPlan, effort_id) is None:
-                    s.add(EffortPlan(effort_id=effort_id, items=items))
             await s.commit()
         await self.audit.log(
             "goal_change",

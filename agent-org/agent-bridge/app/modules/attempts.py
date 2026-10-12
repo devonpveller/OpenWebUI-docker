@@ -127,13 +127,42 @@ def _wrap(body: list[str]) -> str:
 _RECORD_RE = re.compile(r"@@([A-Z][A-Z0-9]*) (.*?) \1@@")
 
 
-def records(out: str | None) -> list[tuple[str, str]] | None:
+_LIST_TAGS = ("J", "X")
+
+
+def new_nonce() -> str:
+    """A per-run tag for the records of a command that runs WORKER code (a check): uppercase hex,
+    unguessable. The check's own output goes to a file, never into the /check stream."""
+    import secrets
+    return secrets.token_hex(8).upper()
+
+
+def records(out: str | None, nonce: str | None = None) -> list[tuple[str, str]] | None:
     """All records in one /check output, in order, or None when the output is untrusted (no
     BEGIN, or no END after it - truncated, or the command died). CR and LF are deleted first:
-    open-terminal's per-write entries are joined with an extra newline that can land anywhere."""
+    open-terminal's per-write entries are joined with an extra newline that can land anywhere.
+
+    With `nonce` (a command that ran worker code): only records whose tag carries `X<nonce>`
+    count; BEGIN and END must appear EXACTLY once, and every single-valued tag at most once -
+    a duplicate (something that learned the nonce and wrote into the stream) makes the whole
+    output untrusted, never accepted. Untagged record-shaped text is ignored."""
     if not out:
         return None
     flat = out.replace("\r", "").replace("\n", "")
+    if nonce:
+        bt, et = f"@@B{nonce} ao B{nonce}@@", f"@@E{nonce} ao E{nonce}@@"
+        if flat.count(bt) != 1 or flat.count(et) != 1:
+            return None
+        b, e = flat.find(bt), flat.find(et)
+        if e < b:
+            return None
+        suf = "X" + nonce
+        got = [(m.group(1)[:-len(suf)], m.group(2))
+               for m in _RECORD_RE.finditer(flat[b + len(bt):e]) if m.group(1).endswith(suf)]
+        singles = [t for t, _ in got if t not in _LIST_TAGS]
+        if len(singles) != len(set(singles)):
+            return None
+        return got
     b = flat.find(BEGIN)
     e = flat.rfind(END)
     if b < 0 or e < 0 or e < b:
@@ -377,26 +406,66 @@ def _show_loop(tag: str) -> str:
             f'fi; {_rec(tag, chr(34) + "$pre$id" + chr(34))}; done')
 
 
-def check_cmd(cmd: str, *, start: str | None, branch: str, park: str, ref: str,
-              timeout: int = CHECK_TIMEOUT_S) -> str:
-    """ONE worker check, end AND start, in ONE /check (a /check per check: one big suite cannot
-    push another's facts out of the 64 KB tail):
+_SHELL_META = re.compile(r"[$`|&;<>(){}*?\[\]!~'\"\\]")
 
-    1. run it at the parked commit (exit status; 124/137 = it hung and was killed);
-    2. `checkout --detach <start>` (verified, CO record) and run it there;
+
+def operands(cmd: str) -> list[str]:
+    """Relative file operands of a check command (`sh tests/t.sh`, `pytest tests/test_x.py`), and
+    the same under a leading `cd DIR &&`: what the shell tests for EXISTENCE at the end and at the
+    start. A check whose operand did not exist at the start could not run there (G1: measured,
+    not a substring match against the diff)."""
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:
+        return []
+    out: list[str] = []
+    cds: list[str] = []
+    for i, t in enumerate(toks):
+        if i > 0 and toks[i - 1] == "cd" and not _SHELL_META.search(t):
+            cds.append(t)
+            continue
+        if (t.startswith("-") or t.startswith("/") or _SHELL_META.search(t) or ".." in t
+                or ("/" not in t and "." not in t[1:]) or len(t) > 200):
+            continue
+        out.append(t)
+        out.extend(f"{d}/{t}" for d in cds)
+    seen: list[str] = []
+    for o in out:
+        if o not in seen:
+            seen.append(o)
+    return seen[:12]
+
+
+def check_cmd(cmd: str, *, start: str | None, branch: str, park: str, ref: str,
+              timeout: int = CHECK_TIMEOUT_S, nonce: str = "") -> str:
+    """ONE worker check, end AND start, in ONE /check:
+
+    1. run it at the parked commit - stdout AND stderr into a FILE (G3: nothing the check prints
+       reaches the /check stream, so no output volume can push the bridge's records out and no
+       record-shaped text can be read as one); exit status and elapsed seconds;
+    2. `checkout --detach <start>` (verified, CO record), which operands are MISSING there, run it;
     3. RESTORE the branch (name and tip) and the tree, whatever the check did;
-    4. OPTIONAL per-test detail, framework-recognisable lines only (pytest `::` ids, dotnet
-       `Passed`/`Failed` lines): compared on FULL ids in the shell, exact counts + a capped list.
-    The FACT is the check's exit status at start vs now; the per-test detail never decides one."""
+    4. OPTIONAL per-test detail (pytest `::` ids, dotnet Passed/Failed lines), full-id comparison.
+    Every bridge record carries the per-run `nonce` (records(out, nonce)); the check runs in its
+    own session (`setsid`, where present) so it has no controlling terminal to write to."""
+    nonce = nonce or new_nonce()
+    sfx = "X" + nonce
+
+    def rec(tag: str, expr: str) -> str:
+        return _rec(tag + sfx, expr)
+
     q = shlex.quote(cmd)
     run = (f"( cd {WS} && NO_COLOR=1 PY_COLORS=0 TERM=dumb DOTNET_CLI_TELEMETRY_OPTOUT=1 "
-           f"timeout -k {CHECK_KILL_S} {int(timeout)} bash -c {q} ) </dev/null 2>&1")
+           f"$SS timeout -k {CHECK_KILL_S} {int(timeout)} bash -c {q} ) </dev/null")
     tests = f'{{ {_TEST_GREP} "$OUT"; {_DOTNET_SED} "$OUT"; }} | {_SPLIT_AWK} | LC_ALL=C sort'
+    ops = " ".join(shlex.quote(o) for o in operands(cmd)) or "''"
     body = [
-        'd=$(mktemp -d); : > "$d/a.t"; : > "$d/b.t"; : > "$d/j"; : > "$d/x"',
-        f'{run} > "$d/a.out"; rca=$?',
+        'SS=""; command -v setsid >/dev/null 2>&1 && SS="setsid -w"',
+        'd=$(mktemp -d); : > "$d/a.t"; : > "$d/b.t"; : > "$d/j"; : > "$d/x"; : > "$d/ops"',
+        f'for o in {ops}; do [ -n "$o" ] && [ -e "$o" ] && printf "%s\\n" "$o" >> "$d/ops"; done',
+        f't0=$(date +%s); {run} > "$d/a.out" 2>&1; rca=$?; t1=$(date +%s)',
         tests.replace("$OUT", "$d/a.out") + ' > "$d/a.t"',
-        _rec("RCA", '"$rca"'),
+        rec("RCA", '"$rca"'), rec("TA", '"$((t1-t0))"'), rec("TO", str(int(timeout))),
     ]
     if is_sha(start):
         body += [
@@ -404,9 +473,12 @@ def check_cmd(cmd: str, *, start: str | None, branch: str, park: str, ref: str,
             f"git checkout -q --detach {start} >/dev/null 2>&1; "
             f"git checkout -q -- . >/dev/null 2>&1; git clean -fdq >/dev/null 2>&1",
             f'if [ "$(git rev-parse HEAD 2>/dev/null)" = "{start}" ]; then '
-            + _rec("CO", "1") + f'; {run} > "$d/b.out"; rcb=$?; '
+            + rec("CO", "1") + '; nm=0; while IFS= read -r o; do [ -e "$o" ] || nm=$((nm+1)); '
+            'done < "$d/ops"; ' + rec("NMISS", '"$nm"')
+            + f'; t0=$(date +%s); {run} > "$d/b.out" 2>&1; rcb=$?; t1=$(date +%s); '
             + tests.replace("$OUT", "$d/b.out") + ' > "$d/b.t"; '
-            + _rec("RCB", '"$rcb"') + "; else " + _rec("CO", "0") + "; fi",
+            + rec("RCB", '"$rcb"') + "; " + rec("TB", '"$((t1-t0))"') + "; else "
+            + rec("CO", "0") + "; fi",
         ]
     body += [
         restore_snippet(branch, park),
@@ -415,18 +487,22 @@ def check_cmd(cmd: str, *, start: str | None, branch: str, park: str, ref: str,
         '> "$d/j"; awk \'NR==FNR { if ($1=="F") f[substr($0,3)]=1; next } '
         '$1=="P" && (substr($0,3) in f) { print substr($0,3) }\' "$d/b.t" "$d/a.t" > "$d/x"; '
         'else awk \'$1=="F" { print "U " substr($0,3) }\' "$d/a.t" > "$d/j"; fi',
-        *[_rec(tag, f'"$(grep -c {pat} "$d/{f}" 2>/dev/null)"') for tag, pat, f in (
+        *[rec(tag, f'"$(grep -c {pat} "$d/{f}" 2>/dev/null)"') for tag, pat, f in (
             ("NFA", "'^F '", "a.t"), ("NPA", "'^P '", "a.t"), ("NFB", "'^F '", "b.t"),
             ("NPB", "'^P '", "b.t"), ("NREG", "'^P '", "j"), ("NNEW", "'^A '", "j"),
             ("NSTILL", "'^F '", "j"), ("NUNK", "'^U '", "j"))],
-        _rec("NFIX", '"$(wc -l < "$d/x")"'),
+        rec("NFIX", '"$(wc -l < "$d/x")"'),
         f'{{ grep \'^P \' "$d/j"; grep \'^A \' "$d/j"; grep \'^F \' "$d/j"; grep \'^U \' "$d/j"; }} '
-        f'| head -{MAX_LISTED} | {_show_loop("J")}',
-        f'head -{MAX_FIXED_LISTED} "$d/x" | {_show_loop("X")}',
+        f'| head -{MAX_LISTED} | {_show_loop("J" + sfx)}',
+        f'head -{MAX_FIXED_LISTED} "$d/x" | {_show_loop("X" + sfx)}',
         'rm -rf "$d"',
-        *_state(ref),
+        *[x.replace("@@HEAD ", f"@@HEAD{sfx} ").replace(" HEAD@@", f" HEAD{sfx}@@")
+          .replace("@@BR ", f"@@BR{sfx} ").replace(" BR@@", f" BR{sfx}@@")
+          .replace("@@DIRTY ", f"@@DIRTY{sfx} ").replace(" DIRTY@@", f" DIRTY{sfx}@@")
+          .replace("@@REF ", f"@@REF{sfx} ").replace(" REF@@", f" REF{sfx}@@") for x in _state(ref)],
     ]
-    return _wrap(body)
+    return " ; ".join([f"cd {WS} 2>/dev/null || exit 90", f"printf '@@B{nonce} ao B{nonce}@@'",
+                       *body, f"printf '@@E{nonce} ao E{nonce}@@'"])
 
 
 @dataclass
@@ -438,11 +514,22 @@ class CheckRun:
     fixed: list
     state: State
     start_checked_out: bool | None = None
+    elapsed_a: int | None = None
+    elapsed_b: int | None = None
+    limit: int | None = None
+    missing_at_start: int = 0
+
+    def hung(self, rc: int | None, elapsed: int | None) -> bool:
+        """A HANG is a 124/137 that came from the timeout: the run lasted (about) its limit. An
+        instant `exit 124` or an OOM SIGKILL (137) well inside the limit is an ordinary failure."""
+        return (rc in HANG_RCS and elapsed is not None and self.limit is not None
+                and elapsed >= self.limit - 1)
 
 
-def parse_check(out: str | None) -> CheckRun | None:
-    """None when the output is untrusted (no BEGIN/END: cut, or the command died) or incomplete."""
-    recs = records(out)
+def parse_check(out: str | None, nonce: str | None = None) -> CheckRun | None:
+    """None when the output is untrusted (no BEGIN/END: cut, or the command died; a duplicated
+    nonce record) or incomplete."""
+    recs = records(out, nonce)
     st = parse_state(recs)
     if recs is None or st is None:
         return None
@@ -464,7 +551,9 @@ def parse_check(out: str | None) -> CheckRun | None:
     fixed = [safe_id(v) for t, v in recs if t == "X"]
     co = first(recs, "CO")
     return CheckRun(rca=rca, rcb=_int(first(recs, "RCB")), counts=counts, listed=listed,
-                    fixed=fixed, state=st, start_checked_out=None if co is None else co.strip() == "1")
+                    fixed=fixed, state=st, start_checked_out=None if co is None else co.strip() == "1",
+                    elapsed_a=_int(first(recs, "TA")), elapsed_b=_int(first(recs, "TB")),
+                    limit=_int(first(recs, "TO")), missing_at_start=_int(first(recs, "NMISS")) or 0)
 
 
 def reset_mixed_cmd(sha: str) -> str:
@@ -679,18 +768,12 @@ OUTCOMES = ("regression", "hang", "new_not_passing", "still_failing", "could_not
             "untrusted", "not_run", "fixed", "new_passing", "passing")
 
 
-def _status(rc: int | None) -> str:
+def _status(rc: int | None, hung: bool = False) -> str:
     if rc is None:
         return "not run"
-    if rc in HANG_RCS:
+    if hung:
         return "HANG"
     return "PASS" if rc == 0 else f"FAIL (exit {rc})"
-
-
-def _names_path(cmd: str, path: str) -> bool:
-    return bool(path) and (path in cmd or (path.rsplit("/", 1)[-1] in cmd
-                                           and "/" not in path.rsplit("/", 1)[-1]
-                                           and len(path.rsplit("/", 1)[-1]) > 3))
 
 
 def classify(checks: list[dict], runs: list, steps: list[dict],
@@ -698,13 +781,14 @@ def classify(checks: list[dict], runs: list, steps: list[dict],
     """CHECK-LEVEL facts, framework-agnostic (round 3): per worker check, its exit status at the
     attempt's start vs now -
 
-    regression             passed at the start, fails now
-    hang                   timed out now (killed by `timeout`), whatever it did at the start
-    new_not_passing        the check runs a file THIS attempt added (named in its command) and
-                           fails now - at the start there was nothing to run, so not a regression
+    hang                   timed out now (killed by its timeout: 124/137 AND the run lasted its
+                           limit), whatever it did at the start - a new check that hangs too
+    regression             MEASURED: passed at the start, fails now (decided before anything else)
+    new_not_passing        the check COULD NOT RUN at the start - exit 126/127 there, or a file
+    new_passing            operand of its command did not exist there (tested in the shell) - and
+                           fails / passes now (round 4: no substring rule against the diff)
     still_failing          failed (or hung) at the start and fails now
-    could_not_run_at_start no start, the start could not be checked out, or the command was not
-                           runnable there (exit 126/127)
+    could_not_run_at_start no start, or the start could not be checked out
     untrusted              its /check output was cut or incomplete: UNKNOWN, never "no regression"
     not_run                the plan wake's check-time budget ran out before it
     fixed / new_passing / passing - the rest
@@ -730,22 +814,24 @@ def classify(checks: list[dict], runs: list, steps: list[dict],
             facts["checks"].append({**base, "start": "?", "now": "?", "outcome": "untrusted"})
             facts["n_untrusted"] += 1
             continue
-        is_new = any(_names_path(c["cmd"], p) for p in new_paths)
-        start_ran = r.rcb is not None and r.rcb not in (126, 127)
-        now_pass, now_hang = r.rca == 0, r.rca in HANG_RCS
-        if is_new:
-            outcome = "new_passing" if now_pass else "new_not_passing"
-        elif now_hang:
+        now_pass = r.rca == 0
+        now_hang = r.hung(r.rca, r.elapsed_a)
+        start_hang = r.hung(r.rcb, r.elapsed_b)
+        could_not = r.rcb is not None and r.rcb != 0 and not start_hang and (
+            r.rcb in (126, 127) or r.missing_at_start > 0)
+        if now_hang:
             outcome = "hang"
-        elif not start_ran:
+        elif r.rcb is None:
             outcome = "could_not_run_at_start"
         elif r.rcb == 0:
             outcome = "passing" if now_pass else "regression"
+        elif could_not:
+            outcome = "new_passing" if now_pass else "new_not_passing"
         else:
             outcome = "fixed" if now_pass else "still_failing"
-        facts["checks"].append({**base, "start": _status(r.rcb) if r.start_checked_out is not False
-                                else "start not checked out", "now": _status(r.rca),
-                                "outcome": outcome})
+        facts["checks"].append({**base, "start": _status(r.rcb, start_hang)
+                                if r.start_checked_out is not False else "start not checked out",
+                                "now": _status(r.rca, now_hang), "outcome": outcome})
         facts[f"n_{outcome}"] += 1
         # optional per-test detail
         cn = r.counts
@@ -779,10 +865,10 @@ def facts_text(facts: dict, diff: dict | None, steps: list[dict], checks: list[d
         return "\n".join(lines)
     words = {"regression": "REGRESSION (passed at the start, fails now)",
              "hang": "HANG (killed by its timeout now)",
-             "new_not_passing": "new check (its file is new in this attempt), NOT passing",
-             "new_passing": "new check (its file is new in this attempt), passing",
+             "new_not_passing": "new check (it could not run at the start), NOT passing",
+             "new_passing": "new check (it could not run at the start), passing",
              "still_failing": "still failing (failed at the start too)",
-             "could_not_run_at_start": "could not run at the start",
+             "could_not_run_at_start": "start not measured (no start / not checked out)",
              "untrusted": "NO FACTS - output cut or incomplete: UNKNOWN, not absent",
              "not_run": "not run (the check-time budget of this plan wake ran out)",
              "fixed": "FIXED (failed at the start, passes now)", "passing": "passing (before and now)"}
@@ -893,9 +979,11 @@ def _norm(t: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9 ]+", " ", (t or "").lower()).split())
 
 
+# the bridge's own clauses appended to a request at intake (and later): never anchor items
 _INJECTED = re.compile(r"\n\n(?:ITERATION |EFFORT ANCHOR|RELEVANT MEMORIES|LEARNED CONSTRAINTS|"
                        r"ACCEPTANCE CORPUS|HANDOFF|PROJECT ORIENTATION|WORKSPACE PROVENANCE|"
-                       r"WHAT NOT TO DO)")
+                       r"WHAT NOT TO DO|STANDING INTENT|COMPOSITION CONTEXT|How this gets checked|"
+                       r"REQUIRED VERIFICATION|THIS IS A RUNTIME|PRIOR ATTEMPTS|YOUR SCOPE)")
 _LIST_ITEM = re.compile(r"^\s*(?:[-*\u2022]|\d{1,2}[.)])\s+(.+?)\s*$")
 MAX_ITEMS = 8
 

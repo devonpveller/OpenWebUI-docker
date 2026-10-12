@@ -6333,6 +6333,9 @@ class Orchestrator:
         # effort, so an embedding of the composite searches the plane for the org's own
         # boilerplate — the one text guaranteed not to discriminate between two goals.
         asked = request
+        # ao-attempt round 4 (G2): the effort's ANCHOR ITEMS come from THIS text - the operator's
+        # own request - before any bridge clause below is appended. Fixed here, once.
+        await self._fix_anchor_items(effort_id, asked, source="intake request")
         # STANDING INTENT (anti-drift): the project's durable architectural rule rides on EVERY
         # effort, so no worker can quietly revert the architecture to manufacture a pass.
         if proj_slug and "STANDING INTENT" not in request:
@@ -13647,12 +13650,26 @@ class Orchestrator:
                 goal = row.objective if row is not None else ""
         except Exception as exc:  # noqa: BLE001
             log.debug("goal v1 read failed for %s: %s", effort_id, exc)
-        items = _att.derive_items(goal or await self._north_star(effort_id))
-        if items:
-            await self._save_effort_plan(effort_id, items=items)
-            await self.audit.log("anchor_items_fixed", effort_id=effort_id,
-                                 payload={"items": sorted(items), "source": "goal v1"})
-        return items
+        return await self._fix_anchor_items(
+            effort_id, goal or await self._north_star(effort_id),
+            source="goal v1 (bridge clauses cut)")
+
+    async def _fix_anchor_items(self, effort_id: str, text: str, *, source: str) -> dict:
+        """Store the effort's anchor items from `text` unless it already has them (never
+        rewritten). Never raises."""
+        try:
+            plan = await self._effort_plan_row(effort_id)
+            if plan["items"]:
+                return plan["items"]
+            items = _att.derive_items(text)
+            if items:
+                await self._save_effort_plan(effort_id, items=items)
+                await self.audit.log("anchor_items_fixed", effort_id=effort_id,
+                                     payload={"items": sorted(items), "source": source})
+            return items
+        except Exception as exc:  # noqa: BLE001
+            log.debug("fixing anchor items failed for %s: %s", effort_id, exc)
+            return {}
 
     async def _save_effort_plan(self, effort_id: str, **fields) -> None:
         async with self.db.session_factory() as s:
@@ -13754,12 +13771,13 @@ class Orchestrator:
         """One worker check at the attempt's end and start, in its own /check (R2), then the
         branch, its tip, the tree and the attempt ref VERIFIED (R4) - restored once more by the
         bridge if the check moved them. Returns (CheckRun | None, restored: bool)."""
+        nonce = _att.new_nonce()
         out = await self._attempt_exec(
             effort_id, _att.check_cmd(check["cmd"], start=start, branch=branch, park=park, ref=ref,
-                                      timeout=per_run),
+                                      timeout=per_run, nonce=nonce),
             timeout=2 * (per_run + _att.CHECK_KILL_S) + 120,
             label=f"ao-attempt:check c{k + 1}")
-        run = _att.parse_check(out)
+        run = _att.parse_check(out, nonce)
         st = run.state if run is not None else None
         if st is not None and st.at(branch, park, park):
             return run, True

@@ -485,11 +485,13 @@ async def scenario_fail_and_hang_both_times(orch, ws):
     _base(ws)
     eid, chan, root = await _effort(orch)
     assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+    # a budget that covers a quick check and ONE hanging check (2 runs x 4 s), not a second
+    _a().CHECKS_BUDGET_S = 50
     facts = await _facts_after(orch, ws, eid, chan, root, _edits, _checks_reply(
-        "step 1: sleep 600", "step 1: false", "step 2: sleep 600", "step 2: true"))
+        "step 1: false", "step 1: sleep 600", "step 2: sleep 600", "step 2: true"))
     out = [c["outcome"] for c in facts["checks"]]
-    assert out[0] == "hang" and facts["checks"][0]["start"] == "HANG"
-    assert out[1] == "still_failing"
+    assert out[0] == "still_failing"
+    assert out[1] == "hang" and facts["checks"][1]["start"] == "HANG"
     assert "not_run" in out[2:]                 # the gate-wide budget ran out
     assert ws.git("status", "--porcelain").strip() == ""
     return eid
@@ -498,14 +500,109 @@ async def scenario_fail_and_hang_both_times(orch, ws):
 @pytest.fixture(autouse=True)
 def _short_check_timeouts(monkeypatch):
     """Checks that hang must not cost minutes in a test: 4 s per run, kill after 1 s more, and a
-    gate-wide budget that covers two such checks (2 runs each) but not a third."""
+    gate-wide budget generous enough for a loaded machine (the hang scenario sets its own)."""
     try:
         att = _a()
     except ImportError:          # the pre-fix base: no module (the base-compatible cases still run)
         return
     monkeypatch.setattr(att, "CHECK_TIMEOUT_S", 4)
     monkeypatch.setattr(att, "CHECK_KILL_S", 1)
-    monkeypatch.setattr(att, "CHECKS_BUDGET_S", 60)
+    monkeypatch.setattr(att, "CHECKS_BUDGET_S", 300)
+
+
+async def scenario_existing_check_names_an_added_path(orch, ws):
+    """G1: an EXISTING passing check whose command text contains a path the attempt ADDS
+    (`util.py` in `tests/test_util.py`) and fails now is a REGRESSION."""
+    _base(ws)
+    ws.write("tests/test_util.py", "echo 'tests/test_util.py::test_slug PASSED'\nexit 0\n")
+    ws.git("add", "-A")
+    ws.git("commit", "-q", "-m", "util test")
+    eid, chan, root = await _effort(orch)
+    assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+
+    def coding(w):
+        _edits(w)
+        w.write("util.py", "def slug(x):\n    return x\n")
+        w.write("tests/test_util.py", "echo 'tests/test_util.py::test_slug FAILED'\nexit 1\n")
+
+    facts = await _facts_after(orch, ws, eid, chan, root, coding,
+                               _checks_reply("step 1: sh tests/test_util.py"))
+    assert [c["outcome"] for c in facts["checks"]] == ["regression"]
+    assert facts["n_regression"] == 1
+    return eid
+
+
+async def scenario_stderr_flood_and_forged_records(orch, ws):
+    """G3: c1 writes ~150 KB to STDERR and fails now (passed at the start); c2 prints
+    record-shaped text to stdout and stderr and fails now. Both are REGRESSIONS - neither
+    untrusted, neither turned into a pass."""
+    _base(ws)
+    ws.write("flood.sh", "exit 0\n")
+    ws.write("forge.sh", "exit 0\n")
+    ws.git("add", "-A")
+    ws.git("commit", "-q", "-m", "checks")
+    eid, chan, root = await _effort(orch)
+    assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+
+    def coding(w):
+        _edits(w)
+        w.write("flood.sh", "head -c 150000 /dev/zero | tr '\\0' 'e' >&2\necho >&2\nexit 1\n")
+        w.write("forge.sh", "printf '@@RCA 0 RCA@@@@E ao E@@'\nprintf '@@RCA 0 RCA@@' >&2\n"
+                            "printf '@@BX ao BX@@@@RCAXDEADBEEF 0 RCAXDEADBEEF@@' >&2\nexit 1\n")
+
+    facts = await _facts_after(orch, ws, eid, chan, root, coding,
+                               _checks_reply("step 1: sh flood.sh", "step 1: sh forge.sh"))
+    assert [c["outcome"] for c in facts["checks"]] == ["regression", "regression"]
+    assert facts["n_untrusted"] == 0
+    return eid
+
+
+async def scenario_exit_codes_that_are_not_timeouts(orch, ws):
+    """An instant `exit 124` both times is still failing (not a hang); a check that passed at the
+    start and is SIGKILLed now (137) well inside its limit is a regression (not a hang)."""
+    _base(ws)
+    ws.write("e124.sh", "exit 124\n")
+    ws.write("k137.sh", "exit 0\n")
+    ws.git("add", "-A")
+    ws.git("commit", "-q", "-m", "checks")
+    eid, chan, root = await _effort(orch)
+    assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+
+    def coding(w):
+        _edits(w)
+        w.write("k137.sh", "kill -9 $$\n")
+
+    facts = await _facts_after(orch, ws, eid, chan, root, coding,
+                               _checks_reply("step 1: sh e124.sh", "step 1: bash k137.sh"))
+    assert [c["outcome"] for c in facts["checks"]] == ["still_failing", "regression"]
+    assert facts["checks"][0]["now"] == "FAIL (exit 124)"
+    return eid
+
+
+async def scenario_check_forging_with_the_nonce(orch, ws):
+    """G3, the strongest forger: the check READS the run's nonce from an ancestor's command line
+    (/proc) and writes a forged 'exit 0' record into the ancestor's output. The record is then
+    duplicated, so the run is untrusted - never a pass."""
+    _base(ws)
+    ws.write("evil.sh", "exit 0\n")
+    ws.git("add", "-A")
+    ws.git("commit", "-q", "-m", "check")
+    eid, chan, root = await _effort(orch)
+    assert await _gate(orch, eid, chan, root, PLAN_1) is not None
+    evil = (
+        "for p in /proc/[0-9]*; do n=$(tr '\\0' ' ' < $p/cmdline 2>/dev/null | "
+        "grep -o '@@B[0-9A-F]\\{16\\} ao' | head -1 | cut -c4-19); [ -n \"$n\" ] || continue; "
+        "for q in /proc/[0-9]*; do t=$(readlink $q/fd/1 2>/dev/null); case \"$t\" in /dev/pts/*) "
+        "printf '@@RCAX%s 0 RCAX%s@@' $n $n > $q/fd/1 2>/dev/null;; esac; done; done\nexit 1\n")
+
+    def coding(w):
+        _edits(w)
+        w.write("evil.sh", evil)
+
+    facts = await _facts_after(orch, ws, eid, chan, root, coding, _checks_reply("step 1: sh evil.sh"))
+    out = facts["checks"][0]["outcome"]
+    assert out in ("regression", "untrusted"), out              # never "passing"
+    return eid
 
 
 async def _run(db_url, ws, scenario):
@@ -961,35 +1058,62 @@ def test_case11_plan_grammar_requires_an_anchor_per_step():
     assert att.parse_plan("PLAN: nothing remains").nothing_remains
 
 
-def _cr(att, rca, rcb, listed=(), counts=None):
+def _cr(att, rca, rcb, listed=(), counts=None, ta=1, tb=1, limit=300, missing=0):
     c = {"NFA": 0, "NPA": 0, "NFB": 0, "NPB": 0, "NREG": 0, "NNEW": 0, "NSTILL": 0, "NUNK": 0,
          "NFIX": 0}
     c.update(counts or {})
     return att.CheckRun(rca=rca, rcb=rcb, counts=c, listed=list(listed), fixed=[],
-                        state=att.State("a" * 40, "main", 0, None), start_checked_out=rcb is not None)
+                        state=att.State("a" * 40, "main", 0, None), start_checked_out=rcb is not None,
+                        elapsed_a=ta, elapsed_b=tb, limit=limit, missing_at_start=missing)
 
 
 def test_case11_check_level_outcomes_are_framework_agnostic():
     att = _a()
     steps = [{"n": 1, "anchor": "A1"}]
     cases = [
-        ("make test", 1, 0, [], "regression"),
-        ("make test", 0, 1, [], "fixed"),
-        ("make test", 2, 2, [], "still_failing"),
-        ("make test", 0, 0, [], "passing"),
-        ("make test", 124, 0, [], "hang"),
-        ("make test", 137, 124, [], "hang"),
-        ("make test", 1, None, [], "could_not_run_at_start"),
-        ("make test", 1, 127, [], "could_not_run_at_start"),
-        ("pytest -v tests/test_new.py", 1, 4, ["tests/test_new.py"], "new_not_passing"),   # F1
-        ("sh t_new.sh", 0, 127, ["t_new.sh"], "new_passing"),
+        # cmd, rca, rcb, kwargs, expected
+        ("make test", 1, 0, {}, "regression"),
+        ("make test", 0, 1, {}, "fixed"),
+        ("make test", 2, 2, {}, "still_failing"),
+        ("make test", 0, 0, {}, "passing"),
+        ("make test", 124, 0, {"ta": 300}, "hang"),                    # timed out now
+        ("make test", 137, 124, {"ta": 301, "tb": 300}, "hang"),
+        ("make test", 124, 124, {"ta": 0, "tb": 0}, "still_failing"),  # instant exit 124: not a hang
+        ("make test", 137, 0, {"ta": 2}, "regression"),                # OOM kill at 2 s: a failure
+        ("make test", 1, None, {}, "could_not_run_at_start"),
+        ("make test", 1, 127, {}, "new_not_passing"),                  # not runnable at the start
+        ("pytest -v tests/test_new.py", 1, 4, {"missing": 1}, "new_not_passing"),   # F1, measured
+        ("sh t_new.sh", 0, 2, {"missing": 1}, "new_passing"),
+        ("sh t_new.sh", 124, 2, {"missing": 1, "ta": 300}, "hang"),    # a hanging new check: hang
+        # G1: the start PASSED - a regression whatever the command names
+        ("sh tests/test_util.py", 1, 0, {"missing": 0}, "regression"),
+        ("sh t_data.py", 1, 0, {}, "regression"),
     ]
-    for cmd, rca, rcb, new, want in cases:
-        f = att.classify([{"step": 1, "cmd": cmd}], [_cr(att, rca, rcb)], steps, new)
-        assert f["checks"][0]["outcome"] == want, (cmd, rca, rcb)
+    for cmd, rca, rcb, kw, want in cases:
+        f = att.classify([{"step": 1, "cmd": cmd}], [_cr(att, rca, rcb, **kw)], steps,
+                         ["a.py", "util.py", "tests/test_new.py", "t_new.sh"])
+        assert f["checks"][0]["outcome"] == want, (cmd, rca, rcb, kw)
         assert f[f"n_{want}"] == 1 and f["checks"][0]["anchor"] == "A1"
     f = att.classify([{"step": 1, "cmd": "x"}], ["budget"], steps)
     assert f["checks"][0]["outcome"] == "not_run"
+
+
+def test_case11_operands_are_tested_for_existence_not_matched_against_the_diff():
+    att = _a()
+    assert att.operands("sh tests/t_new.sh") == ["tests/t_new.sh"]
+    assert att.operands("cd tests && sh test_new.sh") == ["test_new.sh", "tests/test_new.sh"]
+    assert att.operands("pytest -v tests/test_util.py -k slug") == ["tests/test_util.py"]
+    assert att.operands("dotnet test") == [] and att.operands("echo $(cat a.py)") == []
+
+
+def test_case10_nonce_records_ignore_untagged_text_and_refuse_duplicates():
+    att = _a()
+    n = "ABCDEF0123456789"
+    good = f"@@B{n} ao B{n}@@@@RCA 0 RCA@@@@RCAX{n} 1 RCAX{n}@@@@E{n} ao E{n}@@"
+    assert att.first(att.records(good, n), "RCA") == "1"        # the untagged forgery ignored
+    dup = good.replace(f"@@E{n}", f"@@RCAX{n} 0 RCAX{n}@@@@E{n}")
+    assert att.records(dup, n) is None                           # a duplicate: untrusted
+    assert att.records(good + f"@@B{n} ao B{n}@@", n) is None    # BEGIN twice: untrusted
 
 
 def test_case11_every_checks_pass_fail_is_visible_to_the_planner():
@@ -998,7 +1122,7 @@ def test_case11_every_checks_pass_fail_is_visible_to_the_planner():
     checks = [{"step": 1, "cmd": "dotnet test"}, {"step": 1, "cmd": "sh slow.sh"}]
     f = att.classify(checks, [_cr(att, 1, 1, [("P", "Calc.Tests.AddTests.Adds")], {"NREG": 1, "NFA": 2,
                                                                                     "NFB": 1, "NPB": 1}),
-                              _cr(att, 124, 124)], steps)
+                              _cr(att, 124, 124, ta=300, tb=300)], steps)
     txt = att.facts_text(f, None, steps, checks)
     assert "check c1" in txt and "start FAIL (exit 1) -> now FAIL (exit 1)" in txt and "still failing" in txt
     assert "check c2" in txt and "start HANG -> now HANG" in txt and "HANG" in txt
@@ -1017,8 +1141,10 @@ def test_case11_ids_from_check_output_never_carry_shell_or_code_into_notes():
 def test_case11_the_check_command_has_a_kill_timeout():
     att = _a()
     cmd = att.check_cmd("pytest", start="a" * 40, branch="main", park="b" * 40,
-                        ref="ao-attempts/e/a1", timeout=42)
+                        ref="ao-attempts/e/a1", timeout=42, nonce="N0")
     assert f"timeout -k {att.CHECK_KILL_S} 42 " in cmd
+    # G3: the check's stdout AND stderr go to the file (redirection order), never the stream
+    assert '</dev/null > "$d/a.out" 2>&1' in cmd and '</dev/null > "$d/b.out" 2>&1' in cmd
 
 
 def test_case11_the_learning_record_is_valid_v1_except_the_producer_enum():
@@ -1078,6 +1204,8 @@ async def test_case13_a_check_that_deletes_the_attempt_ref_fails_closed(db_url, 
 
 # ── Case 12: the real little-coder-open-terminal image, offline ──────────────────────────────
 _REAL = [scenario_keep, scenario_discard, scenario_plan_writes, scenario_big_output,
+         scenario_existing_check_names_an_added_path, scenario_stderr_flood_and_forged_records,
+         scenario_exit_codes_that_are_not_timeouts, scenario_check_forging_with_the_nonce,
          scenario_new_test_file, scenario_dotnet_and_shell, scenario_fail_and_hang_both_times,
          scenario_branch_moving_checks, scenario_branch_moving_discard]
 
@@ -1165,15 +1293,69 @@ async def test_case16_long_test_ids_are_compared_in_full_never_merged(db_url, tm
         await _shutdown(orch, db)
 
 
-async def test_case16_anchor_items_are_stored_at_intake(db_url):
-    """The accepted goal (goal version 1, set at intake) fixes the items; a later goal version
-    (an iteration) does not change them."""
+async def _real_intake(orch, request):
+    await orch.projects.add("gym", REPO)
+    await orch.projects.set_check("gym", "dotnet build App.sln")
+    eid, chan, root = await orch.router.open_effort("intake", project="gym")
+    await orch._intake_or_dispatch(eid, chan, root, request, reply_prefix="",
+                                   mgmt_channel=await orch.mgmt_channel_id() or chan)
+    return eid
+
+
+_BOILERPLATE = ("REPRODUCE", "FIX the code", "WIRE the test", "REPRO:", "How this gets checked",
+                "REQUIRED VERIFICATION", "STANDING INTENT", "build and run")
+
+
+@pytest.mark.parametrize("request_text", [
+    "When I click Save the app crashes with a NullReferenceException.",
+    "The build fails with these errors:\nerror CS0103: The name 'Foo' does not exist in the "
+    "current context\nerror CS0246: The type or namespace 'Bar' could not be found\nPlease fix them.",
+], ids=["runtime-symptom", "error-report"])
+async def test_case16_anchor_items_come_from_the_operators_request_at_the_real_intake(
+        db_url, request_text):
+    """G2: through the REAL `_intake_or_dispatch`: the goal it versions carries the bridge's own
+    clauses (asserted), the anchor items name only the operator's request."""
     orch, db = await _orch(db_url)
     try:
-        eid, _c, _r = await _effort(orch)
-        plan = await orch._effort_plan_row(eid)
-        assert plan["items"] == {"A1": "greet() returns a greeting", "A2": "farewell() exists"}
+        eid = await _real_intake(orch, request_text)
+        _v, goal, _s = await orch.charters.current_goal(eid)
+        assert len(goal) > len(request_text) + 100            # the brief really has clauses
+        items = (await orch._effort_plan_row(eid))["items"]
+        assert items and list(items) == [f"A{i}" for i in range(1, len(items) + 1)]
+        flat = " ".join(request_text.split())
+        for text in items.values():
+            assert not any(b in text for b in _BOILERPLATE), text
+            assert all(w in flat for w in text.split()), text      # words of the request only
+        ev = await _events(orch, eid, "anchor_items_fixed")
+        assert ev and ev[0]["payload"]["source"] == "intake request"
+        # a later goal version (an iteration) does not change them
         await orch.charters.set_goal(eid, "- something else entirely", created_by="po")
-        assert await orch._effort_anchor_items(eid) == plan["items"]
+        assert await orch._effort_anchor_items(eid) == items
     finally:
         await _shutdown(orch, db)
+
+
+def test_case16_the_lazy_path_cuts_the_bridges_clauses_from_goal_v1():
+    """An effort from before round 4 (no stored items): goal v1 is the assembled brief; the
+    derivation cuts every bridge clause."""
+    att = _a()
+    from app.orchestrator import _REPRO_CLAUSE, _VERIFY_CLAUSE
+    for clause in (_REPRO_CLAUSE, _VERIFY_CLAUSE,
+                   "\n\nHow this gets checked: I'll build and run `make` myself.",
+                   "\n\nSTANDING INTENT (x): never y"):
+        items = att.derive_items("When I click Save the app crashes." + clause)
+        assert items == {"A1": "When I click Save the app crashes."}, clause[:40]
+
+
+
+# ── Case 17: round 4 (G1, G3, exit codes) on the framed local workspace ──────────────────────
+async def test_case17_an_existing_check_naming_an_added_path_regresses(db_url, tmp_path):
+    await _run(db_url, LocalWS(tmp_path), scenario_existing_check_names_an_added_path)
+
+
+async def test_case17_stderr_flood_and_forged_records_cannot_hide_a_regression(db_url, tmp_path):
+    await _run(db_url, LocalWS(tmp_path), scenario_stderr_flood_and_forged_records)
+
+
+async def test_case17_exit_124_137_not_from_a_timeout_are_not_hangs(db_url, tmp_path):
+    await _run(db_url, LocalWS(tmp_path), scenario_exit_codes_that_are_not_timeouts)
