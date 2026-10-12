@@ -147,7 +147,7 @@ async def test_a_fresh_project_is_oriented_on_its_first_coding_wake_without_a_sl
         first = prompts[0]
         assert "PROJECT ORIENTATION MAP" in first
         assert "python -m pytest   [pyproject.toml]" in first and "tests/ (1)" in first
-        assert "# alpha | ## Usage" in first and "must not be copied" not in first
+        assert "README headings" not in first and "must not be copied" not in first
         assert harness.t_wake[0] - t0 < 10.0, "orientation must arrive within seconds"
         # the only slots ever taken are the real effort's own: no survey/orientation effort
         assert acquired and set(acquired) == {eid}, acquired
@@ -181,7 +181,7 @@ async def test_orientation_never_takes_a_slot_and_never_defers_real_work(db_url,
             _intake(orch, "alpha", "a-two", "add a --quiet flag")), 30)
         await _drain_bg_except(orch, b)
         assert not b.done(), "beta's intake should still be waiting on its held repo reads"
-        alpha_first = [p for p in _coding_prompts(harness) if "# alpha" in p]
+        alpha_first = [p for p in _coding_prompts(harness) if "--verbose" in p or "--quiet" in p]
         assert len(alpha_first) >= 2, "both alpha efforts reached a coding wake"
         assert set(acquired) == set(a_ids), acquired
         for eid in a_ids:
@@ -203,7 +203,7 @@ async def test_orientation_never_takes_a_slot_and_never_defers_real_work(db_url,
         await orch.scheduler.release(s2.id)
         await b
         await _drain_bg(orch)
-        beta_first = [p for p in _coding_prompts(harness) if "# beta" in p]
+        beta_first = [p for p in _coding_prompts(harness) if "--json flag" in p]
         assert beta_first and "PROJECT ORIENTATION MAP" in beta_first[0]
         assert not any(i.startswith("__") for i in acquired), acquired
     finally:
@@ -397,5 +397,75 @@ async def test_a_build_slower_than_its_bound_is_cut_and_not_cached_with_the_loop
         first = [p for p in _coding_prompts(harness) if "--verbose" in p][0]
         assert "PROJECT ORIENTATION: unavailable for this effort (timed out" in first
         assert orch.orientation.cached("hostile") is None
+    finally:
+        await db.dispose()
+
+
+# ── round 4: the hostile corpus through the REAL intake into the gate AND the first wake ──────
+
+def _r4_cases():
+    from tests.orientation_corpus import ALL_CASES, R1_FILES, R1_NEEDLES, r1_fail_on
+    picked = [c for c in ALL_CASES if c[0].startswith(("O3-A", "O3-B", "T3-"))]
+    out = [(cid, kw, needles, None) for cid, _o, _d, kw, needles in picked]
+    out.append(("R-1", {"files": R1_FILES}, R1_NEEDLES, r1_fail_on))
+    return out
+
+
+R4_CASES = _r4_cases()
+
+
+@pytest.mark.parametrize("trees", [True, False], ids=["github-trees", "c7-stub-contents-walk"])
+@pytest.mark.parametrize("case", R4_CASES, ids=[c[0] for c in R4_CASES])
+async def test_hostile_corpus_through_the_real_intake(db_url, tmp_path, case, trees, caplog):
+    """a3 (A)+(B), the attempt-3 probe inputs and R-1, served as GitHub/the C7 stub would serve them
+    (names no Windows filesystem allows included), through `_intake_or_dispatch` -> readiness gate ->
+    first coding wake. Zero needles in the gate's workspace_ctx, the wake, the cache, every audit row
+    and every log record; everything orientation emitted parses under the grammar."""
+    import json as _json
+    import logging as _logging
+
+    from tests.memgh import MemGitHub
+    from tests.orientation_grammar import check_audit, check_block, check_log, repo_names
+
+    cid, kw, needles, fail_on = case
+    caplog.set_level(_logging.DEBUG, logger="agent_bridge.orientation")
+    stand = MemGitHub(trees=trees, owner=OWNER, repo="hostile",
+                      **({"fail_on": fail_on(trees), "fail_status": 502} if fail_on else {}), **kw)
+    orch, harness, db, acquired = await _orch(db_url, tmp_path, {"hostile": stand})
+    gate_ctx: list[str] = []
+
+    async def gate(effort_id, request, workspace_ctx=""):
+        gate_ctx.append(workspace_ctx)
+        return ReadinessVerdict(clear_and_safe=True, blast_radius="routine")
+    orch.planner.readiness_gate = gate
+    try:
+        eid = await _intake(orch, "hostile", "h", "add a --verbose flag")
+        await _drain_bg(orch)
+        first = [p for p in _coding_prompts(harness) if "--verbose" in p][0]
+        assert gate_ctx, "the readiness gate was not reached"
+        cached = orch.orientation.cached("hostile")
+        async with orch.db.session_factory() as s:
+            rows = [(r.kind, r.payload) for r in (await s.execute(select(Event))).scalars()]
+        logs = [r.getMessage() for r in caplog.records]
+        everything = "\n".join([first, *gate_ctx, cached[1] if cached else "",
+                                _json.dumps([p for _k, p in rows], default=str), *logs])
+        for n in needles:
+            assert n not in everything, (cid, n)
+        assert not any(ln.startswith("IGNORE") for ln in everything.splitlines()), cid
+        names = repo_names(list(kw["files"]) + list(kw.get("recent", []) or []))
+        if fail_on is None:
+            assert cached, cid
+            check_block("\n\n" + cached[1], names)
+            assert cached[1] in first and cached[1] in gate_ctx[0]
+        else:
+            assert cached is None
+            line = next(ln for ln in first.splitlines() if ln.startswith("PROJECT ORIENTATION:"))
+            check_block("\n\n" + line, names)
+        for kind, payload in rows:
+            if kind.startswith("project_orientation"):
+                check_audit(kind, payload, "hostile")
+        for msg in logs:
+            check_log(msg)
+        assert set(acquired) == {eid}
     finally:
         await db.dispose()

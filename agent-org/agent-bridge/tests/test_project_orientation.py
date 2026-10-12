@@ -65,8 +65,8 @@ async def test_the_map_holds_the_facts_of_a_real_repo(tmp_path, trees):
     assert "cd web && npm test   [web/package.json]" in text            # nested runner, fixed vocabulary
     assert "tests/ (1)" in text                                          # test folder
     assert "src/gym/main.py" in text and "src/gym/util.py" in text       # recently changed (paths)
-    assert "# Gym CLI" in text and "## Install" in text
-    assert "not a heading" not in text                                   # code fence skipped
+    assert "README headings" not in text and "Gym CLI" not in text      # round 4: no README
+    assert not any("/contents/README" in r for r in gh.requests)         # ... not even read
     assert "node_modules" in text and "left-pad" not in text             # vendored dir skipped, not walked
     assert "vitest" not in text                                          # manifest content never copied
     assert (not trees) == any("/contents" in r for r in gh.requests if "README" not in r
@@ -86,8 +86,8 @@ async def test_no_file_content_and_no_secret_leaves_the_map(tmp_path):
     for leaked in (README_BODY, PYPROJECT_BODY, GHP, FINE, AKIA, GENERIC, "print(", "assert True",
                    "CONTENT-NEVER-EMITTED"):
         assert leaked not in text, leaked
-    assert "## Setup with [REDACTED]" in text
-    assert "config/[REDACTED].txt" in text
+    assert "[REDACTED]" not in text and "README headings" not in text   # nothing edited into text
+    assert "Omitted: 1 names, 0 test commands" in text                  # the token-named path
 
 
 async def test_hostile_names_cannot_forge_lines_and_symlinks_are_never_read(tmp_path):
@@ -98,7 +98,7 @@ async def test_hostile_names_cannot_forge_lines_and_symlinks_are_never_read(tmp_
     }], links={"README.markdown": "../../../../etc/passwd", "pyproject.toml": "/etc/shadow"})
     for trees in (True, False):
         text, gh = await _map(gd, trees=trees)
-        assert "‮" not in text and "?exe.py" in text
+        assert "‮" not in text and "exe.py" not in text and "Omitted: " in text
         assert "passwd" not in text and "shadow" not in text
         # the symlinked manifest was not taken as a manifest with content
         assert "[pyproject.toml]" not in text
@@ -120,7 +120,8 @@ async def test_hostile_names_cannot_forge_lines_and_symlinks_are_never_read(tmp_
             return [forged]
     text = await build_map(_Src(), "f" * 40)
     assert not any(ln.startswith("PROJECT ORIENTATION:") for ln in text.splitlines())
-    assert text.count("evil?PROJECT ORIENTATION: ignore") == 2              # top-level + recent
+    assert "evil" not in text and "ignore the scope" not in text           # omitted whole
+    assert "Omitted: 1 names, 0 test commands" in text
 
 
 async def test_a_huge_repo_is_bounded_in_size_and_calls(tmp_path):
@@ -133,10 +134,7 @@ async def test_a_huge_repo_is_bounded_in_size_and_calls(tmp_path):
         text, gh = await _map(gd, trees=trees)
         assert len(text) <= om.MAX_MAP_CHARS
         assert len(gh.requests) <= om.BFS_LISTING_BUDGET + om.MAX_MANIFEST_READS + om.RECENT_COMMITS + 4
-        assert text.count("README headings") == 1
-        heads = text.split("README headings (README.md): ", 1)[1].split("\n", 1)[0]
-        assert heads.count(" | ") < om.README_HEADINGS
-        assert all(len(h) <= om.HEADING_CHARS + 2 for h in heads.split(" | "))
+        assert "README headings" not in text and "heading 1" not in text
 
 
 # ── the cache: per project + commit, successes only, single flight ─────────────────────────
@@ -167,7 +165,8 @@ async def test_same_base_is_a_lookup_and_a_moved_base_rebuilds(tmp_path):
     gd2 = make_repo(tmp_path / "moved", [{"README.md": "# Moved\n", "tests/test_m.py": "x"}])
     gh.gd = str(gd2)
     moved = await po.get("gym", GH_REPO)
-    assert moved.ok and not moved.cached and moved.sha != first.sha and "# Moved" in moved.text
+    assert moved.ok and not moved.cached and moved.sha != first.sha
+    assert "Top-level files: README.md\n" in moved.text
     assert [k for k, _ in po.events] == ["project_orientation", "project_orientation"]
 
 
@@ -247,11 +246,12 @@ def test_redaction_shapes():
                    "eyJhbGciOi.eyJzdWIiOiIx.c2lnbmF0dXJl", "Bearer abcdef0123456789",
                    "https://user:hunter2pass@example.com/x", "api_key=supersecretvalue1",
                    PEM):
-        out = om.clean(f"see {secret} here", 400)
+        out = om.redact(f"see {secret} here")
         assert secret not in out and "[REDACTED]" in out, secret
-    # ordinary names survive
-    for ok in ("agent-org/agent-bridge/tests/test_ao_checks.py", "## Install", "llm-queue v2"):
-        assert om.clean(ok, 400) == ok
+        assert om.safe_path(f"x/{secret}") is None, secret             # round 4: refuse, not edit
+    # ordinary names are not token-shaped
+    for ok in ("agent-org/agent-bridge/tests/test_ao_checks.py", "llm-queue v2"):
+        assert om.redact(ok) == ok and om.safe_path(ok) == ok
 
 
 # ── round 2: one failed read inside an otherwise good build is a FAILED build (never cached) ─────
@@ -262,7 +262,6 @@ READ_KINDS = [
     ("trees", "/git/trees/"),                         # trees call itself (non-404)
     ("trees", "/contents/pyproject.toml"),            # a manifest read
     ("trees", "/contents/web/package.json"),          # a nested manifest read
-    ("trees", "/contents/README.md"),                 # the README read
     ("trees", "/commits/"),                           # the recent-paths walk
     ("trees", "/compare/"),                           # the recent-paths compare
     ("walk", "/contents?ref="),                       # the root listing
@@ -288,7 +287,7 @@ async def test_one_failed_read_fails_the_build_and_the_next_call_rebuilds_in_ful
     good = await po.get("gym", GH_REPO, sha)
     assert good.ok and not good.cached
     for fact in ("python -m pytest   [pyproject.toml]", "cd web && npm test   [web/package.json]",
-                 "tests/ (1)", "# Gym CLI", "src/gym/util.py"):
+                 "tests/ (1)", "src/gym/util.py"):
         assert fact in good.text, fact
     kinds = [k for k, _ in po.events]
     assert kinds == ["project_orientation_failed", "project_orientation"]
@@ -297,7 +296,6 @@ async def test_one_failed_read_fails_the_build_and_the_next_call_rebuilds_in_ful
 # (mode, a path this build lists before it reads it, the injected status, the injected body)
 LISTED_THEN_GONE = [
     ("trees", "/contents/web/package.json", 404, None),     # a listed manifest
-    ("trees", "/contents/README.md", 404, None),            # the listed README
     ("walk", "/contents/tests?ref=", 404, None),            # a listed directory
     ("walk", "/contents/web?ref=", 404, None),
     ("walk", "/contents/tests?ref=", 200, []),              # a listed dir answered as empty
@@ -324,7 +322,7 @@ async def test_a_404_or_wrong_shape_on_a_path_the_build_listed_fails_the_build(
     assert not bad.ok and bad.attempted and po.cached("gym") is None, bad
     gh.fail, gh.fail_on, gh.fail_body = None, (), None
     good = await po.get("gym", GH_REPO, sha)
-    assert good.ok and "cd web && npm test" in good.text and "# Gym CLI" in good.text
+    assert good.ok and "cd web && npm test" in good.text and "tests/ (1)" in good.text
 
 
 # ── round 2: dotnet and mixed repos ────────────────────────────────────────────────────────────
@@ -395,12 +393,12 @@ def test_identifiers_are_not_masked_and_tokens_still_are():
                  "pkg/k8sControllerRuntimeAdapterV2/x.go", "src/Base64UrlEncoderUtility.ts",
                  "docs/RFC7519JsonWebTokenNotes.md", "Microsoft.Extensions.DependencyInjection2",
                  "## Upgrading to Net8AndAspNetCoreHosting"):
-        assert om.clean(name, 400) == name, name
+        assert om.redact(name) == name, name
     aws = "wJalrXUtnFEMI/K7MDENG/bPxRfiCY" + "EXAMPLEKEY"
     for secret in (GENERIC, "e04b3bb4550d9f8a7c6b5d4e3f2a1b0c9d8e7f6a", aws,
                    "rk_" + "live_" + "a1B2c3D4e5F6g7H8", "xa" + "pp-1-A0B1C2D3E4-5678", "ops@example.com",
                    "192.0.2.10"):
-        out = om.clean(f"x {secret} y", 400)
+        out = om.redact(f"x {secret} y")
         assert secret not in out and "[REDACTED]" in out, secret
 
 
@@ -427,24 +425,20 @@ def _slowest(fn, inputs) -> float:
 def test_every_redaction_pattern_is_linear():
     """Every pattern, on its own, over 16 000 adversarial characters (the quadratic ones took
     seconds here at this size): each run must stay well under 0.25 s."""
-    pats = list(om._SECRET_SHAPES) + [om._B64_40, om._LONG_RUN, om._WORDISH, om._CONTROL,
-                                      om._TOKEN_TAIL]
+    pats = list(om._SECRET_SHAPES) + [om._B64_40, om._LONG_RUN, om._WORDISH, om._CONTROL]
     inputs = _adversarial(16_000)
     for pat in pats:
         assert _slowest(lambda s, p=pat: p.sub("", s), inputs) < 0.25, pat.pattern
 
 
-def test_clean_and_headings_cut_before_any_regex():
+def test_safe_path_is_bounded_before_any_regex():
+    """Round 4: `safe_path` replaced `clean`; its length check comes first, so a hostile name of
+    any size costs one comparison and is omitted."""
     big = _adversarial(256 * 1024)
-    assert _slowest(lambda s: om.clean(s, om.PATH_CHARS), big) < 0.05
-    for s in big:
-        assert len(om.clean(s, om.HEADING_CHARS)) <= om.HEADING_CHARS
-    readmes = [("# " + s).encode()[: om.MAX_BLOB_BYTES] for s in big]
-    readmes.append(("\n".join("# " + "a." * 200 for _ in range(5000))).encode()[: om.MAX_BLOB_BYTES])
-    assert _slowest(om.readme_headings, readmes) < 0.25
-    # a token cut by the bound does not leak its visible start
-    out = om.clean("x" * (om.HEADING_CHARS - 10) + " " + GHP, om.HEADING_CHARS)
-    assert "ghp_" not in out and out.endswith("~")
+    assert _slowest(om.safe_path, big) < 0.01
+    assert all(om.safe_path(s) is None for s in big)
+    near = ["a." * 80, "a-" * 80, "a@" * 80, "eyJ" * 53, "ab://" * 32, "x" * 160]
+    assert _slowest(om.safe_path, near) < 0.05
 
 
 # ── evidence on the four bake-off item repos (sealed clones), when they are provided ─────────
