@@ -43,7 +43,7 @@ async def _orch(db_url, tmp_path):
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
-        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        max_concurrent_workers=1, database_url=db_url,
         review_mode="off", plan_approval="off",
         github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
@@ -152,7 +152,7 @@ async def test_active_env_template_widens_egress_to_its_registries(db_url, tmp_p
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
-        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        max_concurrent_workers=1, database_url=db_url,
         review_mode="off", plan_approval="off",
         ot1_image="little-coder-open-terminal:dotnet8", ot2_image="",
     )

@@ -42,7 +42,7 @@ async def _orch(db_url, tmp_path=None, *, github=False):
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
-        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        max_concurrent_workers=1, database_url=db_url,
         review_mode="off", plan_approval="off",
     )
     if github:
@@ -233,29 +233,36 @@ async def test_dispatch_hands_the_worker_its_expected_base_and_stamps_claims(db_
 
 
 async def test_fresh_clone_carries_the_orientation_map_and_shares_it_per_base(db_url, tmp_path):
-    """P8 #5 — a wiped workspace must not mean a BLIND worker: the first coding turn carries the
-    org's cached codebase survey, keyed by base commit, so two efforts on the same base cost ONE
-    survey (a map lookup, not 26 blind reads)."""
-    from app.modules.project_context import ProjectContext
+    """P8 #5 / ao-orient — a wiped workspace must not mean a BLIND worker: the first coding turn
+    carries the orientation map of the repo at the expected base, built by the bridge from the repo
+    (no worker turn) and keyed by base commit, so two efforts on the same base cost ONE build."""
+    from tests.gitbacked_github import GitBackedGitHub, make_repo
     orch, harness, db = await _orch(db_url, tmp_path, github=True)
-    calls: list[str] = []
+    stand = GitBackedGitHub(make_repo(tmp_path / "gym", [{
+        "todo.py": "print('todo')\n", "tests/test_todo.py": "def test_t(): pass\n",
+        "pyproject.toml": "[tool.pytest.ini_options]\n"}]), owner="demoowner", repo="gym")
+    remote = _gh_remote()
 
-    async def survey(repo: str) -> str:
-        calls.append(repo)
-        return "todo.py is the whole CLI; tests live in tests/test_todo.py (pytest)"
-
-    orch.project_context = ProjectContext(survey, enabled=True)
+    async def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if any(k in p for k in ("/git/trees/", "/contents", "/commits/")):
+            # the remote's expected base IS this repo's head
+            url = str(request.url).replace(BASE_SHA, stand.head())
+            return await stand._handle(httpx.Request(request.method, url))
+        return await remote.handle_async_request(request)
     try:
         await orch.projects.add("gym", GH_REPO)
-        orch._gh_transport = _gh_remote()
+        orch._gh_transport = httpx.MockTransport(handler)
         eid, chan, root = await orch.router.open_effort("map-one", project="gym")
         await orch.delegate(eid, chan, root, "add a --due flag to the todo tool")
         first = harness.wakes[0]["prompt"]
-        assert "PROJECT ORIENTATION" in first and "todo.py is the whole CLI" in first
-        # a SECOND effort on the SAME base shares the map — one survey total
+        assert "PROJECT ORIENTATION MAP" in first and "todo.py" in first
+        assert "python -m pytest   [pyproject.toml]" in first
+        # a SECOND effort on the SAME base shares the map — one build total
         eid2, chan2, root2 = await orch.router.open_effort("map-two", project="gym")
         await orch.delegate(eid2, chan2, root2, "add a --priority flag to the todo tool")
-        assert len(calls) == 1, "two efforts on the same base must share ONE survey"
+        trees = [r for r in stand.requests if "/git/trees/" in r]
+        assert len(trees) == 1, "two efforts on the same base must share ONE map build"
     finally:
         await db.dispose()
 

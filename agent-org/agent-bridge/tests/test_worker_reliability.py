@@ -26,7 +26,7 @@ async def _orch(db_url, *, workers="http://w1:8090,http://w2:8090", cap=2):
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), worker_instance_urls=workers,
-        max_concurrent_workers=cap, database_url=db_url, project_survey_enabled=False,
+        max_concurrent_workers=cap, database_url=db_url,
         review_mode="off", plan_approval="off",
     )
     db = Database(db_url)
@@ -125,7 +125,7 @@ async def test_session_rotates_after_undelivered_escalation(db_url):
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(_ROOT / "profiles"), charters_dir=str(_ROOT / "charters"),
         floor_dir=str(_ROOT / "floor"), worker_instance_urls="http://w1:8090",
-        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        max_concurrent_workers=1, database_url=db_url,
         review_mode="off", plan_approval="off",
     )
     db = Database(db_url)

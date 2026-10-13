@@ -76,7 +76,7 @@ from .modules.model_router import (
 )
 from .modules.planner import Planner
 from .modules.profiles import ConcurrentProfileChange, ProfileRegistry
-from .modules.project_context import ProjectContext
+from .modules.orientation import ProjectOrientation, rest_source_for
 from .modules.projects import ProjectRegistry
 from .modules.roles import RoleAuthority
 from .modules.router import (
@@ -85,11 +85,11 @@ from .modules.router import (
 from .modules.scheduler import NoCapacityError, Scheduler
 from .modules.scope_ledger import ScopeLedger
 from .modules.stop_gates import StopGates
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 
 from .models import (
     Concern as ConcernRow,
-    Effort, EffortConstraint, Event, GlobalState, LensReport, Project, ProjectSurvey,
+    Effort, EffortConstraint, Event, GlobalState, LensReport, Project,
     ScopeNode, ScopeTask, WorkerInstance,
 )
 from .modules.pending_store import PendingStore
@@ -1056,16 +1056,17 @@ class Orchestrator:
             db, settings, self.gate, self.scheduler, self.harness, chat, self.audit,
             context_builder=self.charters.build_context, profiles=self.profiles,
         )
-        # Stage-1 anchor: a cached read-only repo survey feeds the readiness gate (P3.8) so it
-        # reasons from the real codebase instead of guessing. Only surveys when a repo is focused.
-        # Persistence seam (memory-plane Phase 0.2): the survey map is durable, so a bounce
-        # no longer costs a re-survey. Callbacks injected — the module stays DB-agnostic.
-        self.project_context = ProjectContext(
-            self.router.survey_project,
-            enabled=settings.project_survey_enabled,
-            load_fn=self._load_project_surveys,
-            save_fn=self._save_project_survey,
-            delete_fn=self._delete_project_survey,
+        # ao-orient: the PROJECT ORIENTATION map (readiness-gate anchor + first coding wake) is
+        # built by the bridge itself from the repo through the GitHub App's REST API - no worker
+        # turn, no pooled slot, no model (modules/orientation.py). The reader is resolved per call,
+        # so the App and the test transport are read when used, not captured here.
+        self.orientation = ProjectOrientation(
+            lambda repo: rest_source_for(
+                self.github if self.s.github_app_enabled else None, repo,
+                api_base=self.s.github_api_base, transport=self._gh_transport),
+            enabled=settings.project_orientation_enabled,
+            timeout_s=settings.project_orientation_timeout_s,
+            audit=self.audit.log,
         )
         self.events = EventGateway(db, chat, self.handle_event,
                                    max_attempts=settings.event_max_attempts)
@@ -2930,11 +2931,6 @@ class Orchestrator:
                 s.add(GlobalState(id=1, kill_switch=False))
                 await s.commit()
         await self._rehydrate_pending()   # restore proposals a prior run held (survives a rebuild, §3)
-        # Same idea one layer down: restore the project-survey map so the first effort after a
-        # bounce reuses it instead of paying for a re-survey (memory-plane Phase 0.2).
-        restored = await self.project_context.hydrate()
-        if restored:
-            log.info("restored %d persisted project survey(s)", restored)
         await self.profiles.load_from_disk()
         await self.charters.seed_floor_from_disk()
         self._load_pm_voice_charter()     # the operator-tunable "how the org talks to you" system prompt
@@ -6391,19 +6387,19 @@ class Orchestrator:
         await self.charters.set_goal(effort_id, request, created_by="po")
         # Anchor the readiness gate to the existing project (UX-FLOW Stage 1) so it resolves
         # conventions/placement/language itself instead of asking about them. When a real repo is
-        # focused, inject a cached read-only survey of the actual codebase; else conventions-only.
+        # focused, add the deterministic orientation map (ao-orient: built by the bridge, never on
+        # a worker slot, bounded in time; it also warms the cache the first coding wake reads);
+        # else conventions-only.
         async with self.db.session_factory() as s:
             e = await s.get(Effort, effort_id)
             project = (e.project if e and e.project else None) or self._project_for()
         repo = await self._effort_repo(effort_id) or ""
         workspace_ctx = f"existing project: #{project}" + (f" (repo: {repo})" if repo else "")
         if repo:
-            try:
-                summary = await self.project_context.ensure(project, repo)
-            except ModelBackpressureError:
-                summary = None  # the survey is optional context — skip under load, don't park on it
-            if summary:
-                workspace_ctx += f"\n\nPROJECT SUMMARY (survey of the actual codebase):\n{summary}"
+            orientation = await self.orientation.get(
+                project, repo, effort_id=effort_id, wait_s=self.s.project_orientation_intake_wait_s)
+            if orientation.ok:
+                workspace_ctx += "\n\n" + orientation.text
         verdict = None
         try:
             # The gate is the same small model — give it the compacted view of pasted walls
@@ -7286,24 +7282,15 @@ class Orchestrator:
                 and "WORKSPACE PROVENANCE" not in instruction):
             instruction += _PROVENANCE_CLAUSE.format(
                 sha=eb["sha"], branch=eb.get("branch") or "main", sha12=eb["sha"][:12])
-        # P8 #5 — ORIENTATION ARTIFACT: a wiped workspace must not mean a BLIND worker (a fresh
-        # clone once burned 26 read-only calls re-discovering a tiny template and tripped the
-        # flail guard). Hand the worker the org's cached survey of this codebase, keyed by the
-        # base commit: same base ⇒ a map lookup shared across efforts; base moved ⇒ one
-        # re-survey. Best-effort — no map, no harm.
+        # P8 #5 / ao-orient - ORIENTATION: a wiped workspace must not mean a BLIND worker. The first
+        # coding wake carries the deterministic map of the repo at the expected base (built by the
+        # bridge, never on a worker slot; cached per project + commit, so efforts on the same base
+        # share it and a moved base rebuilds once). A failed build says "unavailable" for this
+        # effort only and is not cached; the next effort retries.
         if i == 1 and repo and "PROJECT ORIENTATION" not in instruction:
-            try:
-                _proj = await self._effort_project(effort_id)
-                omap = await self.project_context.ensure(
-                    _proj or "", repo, base_sha=eb.get("sha", ""))
-            except Exception as exc:  # noqa: BLE001 — orientation is a bonus, never a blocker
-                log.debug("orientation map for %s failed: %s", effort_id, exc)
-                omap = ""
-            if omap:
-                instruction += (
-                    "\n\nPROJECT ORIENTATION (the org's cached survey of this codebase at your "
-                    "base — orient from THIS instead of re-exploring from zero; verify only the "
-                    "files you actually touch):\n" + omap)
+            _proj = await self._effort_project(effort_id)
+            instruction += (await self.orientation.get(
+                _proj or "", repo, eb.get("sha", ""), effort_id=effort_id)).block()
         result = await self.router.wake(
             effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
             session_id=await self._session_for(effort_id), instruction=instruction, repo=repo, repo_token=repo_token,
@@ -14028,37 +14015,6 @@ class Orchestrator:
         await self.pending.rehydrate(
             self._pending_lifecycle, self._pending_capability,
             self._pending_plan, self._pending_merge)
-
-    # ── project-survey persistence (memory-plane Phase 0.2) ───────────────────
-    # The three callbacks injected into ProjectContext. They live here, not in the module,
-    # so project_context.py keeps its no-DB-coupling discipline (its docstring's promise).
-    async def _load_project_surveys(self) -> dict[str, tuple[str, str]]:
-        """Boot: durable survey rows → the in-memory map."""
-        async with self.db.session_factory() as s:
-            rows = (await s.execute(select(ProjectSurvey))).scalars().all()
-        return {r.project_slug: (r.base_sha or "", r.summary or "") for r in rows}
-
-    async def _save_project_survey(self, project: str, base_sha: str, summary: str) -> None:
-        """Upsert one survey. Re-surveying the same project REPLACES the row (a survey at a
-        new base supersedes the old map; keeping both would just be stale rows)."""
-        async with self.db.session_factory() as s:
-            row = await s.get(ProjectSurvey, project)
-            if row is None:
-                s.add(ProjectSurvey(project_slug=project, base_sha=base_sha, summary=summary))
-            else:
-                row.base_sha = base_sha
-                row.summary = summary
-            await s.commit()
-
-    async def _delete_project_survey(self, project: str | None) -> None:
-        """Operator invalidation — drop the durable row(s) too, or the next restart would
-        resurrect exactly what was just invalidated."""
-        async with self.db.session_factory() as s:
-            stmt = delete(ProjectSurvey)
-            if project is not None:
-                stmt = stmt.where(ProjectSurvey.project_slug == project)
-            await s.execute(stmt)
-            await s.commit()
 
     async def _reconcile_merge_gates(self) -> None:
         """Delegates to `PendingStore.reconcile_merge_gates` (prune gates whose PR is gone)."""

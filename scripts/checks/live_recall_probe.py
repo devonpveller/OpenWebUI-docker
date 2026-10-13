@@ -157,7 +157,7 @@ async def one_real_effort(db_url: str, tmp: pathlib.Path) -> dict:
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(BRIDGE / "profiles"), charters_dir=str(BRIDGE / "charters"),
         floor_dir=str(BRIDGE / "floor"), worker_instance_urls="http://w1:8090",
-        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        max_concurrent_workers=1, database_url=db_url,
         review_mode="off", plan_approval="off",
     )
     s.memory_recall_enabled = True

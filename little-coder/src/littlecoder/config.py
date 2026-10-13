@@ -191,7 +191,7 @@ class TasksConfig(_Strict):
 class FlailConfig(_Strict):
     """Flail guard (agent-org bridge, 2026-07-14; progress-based since ao-progress, 2026-10-10):
     a coding turn that has stopped making PROGRESS is lost. Opt-in per task (`flail_guard` on the
-    trigger; the bridge sets it on coding step wakes only — plan/publish/survey turns are
+    trigger; the bridge sets it on coding step wakes only — plan/publish turns are
     exempt). Tripping kills the turn with a FLAIL-GUARD answer marker; the bridge then forks a
     fresh session from the original goal and re-asks in plan mode.
 

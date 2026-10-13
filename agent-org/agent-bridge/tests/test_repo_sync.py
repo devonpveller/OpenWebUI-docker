@@ -26,7 +26,7 @@ async def _orch(db_url, tmp_path=None, **over):
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
-        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        max_concurrent_workers=1, database_url=db_url,
         review_mode="off", plan_approval="off",
     )
     if tmp_path is not None:   # enable the GitHub App plane (for merge-trigger tests)

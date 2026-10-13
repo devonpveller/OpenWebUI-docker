@@ -1,0 +1,106 @@
+{
+ "ao-auth": {
+  "commands": [
+   "cd agent-org/agent-bridge && python -m pytest   [agent-org/agent-bridge/pyproject.toml]",
+   "cd scripts && python -m pytest   [pytest-style test files; no manifest declares a runner]",
+   "cd little-coder && python -m pytest   [little-coder/pyproject.toml]",
+   "cd inference/llm-queue && python -m pytest   [inference/llm-queue/pyproject.toml]",
+   "cd search/gateway && python -m pytest   [search/gateway/pyproject.toml]",
+   "cd openbrain-gateway && python -m pytest   [pytest-style test files; no manifest declares a runner]",
+   "... 3 more"
+  ],
+  "test_folders": "Test folders (files): agent-org/agent-bridge/tests/ (106), little-coder/tests/ (43), scripts/agent-harness/ (11), scripts/checks/ (11), inference/llm-queue/tests/ (10), search/gateway/tests/ (8), scripts/claude-sessions-bridge/ (7), scripts/sysadmin-mcp/ (7), openbrain-gateway/ (6), scripts/archive/legacy-tests/ (6), scripts/stack/ (3), scripts/archive/smolcrawl/tests/ (2) ... (+17)",
+  "chars_25d05e38": 3927
+ },
+ "ao-checks": {
+  "commands": [
+   "cd agent-org/agent-bridge && python -m pytest   [agent-org/agent-bridge/pyproject.toml]",
+   "cd scripts && python -m pytest   [pytest-style test files; no manifest declares a runner]",
+   "cd little-coder && python -m pytest   [little-coder/pyproject.toml]",
+   "cd inference/llm-queue && python -m pytest   [inference/llm-queue/pyproject.toml]",
+   "cd search/gateway && python -m pytest   [search/gateway/pyproject.toml]",
+   "cd openbrain-gateway && python -m pytest   [pytest-style test files; no manifest declares a runner]",
+   "... 3 more"
+  ],
+  "test_folders": "Test folders (files): agent-org/agent-bridge/tests/ (104), little-coder/tests/ (42), scripts/agent-harness/ (11), scripts/checks/ (10), inference/llm-queue/tests/ (8), search/gateway/tests/ (8), scripts/claude-sessions-bridge/ (7), scripts/sysadmin-mcp/ (7), openbrain-gateway/ (6), scripts/archive/legacy-tests/ (6), scripts/stack/ (3), scripts/archive/smolcrawl/tests/ (2) ... (+17)",
+  "chars_25d05e38": 3923
+ },
+ "ao-queue": {
+  "commands": [
+   "cd agent-org/agent-bridge && python -m pytest   [agent-org/agent-bridge/pyproject.toml]",
+   "cd scripts && python -m pytest   [pytest-style test files; no manifest declares a runner]",
+   "cd little-coder && python -m pytest   [little-coder/pyproject.toml]",
+   "cd inference/llm-queue && python -m pytest   [inference/llm-queue/pyproject.toml]",
+   "cd search/gateway && python -m pytest   [search/gateway/pyproject.toml]",
+   "cd openbrain-gateway && python -m pytest   [pytest-style test files; no manifest declares a runner]",
+   "... 3 more"
+  ],
+  "test_folders": "Test folders (files): agent-org/agent-bridge/tests/ (104), little-coder/tests/ (41), scripts/agent-harness/ (11), scripts/checks/ (10), inference/llm-queue/tests/ (8), search/gateway/tests/ (8), scripts/claude-sessions-bridge/ (7), scripts/sysadmin-mcp/ (7), openbrain-gateway/ (6), scripts/archive/legacy-tests/ (6), scripts/stack/ (3), scripts/archive/smolcrawl/tests/ (2) ... (+17)",
+  "chars_25d05e38": 3941
+ },
+ "ao-wd-offset": {
+  "commands": [
+   "cd agent-org/agent-bridge && python -m pytest   [agent-org/agent-bridge/pyproject.toml]",
+   "cd scripts && python -m pytest   [pytest-style test files; no manifest declares a runner]",
+   "cd little-coder && python -m pytest   [little-coder/pyproject.toml]",
+   "cd inference/llm-queue && python -m pytest   [inference/llm-queue/pyproject.toml]",
+   "cd search/gateway && python -m pytest   [search/gateway/pyproject.toml]",
+   "cd openbrain-gateway && python -m pytest   [pytest-style test files; no manifest declares a runner]",
+   "... 3 more"
+  ],
+  "test_folders": "Test folders (files): agent-org/agent-bridge/tests/ (104), little-coder/tests/ (41), scripts/agent-harness/ (11), scripts/checks/ (10), inference/llm-queue/tests/ (8), search/gateway/tests/ (8), scripts/claude-sessions-bridge/ (7), scripts/sysadmin-mcp/ (7), openbrain-gateway/ (6), scripts/archive/legacy-tests/ (6), scripts/stack/ (3), scripts/archive/smolcrawl/tests/ (2) ... (+17)",
+  "chars_25d05e38": 3941
+ },
+ "dotnet-solution": {
+  "commands": [
+   "dotnet test eShop.sln   [eShop.sln]"
+  ],
+  "test_folders": "Test folders (files): tests/ (7)",
+  "chars_25d05e38": 2192
+ },
+ "go-i18n-docs": {
+  "commands": [
+   "go test ./...   [go.mod]",
+   "make test   [Makefile]"
+  ],
+  "test_folders": "Test folders (files): internal/http/ (1), internal/store/postgres/ (1), pkg/client/ (1)",
+  "chars_25d05e38": 1464
+ },
+ "java-gradle": {
+  "commands": [
+   "gradle test   [build.gradle.kts]"
+  ],
+  "test_folders": "Test folders (files): src/test/ (3)",
+  "chars_25d05e38": 1313
+ },
+ "node-monorepo": {
+  "commands": [
+   "npm test   [package.json]",
+   "cd apps/web && npm test   [apps/web/package.json]",
+   "cd packages/ui && npm test   [packages/ui/package.json]",
+   "cd packages/utils && npm test   [packages/utils/package.json]"
+  ],
+  "test_folders": "Test folders (files): apps/web/__tests__/ (2), packages/ui/src/ (2), packages/utils/src/ (1)",
+  "chars_25d05e38": 1861
+ },
+ "oh-health": {
+  "commands": [
+   "cd agent-org/agent-bridge && python -m pytest   [agent-org/agent-bridge/pyproject.toml]",
+   "cd scripts && python -m pytest   [pytest-style test files; no manifest declares a runner]",
+   "cd little-coder && python -m pytest   [little-coder/pyproject.toml]",
+   "cd inference/llm-queue && python -m pytest   [inference/llm-queue/pyproject.toml]",
+   "cd search/gateway && python -m pytest   [search/gateway/pyproject.toml]",
+   "cd openbrain-gateway && python -m pytest   [pytest-style test files; no manifest declares a runner]",
+   "... 3 more"
+  ],
+  "test_folders": "Test folders (files): agent-org/agent-bridge/tests/ (103), little-coder/tests/ (41), scripts/agent-harness/ (11), inference/llm-queue/tests/ (8), scripts/checks/ (8), search/gateway/tests/ (8), scripts/claude-sessions-bridge/ (7), scripts/sysadmin-mcp/ (7), scripts/archive/legacy-tests/ (6), openbrain-gateway/ (5), scripts/stack/ (3), scripts/archive/smolcrawl/tests/ (2) ... (+17)",
+  "chars_25d05e38": 3938
+ },
+ "python-nonascii-readme": {
+  "commands": [
+   "python -m pytest   [pyproject.toml]"
+  ],
+  "test_folders": "Test folders (files): tests/ (4)",
+  "chars_25d05e38": 1277
+ }
+}

@@ -84,12 +84,12 @@ async def test_egress_allowlist_render_and_file(db, settings, tmp_path):
 
 
 # ── end-to-end: a request names a project → its repo is focused ──────────────
-async def _orch(db_url, *, survey=False):
+async def _orch(db_url):
     settings = Settings(
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
-        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=survey,
+        max_concurrent_workers=1, database_url=db_url,
     )
     db = Database(db_url)
     orch = Orchestrator(settings, db, FakeChatAdapter(),
@@ -144,7 +144,7 @@ async def test_repo_effort_commits_and_pushes_a_feature_branch(db_url):
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
-        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        max_concurrent_workers=1, database_url=db_url,
         review_mode="off", plan_approval="off", default_repo="https://github.com/acme/app.git",
     )
     db = Database(db_url)
@@ -172,7 +172,7 @@ async def test_per_project_deploy_token_threaded_to_clone(db_url, monkeypatch):
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
-        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        max_concurrent_workers=1, database_url=db_url,
         review_mode="off", plan_approval="off",
     )
     db = Database(db_url)
@@ -197,7 +197,7 @@ async def test_token_resolves_by_owner_convention(db_url, monkeypatch):
     settings = Settings(
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
-        floor_dir=str(ROOT / "floor"), database_url=db_url, project_survey_enabled=False,
+        floor_dir=str(ROOT / "floor"), database_url=db_url,
     )
     db = Database(db_url)
     orch = Orchestrator(settings, db, FakeChatAdapter(),
@@ -285,7 +285,7 @@ async def test_default_repo_auto_registered_as_project(db_url):
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), database_url=db_url,
-        default_repo="https://github.com/me/fallback.git", project_survey_enabled=False,
+        default_repo="https://github.com/me/fallback.git",
     )
     db = Database(db_url)
     orch = Orchestrator(settings, db, FakeChatAdapter(),

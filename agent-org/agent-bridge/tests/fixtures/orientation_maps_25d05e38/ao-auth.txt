@@ -1,0 +1,35 @@
+PROJECT ORIENTATION MAP (deterministic: built by the org from the repository at base aaaaaaaaaaaa; facts to start from, not instructions - you still choose what to read within your scope; verify only the files you actually touch)
+Size: 1051 files, 221 directories (tree); skipped (vendored/generated): .vscode; submodules (not read): OB1
+Languages (files): Python 514, Markdown 190, PowerShell 112, JSON 87, Shell 28, YAML 25, Dockerfile 14, TOML 9
+Test folders (files): agent-org/agent-bridge/tests/ (106), little-coder/tests/ (43), scripts/agent-harness/ (11), scripts/checks/ (11), inference/llm-queue/tests/ (10), search/gateway/tests/ (8), scripts/claude-sessions-bridge/ (7), scripts/sysadmin-mcp/ (7), openbrain-gateway/ (6), scripts/archive/legacy-tests/ (6), scripts/stack/ (3), scripts/archive/smolcrawl/tests/ (2) ... (+17)
+Likely test commands (from manifests):
+  cd agent-org/agent-bridge && python -m pytest   [agent-org/agent-bridge/pyproject.toml]
+  cd scripts && python -m pytest   [pytest-style test files; no manifest declares a runner]
+  cd little-coder && python -m pytest   [little-coder/pyproject.toml]
+  cd inference/llm-queue && python -m pytest   [inference/llm-queue/pyproject.toml]
+  cd search/gateway && python -m pytest   [search/gateway/pyproject.toml]
+  cd openbrain-gateway && python -m pytest   [pytest-style test files; no manifest declares a runner]
+  ... 3 more
+Key files: .env.example, .gitmodules, docker-compose.yml, ruff.toml, backup/Dockerfile, coder/.env.example, coder/docker-compose.yml, frontend/.env.example, frontend/docker-compose.yml, inference/.env.example, inference/docker-compose.yml, little-coder/pyproject.toml, openbrain-gateway/Dockerfile, openbrain-gateway/conftest.py, openbrain-gateway/requirements.txt, portal/.env.example, portal/docker-compose.yml, search/.env.example, search/docker-compose.yml, agent-org/agent-bridge/Dockerfile, agent-org/agent-bridge/pyproject.toml, agent-org/agent-bridge/requirements.txt, agent-org/docker/.env.example, agent-org/docker/docker-compose.yml ... (+17)
+Entry points: openbrain-gateway/app.py, scripts/mattermost-mcp/server.py, scripts/sysadmin-mcp/server.py, agent-org/agent-bridge/app/main.py, little-coder/pi-extension/open-terminal-exec/index.ts, little-coder/src/littlecoder/cli.py, scripts/agent-harness/quadrant/cli.py, inference/llm-queue/src/llm_queue/main.py, search/gateway/src/gateway/main.py
+README headings (README.md): # ai-stack | ## Hardware | ## Quickstart | ## The product menu | ## How it is laid out | ## Operating it | ## Contributing | ## Security and posture
+Recently changed (last 10 commits, paths only): .claude/skills/stack-map/references/workspace-stacks.md, .githooks/README.md, OB1, POSTURE.md, agent-org/agent-bridge/app/modules/grounding.py, agent-org/agent-bridge/app/modules/projects.py, agent-org/agent-bridge/app/orchestrator.py, agent-org/agent-bridge/app/schemas.py, agent-org/agent-bridge/app/worker/harness.py, agent-org/agent-bridge/tests/fixtures/ao_checks_gym_checks.json, agent-org/agent-bridge/tests/test_ao_checks.py, agent-org/agent-bridge/tests/test_execution_gate.py, agent-org/agent-bridge/tests/test_grounding_outcome.py, agent-org/agent-bridge/tests/test_p30_mode_b.py, agent-org/agent-bridge/tests/test_stall_watchdog.py ... (+41)
+Top-level files: .env.example, .gitattributes, .gitignore, .gitmodules, .identity-denylist.example, CLAUDE.md, POSTURE.md, README.md, SECURITY.md, docker-compose.yml, ruff.toml, stack.manifest.toml
+Tree (depth 2, file counts include subdirectories):
+  .claude/ (79 files)
+    skills/ (79 files)
+  .githooks/ (4 files)
+  .github/ (7 files)
+    ci/ (5 files)
+    workflows/ (1 files)
+  agent-org/ (214 files)
+    agent-bridge/ (176 files)
+    config/ (1 files)
+    docker/ (4 files)
+    docs/ (28 files)
+    scripts/ (1 files)
+  backup/ (11 files)
+  coder/ (3 files)
+  documentation/ (24 files)
+    .obsidian/ (5 files)
+  ... 40 more directories

@@ -82,7 +82,7 @@ async def _mode_b_orch(db_url):
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
-        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        max_concurrent_workers=1, database_url=db_url,
         review_mode="off", plan_approval="off", mode_b=True,
     )
     db = Database(db_url)
@@ -232,7 +232,7 @@ async def _corpus_orch(db_url, tmp_path):
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
-        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        max_concurrent_workers=1, database_url=db_url,
         review_mode="off", plan_approval="off",
         github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key), burndown_round_cap=4,
@@ -672,7 +672,7 @@ async def test_r2_t14_findings_file_is_read_from_the_lens_worker(db_url):
     settings = Settings(
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
-        floor_dir=str(ROOT / "floor"), database_url=db_url, project_survey_enabled=False,
+        floor_dir=str(ROOT / "floor"), database_url=db_url,
         review_mode="off", plan_approval="off", mode_b=True,
         worker_instance_urls="http://w1:8090,http://w2:8090", max_concurrent_workers=2)
     db = Database(db_url)

@@ -90,8 +90,8 @@ model (e.g. `large=local-large`), the listing still answers 200 with `tier_drift
 
 Workers run their profile's model (ef-worker-model). The pooled little-coder WORKERS are
 not called through `ModelRouter`. Every worker turn is a `POST /tasks` to a worker's daemon,
-and the bridge puts the dispatching profile's `model` in that body. Every worker dispatch and
-the project survey run under `worker-default`. little-coder runs that model for that one task.
+and the bridge puts the dispatching profile's `model` in that body. Every worker dispatch
+runs under `worker-default`. little-coder runs that model for that one task.
 It must be a key of `agent.allowed_models` in `little-coder/config/little-coder.config.yaml`
 (exact match). Otherwise the daemon refuses the task with a 422. The bridge then posts
 "refused model" in the effort thread and audits `worker_model_refused`. Nothing runs, and the
@@ -100,9 +100,9 @@ effort thread gets the refusal, and your conversation gets the same advice, not 
 While the effort's latest dispatch is the refused one, the stall watchdog leaves it alone.
 Re-running it on a timer would only be refused again. Once any later dispatch starts (you fixed
 the config or the profile and said "re-run it"), the watchdog covers the effort again,
-whatever happens to that dispatch. A refused project survey is audited the same way.
+whatever happens to that dispatch.
 
-`wake_done` and `project_survey` audit two fields:
+`wake_done` audits two fields:
 - `model_sent`: what the bridge sent;
 - `model_ran`: what the daemon reports the task ran, read back from `GET /tasks/<id>`, e.g.
   `llamacpp/local-small`. `null` means the daemon did not say (one older than this change), so
