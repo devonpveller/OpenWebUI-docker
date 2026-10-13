@@ -21,7 +21,10 @@
 # to avoid swap thrash.
 
 listen: 0.0.0.0:8080
-healthCheckTimeout: 300
+# Cold-load budget (s). Warm loads take 124-253 s (llama-cpp-upstream logs, 2026-09-21..10-13), but a cold page
+# cache after a restore ran past the old 300 s on 2026-10-12 and 2026-10-13 and returned a 500 to the first caller.
+# 600 = ~2x the slowest completed load; still bounded, so a genuinely broken model is reported after 10 min.
+healthCheckTimeout: 600
 includeAliasesInList: true
 # Never auto-unload — models stay resident until explicitly swapped.
 globalTTL: 0
