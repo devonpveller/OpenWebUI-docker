@@ -3,10 +3,16 @@
 The sweep's liveness signal is the daemon's per-agent-step event offset. One long `bash` call emits
 no agent-loop events while it runs, so a legitimate 9-minute test run under `timeout 900` looked
 frozen and the turn was cancelled at `worker_silence_s` (C7, 2026-10-10: 4 turns). The daemon's
-`/tasks/{id}/events` stream does carry the pi `tool_execution_start` / `tool_execution_end` pair for
+`/tasks/{id}/events` stream carries the pi `tool_execution_start` / `tool_execution_end` pair for
 every call, so the bridge can tell "no tool running and silent" (hung) from "a command is executing
 within its own timeout" (alive). This module folds that stream into the open commands and judges
-them; it holds no clock of its own (the caller passes `now`) so it is trivially testable."""
+them; it holds no clock of its own (the caller passes `now`) so it is trivially testable.
+
+CONDITION (ao-asyncexec, 2026-10-11): the start is in the stream WHILE the command runs only if the
+worker's bash tool does not block pi's event loop. little-coder's open-terminal-exec extension ran
+bash with spawnSync until ao-asyncexec, so the start reached the file only after the command ended
+and this watch saw nothing running (every long command read as `silent`). The extension now spawns
+asynchronously; tests/fixtures/pi_events_bash_running_*.jsonl are real mid-command captures of both."""
 
 from __future__ import annotations
 
