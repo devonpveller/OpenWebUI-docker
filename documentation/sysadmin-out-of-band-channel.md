@@ -319,10 +319,19 @@ The only sender that is NOT on the host: `openbrain-digest` (OB1,
 `recipes/daily-digest/src/routine/telegram.ts`) posts to the same bot and chat
 through the Bot API when the morning digest or the podcast was not delivered by
 the send-by deadline + 15 min (default 07:15 America/New_York). One alert per
-day (a claim file in `D:\_data\routine\`); a Telegram refusal or a connect
-failure is retried by the routine's 10-minute passes until 20:00 local, an
-unknown outcome (no answer) is never repeated. The text is content-free: step
+day, recorded in today's routine record (`D:\_data\routine\<date>.day.json`); if
+Telegram does not confirm it (refused, error, or no answer) it is re-sent at the
+routine's 10-minute passes until 20:00 local - so a no-answer can, at worst, give
+one duplicate Telegram message, never silence. The text is content-free: step
 names, counts, states, times - no subject, address, link or error body.
+
+The same routine also HANDS A DOWN DEPENDENCY TO ITS OWNER through `#sysadmin`
+(Mattermost REST, a bot token in `OB1/docker/.env`: `ROUTINE_OWNER_MM_TOKEN`,
+`ROUTINE_OWNER_MM_CHANNEL_ID`; blank = inert): one post per dependency per day -
+model (owner: this watchdog's inference check + @sysadmin), research engine,
+Gmail auth (owner: the operator). It is a visible request, not a command: the
+bridge acts only on its configured operators, and the watchdog acts on its own
+10-minute schedule; the routine observes recovery by re-checking.
 
 - **Credentials:** the same `SYSADMIN_TELEGRAM_BOT_TOKEN` / `SYSADMIN_TELEGRAM_CHAT_ID`,
   as a SECOND copy in `OB1/docker/.env` (compose interpolates them into the
