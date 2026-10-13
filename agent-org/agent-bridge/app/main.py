@@ -9,6 +9,7 @@ GET /health needs a bearer token (ROUTE_ACCESS below; app/auth.py).
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -26,6 +27,19 @@ from .orchestrator import Orchestrator
 from .schemas import Concern, Decision, Trigger
 
 logging.basicConfig(level=logging.INFO)
+
+
+def quiet_http_loggers() -> None:
+    """httpx/httpcore log every request as "HTTP Request: GET <url>" at INFO, and the root logger
+    is INFO, so every outbound URL (GitHub API repo/folder/file paths, query values) would land
+    in the bridge log. Hold both libraries at WARNING unless AO_LOG_HTTP_REQUESTS=1 (debugging
+    only). The ONLY logging change: agent_bridge.* loggers and root stay as configured."""
+    level = logging.INFO if os.environ.get("AO_LOG_HTTP_REQUESTS") == "1" else logging.WARNING
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(level)
+
+
+quiet_http_loggers()
 log = logging.getLogger("agent_bridge")
 
 
