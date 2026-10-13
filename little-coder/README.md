@@ -86,6 +86,33 @@ deliberately. Not scanned: `LITTLE_CODER_EXTRA_EXTENSIONS` (unset by us) and the
 comes back with its 4,096-token default). Evidence: plan store `agent-org-rework-2026-10`, item
 `ao-thinkon`.
 
+## Flail guard: the time rule counts model time
+
+The flail guard (`progress.py`, `agent._FlailWatcher`, `FlailConfig`; armed by the agent-org bridge
+on coding turns) stops a turn that has stopped making progress: `stale` (10 calls in a row with
+nothing new), `cap` (120 calls since the last edit), and `time`: `seconds` (900) of **model time**
+with zero edits and at least `min_tool_calls` (8) calls. Model time is the turn's time with no tool
+call open: waiting for, thinking in and streaming model responses, pi's retries and their backoff,
+errored and aborted calls, plus pi's own bookkeeping between calls. The worker's tool and command
+time (a test suite, a build) is excluded, so a turn that runs long tests is not stopped for it.
+Until ao-flailtime (2026-10-13) the rule read wall time since the turn started; in the C7c bake-off
+it ended 5 of 12 coding turns before any edit with 658-727 s of the 900 s spent in the worker's own
+test runs.
+
+How it is measured (`progress.ModelClock`): the watcher samples every `clock_seconds` (1 s) with its
+own monotonic clock, attributes the interval since the last sample to "a tool is open" or not
+(the `tool_execution_start` / `tool_execution_end` pairs in pi's `--mode json` stream; a parallel
+batch counts once), then feeds the new events. Each start or end is placed to within one tick. It
+judges, and kills on a trip, every `poll_seconds` (20 s), as before. The trip reason names the
+numbers: `rule=time: 15 min of model time with zero file edits (model 903 s, tools 702 s, wall
+1605 s, 23 tool calls, 20 novel)`.
+
+Boundaries. A hung tool is not this rule's job: the clock stays paused while a call is open, and
+the command's own timeout (`LC_EXEC_TIMEOUT`), the bridge's running-command watch and the task
+timeout bound it. The clock needs a tool's start to be written while the tool runs, which the
+non-blocking `open-terminal-exec` extension (ao-asyncexec) does; a tool that blocks pi's event loop
+is only seen after it ended, and its time then counts as model time (the old behaviour).
+
 ## Daemon API access: `LC_DAEMON_TOKEN`
 
 The control daemon (`:8090`) runs agent tasks, clears the agent's stop-gates

@@ -147,7 +147,8 @@ class Settings(BaseSettings):
     # FLAIL GUARD arming (P9 Phase 0 instrument, 2026-07-16). The daemon kills a coding turn that
     # has stopped making progress (ao-progress, 2026-10-10; little-coder FlailConfig/progress.py):
     # `stale_calls` (10) tool calls in a row that brought back nothing new, `tool_calls` (120)
-    # calls since its last edit, or 15 min with zero edits; an edit resets the window. The bridge
+    # calls since its last edit, or 15 min of MODEL time (tool/command time excluded, ao-flailtime)
+    # with zero edits; an edit resets the window. The bridge
     # then forks a FRESH session from the base goal. (Until 2026-10-10: 25 read-only calls.)
     # That fork is a SUSPECT in the P8 quality regression: it is the one mechanism
     # that discards the worker's model of the code mid-effort, and P9's thesis is that quality

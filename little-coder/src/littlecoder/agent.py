@@ -27,7 +27,7 @@ import time
 from .config import Config
 from .journals import Journals
 from .openterminal import OpenTerminalClient
-from .progress import EDIT_TOOLS, EventFeed, ProgressMeter
+from .progress import EDIT_TOOLS, EventFeed, ModelClock, ProgressMeter
 from .sanitize import redact_secrets
 from .tasks import TaskContext, digest
 
@@ -169,7 +169,7 @@ FLAIL_MARKER = "FLAIL-GUARD:"
 _EDIT_TOOLS = EDIT_TOOLS
 
 
-def flail_tripped(meter: ProgressMeter, elapsed_s: float, cfg) -> str | None:
+def flail_tripped(meter: ProgressMeter, model_s: float, cfg, clock: ModelClock | None = None) -> str | None:
     """WHY this turn is flailing, or None (ao-progress, 2026-10-10: measure progress, not
     activity). Three rules, each named in the reason with numbers only:
 
@@ -177,17 +177,32 @@ def flail_tripped(meter: ProgressMeter, elapsed_s: float, cfg) -> str | None:
       (see progress.py for what "new" means); a successful edit/write resets the window.
     - cap: `cfg.tool_calls` tool calls since the last successful edit (or the turn start) -
       the backstop for a turn that is always slightly new and never moves.
-    - time: (unchanged) `cfg.seconds` elapsed with ZERO edits and at least `cfg.min_tool_calls`
-      calls, so a slow, thoughtful turn with a couple of reads is never killed on time alone.
+    - time: `cfg.seconds` of MODEL time (ao-flailtime, 2026-10-13: `model_s`, the turn's time
+      with no tool call open - see progress.ModelClock; until then wall time since the turn
+      started, which counted the worker's own test runs) with ZERO edits and at least
+      `cfg.min_tool_calls` calls, so a slow, thoughtful turn with a couple of reads is never
+      killed on time alone. `clock`, when given, adds its tool and wall seconds to the reason.
     """
     trip = meter.tripped()
     if trip is not None:
         return trip.detail
-    if meter.edits == 0 and elapsed_s >= cfg.seconds and meter.calls >= cfg.min_tool_calls:
+    if meter.edits == 0 and model_s >= cfg.seconds and meter.calls >= cfg.min_tool_calls:
         n = meter.numbers()
-        return (f"rule=time: {int(elapsed_s // 60)} min with zero file edits "
-                f"({n['calls']} tool calls, {n['novel']} novel)")
+        m = _bounded_secs(model_s)
+        timing = f"model {m} s"
+        if clock is not None:
+            c = clock.numbers()
+            timing += f", tools {c['tool_s']} s, wall {c['wall_s']} s"
+        return (f"rule=time: {m // 60} min of model time with zero file edits "
+                f"({timing}, {n['calls']} tool calls, {n['novel']} novel)")
     return None
+
+
+def _bounded_secs(value: float) -> int:
+    try:
+        return max(0, min(int(value), 10**9))
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def new_progress_meter(cfg) -> ProgressMeter:
@@ -202,7 +217,12 @@ class _FlailWatcher(threading.Thread):
 
     It reads the pi events file incrementally (only what was appended since the last scan) into
     one ProgressMeter for the turn. A scan that raises is logged and skipped - the watcher keeps
-    running (an unhandled error used to end the thread and silently disarm the guard)."""
+    running (an unhandled error used to end the thread and silently disarm the guard).
+
+    Two cadences (ao-flailtime): every `clock_seconds` it SAMPLES - advances the model clock with
+    the state that held since the last sample, then feeds what was appended - and every
+    `poll_seconds` it also JUDGES (and kills on a trip), as before. The short sample tick is what
+    keeps the model clock within one tick per tool start/end; judging stays on the old cadence."""
 
     def __init__(self, proc, pi_events: str, cfg, ctx: "TaskContext") -> None:
         super().__init__(daemon=True, name="flail-watcher")
@@ -212,23 +232,44 @@ class _FlailWatcher(threading.Thread):
         self.ctx = ctx
         self._stop = threading.Event()
         self.started_at = time.monotonic()
+        self.clock = ModelClock(self.started_at)
         self.meter = new_progress_meter(cfg)
         self.feed = EventFeed(pi_events, self.meter)
+        poll = float(cfg.poll_seconds)
+        self._tick = max(0.01, min(float(getattr(cfg, "clock_seconds", poll)), poll))
+        self._next_judge = self.started_at + poll
 
     def stop(self) -> None:
         self._stop.set()
 
-    def check(self) -> str | None:
-        """One scan: feed what was appended, then judge. Returns the trip reason or None."""
+    def sample(self, now: float | None = None) -> None:
+        """Advance the model clock to `now` with the state known at the last sample (a tool
+        open or not), then feed what was appended. Each start or end seen is thereby placed at
+        the tick that first shows it: at most one tick of error per transition. (Feeding first
+        would err by the same tick in the other direction; neither order is more exact.)"""
+        now = time.monotonic() if now is None else now
+        self.clock.advance(now, self.meter.open_calls > 0)
         self.feed.poll()
-        return flail_tripped(self.meter, time.monotonic() - self.started_at, self.cfg)
+
+    def judge(self) -> str | None:
+        return flail_tripped(self.meter, self.clock.model_s, self.cfg, self.clock)
+
+    def check(self) -> str | None:
+        """One scan: sample (clock, then feed), then judge. Returns the trip reason or None."""
+        self.sample()
+        return self.judge()
 
     def run(self) -> None:
-        while not self._stop.wait(self.cfg.poll_seconds):
+        while not self._stop.wait(self._tick):
             if self.proc.poll() is not None:
                 return
             try:
-                reason = self.check()
+                self.sample()
+                now = time.monotonic()
+                if now < self._next_judge:
+                    continue
+                self._next_judge = now + float(self.cfg.poll_seconds)
+                reason = self.judge()
             except Exception:  # noqa: BLE001 - one bad scan must not disarm the guard
                 _log.exception("flail watcher: scan failed; the guard stays armed")
                 continue
