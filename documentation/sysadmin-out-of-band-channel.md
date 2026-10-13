@@ -314,6 +314,26 @@ Two structural fixes shipped with it, both of which had been masking faults:
 > (or moving to an OAuth client). The 2026-09-16 re-auth reset the clock to ~180
 > days, so without it this recurs around 2027-03-15.
 
+### Container-side sender - the morning routine (added 2026-10-13, mr-routine-outage)
+The only sender that is NOT on the host: `openbrain-digest` (OB1,
+`recipes/daily-digest/src/routine/telegram.ts`) posts to the same bot and chat
+through the Bot API when the morning digest or the podcast was not delivered by
+the send-by deadline + 15 min (default 07:15 America/New_York). One alert per
+day (a claim file in `D:\_data\routine\`); a Telegram refusal or a connect
+failure is retried by the routine's 10-minute passes until 20:00 local, an
+unknown outcome (no answer) is never repeated. The text is content-free: step
+names, counts, states, times - no subject, address, link or error body.
+
+- **Credentials:** the same `SYSADMIN_TELEGRAM_BOT_TOKEN` / `SYSADMIN_TELEGRAM_CHAT_ID`,
+  as a SECOND copy in `OB1/docker/.env` (compose interpolates them into the
+  container; blank = inert, the alert is only logged). Rotating the bot token
+  means updating BOTH the repo-root `.env` and `OB1/docker/.env`, then recreating
+  `openbrain-digest`.
+- **Not Docker-independent:** it needs Docker and the digest container up; a
+  Docker-down morning is covered by Layers 1-2, not by this sender.
+- **Egress:** openbrain-digest already reaches the internet (Gmail); this adds no
+  new egress path and nothing for llm-gateway.
+
 ---
 
 ## Operator runbook — "I got an ALERT while away"
