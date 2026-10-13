@@ -164,9 +164,12 @@ class Settings(BaseSettings):
     # PARKED (commit + per-effort ref), measured, and KEPT as completed plan steps or DISCARDED; plan
     # steps name the anchor item they serve; the worker reports its own checks. OFF restores the
     # base plan gate exactly (no park, no anchor items, no CHECKS ask, no pre-turn probe, the base
-    # prompts) - the off switch for a bad live outcome, an env change instead of a redeploy
-    # (AO_ATTEMPTS_ENABLED=false). The tables it created stay (additive; ignored when OFF).
-    attempts_enabled: bool = True
+    # prompts). The tables it created stay (additive; ignored when OFF).
+    # EXPERIMENTAL - OFF BY DEFAULT (stopping rule, 2026-10-12): the planner's free-text VERDICT
+    # could not be parsed safely on real-model shapes (a DISCARD split over two lines or written as
+    # a conditional still discarded the whole attempt; `KEEP all apart from 2` kept an excluded step; a
+    # fenced plan reply stopped the effort). Turn it on only to experiment (AO_ATTEMPTS_ENABLED=true).
+    attempts_enabled: bool = False
     # P31 F31.4 — a BRIDGE-SIDE flail-guard for READ-ONLY lens turns. `worker_flail_guard` above is
     # the daemon's read-*without-edit* guard, which can't police a lens (it never edits by design):
     # gym-035's round-3 lens wedged repeating ONE command for minutes, evading that guard, the

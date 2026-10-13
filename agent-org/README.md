@@ -228,18 +228,31 @@ See "HTTP control-plane auth" under Security notes.
 | Move a profile's lane | - | `POST /profiles/lane {name,lane}` |
 | Suggestion pool | post to `#suggestions` | `GET /suggestions` |
 
-**Attempts at the plan gate (`AO_ATTEMPTS_ENABLED`, default `true`).** At each
+**Attempts at the plan gate (`AO_ATTEMPTS_ENABLED`, EXPERIMENTAL, default `false`).** At each
 plan wake the bridge parks the previous coding attempt (a commit plus a local
 `ao-attempts/<effort>/a<n>` branch), measures the worker's own checks at the
 attempt's start and end, and has the planner KEEP it as completed plan steps or
 DISCARD it. Plan steps name the anchor item they serve; a step that names none
 is asked for once, then mapped to the effort's items. To turn the whole
-mechanism off without a redeploy, set `AO_ATTEMPTS_ENABLED=false` in
-`agent-org/docker/.env` and recreate `agent-bridge`. The plan gate then behaves
-exactly as before ao-attempt: no park, no anchor items, no CHECKS request and
-no pre-turn probe. The `effort_plans` and `effort_attempts` tables stay and are
-ignored. An attempt parked before the switch keeps its commit at the branch
-tip, and work continues on top of it.
+mechanism on, set `AO_ATTEMPTS_ENABLED=true` in `agent-org/docker/.env` and
+recreate `agent-bridge`; set it back to `false` (the default) to turn it off.
+Off, the plan gate behaves exactly as before ao-attempt: no park, no anchor
+items, no CHECKS request and no pre-turn probe. The `effort_plans` and
+`effort_attempts` tables stay and are ignored. An attempt parked before the
+switch keeps its commit at the branch tip, and work continues on top of it.
+
+It ships OFF because its tests stopped on parsing the local model's free text
+(the agreed stopping rule). The planner's verdict is prose, and three shapes
+were still read wrongly in the last round:
+- a DISCARD with its KEEP on another line, or written as a condition (`DISCARD
+  2 when ...`, `... or 1`), discarded the whole attempt, including the step the
+  planner said to keep;
+- `KEEP all apart from 2` (and `save 2`, `minus 2`, `; drop 2`) kept the step it
+  excluded;
+- a plan reply wrapped in one code fence stopped the effort.
+
+A successor should make DISCARD a structured per-step action the planner
+returns, not a sentence the bridge parses.
 
 **Backup and restore.** Both databases are dumped by their sidecars into
 `backups/mattermost-db/` and `backups/agent-bridge-db/` as `*.dump` files.
