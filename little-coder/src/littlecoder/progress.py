@@ -178,6 +178,12 @@ class ProgressMeter:
         """The first trip of this turn (latched), or None."""
         return self.trip
 
+    @property
+    def open_calls(self) -> int:
+        """Tool calls started and not yet ended (as far as the stream shows). The model clock
+        (ModelClock) pauses while this is above zero."""
+        return len(self._pending)
+
     def _judge(self) -> Trip | None:
         n = self.numbers()
         if self.stale_run >= self.stale_calls:
@@ -190,6 +196,63 @@ class ProgressMeter:
                 f"rule=cap: {n['since_edit']} calls since the last edit "
                 f"(cap {n['cap']}, novel {n['novel']}/{n['calls']}, edits {n['edits']})"))
         return None
+
+
+class ModelClock:
+    """MODEL time of a turn for the flail guard's time rule (ao-flailtime, 2026-10-13).
+
+    The time rule used to read wall time since the turn started, so the worker's own test runs
+    counted against it: in the C7c bake-off it ended 5 of 12 coding turns before any edit, each
+    with 658-727 s of its 900 s spent inside the worker's own agent-bridge suite runs.
+
+    What is counted: every second of the turn during which NO tool call is open. That is the
+    model's time - the request waiting for admission, prompt processing, thinking and streaming,
+    pi's own provider retries and their backoff, a call that errors or is aborted, compaction -
+    plus pi's small bookkeeping between calls. What is not counted: the time from a tool call's
+    `tool_execution_start` to its `tool_execution_end` (bash, read, edit, ...); a parallel batch
+    counts once (the union, not the sum). Counting "not a tool" rather than "inside a model
+    request" is deliberate: anything the stream cannot show to be a tool counts toward the rule,
+    so the error goes toward tripping, never toward a turn that thinks forever.
+
+    How it is measured: the caller samples it on a short tick with its own monotonic clock
+    (`advance(now, tool_open)`), then feeds the events appended since the last tick. The interval
+    since the last sample is attributed to the state known at its start (a tool open or not), so
+    each start or end costs at most one tick of error; a tool that starts and ends inside one
+    tick is counted as model time (at most one tick). The event stream carries
+    no timestamps of its own for tool start/end; the clock is ours, the stream only says whether
+    a call is open.
+
+    What it is NOT: a bound on a hung tool. A tool that never ends keeps the clock paused; command
+    timeouts (`LC_EXEC_TIMEOUT`), the bridge's running-command watch (ao-silence) and the task
+    timeout bound that. It also needs the tool's start to be written WHILE the tool runs: a tool
+    that blocks pi's event loop (the pre-ao-asyncexec spawnSync bash) is only seen after it
+    ended, and its time is then counted as model time, as before this change."""
+
+    def __init__(self, now: float) -> None:
+        self.started = float(now)
+        self._last = float(now)
+        self.model_s = 0.0
+        self.tool_s = 0.0
+
+    def advance(self, now: float, tool_open: bool) -> None:
+        """Attribute the interval since the last sample to the model or to tools. `tool_open` is
+        the state at the START of the interval (sample before feeding new events)."""
+        now = float(now)
+        dt = now - self._last
+        if dt <= 0:
+            return               # a clock that did not move (or went back) adds nothing
+        if tool_open:
+            self.tool_s += dt
+        else:
+            self.model_s += dt
+        self._last = now
+
+    def numbers(self) -> dict[str, int]:
+        return {
+            "model_s": _bounded_int(self.model_s),
+            "tool_s": _bounded_int(self.tool_s),
+            "wall_s": _bounded_int(self.model_s + self.tool_s),
+        }
 
 
 def _args_key(tool: str, args) -> bytes:

@@ -98,8 +98,15 @@
     },
     "FlailConfig": {
       "additionalProperties": false,
-      "description": "Flail guard (agent-org bridge, 2026-07-14; progress-based since ao-progress, 2026-10-10):\na coding turn that has stopped making PROGRESS is lost. Opt-in per task (`flail_guard` on the\ntrigger; the bridge sets it on coding step wakes only \u2014 plan/publish/survey turns are\nexempt). Tripping kills the turn with a FLAIL-GUARD answer marker; the bridge then forks a\nfresh session from the original goal and re-asks in plan mode.\n\nTrip rules (progress.py; the reason names the rule and numbers only):\nstale = the last `stale_calls` finished tool calls brought back nothing new (no unseen result\nline; a short result counts as new only for arguments not run before); cap = `tool_calls`\ncalls since the last successful edit/write (or the turn start); time = `seconds` elapsed with\nZERO edits and at least `min_tool_calls` calls. A successful edit/write resets stale and cap.\n\nUntil 2026-10-10 the trip was a fixed 25 read-only calls with zero edits. The C7 bake-off\nshowed it killed 28 of 32 agent-org coding turns before their first edit while each was still\nreading new code; bare little-coder's passing runs made their first edit at calls 14-35.",
+      "description": "Flail guard (agent-org bridge, 2026-07-14; progress-based since ao-progress, 2026-10-10):\na coding turn that has stopped making PROGRESS is lost. Opt-in per task (`flail_guard` on the\ntrigger; the bridge sets it on coding step wakes only \u2014 plan/publish/survey turns are\nexempt). Tripping kills the turn with a FLAIL-GUARD answer marker; the bridge then forks a\nfresh session from the original goal and re-asks in plan mode.\n\nTrip rules (progress.py; the reason names the rule and numbers only):\nstale = the last `stale_calls` finished tool calls brought back nothing new (no unseen result\nline; a short result counts as new only for arguments not run before); cap = `tool_calls`\ncalls since the last successful edit/write (or the turn start); time = `seconds` of MODEL time\nwith ZERO edits and at least `min_tool_calls` calls. A successful edit/write resets stale and cap.\n\nModel time (ao-flailtime, 2026-10-13; progress.ModelClock): the turn's time with no tool call\nopen - waiting on, thinking in and streaming model responses, retries and aborted calls\nincluded; the worker's own tool/command time (a test run, a build) is excluded. Until then the\ntime rule read wall time, and in the C7c bake-off it ended 5 of 12 coding turns before any edit\nwith 658-727 s of the 900 s spent in the worker's own test runs. A hung tool is not this rule's\njob (the clock stays paused while it is open): command timeouts and the bridge's running-command\nwatch bound it.\n\nUntil 2026-10-10 the trip was a fixed 25 read-only calls with zero edits. The C7 bake-off\nshowed it killed 28 of 32 agent-org coding turns before their first edit while each was still\nreading new code; bare little-coder's passing runs made their first edit at calls 14-35.",
       "properties": {
+        "clock_seconds": {
+          "default": 1.0,
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "title": "Clock Seconds",
+          "type": "number"
+        },
         "min_new_lines": {
           "default": 1,
           "maximum": 100000,

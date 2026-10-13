@@ -198,8 +198,16 @@ class FlailConfig(_Strict):
     Trip rules (progress.py; the reason names the rule and numbers only):
     stale = the last `stale_calls` finished tool calls brought back nothing new (no unseen result
     line; a short result counts as new only for arguments not run before); cap = `tool_calls`
-    calls since the last successful edit/write (or the turn start); time = `seconds` elapsed with
-    ZERO edits and at least `min_tool_calls` calls. A successful edit/write resets stale and cap.
+    calls since the last successful edit/write (or the turn start); time = `seconds` of MODEL time
+    with ZERO edits and at least `min_tool_calls` calls. A successful edit/write resets stale and cap.
+
+    Model time (ao-flailtime, 2026-10-13; progress.ModelClock): the turn's time with no tool call
+    open - waiting on, thinking in and streaming model responses, retries and aborted calls
+    included; the worker's own tool/command time (a test run, a build) is excluded. Until then the
+    time rule read wall time, and in the C7c bake-off it ended 5 of 12 coding turns before any edit
+    with 658-727 s of the 900 s spent in the worker's own test runs. A hung tool is not this rule's
+    job (the clock stays paused while it is open): command timeouts and the bridge's running-command
+    watch bound it.
 
     Until 2026-10-10 the trip was a fixed 25 read-only calls with zero edits. The C7 bake-off
     showed it killed 28 of 32 agent-org coding turns before their first edit while each was still
@@ -216,9 +224,13 @@ class FlailConfig(_Strict):
     stale_calls: int = Field(default=10, ge=1, le=100_000)
     # A result is new when it holds at least this many unseen lines.
     min_new_lines: int = Field(default=1, ge=1, le=100_000)
-    seconds: int = 900              # elapsed (15 min) before the time trip
+    # MODEL seconds (15 min; tool time excluded) with zero edits before the time trip.
+    seconds: int = 900
     min_tool_calls: int = 8         # time trip requires at least this much activity
-    poll_seconds: float = 20.0      # watcher scan cadence
+    poll_seconds: float = 20.0      # watcher judge cadence (a trip is acted on at this cadence)
+    # Model-clock sample tick: each tool start/end is attributed to within one tick. Capped at
+    # `poll_seconds` by the watcher. Reads only what the events file appended since the last tick.
+    clock_seconds: float = Field(default=1.0, gt=0, le=60)
 
 
 class ShutdownConfig(_Strict):

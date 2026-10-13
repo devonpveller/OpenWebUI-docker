@@ -453,7 +453,11 @@ little-coder on the same model made its first edit at calls 14-35 in its passing
   files, cycling the same commands, re-running a check that prints what it printed;
 - **cap** trips after `tool_calls` (120) calls since the last edit, new or not — the backstop that
   keeps "always slightly new" from becoming "never stop";
-- **time** trips after 15 min with zero edits and some activity;
+- **time** trips after 15 min of **model time** with zero edits and some activity. Model time is
+  the turn's time with no tool call open (thinking, streaming, waiting on the model, retries);
+  the worker's own command time (a test suite) does not count (ao-flailtime, 2026-10-13; until
+  then wall time, which ended 5 of 12 C7c coding turns inside the worker's own test runs). A
+  hung command is bounded by its timeout and the bridge's running-command watch, not by this rule;
 - a successful edit or write resets the window.
 
 The trip reason names the rule and carries numbers only (no command, path or output text). The
