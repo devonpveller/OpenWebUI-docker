@@ -148,9 +148,12 @@ class Scheduler:
             return reachable == 0
 
     # ── acquire / release (the semaphore) ────────────────────────────────────
-    async def acquire(self, effort_id: str, role: str, session_id: str) -> WorkerInstance:
+    async def acquire(self, effort_id: str, role: str, session_id: str,
+                      *, only_instance: str | None = None) -> WorkerInstance:
         """Move a free instance to `computing` for an effort. Enforces the cap and
-        the composition rule (no computing while frozen)."""
+        the composition rule (no computing while frozen). `only_instance` (ao-attempt2 F5): take
+        THAT worker or none - NoCapacityError when it is not free, with nothing written to any
+        other worker (no fallback, so no other session/effort binding is overwritten)."""
         if not await self.gate.can_dispatch(effort_id):
             raise FrozenEffortError(
                 f"effort {effort_id} is frozen/killed — scheduler will not dispatch "
@@ -176,9 +179,15 @@ class Scheduler:
             # DIFFERENT / empty workspace → "finished but pushed no branch" (nothing to commit) or a
             # 409 if that worker is busy. Prefer the affine instance; fall back to any free one for a
             # brand-new session.
-            inst = (
-                await s.execute(base_q.where(WorkerInstance.session_id == session_id).limit(1))
-            ).scalar_one_or_none()
+            if only_instance is not None:
+                inst = (await s.execute(base_q.where(WorkerInstance.id == only_instance))
+                        ).scalar_one_or_none()
+                if inst is None:
+                    raise NoCapacityError(f"worker {only_instance} is not free")
+            else:
+                inst = (
+                    await s.execute(base_q.where(WorkerInstance.session_id == session_id).limit(1))
+                ).scalar_one_or_none()
             if inst is None:
                 inst = (await s.execute(base_q.limit(1))).scalar_one_or_none()
             if inst is None:

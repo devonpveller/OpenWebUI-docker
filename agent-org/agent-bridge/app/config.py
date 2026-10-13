@@ -163,6 +163,13 @@ class Settings(BaseSettings):
     # worker stays on base to create it. Off by default (a run_check would perturb the unit suite's
     # queues); prod turns it on via AO_SYNC_DELIVERY_BRANCH.
     sync_delivery_branch: bool = False
+    # ao-attempt (2026-10-12) — the turn boundary: at each plan wake the previous coding attempt is
+    # PARKED (commit + per-effort ref), measured, and KEPT as completed plan steps or DISCARDED; plan
+    # steps name the anchor item they serve; the worker reports its own checks. OFF restores the
+    # base plan gate exactly (no park, no anchor items, no CHECKS ask, no pre-turn probe, the base
+    # prompts) - the off switch for a bad live outcome, an env change instead of a redeploy
+    # (AO_ATTEMPTS_ENABLED=false). The tables it created stay (additive; ignored when OFF).
+    attempts_enabled: bool = True
     # P31 F31.4 — a BRIDGE-SIDE flail-guard for READ-ONLY lens turns. `worker_flail_guard` above is
     # the daemon's read-*without-edit* guard, which can't police a lens (it never edits by design):
     # gym-035's round-3 lens wedged repeating ONE command for minutes, evading that guard, the

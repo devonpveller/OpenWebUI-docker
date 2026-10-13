@@ -57,6 +57,9 @@ async def test_cross_effort_code_effort_auto_rehearses_no_command(db_url, tmp_pa
         await orch.charters.set_goal(eid, "port the whole thing", created_by="po")
         await orch.exec_gate.set_risk(eid, "cross_effort")          # dry-run REQUIRED
         assert (await orch.exec_gate.status(eid))["dry_run_status"] == "required"
+        # ao-attempt: the plan turn declares its steps' anchor items, so the dispatch below is a
+        # real CODING wake (an undeclared plan is refused at the plan gate and never executes)
+        harness.output_queue.append("ANCHOR ITEMS: A1: the work is done\nPLAN: 1. do it [anchor: A1]")
         await orch.delegate(eid, chan, root, "port the whole thing", plan_steps=["work"])
         await _drain(orch)
         msgs = " ".join(p["message"] for p in chat.posted)
@@ -64,7 +67,7 @@ async def test_cross_effort_code_effort_auto_rehearses_no_command(db_url, tmp_pa
         assert "held before execution" not in msgs                  # NOT dead-ended
         assert "/dry-run" not in msgs                               # no command demanded
         assert (await orch.exec_gate.status(eid))["dry_run_status"] == "passed"
-        assert harness.wakes, "the worker was actually dispatched"
+        assert any(not w["plan_only"] for w in harness.wakes), "the worker was actually dispatched"
     finally:
         await db.dispose()
 
@@ -113,13 +116,16 @@ async def test_nl_proceed_releases_the_hold_and_dispatches(db_url, tmp_path):
         eid, chan, root = await orch.router.open_effort("await-go", project="murder")
         await orch.charters.set_goal(eid, "the risky thing", created_by="po")
         await orch.exec_gate.set_risk(eid, "irreversible")          # held for a human
+        # ao-attempt: the plan turn declares its steps' anchor items, so the dispatch below is a
+        # real CODING wake (an undeclared plan is refused at the plan gate and never executes)
+        harness.output_queue.append("ANCHOR ITEMS: A1: the work is done\nPLAN: 1. do it [anchor: A1]")
         mgmt = await orch.mgmt_channel_id()
         await orch.nl_intake("proceed", mgmt, thread_id="t")
         await _drain(orch)
         assert (await orch.exec_gate.status(eid))["dry_run_status"] == "passed"
         msgs = " ".join(p["message"] for p in chat.posted)
         assert "Go-ahead received" in msgs
-        assert harness.wakes, "proceed must actually dispatch the held effort"
+        assert any(not w["plan_only"] for w in harness.wakes),             "proceed must actually dispatch the held effort"
     finally:
         await db.dispose()
 
