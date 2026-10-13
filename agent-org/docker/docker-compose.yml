@@ -279,6 +279,9 @@ services:
       # (git fetch + checkout -f) so it builds on the accumulated work, not a stale base clone whose
       # push then bounces. Best-effort (first delivery has no branch yet).
       AO_SYNC_DELIVERY_BRANCH: ${AO_SYNC_DELIVERY_BRANCH:-1}  # 1 | 0 — worker starts on the delivery HEAD
+      # ao-attempt (park / keep / discard at the plan gate): EXPERIMENTAL, OFF by default - see the
+      # agent-org README ("Attempts at the plan gate") for why.
+      AO_ATTEMPTS_ENABLED: ${AO_ATTEMPTS_ENABLED:-false}  # false | true
       # MODE B (§9.5): after Mode A converges an increment, run the adversarial hardening phase — a
       # contrarian lens breaks the product; each REPRODUCED defect becomes a durable §10 corpus check
       # the build didn't catch. Best-effort, never blocks. (P30 Slice 1.)

@@ -48,7 +48,9 @@ def _a():
 
 
 async def _orch(db_url, *, on=True, urls="http://w1:8090", workers=1, gate="all"):
-    kw = {} if on else {"attempts_enabled": False}
+    # ON = opt in (ao-attempt is OFF by default since the stopping-rule ship); OFF = NOTHING set,
+    # so the OFF scenarios prove the DEFAULT is the base gate
+    kw = {"attempts_enabled": True} if on else {}
     settings = Settings(
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
@@ -400,10 +402,12 @@ async def test_f1_off_is_the_base_gate_exactly(db_url, tmp_path):
     assert all(v is None or v.startswith("original") for v in c7a["files"].values())
 
 
-async def test_f1_on_by_default_and_off_by_env(monkeypatch):
-    assert Settings(_env_file=None).attempts_enabled is True
-    monkeypatch.setenv("AO_ATTEMPTS_ENABLED", "false")
+async def test_f1_off_by_default_and_on_by_env(monkeypatch):
+    """Stopping-rule ship: experimental, OFF unless AO_ATTEMPTS_ENABLED=true."""
+    monkeypatch.delenv("AO_ATTEMPTS_ENABLED", raising=False)
     assert Settings(_env_file=None).attempts_enabled is False
+    monkeypatch.setenv("AO_ATTEMPTS_ENABLED", "true")
+    assert Settings(_env_file=None).attempts_enabled is True
 
 
 # ── F2: clarification items; convergent reuse keeps the original request ─────────────────────

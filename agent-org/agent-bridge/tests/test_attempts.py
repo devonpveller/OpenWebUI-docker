@@ -64,6 +64,7 @@ async def _orch(db_url, urls="http://w1:8090", workers=1):
         floor_dir=str(ROOT / "floor"), worker_instance_urls=urls,
         max_concurrent_workers=workers, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off", worker_plan_gate="all",
+        attempts_enabled=True,   # ao-attempt is OFF by default (experimental): opt in
     )
     db = Database(db_url)
     orch = Orchestrator(settings, db, FakeChatAdapter(),
