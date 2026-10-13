@@ -1853,7 +1853,7 @@ PINNED_27B_CMD = ["llama-server", "${common-args}", "--model", "${env.LLAMA_SWAP
 
 PINNED_EFFECTIVE_LINES = [
     'listen: 0.0.0.0:8080',
-    'healthCheckTimeout: 300',
+    'healthCheckTimeout: 600',
     'includeAliasesInList: true',
     'globalTTL: 0',
     'logToStdout: both',
