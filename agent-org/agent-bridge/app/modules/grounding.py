@@ -269,8 +269,14 @@ class OpenBrainResearchGrounding:
                 if left() <= 0:
                     return ResearchJob("timeout")
                 try:
-                    r = await c.post(f"{base}/research", headers=headers, json=body,
-                                     timeout=min(30.0, max(1.0, left())))
+                    # wait_for as well as the httpx timeout: the bound must not depend on the
+                    # transport honouring its timeout (C6).
+                    r = await asyncio.wait_for(
+                        c.post(f"{base}/research", headers=headers, json=body,
+                               timeout=min(30.0, max(1.0, left()))),
+                        timeout=min(30.0, max(1.0, left())))
+                except asyncio.TimeoutError:
+                    return ResearchJob("timeout" if left() <= 0 else "unreachable")
                 except httpx.HTTPError:
                     return ResearchJob("unreachable")
                 if r.status_code >= 500:
@@ -291,18 +297,22 @@ class OpenBrainResearchGrounding:
                     await self.sleep(min(poll, max(0.0, left())))
                     if left() <= 0:
                         break
-                    try:
+                    async def get_status(t: float) -> tuple[int, Any]:
                         async with c.stream("GET", f"{base}/research/jobs/{job_id}",
-                                            headers=headers,
-                                            timeout=min(30.0, max(1.0, left()))) as pr:
-                            if pr.status_code == 404:
-                                return ResearchJob("failed", job_id)
+                                            headers=headers, timeout=t) as pr:
                             if pr.status_code >= 400:
-                                raise httpx.HTTPStatusError("poll", request=pr.request,
-                                                            response=pr)
-                            st = await _read_json_bounded(pr)
+                                return pr.status_code, None
+                            return pr.status_code, await _read_json_bounded(pr)
+
+                    try:
+                        t = min(30.0, max(1.0, left()))
+                        code, st = await asyncio.wait_for(get_status(t), timeout=t)
+                        if code == 404:
+                            return ResearchJob("failed", job_id)
+                        if code >= 400:
+                            raise ValueError(f"poll http {code}")
                         fails = 0
-                    except (httpx.HTTPError, ValueError, UnicodeDecodeError):
+                    except (httpx.HTTPError, ValueError, UnicodeDecodeError, asyncio.TimeoutError):
                         fails += 1
                         if fails >= MAX_POLL_FAILURES:
                             sent = await self._cancel(c, base, headers, job_id, "unreachable")
@@ -350,9 +360,11 @@ class OpenBrainResearchGrounding:
                       job_id: str, reason: str) -> bool:
         """Best-effort, bounded cancel. True = the engine acknowledged (200/202/409)."""
         try:
-            r = await c.post(f"{base}/research/jobs/{job_id}/cancel", headers=headers,
-                             json={"reason": f"agent-org knowledge package: {reason}"},
-                             timeout=CANCEL_TIMEOUT_S)
+            r = await asyncio.wait_for(
+                c.post(f"{base}/research/jobs/{job_id}/cancel", headers=headers,
+                       json={"reason": f"agent-org knowledge package: {reason}"},
+                       timeout=CANCEL_TIMEOUT_S),
+                timeout=CANCEL_TIMEOUT_S)
             return r.status_code in (200, 202, 409)
         except Exception:  # noqa: BLE001 - the engine-side deadline_at still ends the job
             return False

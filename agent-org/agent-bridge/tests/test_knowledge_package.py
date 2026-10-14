@@ -788,3 +788,26 @@ async def test_fuzz_every_answer_line_is_a_whole_sourced_line_with_its_cited_url
             assert ln not in HOSTILE and src.startswith("https://") and "@" not in src
         assert pkg.tokens <= TOKEN_CAP
     assert answered >= 5, answered         # the property was exercised, not vacuous
+
+
+@pytest.mark.parametrize("hang_on", ["submit", "poll"])
+async def test_a_hanging_transport_cannot_hold_run_job_past_its_budget(hang_on):
+    """C6: the bound must not rely on the transport honouring httpx's timeout (a MockTransport,
+    a wedged proxy). Real clock, 1.5 s budget."""
+    eng = StubEngine([[("running", {})]])
+
+    async def handle(request):
+        if (hang_on == "submit" and request.url.path == "/research") or \
+                (hang_on == "poll" and request.method == "GET"):
+            await asyncio.sleep(3600)
+        return eng.handle(request)
+    g = OpenBrainResearchGrounding(_settings(grounding_poll_interval_s=0.05))
+    g.transport = httpx.MockTransport(handle)
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    job = await g.run_job("q", budget_s=1.5)
+    elapsed = loop.time() - t0
+    assert elapsed < 1.5 + 1.0 + 0.5, elapsed           # budget + the 1 s clamp floor + slack
+    assert job.state in ("timeout", "unreachable")
+    if hang_on == "poll":
+        assert eng.cancels                               # a job id existed: the engine was told
