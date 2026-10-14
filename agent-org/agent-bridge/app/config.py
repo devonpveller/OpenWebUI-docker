@@ -466,6 +466,12 @@ class Settings(BaseSettings):
     repo_sync_enabled: bool = True
     grounding_timeout_s: float = 300.0      # bound the poll; on timeout grounding is skipped
     grounding_poll_interval_s: float = 5.0
+    # Knowledge package (agent-knowledge-package D2, kp-research): before assignment, answer the
+    # effort's knowledge questions (codebase + research engine) into a compact, sourced package.
+    # OFF by default and wired into nothing live yet (the hand-off seam is kp-inject). The time box
+    # bounds the WHOLE step (both research rounds + extraction + the codebase answers).
+    knowledge_package_enabled: bool = False
+    knowledge_package_time_box_s: float = 900.0
 
     # ── Advisory (Tier 2) — research-grounded answers to design/architecture questions ──
     # When ON, an `advisory` operator message is answered by running an openbrain-research job and
