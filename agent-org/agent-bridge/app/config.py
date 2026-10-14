@@ -477,9 +477,10 @@ class Settings(BaseSettings):
     # normalised path, or `*.suffix` - none in the defaults). Anything else -> OPEN
     # `source_not_allowed`. Per-task entries for the task's own libraries are added by the
     # caller (build_knowledge_package source_hosts=..., e.g. `anyio.readthedocs.io/en/stable`,
-    # `github.com/agronholm/anyio`, `docs.rs/tokio`). NEVER in the defaults: hosts where anyone
-    # can post or publish (github.com, pypi.org, stackoverflow.com, blogs, *.readthedocs.io,
-    # docs.rs, pkg.go.dev, the learn.microsoft.com Q&A forum) - the reader is a tool-using worker.
+    # `docs.rs/tokio`, and GitHub ONLY as a pinned tag: `github.com/agronholm/anyio@4.4.0`).
+    # NEVER in the defaults: hosts where anyone can post or publish (github.com, pypi.org,
+    # stackoverflow.com, blogs, *.readthedocs.io, docs.rs, pkg.go.dev, the learn.microsoft.com
+    # Q&A forum, MDN outside /en-US/docs) - the reader is a tool-using worker.
     knowledge_source_hosts: str = (
         "docs.python.org,peps.python.org,docs.pytest.org,www.python-httpx.org,"
         "docs.pydantic.dev,fastapi.tiangolo.com,www.starlette.io,docs.sqlalchemy.org,"

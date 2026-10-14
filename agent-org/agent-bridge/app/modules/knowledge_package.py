@@ -198,60 +198,27 @@ def _entropy(s: str) -> float:
     return -sum(c / n * math.log2(c / n) for c in Counter(s).values()) if n else 0.0
 
 
-_CAMEL_PIECE_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
-
-
-def _identifier_like(run: str) -> bool:
-    """A CamelCase / acronym identifier (`OAuth2PasswordBearer`, `WindowsSelectorEventLoopPolicy`,
-    `ASGI3Application`, `HTTP2ConnectionPool`) rather than a random key: it splits into word-like
-    pieces - no lone lower-case letter, at most one lone capital per four pieces, digit groups of
-    at most 3, mean piece length >= 3. Random base62/hex nearly always yields lone letters."""
-    pieces = _CAMEL_PIECE_RE.findall(run)
-    if "".join(pieces) != run or not pieces:
-        return False
-    letters = [p for p in pieces if not p.isdigit()]
-    if any(len(p) == 1 and p.islower() for p in letters):
-        return False
-    if sum(1 for p in letters if len(p) == 1) > max(1, len(pieces) // 4):
-        return False
-    if any(p.isdigit() and len(p) > 3 for p in pieces):
-        return False
-    if sum(1 for p in pieces if p.isdigit()) > max(1, len(pieces) // 3):
-        return False                                   # digits sprinkled through: key-shaped
-    return sum(len(p) for p in pieces) / len(pieces) >= 3.0
-
-
 def _secret_token(tok: str) -> bool:
     """A long high-entropy token, judged on its letters and digits whatever separators it has
-    (`glpat-...`, `sk_live_...`, an AWS secret with `/`, a hex or base62 key). Word-like CamelCase
-    identifiers are exempt from the mixed-class, long-run and entropy rules."""
+    (`glpat-...`, `sk_live_...`, an AWS secret with `/`, a hex or base62 key)."""
     if len(tok) > TOKEN_MAX:
         return True
-    runs = re.findall(r"[A-Za-z0-9]+", tok)
-    if re.search(r"(?:AKIA|ASIA)[0-9A-Z]{12,}", "".join(runs)):
-        return True                                    # AWS access key id, any separators
-    if any(len(r) >= 20 and any(ch.isdigit() for ch in r) and not _identifier_like(r)
-           for r in runs):
-        return True                                    # a long hex / digit-bearing run
-    if any(len(r) >= 16 and sum(ch.isdigit() for ch in r) >= 2
-           and sum(ch.isupper() for ch in r) >= 2 and not any(ch.islower() for ch in r)
-           for r in runs):
-        return True                                    # an upper-case + digit key id
-    alnum = "".join(runs)
+    alnum = re.sub(r"[^A-Za-z0-9]", "", tok)
     if len(alnum) < 16:
         return False
-    long_runs = [r for r in runs if len(r) >= 4]
-    # word-like = made of identifier-shaped runs, not of many short chunks (url-safe base64)
-    word_like = (bool(long_runs) and all(_identifier_like(r) for r in long_runs)
-                 and sum(len(r) for r in long_runs) >= 0.75 * len(alnum))
     has_d = any(ch.isdigit() for ch in alnum)
     has_u = any(ch.isupper() for ch in alnum)
     has_l = any(ch.islower() for ch in alnum)
-    if has_d and has_u and has_l and not word_like:
+    if has_d and has_u and has_l:
         return True                                    # mixed-class: key-shaped
-    if any(len(r) >= 28 for r in runs) and not word_like:
+    if any(len(run) >= 20 and any(ch.isdigit() for ch in run)
+           for run in re.findall(r"[A-Za-z0-9]+", tok)):
+        return True                                    # a long hex / digit-bearing run
+    if any(len(run) >= 28 for run in re.findall(r"[A-Za-z0-9]+", tok)):
         return True
-    return len(alnum) >= 24 and _entropy(alnum) >= 4.3 and not word_like
+    if re.search(r"[A-Z0-9]{16,}", tok):
+        return True                                    # an upper-case key id (AKIA..., etc.)
+    return len(alnum) >= 24 and _entropy(alnum) >= 4.3
 
 
 def _hostish(s: str) -> bool:
@@ -341,6 +308,8 @@ def url_ok(s: Any) -> bool:
         return False
     if _ENCODED_DOT_SLASH_RE.search(path):
         return False                                   # %2e %2f %5c: a hidden segment trick
+    if ";" in path or "%25" in path or re.search(r"%(?![0-9A-Fa-f]{2})", path):
+        return False                                   # server-quirk forms (`..;`, `%252e`, `%u002e`)
     if any(seg in (".", "..") for seg in path.split("/")):
         return False                                   # a dot segment escapes a prefix entry
     if _SECRET_PARAM_RE.search(parts.query or "") or _SECRET_PARAM_RE.search(parts.fragment or ""):
@@ -419,6 +388,13 @@ def fileline_ok(s: Any) -> bool:
 
 
 _ENTRY_RE = re.compile(r"^(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:/[A-Za-z0-9._~-]+)*$")
+# GitHub per-task entries: `github.com/<org>/<repo>@<tag>` - a PINNED tag only.
+_GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
+_GITHUB_ENTRY_RE = re.compile(r"^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100})"
+                              r"@([A-Za-z0-9][A-Za-z0-9._-]{0,99})$")
+_SHA_LIKE_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+_MUTABLE_REFS = frozenset({"main", "master", "head", "develop", "dev", "trunk", "latest",
+                           "default", "gh-pages", "stable", "next", "nightly"})
 
 
 class SourceAllowList:
@@ -426,17 +402,31 @@ class SourceAllowList:
 
     Entry forms: `host` (exact), `*.suffix` (any subdomain of suffix - not in the defaults; a
     caller may pass one per task), `host/path/prefix` (EXACT host, and the normalised path at or
-    under the prefix on a segment boundary - e.g. `github.com/agronholm/anyio` for one project
-    without admitting all of github.com). A punycode (`xn--`) host is admitted only when it is
+    under the prefix on a segment boundary - e.g. `numpy.org/doc` for the docs tree
+    without admitting all of numpy.org). A punycode (`xn--`) host is admitted only when it is
     listed exactly (as a host or a prefix host), never through a wildcard. Invalid entries are
-    ignored."""
+    ignored.
+
+    github.com is special: anyone can post issues, discussions and pull requests under any repo,
+    and GitHub serves commits from any FORK under the parent's URL. So a github.com entry must be
+    `github.com/<org>/<repo>@<tag>` (a pinned release tag, not a sha-like or branch-like ref) and
+    admits ONLY `/<org>/<repo>/blob/<tag>/...`, `/<org>/<repo>/tree/<tag>[/...]` and
+    `/<org>/<repo>/releases/tag/<tag>`. Any other github.com entry is ignored."""
 
     def __init__(self, entries: Iterable[str]) -> None:
         self.exact: set[str] = set()
         self.suffixes: set[str] = set()
         self.prefixes: list[tuple[str, list[str]]] = []
+        self.github: list[tuple[str, str, str]] = []
         for raw in entries:
             e = str(raw or "").strip()
+            gh_host, _, gh_rest = e.partition("/")
+            if gh_host.lower().rstrip(".") in _GITHUB_HOSTS:
+                m = _GITHUB_ENTRY_RE.match(gh_rest)
+                tag = m.group(3) if m else ""
+                if m and not _SHA_LIKE_RE.match(tag) and tag.lower() not in _MUTABLE_REFS:
+                    self.github.append((m.group(1), m.group(2), m.group(3)))
+                continue                                # never a plain github.com host/prefix
             host_part = e.split("/", 1)[0].lower().rstrip(".")
             e = host_part + (("/" + e.split("/", 1)[1]) if "/" in e else "")
             if not e or not _ENTRY_RE.match(e):
@@ -457,6 +447,15 @@ class SourceAllowList:
         base = [x for x in str(settings.knowledge_source_hosts or "").split(",") if x.strip()]
         return cls([*base, *extra])
 
+    @staticmethod
+    def _github_ok(segs: list[str], org: str, repo: str, tag: str) -> bool:
+        if segs[:2] != [org, repo]:
+            return False
+        rest = segs[2:]
+        if len(rest) >= 2 and rest[0] in ("blob", "tree") and rest[1] == tag:
+            return rest[0] == "tree" or len(rest) >= 3 and all(rest[2:])
+        return rest == ["releases", "tag", tag]
+
     def allows(self, url: str) -> bool:
         norm = normalise_url(url)
         if norm is None:
@@ -466,6 +465,8 @@ class SourceAllowList:
             return True
         if any(h == host and segs[:len(p)] == p for h, p in self.prefixes):
             return True
+        if host in _GITHUB_HOSTS:
+            return any(self._github_ok(segs, org, repo, tag) for org, repo, tag in self.github)
         if any(lb.startswith("xn--") for lb in host.split(".")):
             return False                               # IDN only when listed exactly (above)
         return any(host.endswith(suf) for suf in self.suffixes)
@@ -704,7 +705,10 @@ def render_package(items: Sequence[PackageItem],
     for k in reversed(range(n)):
         it = work[k]
         if it.status == ANSWERED and len(it.sources) > 1:
-            work[k] = replace(it, sources=it.sources[:1], line_src=tuple(1 for _ in it.line_src))
+            keep = [i for i, si in enumerate(it.line_src) if si == 1]   # line 1 always cites [1]
+            work[k] = replace(it, sources=it.sources[:1],
+                              lines=tuple(it.lines[i] for i in keep),
+                              line_src=tuple(1 for _ in keep))
             text = r()
             if fits(text):
                 return done(text, "extra_sources")

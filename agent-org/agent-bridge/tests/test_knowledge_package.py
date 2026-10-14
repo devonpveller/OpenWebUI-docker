@@ -33,7 +33,7 @@ from app.modules.knowledge_package import (
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "research_result_5ab36fe0.json")
                      .read_text(encoding="utf-8"))["result"]
 GIT_ALLOW = SourceAllowList(Settings(_env_file=None).knowledge_source_hosts.split(",")
-                            + ["github.com/git-guides", "anyio.readthedocs.io/en/stable"])
+                            + ["anyio.readthedocs.io/en/stable"])
 ISO_WITH_ZONE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})$",
                            re.I)   # jobs.ts
 JOB_RE = re.compile(r"^/research/jobs/([0-9a-f-]{36})(/cancel)?$", re.I)   # index.ts
@@ -167,8 +167,18 @@ def done_with(result: dict) -> list:
                                                                     "message": "outcome=complete"}})]
 
 
+GIT_DOCS = "https://git-scm.com/docs/gittutorial"
+
+
 def real_result() -> dict:
+    """The real recorded result. Round 4: its github.com/git-guides source is re-pointed at the
+    git-scm.com docs tree (a default allow-list entry), because a single-segment github.com page
+    can be a user's profile README and no plain github.com entry is admitted any more. Only that
+    one URL differs from the recording."""
     r = copy.deepcopy(FIXTURE)
+    for src in r["cited_sources"]:
+        if src.get("url") == "https://github.com/git-guides":
+            src["url"] = GIT_DOCS
     r.update({"gaps": [], "reuse_claims": [], "prose": "", "outcome": "complete"})
     return r
 
@@ -331,8 +341,8 @@ def test_candidates_from_the_real_result():
     # [INFERRED] / [GAP] lines never become candidates
     assert not any("structurally parallel" in t or "do not describe" in t for t in texts)
     by = {c.text: c for c in cands}
-    assert by[GIT_DISTRIBUTED].sources == ("https://github.com/git-guides",)
-    assert by[GIT_DISTRIBUTED].allowed                      # per-task entry github.com/git-guides
+    assert by[GIT_DISTRIBUTED].sources == (GIT_DOCS,)
+    assert by[GIT_DISTRIBUTED].allowed                      # default entry git-scm.com/docs
     # [Source 4, 5] -> two sources
     rbac = [c for c in cands if "RBAC" in c.text][0]
     assert len(rbac.sources) == 2 and all(s.startswith("https://azure.microsoft.com/") for s in rbac.sources)
@@ -389,11 +399,11 @@ async def test_cancel_refused_because_filing_started_still_reads_timeout():
 # ── the package ────────────────────────────────────────────────────────────────────────────
 
 async def _build(eng, clk, questions, *, extractor=None, codebase=None,
-                 source_hosts=("github.com/git-guides", "www.coursera.org/articles",
+                 source_hosts=("www.coursera.org/articles",
                                "anyio.readthedocs.io/en/stable"), **over):
     """`source_hosts`: per-task allow-list entries for the real fixture (its sources are
-    github.com/git-guides, coursera, infoworld, gitea/gitlab blogs, azure marketing; only the
-    first two are admitted, so the others exercise `source_not_allowed`)."""
+    git-scm.com/docs (re-pointed, see real_result), coursera, infoworld, gitea/gitlab blogs, azure
+    marketing; only the first two are admitted, so the others exercise `source_not_allowed`)."""
     g = _client(eng, clk, **over)
     return await build_knowledge_package(questions, settings=g.s, research=g,
                                          extractor=extractor, codebase=codebase, clock=clk,
@@ -422,7 +432,7 @@ async def test_all_answered():
     assert [i.qid for i in pkg.items] == ["Q1", "Q2", "Q4"]
     assert all(i.status == "answered" and i.sources for i in pkg.items)
     assert pkg.rounds_used == 1 and len(eng.jobs) == 1
-    assert GIT_DISTRIBUTED in pkg.text and "https://github.com/git-guides" in pkg.text
+    assert GIT_DISTRIBUTED in pkg.text and GIT_DOCS in pkg.text
     assert "agent-org/agent-bridge/tests/conftest.py:12" in pkg.text
     assert pkg.tokens <= TOKEN_CAP and estimate_tokens(pkg.text) == pkg.tokens
 
@@ -616,7 +626,7 @@ async def test_model_extractor_frames_findings_as_data_and_returns_ids():
         seen["system"], seen["user"] = system, user
         return '{"answers":[{"question":"Q1","findings":["C1"]}]}'
     ex = ModelExtractor(complete)
-    cands = [Candidate("C1", GIT_DISTRIBUTED, ("https://github.com/git-guides",))]
+    cands = [Candidate("C1", GIT_DISTRIBUTED, (GIT_DOCS,))]
     assert await ex(Q_EXT[:1], cands) == {"Q1": ["C1"]}
     assert "untrusted" in seen["system"] and "<<<\nC1: " in seen["user"]
 
@@ -868,13 +878,13 @@ async def test_source_not_on_the_allow_list_is_open_source_not_allowed():
 
 
 def test_allow_list_entry_forms():
-    al = SourceAllowList(["docs.python.org", "*.readthedocs.io", "github.com/agronholm/anyio",
+    al = SourceAllowList(["docs.python.org", "*.readthedocs.io", "github.com/agronholm/anyio@4.4.0",
                           "bad entry!", "http://x.org", ""])
     assert al.allows("https://docs.python.org/3/library/asyncio.html")
     assert al.allows("https://anyio.readthedocs.io/en/stable/")
-    assert al.allows("https://github.com/agronholm/anyio/issues/1")
-    assert al.allows("https://github.com/agronholm/anyio")
+    assert al.allows("https://github.com/agronholm/anyio/blob/4.4.0/src/anyio/_core/_tasks.py")
     for bad in ["https://github.com/agronholm/anyio-evil/x", "https://github.com/evil/anyio",
+                "https://github.com/agronholm/anyio/issues/1", "https://github.com/agronholm/anyio",
                 "https://readthedocs.io.evil.com/x", "https://evilreadthedocs.io/x",
                 "https://python.org/", "http://docs.python.org/3/", "https://docs.python.org.evil.com/"]:
         assert not al.allows(bad), bad
@@ -1143,30 +1153,30 @@ def test_r1_defaults_still_admit_the_docs_trees():
 
 
 @pytest.mark.parametrize("url", [
-    "https://github.com/agronholm/anyio/../../evil/repo",
-    "https://github.com/agronholm/anyio/./../../evil/repo",
-    "https://github.com/agronholm/anyio/%2e%2e/%2e%2e/evil/repo",
-    "https://github.com/agronholm/anyio/%2E%2E/evil",
-    "https://github.com/agronholm/anyio/.%2e/.%2e/evil/repo",
-    "https://github.com/agronholm/anyio%2F..%2F..%2Fevil",
-    "https://github.com/agronholm/anyio/x%5c..%5cevil",
-    "https://github.com/agronholm/anyio/x\\..\\evil",
+    "https://anyio.readthedocs.io/en/stable/../../evil/repo",
+    "https://anyio.readthedocs.io/en/stable/./../../evil/repo",
+    "https://anyio.readthedocs.io/en/stable/%2e%2e/%2e%2e/evil/repo",
+    "https://anyio.readthedocs.io/en/stable/%2E%2E/evil",
+    "https://anyio.readthedocs.io/en/stable/.%2e/.%2e/evil/repo",
+    "https://anyio.readthedocs.io/en/stable%2F..%2F..%2Fevil",
+    "https://anyio.readthedocs.io/en/stable/x%5c..%5cevil",
+    "https://anyio.readthedocs.io/en/stable/x\\..\\evil",
 ])
 def test_r2_dot_segments_and_encoded_separators_never_escape_a_prefix(url):
-    per_task = SourceAllowList(["github.com/agronholm/anyio"])
+    per_task = SourceAllowList(["anyio.readthedocs.io/en/stable"])
     assert not url_ok(url) and not per_task.allows(url), url
 
 
 def test_r2_each_normalisation_step():
     from app.modules.knowledge_package import _remove_dot_segments, normalise_url
-    per_task = SourceAllowList(["github.com/agronholm/anyio"])
+    per_task = SourceAllowList(["anyio.readthedocs.io/en/stable"])
     # unreserved escapes decode to the same resource (RFC 3986 6.2.2.2), either hex case
-    assert per_task.allows("https://github.com/agronholm/%61nyio/issues/1")
-    assert per_task.allows("https://github.com/agronholm/%61%6E%79%69%6F/x")
+    assert per_task.allows("https://anyio.readthedocs.io/en/%73table/cancellation.html")
+    assert per_task.allows("https://anyio.readthedocs.io/en/%73%74%61%62%6C%65/x")
     assert normalise_url("https://github.com/agronholm/%61nyio/x") == (
         "github.com", ["agronholm", "anyio", "x"])
     # a reserved escape stays escaped (and so does not match the plain prefix)
-    assert not per_task.allows("https://github.com/agronholm/anyio%3Bx/y")
+    assert not per_task.allows("https://anyio.readthedocs.io/en/stable%3Bx/y")
     # a trailing root dot names the same host
     assert normalise_url("https://docs.python.org./3/x") == ("docs.python.org", ["3", "x"])
     assert DEFAULT_ALLOW.allows("https://docs.python.org./3/library/asyncio.html")
@@ -1175,8 +1185,8 @@ def test_r2_each_normalisation_step():
     assert _remove_dot_segments("mid/content=5/../6") == "mid/6"
     assert _remove_dot_segments("/a/b/..") == "/a/"
     # segment boundary on the normalised path, exact host
-    assert not per_task.allows("https://github.com/agronholm/anyio-evil/x")
-    assert not per_task.allows("https://github.com/agronholm//anyio/x")
+    assert not per_task.allows("https://anyio.readthedocs.io/en/stablex/x")
+    assert not per_task.allows("https://anyio.readthedocs.io/en//stable/x")
 
 
 def test_r2_prefix_entries_require_exact_host_equality():
@@ -1241,17 +1251,6 @@ def test_r4_long_lowercase_hex_is_a_secret():
     assert not line_ok(f"The cache key is {tok} for the default configuration.")
 
 
-@pytest.mark.parametrize("ident", ["OAuth2PasswordBearer", "WindowsSelectorEventLoopPolicy",
-                                   "ASGI3Application", "HTTP2ConnectionPool", "PYTHONASYNCIODEBUG",
-                                   "IPv6Address", "utf8mb4", "base64url", "float32"])
-def test_r4_common_identifiers_are_not_secrets(ident):
-    assert line_ok(f"The documentation describes {ident} in the reference section.")
-
-
-def test_r4_colon_chunked_aws_key_id_is_a_secret():
-    assert not line_ok("The mirror token is " + "AK" + "IA:IOSF:ODNN:7EXA:MPLE and it rotates monthly.")
-
-
 def test_r3_render_never_raises_and_drops_deterministically(monkeypatch):
     import app.modules.knowledge_package as kp
     items = _maxed_items(8)
@@ -1314,15 +1313,6 @@ def test_r2_backslash_anywhere_in_a_url_is_refused():
         assert not url_ok(url), url
 
 
-@pytest.mark.parametrize("tok", [
-    "kXyzwQrstu7Vwxyzab",           # word-like pieces except one lone lower-case letter
-    "Abcdef1Ghijkl2Mnopqr3Stuv",    # word-like pieces with digits sprinkled through
-    "Abcd_x7_q9_z3_k8_Efgh_m2",     # a few word-like runs among many short chunks
-])
-def test_r4_each_identifier_check_keeps_a_key_shape_refused(tok):
-    assert not line_ok(f"The service key for the example project is {tok} in the guide.")
-
-
 async def test_r3_extra_sources_stage_alone_can_fit(monkeypatch):
     """Between 'question_text' and 'over_token_cap': dropping the second source per item is
     enough at this cap, so every answer survives with exactly one source."""
@@ -1342,3 +1332,154 @@ async def test_r3_extra_sources_stage_alone_can_fit(monkeypatch):
     assert any(trimmed) and trimmed == sorted(trimmed)        # last question first
     for it, o in zip(items, out):
         assert it.sources[0] in text and (it.sources[1] in text) == (len(o.sources) == 2)
+
+
+# ── round 4: tester attempt-3 repros (X1, X2) and the GitHub pinned-tag rule ─────────────────
+
+# Refusal rates measured at bf4de1a2 with this exact battery (seeded per shape, 2,000 tokens each,
+# in the neutral line below). Round 3's identifier exemption lowered several of them (attempt 3,
+# X2); the reverted rule must never fall below these.
+BATTERY_MIN_REFUSED = {
+    "ghp_+36": 2000, "sk_live_+24": 1998, "AIza+35": 2000, "npm_+36": 2000,
+    "aws_secret_40": 2000, "letters_mixed_32": 2000, "lower_32": 2000, "upper_20": 2000,
+}
+
+
+def _battery_gen(name):
+    import string
+    b62 = string.ascii_letters + string.digits
+    return {
+        "ghp_+36": lambda r: "gh" + "p_" + "".join(r.choice(b62) for _ in range(36)),
+        "sk_live_+24": lambda r: "sk_" + "live_" + "".join(r.choice(b62) for _ in range(24)),
+        "AIza+35": lambda r: "AI" + "za" + "".join(r.choice(b62 + "-_") for _ in range(35)),
+        "npm_+36": lambda r: "np" + "m_" + "".join(r.choice(b62) for _ in range(36)),
+        "aws_secret_40": lambda r: "".join(r.choice(b62 + "+/") for _ in range(40)),
+        "letters_mixed_32": lambda r: "".join(r.choice(string.ascii_letters) for _ in range(32)),
+        "lower_32": lambda r: "".join(r.choice(string.ascii_lowercase) for _ in range(32)),
+        "upper_20": lambda r: "".join(r.choice(string.ascii_uppercase) for _ in range(20)),
+    }[name]
+
+
+@pytest.mark.parametrize("shape", sorted(BATTERY_MIN_REFUSED))
+def test_x2_secret_shape_battery_is_no_weaker_than_bf4de1a2(shape):
+    import random
+    gen, r = _battery_gen(shape), random.Random(f"kp-battery-{shape}")
+    refused = sum(not line_ok(f"The configured value here is {gen(r)} for the service.")
+                  for _ in range(2000))
+    assert refused >= BATTERY_MIN_REFUSED[shape], (shape, refused)
+
+
+def test_x2_the_tester_attempt3_tokens_never_reach_the_package():
+    for tok in ["gh" + "p_MhjkHWGgbgek8HF0DNBZZdPaRXLujTpwrkcr", "sk_" + "live_NNG7zwJyakvbpvJzQtxDtTwa",
+                "AI" + "zaarMmylnfithxv5CaLq0CTkjwUwdLIZYQ6Nh", "ZAR80XQFryHjscXCGhdyzlMxKfeqsvnlNCvfqEUU",
+                "rshxrazgelondlrbmweodrwdbqagqwns"]:
+        assert not line_ok(f"The sample client is configured with the key {tok} in its docs."), tok
+
+
+async def test_x1_a3_exact_entry_does_not_admit_a_string_suffix_lookalike():
+    """A3: an exact per-task entry `anyio.readthedocs.io` must not admit
+    `evil-anyio.readthedocs.io` (any free RTD project), end to end."""
+    r = real_result()
+    r["synthesis"] = ("[SOURCED] A shielded cancel scope keeps its awaits running while the parent "
+                      "is cancelled. [Source 1]")
+    r["cited_sources"] = [{"url": "https://evil-anyio.readthedocs.io/en/stable/cancellation.html",
+                           "title": "t"}]
+    eng, clk = StubEngine([done_with(r), done_with(r)]), FakeClock()
+    pkg = await _build(eng, clk, Q_EXT[2:], extractor=picker({"Q3": ["shielded cancel scope"]}),
+                       source_hosts=("anyio.readthedocs.io",))
+    assert (pkg.items[0].status, pkg.items[0].reason) == ("open", "source_not_allowed")
+    assert "evil-anyio" not in pkg.text
+    for bad in ["https://evildocs.python.org/3/", "https://xdocs.python.org/3/"]:
+        assert not DEFAULT_ALLOW.allows(bad), bad
+    assert SourceAllowList(["anyio.readthedocs.io"]).allows("https://anyio.readthedocs.io/en/stable/")
+
+
+@pytest.mark.parametrize("url", [
+    "https://stackoverflow.com/questions/1/how-to-cancel",                 # D7
+    "https://developer.mozilla.org/en-US/play",                           # D6: playground snippets
+    "https://developer.mozilla.org/en-US/blog/some-post/",
+    "https://developer.mozilla.org/en-US/",
+    "https://pypi.org/project/anyio/",
+    "https://github.com/agronholm/anyio/blob/4.4.0/README.md",            # no per-task entry
+])
+def test_x1_d6_d7_defaults_refuse(url):
+    assert not DEFAULT_ALLOW.allows(url), url
+
+
+GH = "github.com/agronholm/anyio@4.4.0"
+
+
+@pytest.mark.parametrize("url,ok", [
+    ("https://github.com/agronholm/anyio/blob/4.4.0/src/anyio/_core/_tasks.py", True),
+    ("https://github.com/agronholm/anyio/tree/4.4.0", True),
+    ("https://github.com/agronholm/anyio/tree/4.4.0/docs", True),
+    ("https://github.com/agronholm/anyio/releases/tag/4.4.0", True),
+    ("https://www.github.com/agronholm/anyio/blob/4.4.0/README.rst", True),
+    ("https://github.com/agronholm/anyio", False),
+    ("https://github.com/agronholm/anyio/issues/1", False),
+    ("https://github.com/agronholm/anyio/discussions/2", False),
+    ("https://github.com/agronholm/anyio/pull/3", False),
+    ("https://github.com/agronholm/anyio/commit/0123456789abcdef0123456789abcdef01234567", False),
+    ("https://github.com/agronholm/anyio/blob/0123456789abcdef0123456789abcdef01234567/x.py", False),
+    ("https://github.com/agronholm/anyio/blob/master/x.py", False),
+    ("https://github.com/agronholm/anyio/blob/4.4.1/x.py", False),
+    ("https://github.com/agronholm/anyio/blob/4.4.0", False),
+    ("https://github.com/agronholm/anyio/wiki/Home", False),
+    ("https://github.com/agronholm/anyio/actions/runs/1", False),
+    ("https://github.com/agronholm/anyio/releases/tag/4.4.0/x", False),
+    ("https://github.com/agronholm/anyio/releases/latest", False),
+    ("https://github.com/evil/anyio/blob/4.4.0/x.py", False),
+    ("https://github.com/agronholm/anyio-evil/blob/4.4.0/x.py", False),
+    ("https://gist.github.com/agronholm/anyio/blob/4.4.0/x.py", False),
+    ("https://raw.githubusercontent.com/agronholm/anyio/4.4.0/x.py", False),
+])
+def test_github_per_task_entries_admit_only_the_pinned_tag(url, ok):
+    assert SourceAllowList([GH]).allows(url) is ok, url
+
+
+def test_github_entry_forms_that_are_ignored():
+    for entry in ["github.com/agronholm/anyio", "github.com/agronholm", "github.com",
+                  "github.com/agronholm/anyio@main", "github.com/agronholm/anyio@master",
+                  "github.com/agronholm/anyio@HEAD", "github.com/agronholm/anyio@0123abc",
+                  "github.com/agronholm/anyio@0123456789abcdef0123456789abcdef01234567",
+                  "github.com/agronholm/anyio@4.4.0/extra", "github.com/agronholm/anyio@"]:
+        al = SourceAllowList([entry])
+        assert not al.github and not al.prefixes and not al.exact, entry
+        assert not al.allows("https://github.com/agronholm/anyio/blob/main/x.py")
+        assert not al.allows("https://github.com/agronholm/anyio/issues/1")
+
+
+@pytest.mark.parametrize("url", [
+    "https://docs.python.org/3/library/asyncio..;/x",
+    "https://docs.python.org/3/library;x/asyncio.html",
+    "https://docs.python.org/3/%252e%252e/x",
+    "https://docs.python.org/3/%u002e%u002e/x",
+    "https://docs.python.org/3/%%32%65/x",
+    "https://docs.python.org/3/abc%2/x",
+])
+def test_server_quirk_path_forms_are_refused(url):
+    assert not url_ok(url) and not DEFAULT_ALLOW.allows(url), url
+
+
+def test_extra_sources_stage_keeps_only_lines_of_the_kept_source(monkeypatch):
+    """Attempt-3 finding 4: dropping source [2] must drop the lines that cited it, never relabel
+    them as [1]."""
+    import app.modules.knowledge_package as kp
+    items = _maxed_items(8)
+    full, _, _, _ = render_package(items)
+    for cap in range(estimate_tokens(full), 0, -10):
+        monkeypatch.setattr(kp, "TOKEN_CAP", cap)
+        _, _, stage, out = render_package(items)
+        if stage == "extra_sources":
+            break
+    trimmed = [(i, o) for i, o in zip(items, out) if len(o.sources) == 1]
+    assert trimmed
+    for it, o in trimmed:
+        assert o.lines == tuple(ln for ln, si in zip(it.lines, it.line_src) if si == 1)
+        assert all(si == 1 for si in o.line_src) and len(o.lines) == len(o.line_src)
+
+
+def test_token_max_refuses_an_over_long_low_entropy_token():
+    """Only TOKEN_MAX sees this: 71 chars, lower-case, no digits, runs of 5, low entropy."""
+    tok = "-".join(["abcde"] * 12)
+    assert len(tok) > 64 and not line_ok(f"The configured value here is {tok} for the service.")
