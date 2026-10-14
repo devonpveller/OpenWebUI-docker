@@ -117,7 +117,9 @@ class Settings(BaseSettings):
     # command has held the turn for `worker_command_ceiling_s` (absolute). The audit entry names the rule.
     # 0 disables the whole check (pure legacy busy-defer).
     worker_silence_s: float = 300.0         # no command running and offset frozen this long (5 min) = hung
-    worker_command_default_timeout_s: float = 1800.0   # a command declaring no timeout: the exec wait (1800 s)
+    # a command declaring no timeout: the worker's exec bound, workspace.exec_timeout_seconds in the
+    # generated worker configs (900 s since ao-exechang; agent-org/scripts/gen-worker-configs.py)
+    worker_command_default_timeout_s: float = 900.0
     worker_command_grace_s: float = 120.0   # past a command's own timeout by this much = hung
     worker_command_ceiling_s: float = 3600.0   # no single command keeps a turn alive longer than this (0 = off)
     # Autonomous INFRA-freeze recovery (operator 2026-07-13: "fully autonomous would be my choice,
@@ -480,6 +482,14 @@ class Settings(BaseSettings):
     repo_sync_enabled: bool = True
     grounding_timeout_s: float = 300.0      # bound the poll; on timeout grounding is skipped
     grounding_poll_interval_s: float = 5.0
+
+    # ── Knowledge questions (agent-knowledge-package D1) ─────────────────────
+    # Before assignment, ask the LOCAL model role for <= 8 tagged knowledge questions from a fixed
+    # checklist (app/modules/knowledge_questions.py). OFF by default and wired to no live call site
+    # yet; the profile must be on the local lane or the call is refused.
+    knowledge_questions_enabled: bool = False
+    knowledge_questions_profile: str = "planner"
+    knowledge_questions_timeout_s: float = 180.0   # bound on the one model call
 
     # ── Advisory (Tier 2) — research-grounded answers to design/architecture questions ──
     # When ON, an `advisory` operator message is answered by running an openbrain-research job and

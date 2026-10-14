@@ -17,6 +17,7 @@ Auth: `Authorization: Bearer <OPEN_TERMINAL_API_KEY>`.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import time
 
@@ -29,6 +30,10 @@ _GIT_PROXY_MARKER = "git-proxy: DENIED"
 
 class OpenTerminalError(RuntimeError):
     """open-terminal was unreachable or returned an unusable response."""
+
+
+class _NotFound(OpenTerminalError):
+    """open-terminal answered 404 (no such process / file)."""
 
 
 @dataclasses.dataclass
@@ -55,24 +60,40 @@ class ExecResult:
 def parse_exec_output(entries) -> tuple[str, str]:
     """Split open-terminal's `output` list into (stdout, stderr). The log
     entries may be plain strings or dicts carrying a stream tag — handle
-    both defensively."""
-    out: list[str] = []
-    err: list[str] = []
+    both defensively.
+
+    open-terminal's own entries are `{"type": ..., "data": ...}` and each
+    `data` is a raw chunk that carries its own newlines (a PTY read of up to
+    4096 bytes, or a pipe line that ends in its newline), so consecutive
+    `data` entries are concatenated as they are. Joining them with a newline
+    (as before ao-exechang) put a stray line break into every output longer
+    than one chunk. Other shapes are still joined line by line."""
+    out: list[tuple[str, bool]] = []
+    err: list[tuple[str, bool]] = []
     for entry in entries or []:
         if isinstance(entry, str):
-            out.append(entry)
+            out.append((entry, False))
             continue
         if not isinstance(entry, dict):
-            out.append(str(entry))
+            out.append((str(entry), False))
             continue
         stream = str(entry.get("stream") or entry.get("type") or "stdout").lower()
-        text = ""
+        text, raw = "", False
         for key in ("text", "line", "data", "content", "message"):
             if entry.get(key) is not None:
-                text = str(entry[key])
+                text, raw = str(entry[key]), key == "data"
                 break
-        (err if stream in ("stderr", "err", "2") else out).append(text)
-    return "\n".join(out), "\n".join(err)
+        (err if stream in ("stderr", "err", "2") else out).append((text, raw))
+    return _join_entries(out), _join_entries(err)
+
+
+def _join_entries(parts: list[tuple[str, bool]]) -> str:
+    text = ""
+    for i, (part, raw) in enumerate(parts):
+        if i and not (raw and parts[i - 1][1]):
+            text += "\n"
+        text += part
+    return text
 
 
 class OpenTerminalClient:
@@ -86,8 +107,10 @@ class OpenTerminalClient:
         api_key: str,
         default_cwd: str = "/workspace",
         default_timeout: int = 1800,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        self._transport = transport  # tests inject an httpx.MockTransport
         self._headers = (
             {"Authorization": f"Bearer {api_key}"} if api_key else {}
         )
@@ -96,7 +119,8 @@ class OpenTerminalClient:
 
     def _client(self, timeout: float) -> httpx.Client:
         return httpx.Client(
-            base_url=self.base_url, headers=self._headers, timeout=timeout
+            base_url=self.base_url, headers=self._headers, timeout=timeout,
+            transport=self._transport,
         )
 
     def health(self) -> bool:
@@ -162,6 +186,76 @@ class OpenTerminalClient:
             process_id=pid,
             timed_out=timed_out,
         )
+
+    # -- low-level calls for a caller that drives the wait itself (ot-exec, ao-exechang) --------
+    # Every call is bounded by an HTTP timeout; open-terminal blocks at most `wait` seconds.
+
+    def start(self, command: str, cwd: str | None = None, env: dict[str, str] | None = None,
+              wait: float = 0.0, client: httpx.Client | None = None,
+              http_timeout: float | None = None) -> dict:
+        """POST /execute: start `command`, wait up to `wait` s for it to end; the response dict
+        (`id`, `status`, `exit_code`, `output`)."""
+        body: dict[str, object] = {"command": command, "cwd": cwd or self.default_cwd}
+        if env:
+            body["env"] = env
+        wait = max(0.0, min(float(wait), _MAX_WAIT))
+        return self._call(client, "POST", "/execute", http_timeout or wait + 30, json=body,
+                          params={"wait": wait})
+
+    def status(self, process_id: str, wait: float = 0.0, tail: int | None = None,
+               client: httpx.Client | None = None, http_timeout: float | None = None) -> dict:
+        """GET /execute/{id}/status: wait up to `wait` s for the process to end; the FULL output
+        unless `tail` asks for the last N entries only."""
+        wait = max(0.0, min(float(wait), _MAX_WAIT))
+        params: dict[str, object] = {"wait": wait}
+        if tail:
+            params["tail"] = tail
+        return self._call(client, "GET", f"/execute/{process_id}/status", http_timeout or wait + 30,
+                          params=params)
+
+    def kill(self, process_id: str, client: httpx.Client | None = None,
+             http_timeout: float = 15) -> bool:
+        """DELETE /execute/{id}: SIGTERM to the command's whole process group (open-terminal starts
+        every command in its own session); open-terminal waits for the group leader to exit.
+        False when the call failed (the caller decides what that means)."""
+        try:
+            self._call(client, "DELETE", f"/execute/{process_id}", http_timeout)
+        except _NotFound:
+            pass  # already ended and cleaned up: nothing left to signal
+        except OpenTerminalError:
+            return False
+        return True
+
+    def file_text(self, path: str, client: httpx.Client | None = None) -> str | None:
+        """The text of `path` in the executor, or None when it does not exist."""
+        try:
+            return str(self._call(client, "GET", "/files/read", 15, params={"path": path})
+                       .get("content", ""))
+        except _NotFound:
+            return None
+
+    def delete_file(self, path: str, client: httpx.Client | None = None) -> None:
+        """Best effort: remove `path` in the executor (a missing file is fine)."""
+        with contextlib.suppress(OpenTerminalError):
+            self._call(client, "DELETE", "/files/delete", 15, params={"path": path})
+
+    def _call(self, client: httpx.Client | None, method: str, url: str, timeout: float,
+              **kwargs) -> dict:
+        try:
+            if client is None:
+                with self._client(timeout) as c:
+                    resp = c.request(method, url, timeout=timeout, **kwargs)
+            else:
+                resp = client.request(method, url, timeout=timeout, **kwargs)
+            if resp.status_code == 404:
+                raise _NotFound(f"{method} {url}: 404")
+            resp.raise_for_status()
+            data = resp.json()
+        except httpx.HTTPError as exc:
+            raise OpenTerminalError(f"open-terminal {method} {url} failed: {exc}") from exc
+        except ValueError as exc:  # not JSON
+            raise OpenTerminalError(f"open-terminal {method} {url}: bad response: {exc}") from exc
+        return data if isinstance(data, dict) else {}
 
     def read_file(self, path: str) -> str:
         try:

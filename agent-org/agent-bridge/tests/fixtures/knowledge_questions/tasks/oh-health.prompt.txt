@@ -1,0 +1,68 @@
+# Task
+
+**Goal.** Close two small hardening gaps:
+
+- agent-org must tell a research job that **crashed** apart from one that **finished but was not filed**.
+- The repo's config gate must refuse a service that publishes a host port without a healthcheck, so a crash-looping container cannot look "Up" forever.
+
+**What to build.**
+
+1. **agent-bridge grounding.** Grounding lives in `agent-org/agent-bridge/app/modules/grounding.py` (`OpenBrainResearchGrounding.ground()` and `.advise()`) and its callers in `app/orchestrator.py`. They poll the research engine's `GET /research/jobs/{id}`. The engine writes `status: "error"` for two different things:
+   - **Crashed:** the run threw. `error` holds the exception text, and `result` is null or absent.
+   - **Finished but not filed:** the run completed and the full report IS in `result` (`synthesis`, `reuse_claims`, `cited_sources`, ...). Only filing it into Open Brain failed. `error` starts with `curator: the research completed but was NOT filed into Open Brain - <reason>`.
+
+   Today both are treated as a crash, and a real report is thrown away. Make an unfiled job ground the effort or answer the question as a finished report would, while saying clearly that it was **not saved to Open Brain**. A crash stays ungrounded. A `result` with no report in it (empty synthesis/prose) is still a crash.
+2. **Published-port healthcheck rule.** Write a stdlib-only Python CLI, `scripts/checks/check_port_healthcheck.py`. It reads `docker compose config --format json` renders and refuses any service that publishes a host port unless one of these holds:
+   - (a) its compose `healthcheck` is defined and not disabled (`disable: true`, or a test of `["NONE"]`, counts as disabled);
+   - (b) it is built from a Dockerfile in this checkout (`build.context` + `build.dockerfile`, default `Dockerfile`) whose **last** `HEALTHCHECK` instruction is not `HEALTHCHECK NONE` (backslash-continued lines count), and compose does not disable it;
+   - (c) it has a row with a non-empty reason in an allow-list file.
+
+   Other rules:
+   - A port entry without a `published` value is not published.
+   - An allow-list row for a rendered service that no longer needs it is refused as stale.
+   - A row for a service no render produced is reported as not verified, never silently passed.
+   - Ship the allow-list at `scripts/checks/published-port-healthcheck-allowlist.json` (schema below), seeded with this repo's real published-port services that lack a healthcheck, where you can find any in the compose files of this checkout (the `OB1/` submodule is not checked out here; its services are out of scope).
+   - Wiring it into `scripts/checks/check-project-configs.ps1` is welcome but not judged.
+
+**Out of scope.** OB1 (submodule) Dockerfiles, `deno check`, compose healthchecks for OB1 services, and any Docker build or rig. Research behaviour itself is unchanged.
+
+## Interface the tests rely on
+
+Grounding:
+- `app.modules.grounding.classify_job(st: dict) -> str` returns:
+  - `"done"`, `"cancelled"`, or the live status (`"running"`, `"queued"`, ...) unchanged;
+  - for `status == "error"`: `"unfiled"` when `result` holds a written report **or** `error` starts with the prefix above (case-insensitive); otherwise `"crashed"`. That includes a missing `result`.
+- `OpenBrainResearchGrounding.ground()` must use the instance's injectable `self.transport` (an `httpx` transport, default `None`) for its HTTP client, as `advise()` already does.
+- `app.schemas.GroundingResult` gains `outcome: str = ""`. Values: `"filed"`, `"unfiled"`, `"gap"`, `"crashed"`, `"cancelled"`, `"timeout"`, `"unreachable"`.
+  - Unfiled: `grounded=True`, with the report's summary and claims, `job_id` set, and `outcome="unfiled"`.
+  - Crash: `grounded=False` and `outcome="crashed"`.
+- `advise()` for an unfiled job returns `AdvisoryAnswer(grounded=True, reason="unfiled", sources=...)`. Its `answer` contains the report text, the phrase `Not saved to Open Brain`, and the job id. A crash still gives `grounded=False, reason="failed"`.
+- When `Orchestrator.prepare_execution` injects grounded context from a result with `outcome == "unfiled"`, the steering text contains `NOT saved to Open Brain` (exactly this capitalisation) and the job id. The researched-fix context of the burn-down does the same.
+
+Port rule CLI (`python scripts/checks/check_port_healthcheck.py`):
+- Arguments:
+  - `--render LABEL=PATH` (repeatable): a JSON render with a top-level `services` object;
+  - `--allowlist PATH`: defaults to the shipped file.
+- Exit codes:
+  - 0: every published-port service is accounted for;
+  - 1: any refusal;
+  - 2: bad input (no `--render`, an unreadable render, an unreadable allow-list, or an allow-list row whose `reason` is blank or whose `kind` is not `"exception"` or `"gap"`).
+- Allow-list schema: `{"services": {"<service>": {"kind": "gap" | "exception", "reason": "..."}}}`.
+- Output lines (stdout):
+  - `PUBLISHED PORT WITHOUT HEALTHCHECK: <label>/<service> ...`. When the cause is a disabled healthcheck, the line contains `DISABLED`.
+  - `STALE ALLOW-LIST ROW: '<service>' ...`
+  - `NOT VERIFIED ...` naming each unrendered row.
+  - A summary containing `<n> render(s), <m> service(s) scanned` and the counts `compose healthcheck <a>`, `Dockerfile HEALTHCHECK <b>` and `allow-list <c>`.
+- Module-level, importable: `DEFAULT_ALLOWLIST` (path of the shipped file next to the script) and `load_allowlist(path) -> dict` (the `services` rows; raises `ValueError` on an invalid row).
+
+## How to test
+
+No network and no Docker. Set `DOCKER_HOST=tcp://127.0.0.1:1`.
+
+```
+cd agent-org/agent-bridge && python -m pytest -q tests
+cd scripts/checks && python -m pytest -q test_check_port_healthcheck.py   # once you add tests there
+ruff check .
+```
+
+Work only inside this repository checkout. Do not look for the solution elsewhere (no network, no other checkouts). When done, leave your changes in the working tree (committing is optional).

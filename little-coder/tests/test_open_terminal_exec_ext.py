@@ -41,4 +41,4 @@ def test_open_terminal_exec_node_contract():
         cwd=_ROOT, env=env, capture_output=True, text=True, timeout=300,
     )
     assert proc.returncode == 0, proc.stdout[-6000:] + proc.stderr[-2000:]
-    assert "# fail 0" in proc.stdout and "# pass 15" in proc.stdout, proc.stdout[-3000:]
+    assert "# fail 0" in proc.stdout and "# pass 21" in proc.stdout, proc.stdout[-3000:]
