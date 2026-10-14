@@ -33,9 +33,35 @@ running inside open-terminal (journaled as a `bash` tool_call sourced from the
   assistant message would run concurrently in the same workspace. Unchanged:
   the 64 MB output cap (stdout + stderr together; past it the child gets
   SIGTERM, exit 1), the result text and exit codes, and no timeout of its own
-  (ot-exec applies `LC_EXEC_TIMEOUT`, exit 124). New: pi's abort signal stops
+  (ot-exec applies `LC_EXEC_TIMEOUT`, exit 124; see the next point). New: pi's abort signal stops
   the command. Contract test: `tests/node/open_terminal_exec.test.mjs` (run by
   `tests/test_open_terminal_exec_ext.py`).
+- **A command never holds a turn past its bound** (ao-exechang, 2026-10-14).
+  ot-exec (`littlecoder/otexec.py`) runs the command through a small wrapper
+  in open-terminal: the command gets stdin from `/dev/null`, every process it
+  starts carries `LC_EXEC_ID=<id>`, and its exit status is written to
+  `/tmp/lc-exec-<id>.rc`. So a command that leaves a background job holding
+  the terminal (`( ... ) &`, `cmd &`) returns when the command itself ends,
+  with a note, instead of when the job ends (bake-off C7d: 1,270 s). On
+  `LC_EXEC_TIMEOUT` ot-exec takes the output so far, then a reaper in
+  open-terminal freezes, SIGTERMs (+SIGCONT) and SIGKILLs the command's
+  process group and session, every process carrying its `LC_EXEC_ID`, and
+  their descendants (stopped processes, SIGTERM-ignorers, setsid escapees),
+  counts survivors, and only then ot-exec exits 124 with a fixed message:
+  `[ot-exec] timed out after N s, killed: <command>`, exactly what was
+  checked and killed, and how to proceed (bounded: deadline + 14 s at most).
+  pi records an error only when a tool THROWS (a returned `isError: true` is a
+  success to it: every 1,800-s timeout in the bake-off reached the model as
+  "(no output)"), so the extension throws on that timeout: the model gets the
+  output and the message as an error result. A pi abort SIGTERMs ot-exec,
+  which kills the command in open-terminal the same way before exiting 143.
+  Backstop: an ot-exec still running `LC_EXEC_TIMEOUT` + 120 s
+  (`LC_EXEC_BACKSTOP_GRACE`) after it started is stopped (SIGTERM, SIGKILL
+  30 s later) and the call fails with a fixed message. agent-org workers run
+  with a 900-s bound (`agent-org/scripts/gen-worker-configs.py`); the
+  interactive little-coder keeps 1,800 s. Real-path test:
+  `tests/node/e2e_exechang/` (a real open-terminal container, the real ot-exec,
+  pi and this extension).
 - `docker/entrypoint-agent.sh` installs it into little-coder's own
   `.pi/extensions/` directory (alongside the bundled extensions: 35 in 1.20.0,
   of which the entrypoint removes `shell-session`, `bg-shell`, `browser` and

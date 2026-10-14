@@ -593,9 +593,29 @@ async def test_command_with_no_declared_timeout_is_alive_within_the_default_exec
         await _bound_busy(orch, "effort-nt", [_ev_start("c1", "python -m pytest -q tests")])
         _frozen_for(orch, 20 * 60)
         await orch._sweep_stalled_efforts()
-        _cmd_started_ago(orch, 20 * 60)                           # < 1800 s default
+        # the default is the worker's exec bound (ao-exechang: 900 s, gen-worker-configs.py)
+        assert orch.s.worker_command_default_timeout_s == 900
+        _cmd_started_ago(orch, orch.s.worker_command_default_timeout_s - 60)   # inside the exec wait
         await orch._sweep_stalled_efforts()
         assert orch.harness.cancelled == []
+    finally:
+        await db.dispose()
+
+
+async def test_command_with_no_declared_timeout_past_the_exec_bound_plus_grace_is_hung(db_url):
+    """ao-exechang: the exec layer kills such a command at 900 s; one still open at 900 + grace means
+    the exec layer failed to bound it - the watchdog cancels at 1,020 s, not at the old 1,920 s."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _bound_busy(orch, "effort-nt2", [_ev_start("c1", "python -m pytest -q tests")])
+        _frozen_for(orch, 20 * 60)
+        await orch._sweep_stalled_efforts()                       # tick 1: sees the command start
+        assert orch.harness.cancelled == []
+        _cmd_started_ago(orch, orch.s.worker_command_default_timeout_s + orch.s.worker_command_grace_s + 30)
+        await orch._sweep_stalled_efforts()
+        assert (_W1, "task-c") in orch.harness.cancelled
+        pl = await _last_payload(orch, "effort-nt2", "stall_recovered")
+        assert pl["rule"] == "command_overran" and pl["timeout_s"] == 900
     finally:
         await db.dispose()
 

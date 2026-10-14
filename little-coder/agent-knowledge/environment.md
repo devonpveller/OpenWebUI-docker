@@ -15,6 +15,38 @@ works — stated here once — saves you from rediscovering it on every task.
   remote. There is no general internet access — do not plan around fetching
   arbitrary URLs.
 
+## Running commands: time limit, tests, background jobs
+
+- Every `bash` call has a time limit (15 minutes for an agent-org worker).
+  When it is hit, the command and the processes it started are killed, and
+  you get `[ot-exec] timed out after N s, killed: ...` instead of a result. Do not
+  re-run the same command unchanged: it will be killed again.
+- **Run the narrowest test that shows the behaviour first**: one test file or
+  one test (`python -m pytest -q path/to/test_x.py::test_name -x`), not the
+  whole suite.
+- **Run the full suite once, after your edits** — never as a baseline before
+  your first edit unless the task needs it (it can take longer than the time
+  limit and tells you little you cannot get from the targeted test). Use the
+  project's parallel option if it has one (e.g. `pytest -n 4`). If even the
+  parallel suite may take longer than the limit, run it in the background
+  (below) and poll.
+- Put `timeout <seconds>` in front of a test or script you wrote yourself, or
+  one that reproduces a hang or leak: it may block forever.
+- **Background a long job correctly** — output to a log, then poll the log
+  with short commands:
+
+  ```
+  nohup python -m pytest -q tests > /tmp/suite.log 2>&1 &
+  tail -n 20 /tmp/suite.log
+  ```
+
+  A background job started without redirecting its output (`( ... ) &`,
+  `cmd &`) keeps running, but its output is lost. A poll loop must itself
+  stay short (e.g. `sleep 60; tail -n 5 /tmp/suite.log`), never a loop that
+  waits for the job to end.
+- Commands get no stdin: anything that waits for input (a prompt, an editor)
+  ends at once instead.
+
 ## git — what works
 
 `git` runs through a safety proxy. These behave normally:

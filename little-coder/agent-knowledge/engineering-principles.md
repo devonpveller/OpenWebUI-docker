@@ -59,4 +59,6 @@ optional polish — they are how code survives review and change.
 ## Verify
 
 Write testable code. Test behaviour, not implementation. After a change, run
-the relevant test or a syntax check before claiming it works.
+the relevant test or a syntax check before claiming it works. Narrowest test
+first; the full suite once, after editing (how, and how to background it:
+"Running commands" in your operating environment).
