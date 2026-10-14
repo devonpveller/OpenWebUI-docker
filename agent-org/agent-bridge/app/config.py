@@ -480,7 +480,8 @@ class Settings(BaseSettings):
     # `docs.rs/tokio`, and GitHub ONLY as a pinned tag: `github.com/agronholm/anyio@4.4.0`).
     # NEVER in the defaults: hosts where anyone can post or publish (github.com, pypi.org,
     # stackoverflow.com, blogs, *.readthedocs.io, docs.rs, pkg.go.dev, the learn.microsoft.com
-    # Q&A forum, MDN outside /en-US/docs) - the reader is a tool-using worker.
+    # Q&A forum, MDN outside /en-US/docs, any *.github.com / *.githubusercontent.com host) - the
+    # reader is a tool-using worker. Such user-content hosts are ignored even as per-task entries.
     knowledge_source_hosts: str = (
         "docs.python.org,peps.python.org,docs.pytest.org,www.python-httpx.org,"
         "docs.pydantic.dev,fastapi.tiangolo.com,www.starlette.io,docs.sqlalchemy.org,"
@@ -489,7 +490,7 @@ class Settings(BaseSettings):
         "www.typescriptlang.org/docs,doc.rust-lang.org,go.dev/doc,go.dev/ref,"
         "learn.microsoft.com/en-us/dotnet/api,learn.microsoft.com/en-us/dotnet/csharp,"
         "learn.microsoft.com/en-us/dotnet/standard,learn.microsoft.com/en-us/dotnet/core,"
-        "docs.docker.com,docs.github.com/en,git-scm.com/docs,www.postgresql.org/docs"
+        "docs.docker.com,git-scm.com/docs,www.postgresql.org/docs"
     )
 
     # ── Advisory (Tier 2) — research-grounded answers to design/architecture questions ──

@@ -1196,14 +1196,16 @@ def test_r2_prefix_entries_require_exact_host_equality():
         assert not al.allows(bad), bad
 
 
-def test_r2_punycode_hosts_only_when_listed_exactly():
+def test_r2_punycode_hosts_are_never_admitted():
+    """Round 5: url_ok refuses any `xn--` label, so neither a wildcard nor an exact entry admits
+    an IDN host (attempt-1 F10 probe 'https://xn--80ak6aa92e.com/x')."""
+    assert not url_ok("https://xn--80ak6aa92e.com/x")
     wild = SourceAllowList(["*.example.org"])
     assert wild.allows("https://docs.example.org/x")
     assert not wild.allows("https://xn--dcs-ula.example.org/x")
     exact = SourceAllowList(["xn--dcs-ula.example.org", "xn--prf-xla.example.net/docs"])
-    assert exact.allows("https://xn--dcs-ula.example.org/x")
-    assert exact.allows("https://xn--prf-xla.example.net/docs/a")
-    assert not exact.allows("https://xn--prf-xla.example.net/other")
+    assert not exact.allows("https://xn--dcs-ula.example.org/x")
+    assert not exact.allows("https://xn--prf-xla.example.net/docs/a")
 
 
 def test_r3_url_ok_is_ascii_only():
@@ -1483,3 +1485,220 @@ def test_token_max_refuses_an_over_long_low_entropy_token():
     """Only TOKEN_MAX sees this: 71 chars, lower-case, no digits, runs of 5, low entropy."""
     tok = "-".join(["abcde"] * 12)
     assert len(tok) > 64 and not line_ok(f"The configured value here is {tok} for the service.")
+
+
+# ── round 5: tester attempt-4 repros (Y1, findings 1-5) ─────────────────────────────────────
+
+R5_REPO = "https://github.com/agronholm/anyio"
+
+
+@pytest.mark.parametrize("entry,url", [
+    ("GitHub.com/agronholm/anyio", R5_REPO + "/issues/1"),                        # G4
+    ("GITHUB.COM/agronholm/anyio", R5_REPO + "/issues/1"),
+    ("github.com./agronholm/anyio", R5_REPO + "/discussions/12"),                 # G3
+    ("GitHub.com./agronholm/anyio", R5_REPO + "/pull/3"),
+    ("github.com/agronholm/anyio@ABCDEF0", R5_REPO + "/blob/ABCDEF0/src/x.py"),   # G12
+    ("github.com/agronholm/anyio@" + "ABCDEF0123" * 4, R5_REPO + "/blob/" + "ABCDEF0123" * 4 + "/x.py"),
+    ("github.com/agronholm/anyio@abcdef0", R5_REPO + "/blob/abcdef0/x.py"),
+    ("github.com/agronholm/anyio@2024", R5_REPO + "/blob/2024/x.py"),             # finding 4
+    ("github.com/agronholm/anyio@cafe12", R5_REPO + "/blob/cafe12/x.py"),
+    ("github.com/agronholm/anyio@v4", R5_REPO + "/blob/v4/x.py"),
+    ("github.com/agronholm/anyio@main", R5_REPO + "/blob/main/x.py"),
+    ("github.com/agronholm/anyio@release", R5_REPO + "/blob/release/x.py"),
+])
+async def test_y1_github_entry_spellings_never_admit_user_content(entry, url):
+    al = SourceAllowList([entry])
+    assert not al.github and not al.prefixes and not al.exact and not al.suffixes, entry
+    assert not al.allows(url) and not al.allows(R5_REPO + "/issues/1")
+    r = real_result()
+    r["synthesis"] = ("[SOURCED] A shielded cancel scope keeps running when its parent scope is "
+                      "cancelled. [Source 1]")
+    r["cited_sources"] = [{"url": url, "title": "t"}]
+    eng, clk = StubEngine([done_with(r), done_with(r)]), FakeClock()
+    pkg = await _build(eng, clk, Q_EXT[2:], extractor=picker({"Q3": ["shielded cancel scope"]}),
+                       source_hosts=(entry,))
+    assert (pkg.items[0].status, pkg.items[0].reason) == ("open", "source_not_allowed")
+    assert url not in pkg.text
+
+
+@pytest.mark.parametrize("tag", ["4.4.0", "v1.2.3", "1.0.0-rc1", "2.0.post1", "3.12.0b2", "0.9"])
+def test_release_tag_forms_are_accepted(tag):
+    al = SourceAllowList([f"github.com/agronholm/anyio@{tag}"])
+    assert al.github == [("agronholm", "anyio", tag)]
+    assert al.allows(f"{R5_REPO}/blob/{tag}/README.rst")
+
+
+@pytest.mark.parametrize("entry", [
+    "gist.github.com", "gist.github.com/someone", "*.github.com", "api.github.com",
+    "raw.githubusercontent.com", "raw.githubusercontent.com/agronholm/anyio",
+    "*.githubusercontent.com", "githubusercontent.com", "someone.github.io", "*.github.io",
+    "*.com", "*.io",
+])
+def test_user_content_and_tld_wildcard_entries_are_ignored(entry):
+    al = SourceAllowList([entry])
+    assert not (al.exact or al.suffixes or al.prefixes or al.github), entry
+    for url in ["https://gist.github.com/someone/abc", "https://raw.githubusercontent.com/a/b/c/x.py",
+                "https://www.github.com/someone", "https://someone.github.io/x",
+                "https://evil.com/x", "https://objects.githubusercontent.com/x"]:
+        assert not al.allows(url), (entry, url)
+
+
+@pytest.mark.parametrize("path", [
+    "/3/%c0%ae%c0%ae/x", "/3/%C0%AE/x", "/3/%c1%9c/x", "/3/%e0%80%ae%e0%80%ae/x", "/3/%E0%80%AF/x",
+    "/3/%f0%80%80%ae/x", "/3/%ef%bc%8e%ef%bc%8e/x", "/3/%E3%80%82/x", "/3/%ef%b9%92/x",
+    "/3/%e2%80%a4%e2%80%a4/x", "/3/.../x", "/3/..../x", "/3/．．/x", "/3/。/x",
+])
+def test_overlong_utf8_and_wide_dots_are_refused(path):
+    url = "https://docs.python.org" + path
+    assert not url_ok(url) and not DEFAULT_ALLOW.allows(url), url
+
+
+def test_legit_percent_encoded_utf8_still_passes():
+    assert url_ok("https://docs.python.org/3/caf%C3%A9")
+    assert url_ok("https://docs.python.org/3/library/asyncio.html#a.b")
+
+
+def test_s27_shape_classes_are_computed_on_letters_and_digits_not_the_raw_token():
+    """bf4de1a2's rule measures `len < 16` on the letters and digits. A 13-alnum, 16-char token
+    with separators passes; computing on the raw token (mutant S27) would refuse it."""
+    assert line_ok("The image tag is Ubuntu-22-04-LTS for the runner.")
+
+
+def test_an_answered_item_with_no_lines_or_bad_citations_is_open():
+    url = "https://docs.python.org/3/library/asyncio.html"
+    bad = [
+        PackageItem("Q1", "external", "q?", "answered", "", (), (), (url,), 1),
+        PackageItem("Q2", "external", "q?", "answered", "", ("A fact line for the test.",), (2,),
+                    (url,), 1),
+        PackageItem("Q3", "external", "q?", "answered", "", ("A fact line for the test.",), (1,),
+                    (), 1),
+        PackageItem("Q4", "external", "q?", "answered", "", ("A fact line for the test.",), (),
+                    (url,), 1),
+    ]
+    text, _, _, out = render_package(bad)
+    assert [(i.status, i.reason) for i in out] == [("open", "unsourced_answer")] * 4
+    assert "ANSWERED" not in text
+
+
+def test_extra_sources_stage_opens_an_item_whose_lines_all_cite_source_two(monkeypatch):
+    """Attempt-4 finding 5: a (hand-built) item whose lines never cite [1] cannot stay ANSWERED
+    with zero lines after the second source is dropped."""
+    import app.modules.knowledge_package as kp
+    u1 = "https://docs.python.org/3/library/" + "a" * 100
+    u2 = "https://docs.python.org/3/library/" + "b" * 100
+    item = PackageItem("Q1", "external", "q?", "answered", "", ("A fact line for the test.",),
+                       (2,), (u1, u2), 1)
+    full, _, _, _ = render_package([item])
+    for cap in range(estimate_tokens(full), 0, -1):
+        monkeypatch.setattr(kp, "TOKEN_CAP", cap)
+        _, _, stage, out = render_package([item])
+        if stage in ("extra_sources", "over_token_cap"):
+            break
+    assert out[0].status == "open" and out[0].reason == "over_token_cap"
+
+
+@pytest.mark.parametrize("line", [
+    "The mirror token is " + "AK" + "IA:IOSF:ODNN:7EXA:MPLE and it rotates monthly.",
+    "The mirror token is 4eC3 9HqL yjWD arjt T1zd p7dc and it rotates monthly.",
+    "The mirror token is 4eC3-9HqL-yjWD-arjt-T1zd-p7dc and it rotates monthly.",
+    "The mirror is evil.com\payload for every platform here.",
+    "The mirror is evil[.]com/x for every platform here.",
+    "The mirror is evil(dot)com for every platform here.",
+])
+def test_round5_attempt1_residuals_are_now_refused(line):
+    assert not line_ok(line), line
+
+
+@pytest.mark.parametrize("line", [
+    "The fact is that this code uses more time than that.",
+    "Runs with HTTP over TLS1 when the peer asks for it.",
+    "Uses utf8 and ipv4 over http with json by default.",
+    "Version 3.11.4 added the TaskGroup class to asyncio.",
+])
+def test_round5_chunk_rule_keeps_prose(line):
+    assert line_ok(line), line
+
+
+def test_entries_are_stripped_and_settings_split_cleanly():
+    """Surrounding whitespace is stripped (the attempt-4 tester withdrew the opposite expectation:
+    its own probe lists the same entry, padded, as kept)."""
+    assert SourceAllowList([" github.com/agronholm/anyio@4.4.0 "]).github == [
+        ("agronholm", "anyio", "4.4.0")]
+    s = Settings(_env_file=None, knowledge_source_hosts=" docs.python.org , numpy.org/doc ")
+    al = SourceAllowList.from_settings(s)
+    assert al.exact == {"docs.python.org"} and al.prefixes == [("numpy.org", ["doc"])]
+
+
+
+@pytest.mark.parametrize("entry", ["GitHub.com/agronholm/anyio@4.4.0", "github.com./agronholm/anyio@4.4.0",
+                                   "GITHUB.COM./agronholm/anyio@4.4.0", "www.github.com/agronholm/anyio@4.4.0"])
+def test_github_host_spellings_still_route_to_the_pinned_tag_rule(entry):
+    """G3/G4 from the kept side: an odd spelling of the github host is the SAME rule (pinned tag
+    only), never a plain prefix."""
+    al = SourceAllowList([entry])
+    assert al.github == [("agronholm", "anyio", "4.4.0")] and not al.prefixes and not al.exact
+    assert al.allows(R5_REPO + "/blob/4.4.0/x.py") and not al.allows(R5_REPO + "/issues/1")
+
+
+def test_entry_hosts_are_case_folded_and_numeric_labels_refused():
+    assert SourceAllowList(["Docs.Python.ORG"]).exact == {"docs.python.org"}
+    assert SourceAllowList(["NumPy.org/doc"]).prefixes == [("numpy.org", ["doc"])]
+    for url in ["https://1.2.3.example.com/x", "https://docs.123.org/x"]:
+        assert not url_ok(url), url
+
+
+def test_entry_parsing_edges_pin_each_rule():
+    """Attempt-3/4 survivors A7-A10: entry trailing dot, dot-segment entries, an empty prefix and a
+    wildcard with a path."""
+    assert SourceAllowList(["docs.python.org."]).exact == {"docs.python.org"}             # A7
+    for entry in ["numpy.org/doc/..", "numpy.org/doc/./x", "numpy.org/../doc"]:            # A8
+        assert not SourceAllowList([entry]).prefixes, entry
+    al = SourceAllowList(["numpy.org/"])                                                   # A9
+    assert not al.prefixes and not al.exact and not al.allows("https://numpy.org/news/")
+    al = SourceAllowList(["*.example.org/docs"])                                           # A10
+    assert not al.suffixes and not al.allows("https://evil.example.org/x")
+
+
+def test_n3_only_unreserved_escapes_are_decoded():
+    from app.modules.knowledge_package import normalise_url
+    assert normalise_url("https://numpy.org/doc/a%40b%3Fc") == ("numpy.org", ["doc", "a%40b%3Fc"])
+    assert normalise_url("https://numpy.org/doc/a%3fc") == ("numpy.org", ["doc", "a%3Fc"])
+    assert normalise_url("https://numpy.org/doc/%7Euser") == ("numpy.org", ["doc", "~user"])
+
+
+def test_d3_no_github_com_subdomain_is_a_source():
+    """Round 5: *.github.com hosts are user-content hosts for the allow-list (gist.github.com is),
+    so even docs.github.com is neither a default nor an accepted entry."""
+    for url in ["https://docs.github.com/en/rest", "https://docs.github.com/ja/rest",
+                "https://gist.github.com/someone/abc"]:
+        assert not DEFAULT_ALLOW.allows(url), url
+    assert not SourceAllowList(["docs.github.com/en"]).prefixes
+    assert not SourceAllowList(["docs.github.com"]).exact
+
+
+def test_r6_r7_cap_boundary_and_the_two_line_stage(monkeypatch):
+    import app.modules.knowledge_package as kp
+    items = _maxed_items(2)
+    full, tokens, stage, _ = render_package(items)
+    assert stage == "none"
+    monkeypatch.setattr(kp, "TOKEN_CAP", tokens)                 # R6: exactly at the cap fits
+    assert render_package(items)[2] == "none"
+    for cap in range(tokens - 1, 0, -1):                         # R7: first trim keeps 2 lines
+        monkeypatch.setattr(kp, "TOKEN_CAP", cap)
+        text, _, stage, _ = render_package(items)
+        if stage != "none":
+            break
+    assert stage == "lines"
+    last = text.split("[" + items[-1].qid + "]")[1]
+    assert last.count("\n  - ") == 2, last
+
+
+@pytest.mark.parametrize("url", [
+    "https://github.com/agronholm/anyio/blob/4.4.0/src/x.py/",       # G11: an empty file segment
+    "https://github.com/agronholm/anyio/blob/4.4.0//x.py",
+    "https://github.com/agronholm/anyio/BLOB/4.4.0/x.py",            # G14: routes are lower-case
+    "https://github.com/agronholm/anyio/Tree/4.4.0",
+    "https://github.com/agronholm/anyio/Releases/tag/4.4.0",
+])
+def test_github_pinned_tag_paths_are_exact(url):
+    assert not SourceAllowList([GH]).allows(url), url

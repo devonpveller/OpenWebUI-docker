@@ -84,7 +84,7 @@ ANSWERED, OPEN = "answered", "open"
 # OPEN reason codes (closed set; rendered verbatim).
 REASONS = frozenset({
     "not_found", "time_box", "extract_failed", "question_text_rejected", "no_research_client",
-    "source_not_allowed", "over_question_cap", "over_token_cap",
+    "source_not_allowed", "over_question_cap", "over_token_cap", "unsourced_answer",
     "research_timeout", "research_unreachable", "research_model_down", "research_unfiled",
     "research_crashed", "research_cancelled", "research_rejected", "research_unauthorized",
     "research_malformed", "research_failed",
@@ -161,7 +161,7 @@ _SCHEME_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{1,20}://|\b(?:javascript|vbscri
 _IP_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b|\[[0-9A-Fa-f:]{2,}\]")
 _INTERNAL_RE = re.compile(r"(?i)\blocalhost\b|\b[a-z0-9-]+\.(?:internal|local|lan|localdomain|"
                           r"corp|home|intranet|svc)\b|\bnip\.io\b|\bsslip\.io\b|\bxip\.io\b")
-_HOSTPATH_RE = re.compile(r"\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.([A-Za-z]{2,24})(?::\d{1,5})?/")
+_HOSTPATH_RE = re.compile(r"\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.([A-Za-z]{2,24})(?::\d{1,5})?[/\\]")
 _HOSTPORT_RE = re.compile(r"\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.([A-Za-z]{2,24}):(\d{2,5})\b")
 _CODE_EXT = frozenset({
     "py", "pyi", "pyx", "ts", "tsx", "js", "jsx", "mjs", "cjs", "md", "rst", "txt", "json", "toml",
@@ -231,6 +231,34 @@ def _hostish(s: str) -> bool:
     return False
 
 
+# A key split into equal chunks by one separator (`AKIA:IOSF:ODNN:7EXA:MPLE`, `4eC3 9HqL yjWD ...`):
+# four or more chunks of the same length (3-8) and the same separator, containing a digit, judged
+# JOINED by the unchanged bf4de1a2 `_secret_token`. Ordinary prose rarely has 4 equal-length words in a row, and
+# when it does the joined words are not key-shaped.
+def _chunk_re(n: int, sep: str) -> re.Pattern[str]:
+    c = "[A-Za-z0-9]{%d}" % n
+    return re.compile("(?<![A-Za-z0-9])" + c + "(?:" + re.escape(sep) + c + "){3,}(?![A-Za-z0-9])")
+
+
+_CHUNKS_RES = tuple(_chunk_re(n, sep) for n in range(3, 9) for sep in " :._-")
+# Defanged hosts (`evil[.]com`, `evil(dot)com`): a URL the reader is meant to re-assemble.
+_DEFANGED_RE = re.compile(r"(?i)\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\)")
+
+
+def _chunked_secret(s: str) -> bool:
+    for rx in _CHUNKS_RES:
+        for m in rx.finditer(s):
+            chunks = re.findall(r"[A-Za-z0-9]+", m.group(0))
+            # key-like chunks, not prose words: at least two chunks carry a digit, or every
+            # chunk is upper-case/digits with at least one digit (AWS key ids)
+            with_digit = sum(any(ch.isdigit() for ch in c) for c in chunks)
+            upper_only = all(c == c.upper() for c in chunks)
+            key_like = with_digit >= 2 or (upper_only and with_digit >= 1)
+            if key_like and _secret_token("".join(chunks)):
+                return True
+    return False
+
+
 def _shape_ok(s: Any, *, min_len: int, max_len: int) -> bool:
     if not isinstance(s, str):
         return False
@@ -242,7 +270,10 @@ def _shape_ok(s: Any, *, min_len: int, max_len: int) -> bool:
         return False
     if any(_secret_token(t.strip(_TOKEN_STRIP)) for t in s.split()):
         return False
+    if _chunked_secret(s):
+        return False
     return not (_MARKUP_RE.search(s) or _ENTITY_RE.search(s) or _MENTION_RE.search(s)
+                or _DEFANGED_RE.search(s)
                 or _TAG_RE.search(s) or _SCHEME_RE.search(s) or _IP_RE.search(s)
                 or _INTERNAL_RE.search(s) or _hostish(s) or _ASSIGN_RE.search(s)
                 or _DIRECTIVE_RE.search(s))
@@ -267,6 +298,10 @@ _BAD_HOST_SUFFIXES = (".local", ".lan", ".internal", ".localdomain", ".corp", ".
                       ".svc", ".nip.io", ".sslip.io", ".xip.io", ".localtest.me", ".lvh.me",
                       ".test", ".example", ".invalid", ".onion", ".arpa")
 _ENCODED_DOT_SLASH_RE = re.compile(r"%(?:2e|2f|5c)", re.I)
+# Overlong UTF-8 leads (%C0 %C1 any; %E0 then %80-%9F; %F0 then %80-%8F) can smuggle `.` or `/`
+# past a lenient server; U+FF0E / U+3002 / U+FE52 / U+2024 are dots some servers fold to `.`.
+_OVERLONG_OR_WIDE_DOT_RE = re.compile(
+    r"%c[01]|%e0%[89][0-9a-f]|%f0%8[0-9a-f]|%ef%bc%8e|%e3%80%82|%ef%b9%92|%e2%80%a4", re.I)
 _BAD_HOSTS = frozenset({"localhost", "nip.io", "sslip.io", "xip.io", "localtest.me", "lvh.me"})
 
 
@@ -300,6 +335,8 @@ def url_ok(s: Any) -> bool:
         return False
     if not re.fullmatch(r"[a-z]{2,24}", labels[-1]) or any(lb.isdigit() for lb in labels):
         return False
+    if any(lb.startswith("xn--") for lb in labels):
+        return False                                   # IDN / punycode: homograph risk, never
     h = host.lower()
     if h in _BAD_HOSTS or any(h.endswith(suf) for suf in _BAD_HOST_SUFFIXES):
         return False
@@ -310,8 +347,10 @@ def url_ok(s: Any) -> bool:
         return False                                   # %2e %2f %5c: a hidden segment trick
     if ";" in path or "%25" in path or re.search(r"%(?![0-9A-Fa-f]{2})", path):
         return False                                   # server-quirk forms (`..;`, `%252e`, `%u002e`)
-    if any(seg in (".", "..") for seg in path.split("/")):
-        return False                                   # a dot segment escapes a prefix entry
+    if _OVERLONG_OR_WIDE_DOT_RE.search(path):
+        return False                                   # overlong UTF-8 / fullwidth or ideographic dot
+    if any(seg and set(seg) == {"."} for seg in path.split("/")):
+        return False                                   # `.` `..` `...`: dot segments escape a prefix
     if _SECRET_PARAM_RE.search(parts.query or "") or _SECRET_PARAM_RE.search(parts.fragment or ""):
         return False
     words = re.sub(r"[-_/.+%=&?#]+", " ", s[len("https://"):])
@@ -371,8 +410,6 @@ def normalise_url(url: str) -> tuple[str, list[str]] | None:
     if host.endswith("."):
         host = host[:-1]
     path = _remove_dot_segments(_decode_unreserved(parts.path or "/")) or "/"
-    if any(seg in (".", "..") for seg in path.split("/")):
-        return None                                    # decoding produced a dot segment
     return host, path.split("/")[1:]
 
 
@@ -392,9 +429,24 @@ _ENTRY_RE = re.compile(r"^(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:/[A-Za-z0-9._~-
 _GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
 _GITHUB_ENTRY_RE = re.compile(r"^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100})"
                               r"@([A-Za-z0-9][A-Za-z0-9._-]{0,99})$")
-_SHA_LIKE_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
-_MUTABLE_REFS = frozenset({"main", "master", "head", "develop", "dev", "trunk", "latest",
-                           "default", "gh-pages", "stable", "next", "nightly"})
+# A release tag: `4.4.0`, `v1.2.3`, `1.0.0-rc1`, `2.0.post1` - at least two dot-separated numbers.
+# A sha (any case, any length), a bare number (`@2024`), hex (`@cafe12`) or a branch name never
+# matches, so mutable and commit refs are excluded by construction.
+_RELEASE_TAG_RE = re.compile(r"^v?\d+(?:\.\d+)+(?:[.-][A-Za-z0-9]+)*$")
+# Hosts where anyone can publish (gists, raw user content): never admitted by any entry form.
+_USER_CONTENT_SUFFIXES = (".github.com", ".githubusercontent.com", ".github.io")
+_USER_CONTENT_HOSTS = frozenset({"githubusercontent.com", "github.io"})
+
+
+def _user_content_host(host: str) -> bool:
+    """A host (or a `*.suffix` entry) under which anyone can publish. Plain github.com itself is
+    not one here: its entries take the pinned-tag branch before this check."""
+    h = host.lower().rstrip(".")
+    wild = h.startswith("*.")
+    h = h[2:] if wild else h
+    if wild and h == "github.com":
+        return True                                     # `*.github.com` covers gist.github.com
+    return h in _USER_CONTENT_HOSTS or any(h.endswith(s) for s in _USER_CONTENT_SUFFIXES)
 
 
 class SourceAllowList:
@@ -403,15 +455,17 @@ class SourceAllowList:
     Entry forms: `host` (exact), `*.suffix` (any subdomain of suffix - not in the defaults; a
     caller may pass one per task), `host/path/prefix` (EXACT host, and the normalised path at or
     under the prefix on a segment boundary - e.g. `numpy.org/doc` for the docs tree
-    without admitting all of numpy.org). A punycode (`xn--`) host is admitted only when it is
-    listed exactly (as a host or a prefix host), never through a wildcard. Invalid entries are
-    ignored.
+    without admitting all of numpy.org). A punycode (`xn--`) host is never admitted (`url_ok`
+    refuses it). Invalid entries are ignored.
 
     github.com is special: anyone can post issues, discussions and pull requests under any repo,
     and GitHub serves commits from any FORK under the parent's URL. So a github.com entry must be
-    `github.com/<org>/<repo>@<tag>` (a pinned release tag, not a sha-like or branch-like ref) and
-    admits ONLY `/<org>/<repo>/blob/<tag>/...`, `/<org>/<repo>/tree/<tag>[/...]` and
-    `/<org>/<repo>/releases/tag/<tag>`. Any other github.com entry is ignored."""
+    `github.com/<org>/<repo>@<tag>` where <tag> looks like a release (`_RELEASE_TAG_RE`: `4.4.0`,
+    `v1.2.3`, `1.0.0-rc1` - never a sha, a bare number or a branch name) and admits ONLY
+    `/<org>/<repo>/blob/<tag>/<file...>`, `/<org>/<repo>/tree/<tag>[/...]` and
+    `/<org>/<repo>/releases/tag/<tag>`. Any other github.com entry (any case, trailing dot) is
+    ignored, and so is any entry for a user-content host (gist.github.com, *.github.com,
+    *.githubusercontent.com, *.github.io)."""
 
     def __init__(self, entries: Iterable[str]) -> None:
         self.exact: set[str] = set()
@@ -423,10 +477,11 @@ class SourceAllowList:
             gh_host, _, gh_rest = e.partition("/")
             if gh_host.lower().rstrip(".") in _GITHUB_HOSTS:
                 m = _GITHUB_ENTRY_RE.match(gh_rest)
-                tag = m.group(3) if m else ""
-                if m and not _SHA_LIKE_RE.match(tag) and tag.lower() not in _MUTABLE_REFS:
+                if m and _RELEASE_TAG_RE.match(m.group(3)):
                     self.github.append((m.group(1), m.group(2), m.group(3)))
                 continue                                # never a plain github.com host/prefix
+            if _user_content_host(gh_host):
+                continue                                # gists / raw user content / *.github.com
             host_part = e.split("/", 1)[0].lower().rstrip(".")
             e = host_part + (("/" + e.split("/", 1)[1]) if "/" in e else "")
             if not e or not _ENTRY_RE.match(e):
@@ -444,7 +499,7 @@ class SourceAllowList:
 
     @classmethod
     def from_settings(cls, settings: Settings, extra: Iterable[str] = ()) -> "SourceAllowList":
-        base = [x for x in str(settings.knowledge_source_hosts or "").split(",") if x.strip()]
+        base = [x.strip() for x in str(settings.knowledge_source_hosts or "").split(",") if x.strip()]
         return cls([*base, *extra])
 
     @staticmethod
@@ -467,8 +522,6 @@ class SourceAllowList:
             return True
         if host in _GITHUB_HOSTS:
             return any(self._github_ok(segs, org, repo, tag) for org, repo, tag in self.github)
-        if any(lb.startswith("xn--") for lb in host.split(".")):
-            return False                               # IDN only when listed exactly (above)
         return any(host.endswith(suf) for suf in self.suffixes)
 
 
@@ -666,7 +719,13 @@ def render_package(items: Sequence[PackageItem],
     (5) answers -> OPEN `over_token_cap` (research answers before codebase answers).
     Stages 1-3 keep every source and every question. Returns (text, tokens, stage, items) - the
     items as finally rendered (stage 4/5 change them)."""
-    work = list(items)
+    # An ANSWERED item must carry at least one line and one source, every line citing a source it
+    # has; anything else (only possible for a hand-built item) is OPEN `unsourced_answer`.
+    work = [it if it.status != ANSWERED or (
+                it.lines and it.sources and len(it.lines) == len(it.line_src)
+                and all(1 <= si <= len(it.sources) for si in it.line_src))
+            else PackageItem(it.qid, it.tag, it.question, OPEN, "unsourced_answer", round=it.round)
+            for it in items]
     n = len(work)
     max_lines = [MAX_LINES] * n
     omit_answer = [False] * n
@@ -705,10 +764,14 @@ def render_package(items: Sequence[PackageItem],
     for k in reversed(range(n)):
         it = work[k]
         if it.status == ANSWERED and len(it.sources) > 1:
-            keep = [i for i, si in enumerate(it.line_src) if si == 1]   # line 1 always cites [1]
-            work[k] = replace(it, sources=it.sources[:1],
-                              lines=tuple(it.lines[i] for i in keep),
-                              line_src=tuple(1 for _ in keep))
+            keep = [i for i, si in enumerate(it.line_src) if si == 1]
+            if keep:
+                work[k] = replace(it, sources=it.sources[:1],
+                                  lines=tuple(it.lines[i] for i in keep),
+                                  line_src=tuple(1 for _ in keep))
+            else:                                       # no line cited [1]: nothing left to answer
+                work[k] = PackageItem(it.qid, it.tag, it.question, OPEN, "over_token_cap",
+                                      round=it.round)
             text = r()
             if fits(text):
                 return done(text, "extra_sources")
