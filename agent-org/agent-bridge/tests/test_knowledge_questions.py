@@ -218,7 +218,7 @@ def test_count_is_capped_at_eight_in_order():
 
 
 def test_overlong_question_is_omitted_not_cut():
-    long_q = "Q1 [external] Does " + "the library " * 40 + "retry?"
+    long_q = "Q1 [external] Does " + "the library " * 55 + "retry?"
     assert kq.MAX_QUESTION_CHARS < len(long_q) < kq.MAX_LINE_CHARS
     qs = kq.parse_reply(long_q + "\nQ2 [codebase] Is the base commit green before the change?\n")
     assert [q.text for q in qs.questions] == ["Is the base commit green before the change?"]
@@ -483,3 +483,127 @@ def test_think_without_opener_and_nested_think():
 def test_parse_reply_tolerates_non_text(reply):
     qs = kq.parse_reply(reply)
     assert qs.questions == [] and qs.reason == "empty_reply"
+
+
+
+# ── ROUND 2: real local-Qwen label shapes (bake-off rig), line separators, chat offers ───────
+import json  # noqa: E402
+
+REAL_SHAPES = json.loads((FIX / "real_shapes.json").read_text(encoding="utf-8"))["shapes"]
+# The bodies: the seven questions the ao-queue recorded reply yields (real task-derived text).
+BODIES = [(q.tag, q.text) for q in kq.parse_reply(_reply("ao-queue")).questions]
+
+
+def _render(template: str, rows) -> str:
+    return "\n".join(template.format(n=i, t=tag, q=text) for i, (tag, text) in enumerate(rows, 1))
+
+
+@pytest.mark.parametrize("shape", REAL_SHAPES, ids=[s["template"] for s in REAL_SHAPES])
+def test_real_rig_label_shape_replays(shape):
+    """C8/C3: a list written in a label shape real local Qwen uses, with the tag as the label,
+    yields every question with its tag, verbatim - none lost, none invented."""
+    reply = _render(shape["template"], BODIES)
+    qs = kq.parse_reply(reply)
+    assert [(q.tag, q.text) for q in qs.questions] == BODIES, (qs.status, qs.dropped)
+    _assert_not_invented(qs, reply)
+
+
+def test_real_rig_shapes_mixed_in_one_reply_capped_at_eight():
+    lines = [shape["template"].format(n=i, t=BODIES[i % 7][0], q=BODIES[i % 7][1])
+             for i, shape in enumerate(REAL_SHAPES)]
+    qs = kq.parse_reply("\n".join(lines))
+    assert len(qs.questions) == 7 and qs.status == "ok"          # 18 lines, 7 distinct questions
+    assert qs.dropped == {"duplicate": len(REAL_SHAPES) - 7}
+
+
+def test_real_shape_fixture_records_its_provenance():
+    rig = [s for s in REAL_SHAPES if s["source"] == "rig"]
+    assert len(rig) >= 12 and all(s["rig_lines"] > 0 and s["example_run"] for s in rig)
+    assert sum(s["rig_lines"] for s in rig) > 250
+
+
+def test_code_label_never_rewrites_code_names():
+    reply = "- `codebase` — Does `decide(None, ...)` return 403 for an `external` caller here?\n"
+    qs = kq.parse_reply(reply)
+    assert [q.text for q in qs.questions] == [
+        "Does `decide(None, ...)` return 403 for an `external` caller here?"]
+
+
+@pytest.mark.parametrize("sep", [chr(0x2028), chr(0x2029), chr(0x85), chr(0x0B), chr(0x0C)])
+def test_line_separators_never_inside_an_emitted_question(sep):
+    """C1 (attempt-1 F-B): one line on EVERY path - JSON values, table cells and lines."""
+    body = "Where is the permit" + sep + "Q2 [external] released on the stream?"
+    as_json = json.dumps([{"question": body, "tag": "codebase"}])
+    as_line = "Q1 [codebase] " + body + "\n"
+    as_table = "| 1 | codebase | " + body + " |\n"
+    for reply in (as_json, as_line, as_table):
+        for q in kq.parse_reply(reply).questions:
+            assert len(q.text.splitlines()) == 1 and sep not in q.text, (repr(reply), q.text)
+    assert kq.parse_reply(as_json).questions == []
+
+
+def test_chat_offers_are_not_knowledge_questions():
+    """attempt-1 O2: offers addressed to the user are dropped, and a non-tag header ends the
+    section so closing list items do not inherit its tag."""
+    reply = ("### Codebase questions\n"
+             "- Where in `routes/data.py` is the model permit released on the streaming path?\n"
+             "Follow-ups you might ask:\n"
+             "- Which other routes share the release helper in this module?\n"
+             "- Would you like a deeper dive into the streaming path?\n"
+             "External: is this what you wanted for the first pass?\n"
+             "Q9 [external] Would you like me to also cover retries?\n")
+    qs = kq.parse_reply(reply)
+    assert [(q.tag, q.text) for q in qs.questions] == [
+        ("codebase", "Where in `routes/data.py` is the model permit released on the streaming path?")]
+    assert qs.dropped == {"untagged": 2, "chat_offer": 2}
+
+
+def test_json_text_tag_must_agree_with_field_tag():
+    """attempt-1 O3: a JSON item whose text tag conflicts with its field tag is ambiguous."""
+    conflict = '[{"question": "[external] Does uvicorn send http.disconnect early?", "tag": "codebase"}]'
+    qs = kq.parse_reply(conflict)
+    assert qs.questions == [] and qs.dropped == {"ambiguous_tag": 1}
+    agree = '[{"question": "[external] Does uvicorn send http.disconnect early?", "tag": "external"}]'
+    assert [(q.tag, q.text) for q in kq.parse_reply(agree).questions] == [
+        ("external", "Does uvicorn send http.disconnect early?")]
+    text_only = '[{"question": "[codebase] Which helper builds the fake client here?"}]'
+    assert [q.tag for q in kq.parse_reply(text_only).questions] == ["codebase"]
+
+
+def test_question_length_bound_is_600_and_inclusive():
+    head = "Q1 [codebase] "
+    q600 = "Does " + "x" * (kq.MAX_QUESTION_CHARS - 6) + "?"
+    q601 = "Does " + "x" * (kq.MAX_QUESTION_CHARS - 5) + "?"
+    assert len(q600) == 600 and len(q601) == 601
+    assert [q.text for q in kq.parse_reply(head + q600).questions] == [q600]
+    qs = kq.parse_reply(head + q601)
+    assert qs.questions == [] and qs.dropped == {"too_long": 1}
+
+
+
+def test_prompt_asks_for_concise_tagged_list_only():
+    """Operator 2026-10-14: the prompt asks for one-line, one-sentence, single-fact questions
+    within a word budget, and no preamble or closing offers; the parser stays tolerant above it."""
+    system, _, _ = kq.build_prompt("task")
+    assert "CONCISE" in system and "one sentence" in system and "single fact" in system
+    assert f"at most {kq.CONCISE_WORDS} words" in system and f"{kq.CONCISE_CHARS} characters" in system
+    assert "No preamble" in system and "no closing offers" in system
+    assert kq.CONCISE_CHARS < kq.MAX_QUESTION_CHARS          # tolerance above the requested size
+
+
+@pytest.mark.parametrize("template", [
+    "{n}. **{t}** {q}",                 # bold label, no separator
+    "Q{n} \u2014 [{t}] {q}",            # dash after the Q label
+    "Q{n} `[{t}]` {q}",                 # bracket tag inside code
+    "- {q} \u2014 *{t}*",               # trailing italic tag after a dash
+    "- {q} \u2192 {t}",                 # trailing arrow tag
+])
+def test_more_label_variants(template):
+    reply = _render(template, BODIES)
+    qs = kq.parse_reply(reply)
+    assert [(q.tag, q.text) for q in qs.questions] == BODIES, (qs.status, qs.dropped)
+
+
+def test_italic_tag_label_on_the_next_line():
+    reply = "\n".join(f"{i}. {q}\n   *Tag:* `{t}`" for i, (t, q) in enumerate(BODIES, 1))
+    assert [(q.tag, q.text) for q in kq.parse_reply(reply).questions] == BODIES
