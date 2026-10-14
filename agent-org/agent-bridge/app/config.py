@@ -472,6 +472,21 @@ class Settings(BaseSettings):
     # bounds the WHOLE step (both research rounds + extraction + the codebase answers).
     knowledge_package_enabled: bool = False
     knowledge_package_time_box_s: float = 900.0
+    # Defence (a): only pages on these documentation / upstream hosts may source an answer
+    # (comma-separated; `host`, `*.suffix`, or `host/path/prefix` for one project on a shared host,
+    # e.g. `github.com/agronholm/anyio`). Anything else -> OPEN `source_not_allowed`. Per-task
+    # entries (the task's own libraries) are added by the caller (build_knowledge_package
+    # source_hosts=...). Deliberately NOT generic github.com / pypi.org / stackoverflow.com /
+    # blogs: anyone can write there, and the reader is a tool-using worker.
+    knowledge_source_hosts: str = (
+        "docs.python.org,peps.python.org,*.readthedocs.io,docs.pytest.org,www.python-httpx.org,"
+        "docs.pydantic.dev,fastapi.tiangolo.com,www.starlette.io,docs.sqlalchemy.org,"
+        "docs.aiohttp.org,docs.djangoproject.com,flask.palletsprojects.com,numpy.org/doc,"
+        "pandas.pydata.org/docs,developer.mozilla.org,nodejs.org/api,docs.deno.com,"
+        "www.typescriptlang.org/docs,doc.rust-lang.org,docs.rs,pkg.go.dev,go.dev/doc,"
+        "learn.microsoft.com,docs.docker.com,docs.github.com,git-scm.com/docs,"
+        "www.postgresql.org/docs"
+    )
 
     # ── Advisory (Tier 2) — research-grounded answers to design/architecture questions ──
     # When ON, an `advisory` operator message is answered by running an openbrain-research job and

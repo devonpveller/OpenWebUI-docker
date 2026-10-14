@@ -156,8 +156,10 @@ RESEARCH_ORIGIN = "agent"
 _JOB_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _LIVE = ("queued", "running")
 MAX_BODY_BYTES = 4 * 1024 * 1024        # a job row (result incl. prose/rendered) is ~100-300 KB
+MAX_SUBMIT_BODY_BYTES = 64 * 1024       # the 202 submit body is ~150 bytes
 MAX_POLL_FAILURES = 3                   # consecutive failed polls -> "unreachable"
-CANCEL_TIMEOUT_S = 5.0
+CANCEL_TIMEOUT_S = 5.0                  # a cancel sent BEFORE the deadline (unreachable/model down)
+CANCEL_GRACE_S = 0.5                    # a cancel sent AT the deadline: run_job ends <= budget + this
 
 
 @dataclass(frozen=True)
@@ -165,8 +167,8 @@ class ResearchJob:
     """How one deadline-bounded research job ended.
 
     state (closed set): done | unfiled | crashed | cancelled | timeout | unreachable | model_down
-    | rejected | failed. Only `done` and `unfiled` carry a `result`; a caller decides what an
-    unfiled result is worth (the knowledge package treats it as OPEN, never as an answer)."""
+    | rejected | unauthorized | malformed | failed. Only `done` and `unfiled` carry a `result`; a
+    caller decides what an unfiled result is worth (the knowledge package treats it as OPEN)."""
 
     state: str
     job_id: str | None = None
@@ -190,12 +192,13 @@ async def _read_json_bounded(resp: httpx.Response, cap: int = MAX_BODY_BYTES) ->
     return json.loads(bytes(buf).decode("utf-8"))
 
 
-def _model_down(st: dict[str, Any]) -> bool:
-    """The engine's model-down signals (README 'How a caller reads it')."""
+def _job_model_down(st: dict[str, Any]) -> bool:
+    """Did THIS job stop because the model is down? Only the job's own fields count: the
+    `progress.code` / `progress.model_down` that pauseForModelDown writes on it, or an `error`
+    starting `model_down:`. The row's `model` key is the engine's PROCESS-WIDE latch snapshot
+    (llm.ts ModelHealth.snapshot) and says nothing about why this job crashed or was cancelled."""
     prog = st.get("progress") if isinstance(st.get("progress"), dict) else {}
-    model = st.get("model") if isinstance(st.get("model"), dict) else {}
     return (prog.get("code") == "model_down" or prog.get("model_down") is True
-            or model.get("state") == "down"
             or str(st.get("error") or "").startswith("model_down:"))
 
 
@@ -237,9 +240,10 @@ class OpenBrainResearchGrounding:
         - `deadline_at` = now + budget_s is sent to the engine, so a queued job past it is never
           started and a running one is aborted engine-side even if this process dies.
         - The local wait is bounded by the same budget on a monotonic clock AND by a poll count
-          (C6); every HTTP call's timeout is clamped to the time left.
-        - On the deadline (or this task being cancelled) the job is cancelled
-          (POST .../cancel, best-effort, bounded) and the outcome is `timeout`.
+          (C6); every HTTP call is bounded by the time left (httpx timeout AND asyncio.wait_for,
+          so the bound does not depend on the transport); no poll is sent after the deadline.
+        - On the deadline the job is cancelled with a CANCEL_GRACE_S bound, so the call returns
+          within budget_s + CANCEL_GRACE_S even when the engine is wedged.
         - Every failure maps to a closed state; no engine text is returned except `result`."""
         start = self.clock()
         end = start + max(0.0, budget_s)
@@ -263,92 +267,116 @@ class OpenBrainResearchGrounding:
         def left() -> float:
             return end - self.clock()
 
+        def early_cancel_t() -> float:
+            # a cancel before the deadline may use the time left plus the grace, at most 5 s
+            return min(CANCEL_TIMEOUT_S, max(0.0, left()) + CANCEL_GRACE_S)
+
         job_id: str | None = None
         try:
             async with httpx.AsyncClient(transport=self.transport) as c:
                 if left() <= 0:
                     return ResearchJob("timeout")
+
+                async def submit(t: float) -> tuple[int, Any]:
+                    async with c.stream("POST", f"{base}/research", headers=headers, json=body,
+                                        timeout=t) as rr:
+                        if rr.status_code >= 400:
+                            return rr.status_code, None
+                        return rr.status_code, await _read_json_bounded(rr, MAX_SUBMIT_BODY_BYTES)
+
                 try:
-                    # wait_for as well as the httpx timeout: the bound must not depend on the
-                    # transport honouring its timeout (C6).
-                    r = await asyncio.wait_for(
-                        c.post(f"{base}/research", headers=headers, json=body,
-                               timeout=min(30.0, max(1.0, left()))),
-                        timeout=min(30.0, max(1.0, left())))
+                    t = min(30.0, left())
+                    code, sub = await asyncio.wait_for(submit(t), timeout=t)
                 except asyncio.TimeoutError:
                     return ResearchJob("timeout" if left() <= 0 else "unreachable")
                 except httpx.HTTPError:
                     return ResearchJob("unreachable")
-                if r.status_code >= 500:
+                except (ValueError, UnicodeDecodeError):
+                    return ResearchJob("malformed")
+                if code >= 500:
                     return ResearchJob("unreachable")
-                if r.status_code >= 400:
+                if code in (401, 403):
+                    return ResearchJob("unauthorized")
+                if code >= 400:
                     return ResearchJob("rejected")
-                try:
-                    jid = (r.json() or {}).get("job_id")
-                except (ValueError, AttributeError):
-                    return ResearchJob("failed")
+                jid = sub.get("job_id") if isinstance(sub, dict) else None
                 if not isinstance(jid, str) or not _JOB_ID_RE.match(jid):
-                    return ResearchJob("failed")   # never interpolate an unchecked id into a URL
+                    return ResearchJob("malformed")   # never interpolate an unchecked id into a URL
                 job_id = jid
                 fails = 0
+
+                async def get_status(t: float) -> tuple[int, Any]:
+                    async with c.stream("GET", f"{base}/research/jobs/{job_id}",
+                                        headers=headers, timeout=t) as pr:
+                        if pr.status_code >= 400:
+                            return pr.status_code, None
+                        return pr.status_code, await _read_json_bounded(pr)
+
                 for _ in range(max_polls):
                     if left() <= 0:
                         break
                     await self.sleep(min(poll, max(0.0, left())))
                     if left() <= 0:
-                        break
-                    async def get_status(t: float) -> tuple[int, Any]:
-                        async with c.stream("GET", f"{base}/research/jobs/{job_id}",
-                                            headers=headers, timeout=t) as pr:
-                            if pr.status_code >= 400:
-                                return pr.status_code, None
-                            return pr.status_code, await _read_json_bounded(pr)
-
+                        break                      # never poll after the deadline
                     try:
-                        t = min(30.0, max(1.0, left()))
+                        # floor 0.05 s: the post-sleep check above is THE guard against a poll
+                        # after the deadline, not a zero wait_for that happens to cancel it
+                        t = min(30.0, max(0.05, left()))
                         code, st = await asyncio.wait_for(get_status(t), timeout=t)
-                        if code == 404:
-                            return ResearchJob("failed", job_id)
-                        if code >= 400:
-                            raise ValueError(f"poll http {code}")
-                        fails = 0
-                    except (httpx.HTTPError, ValueError, UnicodeDecodeError, asyncio.TimeoutError):
+                    except (ValueError, UnicodeDecodeError):
+                        sent = await self._cancel(c, base, headers, job_id, "malformed reply",
+                                                  early_cancel_t())
+                        return ResearchJob("malformed", job_id, cancel_sent=sent)
+                    except (httpx.HTTPError, asyncio.TimeoutError):
+                        code, st = -1, None
+                    if code in (401, 403):
+                        return ResearchJob("unauthorized", job_id)
+                    if code == 404:
+                        return ResearchJob("failed", job_id)
+                    if code < 200 or code >= 400:
                         fails += 1
                         if fails >= MAX_POLL_FAILURES:
-                            sent = await self._cancel(c, base, headers, job_id, "unreachable")
+                            sent = await self._cancel(c, base, headers, job_id, "unreachable",
+                                                      early_cancel_t())
                             return ResearchJob("unreachable", job_id, cancel_sent=sent)
                         continue
+                    fails = 0
                     if not isinstance(st, dict):
-                        return ResearchJob("failed", job_id)
+                        sent = await self._cancel(c, base, headers, job_id, "malformed reply",
+                                                  early_cancel_t())
+                        return ResearchJob("malformed", job_id, cancel_sent=sent)
                     status = st.get("status")
                     if status in _LIVE:
-                        if _model_down(st):
-                            sent = await self._cancel(c, base, headers, job_id, "model down")
+                        if _job_model_down(st):
+                            sent = await self._cancel(c, base, headers, job_id, "model down",
+                                                      early_cancel_t())
                             return ResearchJob("model_down", job_id, cancel_sent=sent)
                         continue
                     state = classify_job(st)
                     if state in ("done", "unfiled"):
                         res = st.get("result")
                         if not isinstance(res, dict):
-                            return ResearchJob("failed", job_id)
+                            return ResearchJob("malformed", job_id)
                         return ResearchJob(state, job_id, res)
                     if state == "cancelled":
                         prog = st.get("progress") if isinstance(st.get("progress"), dict) else {}
                         if prog.get("code") == "deadline":
                             return ResearchJob("timeout", job_id)
-                        if _model_down(st):
+                        if _job_model_down(st):
                             return ResearchJob("model_down", job_id)
                         return ResearchJob("cancelled", job_id)
                     if state == "crashed":
-                        return ResearchJob("model_down" if _model_down(st) else "crashed", job_id)
-                    return ResearchJob("failed", job_id)   # a status outside the closed set
-                sent = await self._cancel(c, base, headers, job_id, "deadline")
+                        return ResearchJob("model_down" if _job_model_down(st) else "crashed",
+                                           job_id)
+                    return ResearchJob("malformed", job_id)   # a status outside the closed set
+                sent = await self._cancel(c, base, headers, job_id, "deadline", CANCEL_GRACE_S)
                 return ResearchJob("timeout", job_id, cancel_sent=sent)
         except asyncio.CancelledError:
             if job_id:
                 try:
                     async with httpx.AsyncClient(transport=self.transport) as c2:
-                        await asyncio.shield(self._cancel(c2, base, headers, job_id, "caller gone"))
+                        await asyncio.shield(self._cancel(c2, base, headers, job_id,
+                                                          "caller gone", CANCEL_GRACE_S))
                 except BaseException:  # noqa: BLE001 - best effort; the engine deadline still holds
                     pass
             raise
@@ -357,16 +385,17 @@ class OpenBrainResearchGrounding:
             return ResearchJob("failed", job_id)
 
     async def _cancel(self, c: httpx.AsyncClient, base: str, headers: dict[str, str],
-                      job_id: str, reason: str) -> bool:
-        """Best-effort, bounded cancel. True = the engine acknowledged (200/202/409)."""
+                      job_id: str, reason: str, timeout_s: float) -> bool:
+        """Best-effort cancel bounded by `timeout_s`. True = the engine acknowledged
+        (200/202/409). The engine-side deadline_at still ends the job if this fails."""
+        t = max(0.05, timeout_s)
         try:
             r = await asyncio.wait_for(
                 c.post(f"{base}/research/jobs/{job_id}/cancel", headers=headers,
-                       json={"reason": f"agent-org knowledge package: {reason}"},
-                       timeout=CANCEL_TIMEOUT_S),
-                timeout=CANCEL_TIMEOUT_S)
+                       json={"reason": f"agent-org knowledge package: {reason}"}, timeout=t),
+                timeout=t)
             return r.status_code in (200, 202, 409)
-        except Exception:  # noqa: BLE001 - the engine-side deadline_at still ends the job
+        except Exception:  # noqa: BLE001
             return False
 
     async def ground(self, question: str, *, context: str = "") -> GroundingResult:
