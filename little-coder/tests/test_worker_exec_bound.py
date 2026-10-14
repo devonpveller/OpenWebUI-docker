@@ -44,12 +44,12 @@ def worker_configs(tmp_path_factory) -> Path:
 
 
 @pytest.mark.parametrize("n", [1, 2])
-def test_worker_config_bound_is_600_and_reaches_ot_exec(worker_configs, n):
+def test_worker_config_bound_is_900_and_reaches_ot_exec(worker_configs, n):
     cfg = load_config(worker_configs / f"worker-{n}" / "little-coder.config.yaml")
-    assert cfg.workspace.exec_timeout_seconds == 600
+    assert cfg.workspace.exec_timeout_seconds == 900
     assert cfg.workspace.open_terminal_url == f"http://ao-ot-{n}:8000"
     env = AgentRunner(cfg, journals=None, ot_client=None)._build_env(_Ctx(), "/tmp/ev")  # type: ignore[arg-type]
-    assert env["LC_EXEC_TIMEOUT"] == "600"
+    assert env["LC_EXEC_TIMEOUT"] == "900"
 
 
 def test_interactive_little_coder_keeps_its_1800(worker_configs):
@@ -65,7 +65,7 @@ def test_worker_config_differs_from_canonical_only_in_the_two_generated_lines(wo
     assert len(canon) == len(gen)
     assert [b.strip() for _, b in changed] == [
         "open_terminal_url: http://ao-ot-1:8000",
-        "exec_timeout_seconds: 600  # agent-org worker bound (generator)",
+        "exec_timeout_seconds: 900  # agent-org worker bound (generator)",
     ]
 
 

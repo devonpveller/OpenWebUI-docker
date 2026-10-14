@@ -43,11 +43,13 @@ running inside open-terminal (journaled as a `bash` tool_call sourced from the
   `/tmp/lc-exec-<id>.rc`. So a command that leaves a background job holding
   the terminal (`( ... ) &`, `cmd &`) returns when the command itself ends,
   with a note, instead of when the job ends (bake-off C7d: 1,270 s). On
-  `LC_EXEC_TIMEOUT` ot-exec takes the output so far, has open-terminal SIGTERM
-  the command's process group, SIGKILLs anything still carrying its
-  `LC_EXEC_ID` (setsid escapees, SIGTERM-ignorers), counts survivors, and only
-  then exits 124 with a fixed message: `[ot-exec] timed out after N s,
-  killed: <command>`, whether the kill was confirmed, and how to proceed.
+  `LC_EXEC_TIMEOUT` ot-exec takes the output so far, then a reaper in
+  open-terminal freezes, SIGTERMs (+SIGCONT) and SIGKILLs the command's
+  process group and session, every process carrying its `LC_EXEC_ID`, and
+  their descendants (stopped processes, SIGTERM-ignorers, setsid escapees),
+  counts survivors, and only then ot-exec exits 124 with a fixed message:
+  `[ot-exec] timed out after N s, killed: <command>`, exactly what was
+  checked and killed, and how to proceed (bounded: deadline + 14 s at most).
   pi records an error only when a tool THROWS (a returned `isError: true` is a
   success to it: every 1,800-s timeout in the bake-off reached the model as
   "(no output)"), so the extension throws on that timeout: the model gets the
@@ -56,7 +58,7 @@ running inside open-terminal (journaled as a `bash` tool_call sourced from the
   Backstop: an ot-exec still running `LC_EXEC_TIMEOUT` + 120 s
   (`LC_EXEC_BACKSTOP_GRACE`) after it started is stopped (SIGTERM, SIGKILL
   30 s later) and the call fails with a fixed message. agent-org workers run
-  with a 600-s bound (`agent-org/scripts/gen-worker-configs.py`); the
+  with a 900-s bound (`agent-org/scripts/gen-worker-configs.py`); the
   interactive little-coder keeps 1,800 s. Real-path test:
   `tests/node/e2e_exechang/` (a real open-terminal container, the real ot-exec,
   pi and this extension).

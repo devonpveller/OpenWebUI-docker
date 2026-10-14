@@ -191,32 +191,35 @@ class OpenTerminalClient:
     # Every call is bounded by an HTTP timeout; open-terminal blocks at most `wait` seconds.
 
     def start(self, command: str, cwd: str | None = None, env: dict[str, str] | None = None,
-              wait: float = 0.0, client: httpx.Client | None = None) -> dict:
+              wait: float = 0.0, client: httpx.Client | None = None,
+              http_timeout: float | None = None) -> dict:
         """POST /execute: start `command`, wait up to `wait` s for it to end; the response dict
         (`id`, `status`, `exit_code`, `output`)."""
         body: dict[str, object] = {"command": command, "cwd": cwd or self.default_cwd}
         if env:
             body["env"] = env
         wait = max(0.0, min(float(wait), _MAX_WAIT))
-        return self._call(client, "POST", "/execute", wait + 30, json=body, params={"wait": wait})
+        return self._call(client, "POST", "/execute", http_timeout or wait + 30, json=body,
+                          params={"wait": wait})
 
     def status(self, process_id: str, wait: float = 0.0, tail: int | None = None,
-               client: httpx.Client | None = None) -> dict:
+               client: httpx.Client | None = None, http_timeout: float | None = None) -> dict:
         """GET /execute/{id}/status: wait up to `wait` s for the process to end; the FULL output
         unless `tail` asks for the last N entries only."""
         wait = max(0.0, min(float(wait), _MAX_WAIT))
         params: dict[str, object] = {"wait": wait}
         if tail:
             params["tail"] = tail
-        return self._call(client, "GET", f"/execute/{process_id}/status", wait + 30,
+        return self._call(client, "GET", f"/execute/{process_id}/status", http_timeout or wait + 30,
                           params=params)
 
-    def kill(self, process_id: str, client: httpx.Client | None = None) -> bool:
+    def kill(self, process_id: str, client: httpx.Client | None = None,
+             http_timeout: float = 15) -> bool:
         """DELETE /execute/{id}: SIGTERM to the command's whole process group (open-terminal starts
         every command in its own session); open-terminal waits for the group leader to exit.
         False when the call failed (the caller decides what that means)."""
         try:
-            self._call(client, "DELETE", f"/execute/{process_id}", 15)
+            self._call(client, "DELETE", f"/execute/{process_id}", http_timeout)
         except _NotFound:
             pass  # already ended and cleaned up: nothing left to signal
         except OpenTerminalError:

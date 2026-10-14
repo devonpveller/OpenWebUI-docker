@@ -151,7 +151,7 @@ whenever `little-coder/config/` changes):
 python agent-org/scripts/gen-worker-configs.py
 ```
 
-The generated configs differ from the source in two lines: the executor URL, and a 600-s
+The generated configs differ from the source in two lines: the executor URL, and a 900-s
 per-command bound (`workspace.exec_timeout_seconds`; the interactive little-coder keeps 1,800 s).
 A worker command that runs past it is killed with its whole process tree and the worker is told
 how to proceed ([`little-coder/pi-extension/README.md`](../little-coder/pi-extension/README.md)).

@@ -28,12 +28,15 @@ still "running" but the status file exists, the command itself has finished and 
 background jobs hold the PTY: ot-exec returns with that status and says so. Every process the
 command starts carries `LC_EXEC_ID=<id>` in its environment.
 
-On timeout ot-exec (1) takes the output so far, (2) has open-terminal SIGTERM the command's whole
-process group, (3) runs a reaper that SIGKILLs every process still carrying the command's
-`LC_EXEC_ID` (one that ignored SIGTERM, or left the group with setsid) and counts survivors, and
-only then (4) reports: exit 124 and a fixed message on stderr that names the command, says
-`timed out after N s, killed` and how to proceed. The same kill runs when ot-exec itself gets
-SIGTERM (pi's abort) and when open-terminal stops answering mid-command.
+On timeout ot-exec (1) takes the output so far, (2) runs a reaper in open-terminal that freezes
+(SIGSTOP), then SIGTERMs + SIGCONTs, then SIGKILLs the command's processes - its process group and
+session (the wrapper records the id), every process carrying its `LC_EXEC_ID`, and their
+descendants - and counts survivors, (3) has open-terminal DELETE its record, and only then (4)
+reports: exit 124 and a fixed message on stderr that names the command, says `timed out after N s,
+killed`, states exactly what was checked, and how to proceed. The reaper does not wait on the
+DELETE (which hangs on a stopped group leader); the whole kill is bounded by KILL_BUDGET_S. The
+same kill runs when ot-exec itself gets SIGTERM (pi's abort) and when open-terminal stops
+answering mid-command.
 """
 
 from __future__ import annotations
@@ -65,38 +68,82 @@ UNREACHABLE_EXIT = 125
 TIMEOUT_MARKER = "[ot-exec] timed out after"   # open-terminal-exec keys on this; keep in step
 GIT_PROXY_MARKER = "git-proxy: DENIED"
 _RC_PATH = "/tmp/lc-exec-{id}.rc"
-_REAP_RE = re.compile(r"LC_REAP killed=(\d+) survivors=(\d+)")
+_PG_PATH = "/tmp/lc-exec-{id}.pg"
+_REAP_RE = re.compile(r"LC_REAP killed=(\d+) survivors=(\d+) group=(\S+)")
+_REAP_WAIT_S = 6      # the reaper takes ~1.5-3 s; 6 s is its ceiling
+_OUTPUT_FETCH_S = 3   # reading the output so far at the deadline
+# what the kill may add after the deadline: output read + reaper + its kill + the DELETE
+KILL_BUDGET_S = _OUTPUT_FETCH_S + (_REAP_WAIT_S + 1) + 2 + 2
 _CMD_ECHO_CAP = 200
 _HTTP_CAP_S = 360  # one request: open-terminal's 300-s wait ceiling + slack
 
 
 def _wrapper(exec_id: str) -> str:
     """The shell text open-terminal runs (/bin/sh). The command itself arrives in LC_EXEC_CMD."""
+    # $$ is the shell open-terminal started in a NEW session, so it is also the id of the
+    # command's process group and session: the reaper kills by those as well as by the tag (round 2:
+    # a process that drops LC_EXEC_ID but stays in the group/session is still found).
     return (
         "umask 000\n"
+        f"echo $$ > {_PG_PATH.format(id=exec_id)}\n"
         "c=$LC_EXEC_CMD\n"
         "unset LC_EXEC_CMD\n"
         f'LC_EXEC_ID={exec_id} sh -c "$c" </dev/null\n'
         "rc=$?\n"
+        f"rm -f {_PG_PATH.format(id=exec_id)}\n"
         f'echo "$rc" > {_RC_PATH.format(id=exec_id)}\n'
         'exit "$rc"\n'
     )
 
 
 def _reaper(exec_id: str) -> str:
-    """Kill every process that still carries this command's LC_EXEC_ID; report what it did."""
+    """Stop the command. Its processes are: the members of its process group or session (the id
+    the wrapper recorded), the processes carrying its LC_EXEC_ID, and - round 2 - every descendant
+    of those (a child that left the session AND cleared its environment is still its parent's
+    child). The tree is first frozen with SIGSTOP (repeated until no new member appears), so nothing
+    forks, exits or is re-parented away while it is collected; then SIGTERM + SIGCONT, one second,
+    then SIGKILL until none is alive (5 passes). It reports how many of THOSE processes are still
+    alive - all it can know: a process re-parented away (its parent gone) with neither session nor
+    tag is invisible to it. The reaper runs in its own session, so it never matches itself."""
+    pg_path, rc_path = _PG_PATH.format(id=exec_id), _RC_PATH.format(id=exec_id)
     return (
-        f"i={exec_id}; n=0; k=0\n"
-        "sleep 1\n"  # SIGTERM handlers get a second to exit
+        f"i={exec_id}; k=0; n=0; L=\n"
+        f"pg=$(cat {pg_path} 2>/dev/null)\n"
+        "members() {\n"
+        '  t=" "; for e in $(grep -lzx "LC_EXEC_ID=$i" /proc/[0-9]*/environ 2>/dev/null); do\n'
+        '    e=${e#/proc/}; t="$t${e%/environ} "; done\n'
+        "  for d in /proc/[0-9]*; do\n"
+        '    read -r s 2>/dev/null < "$d/stat" || continue\n'
+        '    p=${d#/proc/}; s=${s##*) }; set -- $s\n'
+        '    [ "$1" = Z ] && continue\n'
+        "    m=0\n"
+        '    if [ -n "$pg" ] && { [ "$3" = "$pg" ] || [ "$4" = "$pg" ]; }; then m=1; fi\n'
+        '    case "$t" in *" $p "*) m=1;; esac\n'
+        '    echo "$p $2 $m"\n'
+        "  done | awk '{pp[$1]=$2; if ($3) m[$1]=1}\n"
+        "    END {do {c=0; for (x in pp) if (!(x in m) && (pp[x] in m)) {m[x]=1; c=1}} while (c);\n"
+        "         for (x in m) print x}'\n"
+        "}\n"
+        "alive() { for p in $1; do read -r s 2>/dev/null < /proc/$p/stat || continue; s=${s##*) };"
+        ' [ "${s%% *}" = Z ] || echo "$p"; done; }\n'
+        "while [ $n -lt 4 ]; do\n"  # freeze the tree; repeat while it still grows
+        "  new=; for p in $(members); do case \" $L \" in *\" $p \"*) ;; *) new=\"$new $p\";; esac; done\n"
+        '  [ -z "$new" ] && break\n'
+        '  for p in $new; do kill -STOP "$p"; done 2>/dev/null\n'
+        '  L="$L$new"; n=$((n+1))\n'
+        "done\n"
+        'for p in $L; do kill -TERM "$p"; kill -CONT "$p"; done 2>/dev/null\n'
+        '[ -n "$L" ] && sleep 1\n'
+        "n=0\n"
         "while [ $n -lt 5 ]; do\n"
-        '  l=$(grep -lzx "LC_EXEC_ID=$i" /proc/[0-9]*/environ 2>/dev/null)\n'
+        "  l=$(alive \"$L $(members)\" | sort -u)\n"
         '  [ -z "$l" ] && break\n'
-        '  for e in $l; do p=${e#/proc/}; p=${p%/environ}; kill -KILL "$p" 2>/dev/null && k=$((k+1)); done\n'
+        '  for p in $l; do kill -KILL "$p" 2>/dev/null && k=$((k+1)); done\n'
         "  n=$((n+1)); sleep 0.3\n"
         "done\n"
-        's=$(grep -lzx "LC_EXEC_ID=$i" /proc/[0-9]*/environ 2>/dev/null | wc -l)\n'
-        f"rm -f {_RC_PATH.format(id=exec_id)}\n"
-        'echo "LC_REAP killed=$k survivors=$s"\n'
+        "s=$(alive \"$L $(members)\" | sort -u | wc -l)\n"
+        f"rm -f {rc_path} {pg_path}\n"
+        'echo "LC_REAP killed=$k survivors=$s group=${pg:-none}"\n'
     )
 
 
@@ -114,6 +161,7 @@ class RunOutcome:
     killed: int | None = None     # processes the reaper had to SIGKILL (None: it did not answer)
     survivors: int | None = None  # processes still alive after the reaper (None: unknown)
     error: str = ""
+    group_known: bool = False     # the reaper knew the command's group/session id
 
     @property
     def timed_out(self) -> bool:
@@ -142,7 +190,8 @@ def run_command(client: OpenTerminalClient, command: str, timeout: float,
                 left = deadline - time.monotonic()
                 if left <= 0:
                     try:
-                        streams = _streams(client.status(pid, client=http))
+                        streams = _streams(client.status(pid, client=http,
+                                                         http_timeout=_OUTPUT_FETCH_S))
                     except OpenTerminalError:
                         streams = ("", "")   # still a timeout: report it as one
                     return _kill(client, pid, exec_id, "timed_out", streams, started)
@@ -177,24 +226,28 @@ def run_command(client: OpenTerminalClient, command: str, timeout: float,
 
 def _kill(client: OpenTerminalClient, pid: str, exec_id: str, status: str,
           streams: tuple[str, str], started: float) -> RunOutcome:
-    """SIGTERM the command's process group, then SIGKILL whatever still carries its LC_EXEC_ID.
-    Uses a FRESH connection: the one the wait used may have been cut mid-request (SIGTERM).
-    Bounded: one DELETE (15 s) and one reaper run (30 s; killed itself if it overruns)."""
+    """Kill the command, then report. The reaper does the killing itself (TERM+CONT, then KILL, to
+    the command's group, session and tagged processes), so it does not depend on open-terminal's
+    DELETE, which waits for the group leader and hangs on a STOPPED one (round 2, D2). The DELETE
+    after it only clears open-terminal's record. Uses a FRESH connection (the waiting one may have
+    been cut by SIGTERM). Bounded: <= KILL_BUDGET_S in all (reaper <= 7 s, DELETEs <= 2 s each)."""
     killed = survivors = None
+    group = False
     with client._client(_HTTP_CAP_S) as http:
-        if pid:
-            client.kill(pid, client=http)
         try:
-            rep = client.start(_reaper(exec_id), wait=30, client=http)
+            rep = client.start(_reaper(exec_id), wait=_REAP_WAIT_S, client=http,
+                               http_timeout=_REAP_WAIT_S + 1)
             if str(rep.get("status")) == "running":
-                client.kill(str(rep.get("id", "")), client=http)
+                client.kill(str(rep.get("id", "")), client=http, http_timeout=2)
             m = _REAP_RE.search("".join(_streams(rep)))
             if m:
-                killed, survivors = int(m.group(1)), int(m.group(2))
+                killed, survivors, group = int(m.group(1)), int(m.group(2)), m.group(3) != "none"
         except OpenTerminalError:
             pass
+        if pid:
+            client.kill(pid, client=http, http_timeout=2)
     code = {"timed_out": TIMEOUT_EXIT, "stopped": STOPPED_EXIT}.get(status, UNREACHABLE_EXIT)
-    return RunOutcome(*streams, code, status, _ms(started), killed, survivors)
+    return RunOutcome(*streams, code, status, _ms(started), killed, survivors, group_known=group)
 
 
 def _streams(data: dict) -> tuple[str, str]:
@@ -222,14 +275,24 @@ def _command_echo(command: str) -> str:
 
 
 def _kill_note(out: RunOutcome) -> str:
+    """Claims only what the reaper checked (round 2, D3): the command's process group and session,
+    the processes carrying its tag, and their descendants. A process that is none of these (it left
+    the session, cleared its environment AND its parent is gone) is invisible to that check, and
+    the note says so instead of claiming "every process"."""
     if out.survivors is None:
         return ("WARNING: the kill could not be confirmed (open-terminal did not answer the "
                 "process check); processes it started may still be running.")
     if out.survivors:
-        return (f"WARNING: {out.survivors} process(es) it started could not be killed and may "
-                "still be running.")
-    extra = f" ({out.killed} of them needed SIGKILL)" if out.killed else ""
-    return f"The command and every process it started were stopped{extra}."
+        return (f"WARNING: {out.survivors} of its processes could not be killed and may still "
+                "be running.")
+    scope = ("its process group and session, every process carrying its tag, and their "
+             "descendants" if out.group_known else
+             "every process carrying its tag and their descendants (its process group was not "
+             "recorded)")
+    extra = f"; {out.killed} needed SIGKILL" if out.killed else ""
+    return (f"Killed {scope}; none of them is still running{extra}. A process that left the "
+            "session and cleared its environment after its parent exited cannot be tracked and "
+            "may still run.")
 
 
 def timeout_message(command: str, timeout: float, out: RunOutcome) -> str:

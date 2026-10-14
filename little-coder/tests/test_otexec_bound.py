@@ -32,7 +32,7 @@ class FakeOT:
     still running; `rc_after` makes the wrapper's status file appear after N status requests."""
 
     def __init__(self, *, done_after=None, rc_after=None, rc="0", output="out\n",
-                 reap="LC_REAP killed=0 survivors=0", fail_on=None, fail_reaper=False,
+                 reap="LC_REAP killed=0 survivors=0 group=77", fail_on=None, fail_reaper=False,
                  stop_on=None):
         self.done_after = done_after   # status calls until the command is done (None: never)
         self.rc_after = rc_after       # status calls until the rc file exists (None: never)
@@ -123,7 +123,18 @@ def test_wrapper_detaches_stdin_marks_the_tree_and_records_the_exit_status():
     assert 'LC_EXEC_ID=e1 sh -c "$c" </dev/null' in w
     assert "unset LC_EXEC_CMD" in w
     assert 'echo "$rc" > /tmp/lc-exec-e1.rc' in w
-    assert w.startswith("umask 000\n")
+    assert w.startswith("umask 000\necho $$ > /tmp/lc-exec-e1.pg\n")   # group/session id first
+    assert w.index("rm -f /tmp/lc-exec-e1.pg") < w.index('echo "$rc" > /tmp/lc-exec-e1.rc')
+
+
+def test_reaper_kills_group_session_and_tag_and_wakes_stopped_processes():
+    r = otexec._reaper("e1")
+    assert "pg=$(cat /tmp/lc-exec-e1.pg" in r
+    assert '[ "$3" = "$pg" ] || [ "$4" = "$pg" ]' in r      # process group, session
+    assert 'grep -lzx "LC_EXEC_ID=$i"' in r                  # the tag
+    assert r.index("kill -STOP") < r.index("kill -TERM") < r.index("kill -KILL")
+    assert "pp[x] in m" in r          # descendants of members are members (round 2)
+    assert "rm -f /tmp/lc-exec-e1.rc /tmp/lc-exec-e1.pg" in r
 
 
 # --- endings -------------------------------------------------------------------------------------
@@ -167,8 +178,8 @@ def test_background_returns_the_commands_nonzero_status():
     assert (out.status, out.exit_code) == ("background", 3)
 
 
-def test_timeout_kills_the_group_then_reaps_then_reports():
-    ot = FakeOT(reap="LC_REAP killed=2 survivors=0")
+def test_timeout_reaps_before_delete_and_both_before_the_report():
+    ot = FakeOT(reap="LC_REAP killed=2 survivors=0 group=77")
     t0 = time.monotonic()
     out = _run(ot, timeout=0.3)
     assert time.monotonic() - t0 < 3
@@ -178,7 +189,9 @@ def test_timeout_kills_the_group_then_reaps_then_reports():
     i_out = max(i for i, c in enumerate(ot.calls) if c[1] == "/execute/p1/status" and "tail" not in c[2])
     i_kill = seq.index(("DELETE", "/execute/p1"))
     i_reap = max(i for i, c in enumerate(seq) if c == ("POST", "/execute"))
-    assert i_out < i_kill < i_reap, seq   # output taken, group killed, stragglers reaped
+    # output taken, then the reaper kills (not waiting on DELETE, which hangs on a stopped leader),
+    # then DELETE clears open-terminal's record - all before run_command returns
+    assert i_out < i_reap < i_kill, seq
     assert out.stdout == "out\n"
 
 
@@ -192,26 +205,52 @@ def test_every_wait_is_bounded_by_the_time_left():
 
 
 def test_timeout_message_names_the_command_the_bound_and_the_way_forward():
-    ot = FakeOT(reap="LC_REAP killed=0 survivors=0")
+    ot = FakeOT(reap="LC_REAP killed=0 survivors=0 group=77")
     out = _run(ot, timeout=0.3, command="cd /w && python -m pytest -q tests")
     msg = otexec.timeout_message("cd /w && python -m pytest -q tests", 3, out)
     assert msg.startswith("[ot-exec] timed out after 3 s, killed: `cd /w && python -m pytest -q tests`\n")
-    assert "every process it started were stopped" in msg
+    assert "Killed its process group and session, every process carrying its tag, and their descendants" in msg
+    assert "cannot be tracked and may still run" in msg
+    assert "every process it started" not in msg      # round 2, D3: no blanket claim
     assert "narrower, targeted command" in msg
     assert "nohup CMD > /tmp/x.log 2>&1 &" in msg and "tail -n 20 /tmp/x.log" in msg
 
 
 def test_timeout_with_survivors_says_so():
-    out = _run(FakeOT(reap="LC_REAP killed=3 survivors=1"))
+    out = _run(FakeOT(reap="LC_REAP killed=3 survivors=1 group=77"))
     msg = otexec.timeout_message("x", 3, out)
-    assert "WARNING: 1 process(es) it started could not be killed" in msg
+    assert "WARNING: 1 of its processes could not be killed" in msg and "none of them" not in msg
 
 
 def test_timeout_with_a_dead_reaper_does_not_claim_the_kill():
     out = _run(FakeOT(fail_reaper=True))
     assert out.status == "timed_out" and out.survivors is None
     msg = otexec.timeout_message("x", 3, out)
-    assert "could not be confirmed" in msg and "were stopped" not in msg
+    assert "could not be confirmed" in msg and "Killed" not in msg
+
+
+def test_unknown_group_narrows_the_claim():
+    out = _run(FakeOT(reap="LC_REAP killed=0 survivors=0 group=none"))
+    msg = otexec.timeout_message("x", 3, out)
+    assert "its process group was not recorded" in msg and "group and session" not in msg
+
+
+def test_the_kill_stays_within_its_budget_when_open_terminal_stalls():
+    """D2: a DELETE that never returns (a stopped leader) or a slow reaper cannot stretch the call
+    past bound + KILL_BUDGET_S (<= 15 s); every kill-path request carries a short timeout."""
+    assert otexec.KILL_BUDGET_S <= 15
+    ot = FakeOT()
+    timeouts = []
+    real = ot.handler
+
+    def handler(req):
+        timeouts.append((req.method, req.url.path, req.extensions.get("timeout", {}).get("read")))
+        return real(req)
+    ot.handler = handler
+    _run(ot, timeout=0.3)
+    kill_path = [t for m, p, t in timeouts if (m, p) in (("DELETE", "/execute/p1"),)]
+    reap = [t for m, p, t in timeouts if (m, p) == ("POST", "/execute")][-1]
+    assert kill_path and max(kill_path) <= 2 and reap <= otexec._REAP_WAIT_S + 1
 
 
 def test_timeout_is_still_a_timeout_when_the_output_fetch_fails():

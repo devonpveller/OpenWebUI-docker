@@ -11,11 +11,12 @@ pointing at its OWN open-terminal, or it would route exec to the MAIN stack's op
 This copies the canonical config (single source of truth) and rewrites just two lines per
 instance — targeted line replaces so all comments/tuning are preserved verbatim:
   - `workspace.open_terminal_url` -> the instance's own open-terminal (above);
-  - `workspace.exec_timeout_seconds` 1800 -> 600 (ao-exechang, 2026-10-14). A worker's command
-    that hangs blocked its coding turn for the whole 1,800 s (4 of 10 bake-off runs lost to it);
-    every bake-off command that legitimately ran past 600 s was an agent-bridge full suite, which
-    the worker knowledge now says to run in the background and poll. The interactive
-    little-coder keeps the canonical 1,800 s. Evidence: the ao-exechang findings in the plan store.
+  - `workspace.exec_timeout_seconds` 1800 -> 900 (ao-exechang, 2026-10-14). A worker's command
+    that hangs blocked its coding turn for the whole 1,800 s (4 of 10 bake-off runs lost to it).
+    Every bake-off command that legitimately ran past 600 s was an agent-bridge full suite; with
+    `-n 4` those took 604-690 s (and 645-661 s on the host), so 900 lets the one full suite the
+    worker knowledge prescribes (after editing, `-n 4`) finish, and still halves a hang. The
+    interactive little-coder keeps the canonical 1,800 s. Evidence: the ao-exechang findings.
 
 Usage (from the workspace root):  python agent-org/scripts/gen-worker-configs.py [--count N]
                                    [--out-dir DIR]   (default: agent-org/agent-bridge/worker-configs)
@@ -34,7 +35,7 @@ OUT_DIR = ROOT / "agent-org" / "agent-bridge" / "worker-configs"
 
 _ORIG = "open_terminal_url: http://open-terminal:8000"
 _EXEC_TIMEOUT_ORIG = "exec_timeout_seconds: 1800"
-WORKER_EXEC_TIMEOUT_S = 600
+WORKER_EXEC_TIMEOUT_S = 900
 
 
 def main() -> int:

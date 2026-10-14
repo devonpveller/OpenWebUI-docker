@@ -118,8 +118,8 @@ class Settings(BaseSettings):
     # 0 disables the whole check (pure legacy busy-defer).
     worker_silence_s: float = 300.0         # no command running and offset frozen this long (5 min) = hung
     # a command declaring no timeout: the worker's exec bound, workspace.exec_timeout_seconds in the
-    # generated worker configs (600 s since ao-exechang; agent-org/scripts/gen-worker-configs.py)
-    worker_command_default_timeout_s: float = 600.0
+    # generated worker configs (900 s since ao-exechang; agent-org/scripts/gen-worker-configs.py)
+    worker_command_default_timeout_s: float = 900.0
     worker_command_grace_s: float = 120.0   # past a command's own timeout by this much = hung
     worker_command_ceiling_s: float = 3600.0   # no single command keeps a turn alive longer than this (0 = off)
     # Autonomous INFRA-freeze recovery (operator 2026-07-13: "fully autonomous would be my choice,
