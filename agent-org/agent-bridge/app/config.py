@@ -467,6 +467,14 @@ class Settings(BaseSettings):
     grounding_timeout_s: float = 300.0      # bound the poll; on timeout grounding is skipped
     grounding_poll_interval_s: float = 5.0
 
+    # ── Knowledge questions (agent-knowledge-package D1) ─────────────────────
+    # Before assignment, ask the LOCAL model role for <= 8 tagged knowledge questions from a fixed
+    # checklist (app/modules/knowledge_questions.py). OFF by default and wired to no live call site
+    # yet; the profile must be on the local lane or the call is refused.
+    knowledge_questions_enabled: bool = False
+    knowledge_questions_profile: str = "planner"
+    knowledge_questions_timeout_s: float = 180.0   # bound on the one model call
+
     # ── Advisory (Tier 2) — research-grounded answers to design/architecture questions ──
     # When ON, an `advisory` operator message is answered by running an openbrain-research job and
     # replying with the grounded, CITED synthesis in-thread (falls back to a clearly-labelled

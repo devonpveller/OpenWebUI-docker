@@ -1,0 +1,17 @@
+**Knowledge questions**
+
+Q1 (codebase): How do `OpenBrainResearchGrounding.ground()` and `.advise()` currently classify a polled job with `status: "error"`, and where in `app/orchestrator.py` is the grounded context injected?
+
+Q2 (external): What JSON shape does the research engine's `GET /research/jobs/{id}` return for a crashed run versus a finished-but-not-filed run, and is `result` null or absent on a crash?
+
+**Question:** What does a test need to fake to make an unfiled job visible (an `httpx.MockTransport` serving a job with `status: "error"` and a full `result`)?
+**Tag:** codebase
+
+**Question:** What does `docker compose config --format json` emit for `ports` entries without a `published` value and for a healthcheck with `disable: true`?
+**Tag:** external
+
+Q5 - external - How does Docker resolve the last `HEALTHCHECK` instruction in a Dockerfile, including backslash-continued lines and `HEALTHCHECK NONE`?
+
+Q6 [codebase] Which existing services in this checkout's compose files publish a host port without a healthcheck, and so belong in the shipped allow-list?
+
+Q7 [codebase] Which fixed names and values may not change (`classify_job`, the `outcome` values, `NOT saved to Open Brain`, exit codes 0/1/2, `DEFAULT_ALLOWLIST`, `load_allowlist`)?

@@ -1,0 +1,13 @@
+Sure! Below are the knowledge questions for this task, one per row.
+
+| # | Tag | Question |
+|---|-----|----------|
+| 1 | codebase | Where does `Orchestrator._sweep_stalled_efforts` read and write `self._worker_progress[url]`, and which value is passed as `since_offset` on the next probe? |
+| 2 | codebase | How does `FakeHarness.running_task_progress` currently use `progress_offsets`, and which existing watchdog tests depend on that behaviour? |
+| 3 | external | Does Python's `readlines()` on a file opened in binary mode return a final element without a trailing newline when the writer is mid-line, and can one call split a line? |
+| 4 | external | Is `seek()` to a cached byte position safe while another process appends to the same file on Windows and Linux? |
+| 5 | codebase | What is the fast test command for agent-bridge and for little-coder (`PYTHONPATH=src`), and are both suites green on the base? |
+| 6 | codebase | What must a test fake to show that a large-file probe reads only the appended bytes (a spy on `littlecoder.daemon.open` and on `readlines`)? |
+| 7 | external | How should a module-level cache shared across threads be locked so that eviction at 64 entries is safe under concurrent `read_event_lines` calls? |
+
+These cover the edge behaviour, codebase conventions, test fakes and the fixed interface (`running_task_progress(base_url, since_offset=0, since_task_id=None)`, `read_event_lines(path, offset, cache)`).

@@ -300,9 +300,13 @@ class ModelRouter:
 
         return await self._with_backpressure_retry(_call, label=f"structured:{profile_name}")
 
-    async def complete(self, profile_name: str, system: str, user: str) -> str:
+    async def complete(self, profile_name: str, system: str, user: str,
+                       temperature: float | None = None) -> str:
+        # `temperature` overrides the profile default for a call that must be deterministic (as
+        # `structured` allows); omitted -> the profile's temperature, unchanged for every caller.
         p = self.profiles.get(profile_name)
         api_base, api_key = self._endpoint(p.lane)
+        temp = p.temperature if temperature is None else temperature
 
         def _call():
             return self._get_client().complete(
@@ -310,7 +314,7 @@ class ModelRouter:
                 api_key=api_key,
                 model=p.model,
                 caller_key=p.caller_key,
-                temperature=p.temperature,
+                temperature=temp,
                 system=system,
                 user=user,
             )

@@ -1,0 +1,3 @@
+Q1 [codebase] Where does `Registry.reserve_connection` get called on the streaming path in `llm_queue/routes/data.py`?
+Q2 [external] Does Starlette close the body iterator of a `StreamingResponse` when the client disconnects under ASGI 2.3?
+Q3 [external] How does uvicorn deliver `http.disconnect` to an app whose response has not st

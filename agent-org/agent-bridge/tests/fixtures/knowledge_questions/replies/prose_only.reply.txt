@@ -1,0 +1,5 @@
+This task is fairly clear, so I don't think many questions are needed. The key point is that the codebase already has a middleware layer, and the external behaviour of FastAPI is well documented.
+
+Should the worker start with the auth module? Probably yes. It should then update the tests, run ruff and the suite, and confirm nothing regressed.
+
+In summary: implement `app/auth.py`, wire the table, update the hook, and document the two variables.

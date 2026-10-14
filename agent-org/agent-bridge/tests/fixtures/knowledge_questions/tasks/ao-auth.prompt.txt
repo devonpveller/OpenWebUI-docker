@@ -1,0 +1,72 @@
+# Task
+
+**Goal.** Workers, and the commands they run, must not be able to drive agent-bridge's operator controls.
+
+agent-bridge (`agent-org/agent-bridge/app/main.py`) serves an HTTP control plane:
+
+- `POST /nl` takes any operator verb;
+- `/decision` clears gates;
+- `/kill-switch` stops the org;
+- `/profiles/lane` moves model lanes;
+- and so on.
+
+None of it is authenticated. Worker command sandboxes share a network with the bridge, so a prompt-injected command could approve gates, change model lanes, abort efforts or retire checks.
+
+**What to build (two-token design).**
+
+1. **Operator token** (`AO_OPERATOR_TOKEN`). Required on every route except `GET /health`, sent as `Authorization: Bearer <token>`:
+   - Compare tokens in constant time.
+   - Classify every route explicitly in ONE table in code.
+   - If the operator token is unset or blank, operator routes refuse (fail closed) with 503, and a log line at startup says so.
+   - Refuse before the request body is read or validated.
+   - Never log, echo or return a token.
+   - Disable the auto-generated `/docs`, `/redoc` and `/openapi.json` (they must 404).
+2. **Worker token** (`AO_WORKER_TOKEN`). Accepted ONLY on the routes the worker side really calls. Reading the worker side shows that is just the floor hook: `hooks/pretooluse_floor.py` calls `POST /hook/floor-check`. `/lateral-concern`, `/handoff` and `/suggestion` are raised in-process, not by workers, so they are operator routes.
+   - The operator token is also accepted on the worker route.
+   - If the two tokens are equal, both are discarded and authenticated routes refuse with 503.
+   - If both tokens are unset, the worker route refuses with 503.
+3. **Floor hook.** `hooks/pretooluse_floor.py` sends `AO_WORKER_TOKEN` as a bearer and keeps its fail-CLOSED behaviour. An irreversible action is BLOCKED (exit 2) when the token is missing, when the bridge refuses (HTTP 401/403/503), or when the bridge is unreachable. Its output never contains the token. A reversible action never needs the bridge.
+4. Document both variables in `agent-org/docker/.env.example`. Update any in-repo host tooling that calls the bridge on `127.0.0.1:8830` to send the operator token.
+
+**Out of scope.** Docker/compose network changes, the external gym runner, Mattermost auth, and other planes. Only the agent-bridge Python suite is judged.
+
+## Interface the tests rely on
+
+- `app.config.Settings` gains `operator_token` and `worker_token`, read from env `AO_OPERATOR_TOKEN` and `AO_WORKER_TOKEN` (the existing `AO_` prefix). Both are constructible from plain strings (`Settings(..., operator_token="...")`) and default to empty. A whitespace-only value counts as unset.
+- New module **`app/auth.py`**:
+  - Constants `PUBLIC = "public"`, `OPERATOR = "operator"` and `WORKER = "worker"`.
+  - `Tokens(operator: bytes | None, worker: bytes | None)`.
+  - `load_tokens(settings) -> Tokens`. It logs via `logging` and never logs the values. Messages:
+    - an unset operator token logs a message containing `AO_OPERATOR_TOKEN is not set`;
+    - an unset worker token logs one containing `AO_WORKER_TOKEN is not set`;
+    - a configured operator token logs one containing `auth: operator token configured`.
+  - `verify_table(app, table)` raises `RuntimeError` with `unclassified` in the message when the app serves a `(method, path)` that is not in the table. A stale table row is also an error.
+  - `decide(access, presented: bytes | None, tokens) -> None | tuple[int, str]`, a pure function. `None` means allow.
+    - `decide(None, ...)` returns exactly `(403, "route is not classified for access; refused")`, and an unknown class also gives 403.
+    - `decide(PUBLIC, ...)` returns `None`.
+- `app.main.ROUTE_ACCESS: dict[tuple[str, str], str]` maps `(METHOD, path template)` to a class for exactly the app's 24 routes:
+  - `GET /health` is public;
+  - `POST /hook/floor-check` is worker;
+  - everything else is operator: `POST /effort`, `/nl`, `/concern`, `/decision`, `/kill-switch`, `/profiles/lane`, `/effort/risk`, `/effort/dry-run`, `/effort/prepare`, `/projects`, `/egress`, `/lateral-concern`, `/handoff`, `/suggestion`; `GET /state/{effort_id}`, `/scheduler`, `/audit`, `/profiles`, `/execution/{effort_id}`, `/projects`, `/egress`, `/suggestions`.
+  - `create_app` refuses to build if the table and the routes disagree.
+- Refusal responses are JSON `{"detail": "..."}`:
+  - **401** (no token, a wrong token, or a header without the `Bearer` scheme): detail contains `token required`, with header `WWW-Authenticate: Bearer`.
+  - **403** (the worker token on an operator route): detail contains `needs the operator token`.
+  - **503** (not configured): detail contains `not configured`.
+  - An unauthenticated POST with an invalid JSON body gets 401, not 422.
+- Each refusal logs a line containing `auth: refused <METHOD> <path> -> <status>` (e.g. `auth: refused POST /nl -> 401`).
+- `GET /health` still returns `{"status": "ok"}` with no token, even when no tokens are configured.
+- Floor hook stderr contains `no AO_WORKER_TOKEN` when the token is missing, and `HTTP <code>` (e.g. `HTTP 401`) when the bridge refuses.
+
+## How to test
+
+No network and no Docker. Set `DOCKER_HOST=tcp://127.0.0.1:1`.
+
+```
+cd agent-org/agent-bridge && python -m pytest -q tests
+ruff check .
+```
+
+Existing tests that call the HTTP app without a token will now get refusals. Updating them to send an operator bearer token is expected; build fake tokens in tests, never real ones.
+
+Work only inside this repository checkout. Do not look for the solution elsewhere (no network, no other checkouts). When done, leave your changes in the working tree (committing is optional).

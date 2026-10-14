@@ -1,0 +1,55 @@
+# Task
+
+**Goal.** agent-bridge's stall watchdog must stop cancelling healthy worker turns.
+
+On each sweep (`Orchestrator._sweep_stalled_efforts` in `agent-org/agent-bridge/app/orchestrator.py`), the watchdog probes every busy worker for `(task_id, event_offset)` through `harness.running_task_progress(...)`. It stores the last result per worker URL in `self._worker_progress[url] = (task_id, offset, seen_at)`. If the offset does not grow for `worker_silence_s`, it treats the turn as hung and cancels it. The bug: the next probe always passes the previous probe's offset as `since_offset`, even when the worker is now running a **different** task. A new task therefore inherits the old task's offset. In one observed case the stored offset was 56,200 and the new task's event file had about 9,000 lines. The new task's progress looks frozen, and the healthy turn is cancelled as "silent".
+
+**What to build.**
+
+1. Pass the stored offset only when the running task is the task that offset was read from. For a different task, probe from 0 and reset the stored state to the new task.
+2. Make the little-coder worker daemon's progress probe cheap on large event files. The `/tasks/{task_id}/events?offset=N` route in `little-coder/src/littlecoder/daemon.py` re-reads the whole event file on every probe (one file was 761 MB). It must read only from where it last stopped (O(new bytes)). The route's semantics stay the same: `events = lines[offset:]`, `next_offset = offset + len(events)`.
+
+**Threat model.** A genuinely hung turn must still be detected and cancelled. That means the same task id, no offset growth, and `worker_silence_s` elapsed.
+
+**Acceptance.**
+- Stored offset 56,200 from task A, and worker now running task B with 9,000 lines: B is judged alive, not cancelled, and the stored state becomes `("task-B", 9000, ...)`. This holds over two sweeps with the real `LittleCoderHarness` client too.
+- A frozen task with the same id is still cancelled and recovered.
+- A large-file probe reads only the newly appended bytes. A test must prove it.
+- The agent-bridge and little-coder suites pass. `ruff check` is clean.
+
+**Out of scope:** the other watchdog guards. Do not change how hangs are decided beyond the offset/task-id rule.
+
+## Interface the tests rely on
+
+agent-bridge (`app/worker/harness.py`):
+- `WorkerHarness.running_task_progress(base_url, since_offset=0, since_task_id=None) -> tuple[str, int] | None`. Add the new keyword `since_task_id` (the task the `since_offset` belongs to) to the protocol, to `LittleCoderHarness`, and to `FakeHarness`. `since_task_id=None` keeps the old behaviour (trust the offset).
+- `LittleCoderHarness.running_task_progress`: if `since_task_id` is given and differs from the daemon's running task id, it requests `/tasks/{id}/events` with `offset=0`. It must keep creating its client as `httpx.AsyncClient(...)` from the harness module, with keyword arguments only, because tests monkeypatch that constructor.
+- The orchestrator's sweep passes `since_task_id` from the stored `_worker_progress` entry.
+- `FakeHarness` gains:
+  - `progress_totals: dict[str, int]` (default empty). When a URL has an entry, `running_task_progress` emulates the daemon's line-count semantics and returns `(task_id, since_offset + max(0, total - since_offset))`, using the *effective* since_offset (0 when the task id differs). Without an entry, the existing `progress_offsets` behaviour is unchanged.
+  - `progress_calls: list[tuple[str, str, int]]`. Every `running_task_progress` call appends `(base_url, task_id, effective_since_offset)`.
+  - The same "different task → offset 0" rule as the real client.
+
+little-coder (`littlecoder/daemon.py`):
+- Add a module-level function `read_event_lines(path: str, offset: int, cache: dict) -> list[str]`. It returns lines `offset..` of the file with the trailing newline stripped (decoded as UTF-8; use `errors="replace"`). `[]` when `offset` is at or past the end.
+- `cache` is caller-owned and keyed by `path`. `cache[path] == (complete_line_count, byte_position_after_those_lines)`.
+- The cache never holds more than 64 entries. Concurrent calls from several threads, including eviction, must be safe.
+- Only complete (newline-terminated) lines count. An unterminated tail being written is neither returned nor counted, and the cached byte position always stays on a line boundary. If one `readlines()` call hands back a line split into an unterminated head plus its tail, stop at the first unterminated element.
+- When `offset` is at or past the cached line count and the file has not shrunk, read only the bytes after the cached byte position. Otherwise fall back to a full read.
+- I/O contract that the tests spy on:
+  - Open the file with the builtin name `open(...)` looked up in `littlecoder.daemon` (tests monkeypatch `littlecoder.daemon.open`).
+  - Use the handle as a context manager, and call only `fileno()`, `seek()` and `readlines()` on it.
+  - Read the new region with a single `readlines()`. The bytes it returns must be exactly the appended bytes.
+- The `/tasks/{task_id}/events` route uses `read_event_lines`.
+
+## How to test
+
+No network and no Docker. Set `DOCKER_HOST=tcp://127.0.0.1:1`.
+
+```
+cd agent-org/agent-bridge && python -m pytest -q tests
+cd little-coder && PYTHONPATH=src python -m pytest -q tests
+ruff check .
+```
+
+Work only inside this repository checkout. Do not look for the solution elsewhere (no network, no other checkouts). When done, leave your changes in the working tree (committing is optional).

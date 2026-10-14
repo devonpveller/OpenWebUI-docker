@@ -1,0 +1,5 @@
+<think>
+The user wants knowledge questions for the auth task. Let me draft them first:
+Q1 [codebase] How does create_app register routes in app/main.py?
+Q2 [external] Is hmac.compare_digest constant time for unequal lengths?
+Hmm, I should also consider the floor hook and whether the bridge is
