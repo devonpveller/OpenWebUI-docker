@@ -31,17 +31,46 @@
  *   - the result: stdout, then stderr after a newline, "(no output)" when both
  *     are empty, details.exitCode = the exit status, or 1 when there is none
  *     (killed by a signal, could not start), isError = exitCode !== 0;
- *   - timeouts: none of our own; ot-exec applies LC_EXEC_TIMEOUT and its
- *     exit code / message pass through unchanged.
+ *   - timeouts: ot-exec applies LC_EXEC_TIMEOUT (it kills the command's whole
+ *     process tree in open-terminal, then exits 124 with a fixed message).
  * New: pi's abort signal is honoured (the child gets SIGTERM; the result says
  * "Command aborted"). The child stays in pi's process group, so the daemon's
  * process-group kill on cancel still reaches it exactly as before.
+ *
+ * ao-exechang (2026-10-14):
+ *   - pi takes `isError` only from a THROWN error: a returned
+ *     `{isError: true}` is recorded as a success (bake-off sessions: every
+ *     1,800-s timeout reached the model as "(no output)", isError false). So an
+ *     ot-exec timeout (exit 124 AND its fixed "[ot-exec] timed out after"
+ *     line) is thrown: the model gets the output so far plus the message as an
+ *     error result. Any other exit, a user's own `timeout` exit 124 included,
+ *     is returned exactly as before.
+ *   - backstop: if ot-exec itself has not ended LC_EXEC_TIMEOUT +
+ *     LC_EXEC_BACKSTOP_GRACE (default 120) seconds after it started, it gets
+ *     SIGTERM (it then kills the command in open-terminal), and SIGKILL 30 s
+ *     later; the call fails with a fixed message. No call outlives that.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+const TIMEOUT_EXIT = 124;
+const TIMEOUT_MARKER = "[ot-exec] timed out after"; // littlecoder/otexec.py TIMEOUT_MARKER
+const DEFAULT_EXEC_TIMEOUT_S = 1800; // ot-exec's own default when LC_EXEC_TIMEOUT is unset
+const DEFAULT_BACKSTOP_GRACE_S = 120;
+const BACKSTOP_KILL_AFTER_MS = 30_000;
+
+function envSeconds(name: string, fallback: number): number {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+}
+
+/** ot-exec's own bound fired: it killed the command and wrote its fixed message, which starts a
+ * line of ot-exec's OWN stderr (the command's output arrives on stdout: open-terminal's PTY). */
+function isOtExecTimeout(exitCode: number, stderr: string): boolean {
+  return exitCode === TIMEOUT_EXIT && (stderr.startsWith(TIMEOUT_MARKER) || stderr.includes("\n" + TIMEOUT_MARKER));
+}
 
 type ExecResult = {
   content: { type: "text"; text: string }[];
@@ -58,7 +87,7 @@ function result(stdout: string, stderr: string, exitCode: number, note?: string)
 }
 
 function runOtExec(command: string, signal: AbortSignal | undefined): Promise<ExecResult> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       resolve(result("", "", 1, "Command aborted"));
       return;
@@ -92,18 +121,38 @@ function runOtExec(command: string, signal: AbortSignal | undefined): Promise<Ex
       child.kill("SIGTERM");
     };
     signal?.addEventListener("abort", onAbort, { once: true });
+    // Backstop: ot-exec bounds the command; this bounds ot-exec.
+    const backstopS =
+      envSeconds("LC_EXEC_TIMEOUT", DEFAULT_EXEC_TIMEOUT_S) +
+      envSeconds("LC_EXEC_BACKSTOP_GRACE", DEFAULT_BACKSTOP_GRACE_S);
+    let stalled = false;
+    let hardKill: ReturnType<typeof setTimeout> | undefined;
+    const backstop = setTimeout(() => {
+      stalled = true;
+      child.kill("SIGTERM");
+      hardKill = setTimeout(() => child.kill("SIGKILL"), BACKSTOP_KILL_AFTER_MS);
+    }, backstopS * 1000);
     const finish = (status: number | null) => {
       if (done) return;
       done = true;
+      clearTimeout(backstop);
+      if (hardKill) clearTimeout(hardKill);
       signal?.removeEventListener("abort", onAbort);
-      resolve(
-        result(
-          Buffer.concat(out).toString("utf-8"),
-          Buffer.concat(err).toString("utf-8"),
-          status ?? 1,
-          aborted ? "Command aborted" : undefined,
-        ),
+      const stderr = Buffer.concat(err).toString("utf-8");
+      const r = result(
+        Buffer.concat(out).toString("utf-8"),
+        stderr,
+        status ?? 1,
+        aborted
+          ? "Command aborted"
+          : stalled
+            ? `[open-terminal-exec] ot-exec did not finish within ${Math.round(backstopS)} s and was stopped; ` +
+              "the command's result is unknown. Run a narrower command, or background a long job: " +
+              "nohup CMD > /tmp/x.log 2>&1 &  then poll the log."
+            : undefined,
       );
+      if (stalled || (!aborted && isOtExecTimeout(r.details.exitCode, stderr))) reject(new Error(r.content[0].text));
+      else resolve(r);
     };
     // could not start (ENOENT ...): spawnSync returned no output and no status.
     // An 'error' for a child that DID start (e.g. a failed kill) is not the end:

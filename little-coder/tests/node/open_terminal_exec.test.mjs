@@ -150,6 +150,80 @@ test("ot-exec's own timeout (exit 124 + partial output) passes through unchanged
   assert.equal(r.isError, true);
 });
 
+// ── ao-exechang: what the model receives when the bound fires ───────────────
+// pi records isError only for a THROWN error (pi-agent-core executePreparedToolCall);
+// a returned {isError: true} reaches the model as a success.
+
+const OT_TIMEOUT_MSG =
+  "[ot-exec] timed out after 3 s, killed: `sleep 1000`\n" +
+  "The command and every process it started were stopped. Any output above is what it printed before the kill.\n";
+
+test("ot-exec's timeout (exit 124 + its fixed message) is THROWN, output and message intact", async () => {
+  await assert.rejects(
+    run({ stdout: "partial\n", stderr: OT_TIMEOUT_MSG, exit: 124 }),
+    (e) => {
+      assert.ok(e instanceof Error);
+      assert.equal(e.message, "partial\n\n" + OT_TIMEOUT_MSG);
+      return true;
+    },
+  );
+});
+
+test("a user's own `timeout` (exit 124, no ot-exec message) is returned, not thrown", async () => {
+  const r = await run({ stdout: "x\n", stderr: "Terminated\n", exit: 124 });
+  assert.equal(text(r), "x\n\nTerminated\n");
+  assert.deepEqual(r.details, { exitCode: 124 });
+});
+
+test("the marker in the COMMAND's output (stdout) with exit 124 is not ot-exec's timeout", async () => {
+  const r = await run({ stdout: OT_TIMEOUT_MSG, exit: 124 });
+  assert.deepEqual(r.details, { exitCode: 124 });
+  assert.equal(text(r), OT_TIMEOUT_MSG);
+});
+
+test("the timeout marker with another exit code is not a timeout", async () => {
+  const r = await run({ stdout: "[ot-exec] timed out after 3 s (quoted in a log)\n", exit: 0 });
+  assert.equal(r.isError, false);
+});
+
+test("backstop: an ot-exec that outlives LC_EXEC_TIMEOUT + grace is stopped and the call throws", async () => {
+  const saved = [process.env.LC_EXEC_TIMEOUT, process.env.LC_EXEC_BACKSTOP_GRACE];
+  process.env.LC_EXEC_TIMEOUT = "1";
+  process.env.LC_EXEC_BACKSTOP_GRACE = "1";
+  try {
+    const t0 = Date.now();
+    await assert.rejects(run({ stdout: "stuck\n", sleep_ms: 30000 }), (e) => {
+      assert.match(e.message, /^stuck\n/);
+      assert.match(e.message, /ot-exec did not finish within 2 s and was stopped/);
+      assert.match(e.message, /nohup CMD > \/tmp\/x\.log 2>&1 &/);
+      return true;
+    });
+    const ms = Date.now() - t0;
+    assert.ok(ms >= 1900 && ms < 10000, `stopped at the backstop (${ms} ms), not after 30 s`);
+  } finally {
+    for (const [k, v] of [["LC_EXEC_TIMEOUT", saved[0]], ["LC_EXEC_BACKSTOP_GRACE", saved[1]]]) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
+test("the backstop does not touch a call that ends in time", async () => {
+  const saved = [process.env.LC_EXEC_TIMEOUT, process.env.LC_EXEC_BACKSTOP_GRACE];
+  process.env.LC_EXEC_TIMEOUT = "1";
+  process.env.LC_EXEC_BACKSTOP_GRACE = "2";
+  try {
+    const r = await run({ stdout: "fine\n", sleep_ms: 1500 });
+    assert.equal(text(r), "fine\n");
+    assert.equal(r.isError, false);
+  } finally {
+    for (const [k, v] of [["LC_EXEC_TIMEOUT", saved[0]], ["LC_EXEC_BACKSTOP_GRACE", saved[1]]]) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
 test("ot-exec that cannot start: (no output), exit 1", async () => {
   missing = true;
   try {
