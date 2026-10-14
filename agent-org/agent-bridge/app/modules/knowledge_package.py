@@ -13,16 +13,16 @@ kp-questions) is answered:
 The package feeds a TOOL-USING coding worker, so research text is treated as hostile (the
 engine's own injection screen, injection.ts, assumes tool-less readers). Defences, in order:
 
-  (a) SOURCE ALLOW-LIST. An answer line counts only if every citation resolves to a source whose
-      host (or host/path prefix) is on the configured documentation/upstream allow-list
-      (`AO_KNOWLEDGE_SOURCE_HOSTS`, plus per-call `source_hosts`), or it is a repo `path:line`
-      from the codebase answerer. A finding the extractor picked from any other source leaves
-      the question OPEN with `source_not_allowed`.
-  (b) FACT STATEMENTS ONLY. A line that addresses the reader (you / the worker / the agent) or
-      speaks about repo actions (push, merge, force, skip/disable/delete tests or gates, hooks,
-      credentials ...) is dropped. A coarse filter on top of (a), not the defence.
+  (a) SOURCE ALLOW-LIST - the defence. An answer line counts only if EVERY citation resolves to
+      a source whose host (exact) or host + path prefix (segment boundary, on the NORMALISED
+      path) is on the configured documentation allow-list (`AO_KNOWLEDGE_SOURCE_HOSTS`, plus
+      per-call `source_hosts` for the task's own libraries), or it is a repo `path:line` from the
+      codebase answerer. No anyone-can-publish host is in the defaults. A finding the extractor
+      picked from any other source leaves the question OPEN with `source_not_allowed`.
   (c) FRAMING. The header says the package is reference material from cited docs, never
       instructions, to verify before relying on it.
+  (A vocabulary filter for "operational" lines was tried in round 2 and removed in round 3: the
+  tester measured it dropping 14/70 real facts while passing 33/40 operational instructions.)
 
 And the C1 shape of every slot: an answer line is a WHOLE `[SOURCED]` synthesis line (split on
 `\\r?\\n` exactly as the engine does) that the extractor SELECTED BY ID (it never writes text),
@@ -34,8 +34,10 @@ assignments, instruction-shaped text). A source is a whole https URL passing `ur
 
 Honesty (C5): an unanswered question is OPEN with a reason, never dropped and never filled.
 Bounds (C6): <= 8 questions answered (the rest listed by id as `over_question_cap`), <= 3 lines,
-<= 2 sources per item, a hard token cap with a deterministic truncation that keeps every source,
-a time box over the whole step, and a deadline on every research job.
+<= 2 sources per item, a hard token cap with a deterministic truncation that never raises (it
+keeps every source and question as long as it can, then drops extra sources, then turns research
+answers - then codebase answers - into OPEN `over_token_cap`), a time box over the whole step,
+and a deadline on every research job.
 
 Flag: `AO_KNOWLEDGE_PACKAGE_ENABLED` (default false). Nothing live calls this yet (kp-inject).
 """
@@ -49,7 +51,7 @@ import math
 import re
 import time
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
@@ -82,7 +84,7 @@ ANSWERED, OPEN = "answered", "open"
 # OPEN reason codes (closed set; rendered verbatim).
 REASONS = frozenset({
     "not_found", "time_box", "extract_failed", "question_text_rejected", "no_research_client",
-    "source_not_allowed", "over_question_cap",
+    "source_not_allowed", "over_question_cap", "over_token_cap",
     "research_timeout", "research_unreachable", "research_model_down", "research_unfiled",
     "research_crashed", "research_cancelled", "research_rejected", "research_unauthorized",
     "research_malformed", "research_failed",
@@ -187,25 +189,6 @@ _DIRECTIVE_RE = re.compile(
     r"|\b(?:AI|LLM|language model|assistant)s?\b[^.]{0,30}\b(?:must|should|shall)\b"
     r"|\brm\s+-[rf]|\bcurl\s|\bwget\s|\bsudo\s|\|\s*(?:sh|bash|zsh|pwsh|powershell)\b"
     r"|\bbase64\b|\bexfiltrat|--no-verify\b")
-# (b) Fact statements only: a line that addresses the reader or talks about repo actions.
-_ACTION_RE = re.compile(
-    r"(?i)\b(?:you|your|yours|yourself)\b"
-    r"|\b(?:the|this|that|a|an|any|each|every)\s+(?:worker|agent|assistant|coding model|bot)s?\b"
-    r"|\bgit\s+(?:push|reset|rebase|commit|merge|checkout|clean|stash|tag|config|remote)\b"
-    r"|\b(?:push|pushes|pushed|pushing|merge|merges|merged|merging|commit|commits|committing)\b"
-    r"[^.]{0,30}?\b(?:main|master|origin|upstream|remote|directly|production|prod)\b"
-    r"|\bforce\b|--force\b|\bforce-push"
-    r"|\b(?:skip|skips|skipped|skipping|disable|disables|disabled|disabling|bypass|bypassing"
-    r"|delete|deletes|deleted|deleting|remove|removes|removed|removing|drop|dropping"
-    r"|comment(?:ing)? out|xfail|silence|silencing|weaken|weakening|loosen|loosening)\b"
-    r"[^.]{0,40}?\b(?:tests?|checks?|gates?|hooks?|ci|lint(?:er|ing)?|verification|validation"
-    r"|suites?|asserts?|assertions?|pre-commit|safety|guards?|reviews?)\b"
-    r"|\b(?:test|ci|quality|merge|commit|review)\s+gates?\b|\bpre-commit\b|\bgit hooks?\b"
-    r"|\b(?:credentials?|passwords?|passwd|secrets?|api[ -]?keys?|access[ -]?keys?"
-    r"|private[ -]?keys?|ssh[ -]?keys?|auth(?:entication)? tokens?|access tokens?)\b"
-    r"|\b(?:sudo|chmod|chown)\b|\bmain branch\b|\b(?:origin|upstream)/(?:main|master)\b")
-
-
 def _charset_ok(s: str) -> bool:
     return all(0x20 <= ord(ch) <= 0x7E or ch in _EXTRA_CHARS for ch in s)
 
@@ -215,27 +198,60 @@ def _entropy(s: str) -> float:
     return -sum(c / n * math.log2(c / n) for c in Counter(s).values()) if n else 0.0
 
 
+_CAMEL_PIECE_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+
+
+def _identifier_like(run: str) -> bool:
+    """A CamelCase / acronym identifier (`OAuth2PasswordBearer`, `WindowsSelectorEventLoopPolicy`,
+    `ASGI3Application`, `HTTP2ConnectionPool`) rather than a random key: it splits into word-like
+    pieces - no lone lower-case letter, at most one lone capital per four pieces, digit groups of
+    at most 3, mean piece length >= 3. Random base62/hex nearly always yields lone letters."""
+    pieces = _CAMEL_PIECE_RE.findall(run)
+    if "".join(pieces) != run or not pieces:
+        return False
+    letters = [p for p in pieces if not p.isdigit()]
+    if any(len(p) == 1 and p.islower() for p in letters):
+        return False
+    if sum(1 for p in letters if len(p) == 1) > max(1, len(pieces) // 4):
+        return False
+    if any(p.isdigit() and len(p) > 3 for p in pieces):
+        return False
+    if sum(1 for p in pieces if p.isdigit()) > max(1, len(pieces) // 3):
+        return False                                   # digits sprinkled through: key-shaped
+    return sum(len(p) for p in pieces) / len(pieces) >= 3.0
+
+
 def _secret_token(tok: str) -> bool:
     """A long high-entropy token, judged on its letters and digits whatever separators it has
-    (`glpat-...`, `sk_live_...`, an AWS secret with `/`, a hex or base62 key)."""
+    (`glpat-...`, `sk_live_...`, an AWS secret with `/`, a hex or base62 key). Word-like CamelCase
+    identifiers are exempt from the mixed-class, long-run and entropy rules."""
     if len(tok) > TOKEN_MAX:
         return True
-    alnum = re.sub(r"[^A-Za-z0-9]", "", tok)
+    runs = re.findall(r"[A-Za-z0-9]+", tok)
+    if re.search(r"(?:AKIA|ASIA)[0-9A-Z]{12,}", "".join(runs)):
+        return True                                    # AWS access key id, any separators
+    if any(len(r) >= 20 and any(ch.isdigit() for ch in r) and not _identifier_like(r)
+           for r in runs):
+        return True                                    # a long hex / digit-bearing run
+    if any(len(r) >= 16 and sum(ch.isdigit() for ch in r) >= 2
+           and sum(ch.isupper() for ch in r) >= 2 and not any(ch.islower() for ch in r)
+           for r in runs):
+        return True                                    # an upper-case + digit key id
+    alnum = "".join(runs)
     if len(alnum) < 16:
         return False
+    long_runs = [r for r in runs if len(r) >= 4]
+    # word-like = made of identifier-shaped runs, not of many short chunks (url-safe base64)
+    word_like = (bool(long_runs) and all(_identifier_like(r) for r in long_runs)
+                 and sum(len(r) for r in long_runs) >= 0.75 * len(alnum))
     has_d = any(ch.isdigit() for ch in alnum)
     has_u = any(ch.isupper() for ch in alnum)
     has_l = any(ch.islower() for ch in alnum)
-    if has_d and has_u and has_l:
+    if has_d and has_u and has_l and not word_like:
         return True                                    # mixed-class: key-shaped
-    if any(len(run) >= 20 and any(ch.isdigit() for ch in run)
-           for run in re.findall(r"[A-Za-z0-9]+", tok)):
-        return True                                    # a long hex / digit-bearing run
-    if any(len(run) >= 28 for run in re.findall(r"[A-Za-z0-9]+", tok)):
+    if any(len(r) >= 28 for r in runs) and not word_like:
         return True
-    if re.search(r"[A-Z0-9]{16,}", tok):
-        return True                                    # an upper-case key id (AKIA..., etc.)
-    return len(alnum) >= 24 and _entropy(alnum) >= 4.3
+    return len(alnum) >= 24 and _entropy(alnum) >= 4.3 and not word_like
 
 
 def _hostish(s: str) -> bool:
@@ -266,14 +282,12 @@ def _shape_ok(s: Any, *, min_len: int, max_len: int) -> bool:
 
 
 def line_ok(s: Any) -> bool:
-    """An answer line: one whole line, 12..280 chars, every shape check, AND a fact statement
-    (no address to the reader, no repo-action talk: defence (b))."""
-    return _shape_ok(s, min_len=LINE_MIN, max_len=LINE_MAX) and not _ACTION_RE.search(s)
+    """An answer line: one whole line, 12..280 chars, every shape check."""
+    return _shape_ok(s, min_len=LINE_MIN, max_len=LINE_MAX)
 
 
 def question_text_ok(s: Any) -> bool:
-    """Question text is shown in the package (and the effort thread): every shape check. The
-    fact-only filter does not apply - a question may well ask about credentials or hooks."""
+    """Question text is shown in the package (and the effort thread): every shape check."""
     return _shape_ok(s, min_len=3, max_len=QUESTION_MAX)
 
 
@@ -285,14 +299,19 @@ _SECRET_PARAM_RE = re.compile(r"(?i)(?:^|[?&#;])[A-Za-z0-9_.-]*(?:key|token|secr
 _BAD_HOST_SUFFIXES = (".local", ".lan", ".internal", ".localdomain", ".corp", ".home", ".intranet",
                       ".svc", ".nip.io", ".sslip.io", ".xip.io", ".localtest.me", ".lvh.me",
                       ".test", ".example", ".invalid", ".onion", ".arpa")
+_ENCODED_DOT_SLASH_RE = re.compile(r"%(?:2e|2f|5c)", re.I)
 _BAD_HOSTS = frozenset({"localhost", "nip.io", "sslip.io", "xip.io", "localtest.me", "lvh.me"})
 
 
 def url_ok(s: Any) -> bool:
-    """A doc URL: https only, a public-looking DNS host (no IP, no internal suffix, no port, no
-    userinfo), a plain path, no secret-shaped parameter, no pseudo-scheme or instruction-shaped
-    text anywhere in it. Shape only - see `SourceAllowList` for which hosts count."""
-    if not isinstance(s, str) or len(s) > URL_MAX or not _charset_ok(s) or " " in s:
+    """A doc URL: printable ASCII only (a URL's non-ASCII is percent-encoded on the wire, and the
+    byte budget stays exact), https, a public-looking DNS host (no IP, no internal suffix, no
+    port, no userinfo), a plain path with NO dot segments, encoded dots/slashes/backslashes or
+    backslashes, no secret-shaped parameter, no pseudo-scheme or instruction-shaped text.
+    Shape only - see `SourceAllowList` for which hosts count."""
+    if not isinstance(s, str) or len(s) > URL_MAX:
+        return False
+    if not all(0x21 <= ord(ch) <= 0x7E for ch in s):
         return False
     if not s.startswith("https://") or "@" in s or "\\" in s:
         return False
@@ -305,6 +324,8 @@ def url_ok(s: Any) -> bool:
     except ValueError:
         return False
     host = (parts.hostname or "")
+    if host.endswith("."):
+        host = host[:-1]                               # a trailing root dot names the same host
     if port is not None or not host:
         return False
     labels = host.lower().split(".")
@@ -315,12 +336,75 @@ def url_ok(s: Any) -> bool:
     h = host.lower()
     if h in _BAD_HOSTS or any(h.endswith(suf) for suf in _BAD_HOST_SUFFIXES):
         return False
-    if not _PATH_RE.match(parts.path or ""):
+    path = parts.path or ""
+    if not _PATH_RE.match(path):
         return False
+    if _ENCODED_DOT_SLASH_RE.search(path):
+        return False                                   # %2e %2f %5c: a hidden segment trick
+    if any(seg in (".", "..") for seg in path.split("/")):
+        return False                                   # a dot segment escapes a prefix entry
     if _SECRET_PARAM_RE.search(parts.query or "") or _SECRET_PARAM_RE.search(parts.fragment or ""):
         return False
     words = re.sub(r"[-_/.+%=&?#]+", " ", s[len("https://"):])
     return not _DIRECTIVE_RE.search(words)
+
+
+_UNRESERVED_PCT_RE = re.compile(r"%([0-9A-Fa-f]{2})")
+
+
+def _decode_unreserved(path: str) -> str:
+    """RFC 3986 6.2.2.2: decode percent-encoded UNRESERVED characters only (ALPHA DIGIT - . _ ~);
+    every other escape is left as is."""
+    def sub(m: re.Match[str]) -> str:
+        ch = chr(int(m.group(1), 16))
+        return ch if (ch.isascii() and (ch.isalnum() or ch in "-._~")) else m.group(0).upper()
+    return _UNRESERVED_PCT_RE.sub(sub, path)
+
+
+def _remove_dot_segments(path: str) -> str:
+    """RFC 3986 5.2.4 remove_dot_segments."""
+    inp, out = path, []
+    while inp:
+        if inp.startswith("../"):
+            inp = inp[3:]
+        elif inp.startswith("./"):
+            inp = inp[2:]
+        elif inp.startswith("/./"):
+            inp = inp[2:]
+        elif inp == "/.":
+            inp = "/"
+        elif inp.startswith("/../"):
+            inp = inp[3:]
+            if out:
+                out.pop()
+        elif inp == "/..":
+            inp = "/"
+            if out:
+                out.pop()
+        elif inp in (".", ".."):
+            inp = ""
+        else:
+            i = inp.find("/", 1)
+            seg, inp = (inp, "") if i == -1 else (inp[:i], inp[i:])
+            out.append(seg)
+    return "".join(out)
+
+
+def normalise_url(url: str) -> tuple[str, list[str]] | None:
+    """(host, path segments) as the allow-list compares them, or None when `url` fails `url_ok`.
+    Host: lower case, trailing root dot stripped. Path: unreserved escapes decoded, then dot
+    segments removed (a raw dot segment or encoded dot/slash is already refused by url_ok, so the
+    raw and normalised paths name the same resource)."""
+    if not url_ok(url):
+        return None
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if host.endswith("."):
+        host = host[:-1]
+    path = _remove_dot_segments(_decode_unreserved(parts.path or "/")) or "/"
+    if any(seg in (".", "..") for seg in path.split("/")):
+        return None                                    # decoding produced a dot segment
+    return host, path.split("/")[1:]
 
 
 _FILELINE_RE = re.compile(r"^(?:[A-Za-z0-9_.-]+/){0,12}[A-Za-z0-9_.-]+:\d{1,6}(?:-\d{1,6})?$")
@@ -338,28 +422,33 @@ _ENTRY_RE = re.compile(r"^(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:/[A-Za-z0-9._~-
 
 
 class SourceAllowList:
-    """Documentation / upstream hosts whose pages may source an answer (defence (a)).
+    """Documentation hosts whose pages may source an answer (the defence).
 
-    Entry forms: `host` (exact), `*.suffix` (any subdomain of suffix), `host/path/prefix` (that
-    host, paths at or under the prefix - e.g. `github.com/agronholm/anyio` for one project's
-    repo and issues without admitting all of github.com). Invalid entries are ignored."""
+    Entry forms: `host` (exact), `*.suffix` (any subdomain of suffix - not in the defaults; a
+    caller may pass one per task), `host/path/prefix` (EXACT host, and the normalised path at or
+    under the prefix on a segment boundary - e.g. `github.com/agronholm/anyio` for one project
+    without admitting all of github.com). A punycode (`xn--`) host is admitted only when it is
+    listed exactly (as a host or a prefix host), never through a wildcard. Invalid entries are
+    ignored."""
 
     def __init__(self, entries: Iterable[str]) -> None:
         self.exact: set[str] = set()
         self.suffixes: set[str] = set()
-        self.prefixes: list[tuple[str, str]] = []
+        self.prefixes: list[tuple[str, list[str]]] = []
         for raw in entries:
             e = str(raw or "").strip()
-            host_part = e.split("/", 1)[0].lower()
+            host_part = e.split("/", 1)[0].lower().rstrip(".")
             e = host_part + (("/" + e.split("/", 1)[1]) if "/" in e else "")
             if not e or not _ENTRY_RE.match(e):
                 continue
             if e.startswith("*."):
                 if "/" not in e:
-                    self.suffixes.add(e[1:])            # ".readthedocs.io"
+                    self.suffixes.add(e[1:])            # ".example.org"
             elif "/" in e:
                 host, path = e.split("/", 1)
-                self.prefixes.append((host, "/" + path.rstrip("/")))
+                segs = [s for s in path.split("/") if s]
+                if segs and not any(s in (".", "..") for s in segs):
+                    self.prefixes.append((host, segs))
             else:
                 self.exact.add(e)
 
@@ -369,14 +458,17 @@ class SourceAllowList:
         return cls([*base, *extra])
 
     def allows(self, url: str) -> bool:
-        if not url_ok(url):
+        norm = normalise_url(url)
+        if norm is None:
             return False
-        parts = urlsplit(url)
-        host, path = (parts.hostname or "").lower(), parts.path or "/"
-        if host in self.exact or any(host.endswith(suf) for suf in self.suffixes):
+        host, segs = norm
+        if host in self.exact:
             return True
-        return any(host == h and (path == p or path.startswith(p + "/"))
-                   for h, p in self.prefixes)
+        if any(h == host and segs[:len(p)] == p for h, p in self.prefixes):
+            return True
+        if any(lb.startswith("xn--") for lb in host.split(".")):
+            return False                               # IDN only when listed exactly (above)
+        return any(host.endswith(suf) for suf in self.suffixes)
 
 
 def source_ok(s: Any) -> bool:
@@ -525,7 +617,7 @@ class KnowledgePackage:
     items: tuple[PackageItem, ...]  # every input question, in input order (over-cap ones last)
     text: str
     tokens: int
-    truncation: str                 # none | lines | answer_text | question_text
+    truncation: str                 # none|lines|answer_text|question_text|extra_sources|over_token_cap
     rounds_used: int
     jobs: tuple[tuple[int, str], ...] = field(default=())   # (round, ResearchJob.state)
     over_cap_questions: int = 0
@@ -566,42 +658,69 @@ def _render(items: Sequence[PackageItem], over: Sequence[PackageItem], *,
 
 
 def render_package(items: Sequence[PackageItem],
-                   over: Sequence[PackageItem] = ()) -> tuple[str, int, str]:
-    """Render under the hard cap. Deterministic truncation, last question first, that never drops
-    a source or a question: (1) lines beyond 2, then beyond 1; (2) answer text -> an 'omitted,
-    read the source' marker; (3) question text -> 'omitted for size'. Returns (text, tokens, stage)."""
-    n = len(items)
+                   over: Sequence[PackageItem] = ()) -> tuple[str, int, str, tuple[PackageItem, ...]]:
+    """Render under the hard cap; NEVER raises. Deterministic stages, last question first:
+    (1) lines beyond 2, then beyond 1; (2) answer text -> 'omitted, read the source';
+    (3) question text -> 'omitted for size'; (4) sources beyond the first per item;
+    (5) answers -> OPEN `over_token_cap` (research answers before codebase answers).
+    Stages 1-3 keep every source and every question. Returns (text, tokens, stage, items) - the
+    items as finally rendered (stage 4/5 change them)."""
+    work = list(items)
+    n = len(work)
     max_lines = [MAX_LINES] * n
     omit_answer = [False] * n
     omit_q = [False] * n
 
     def r() -> str:
-        return _render(items, over, max_lines=max_lines, omit_answer=omit_answer, omit_q=omit_q)
+        return _render(work, over, max_lines=max_lines, omit_answer=omit_answer, omit_q=omit_q)
+
+    def fits(t: str) -> bool:
+        return estimate_tokens(t) <= TOKEN_CAP
+
+    def done(t: str, stage: str) -> tuple[str, int, str, tuple[PackageItem, ...]]:
+        return t, estimate_tokens(t), stage, tuple(work)
 
     text = r()
-    if estimate_tokens(text) <= TOKEN_CAP:
-        return text, estimate_tokens(text), "none"
+    if fits(text):
+        return done(text, "none")
     for keep in (2, 1):
         for k in reversed(range(n)):
-            if items[k].status == ANSWERED and max_lines[k] > keep:
+            if work[k].status == ANSWERED and max_lines[k] > keep:
                 max_lines[k] = keep
                 text = r()
-                if estimate_tokens(text) <= TOKEN_CAP:
-                    return text, estimate_tokens(text), "lines"
+                if fits(text):
+                    return done(text, "lines")
     for k in reversed(range(n)):
-        if items[k].status == ANSWERED:
+        if work[k].status == ANSWERED:
             omit_answer[k] = True
             text = r()
-            if estimate_tokens(text) <= TOKEN_CAP:
-                return text, estimate_tokens(text), "answer_text"
+            if fits(text):
+                return done(text, "answer_text")
     for k in reversed(range(n)):
         omit_q[k] = True
         text = r()
-        if estimate_tokens(text) <= TOKEN_CAP:
-            return text, estimate_tokens(text), "question_text"
-    # Unreachable by construction (8 items x 2 sources x 160 chars + 16 over-cap ids fit);
-    # refuse rather than ship an over-cap package.
-    raise RuntimeError("knowledge package cannot fit the token cap")
+        if fits(text):
+            return done(text, "question_text")
+    for k in reversed(range(n)):
+        it = work[k]
+        if it.status == ANSWERED and len(it.sources) > 1:
+            work[k] = replace(it, sources=it.sources[:1], line_src=tuple(1 for _ in it.line_src))
+            text = r()
+            if fits(text):
+                return done(text, "extra_sources")
+    order = [k for k in reversed(range(n)) if work[k].round > 0] + \
+            [k for k in reversed(range(n)) if work[k].round == 0]
+    for k in order:
+        it = work[k]
+        if it.status == ANSWERED:
+            work[k] = PackageItem(it.qid, it.tag, it.question, OPEN, "over_token_cap",
+                                  round=it.round)
+            text = r()
+            if fits(text):
+                return done(text, "over_token_cap")
+    # Every answer is OPEN and every question text omitted: header + <= 8 short lines + the
+    # over-cap line (<= 16 ids) - well under the cap. Returned whatever it measures, never raised.
+    return done(r(), "over_token_cap")
 
 
 def _answered_item(q: KnowledgeQuestion, rnd: int,
@@ -805,7 +924,7 @@ async def build_knowledge_package(
 
     await asyncio.gather(codebase_step(), research_step())
     items = tuple(done[q.id] for q in qs)                     # input order: deterministic
-    text, tokens, stage = render_package(items, over)
+    text, tokens, stage, items = render_package(items, over)   # stage 4/5 may change items
     pkg = KnowledgePackage(items + over, text, tokens, stage, len(jobs), tuple(jobs), len(over))
     log.info("knowledge package: %d/%d answered, %d research job(s) %s, %d tokens, truncation=%s",
              pkg.answered, len(pkg.items), len(jobs), [s for _, s in jobs], tokens, stage)

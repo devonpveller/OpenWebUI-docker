@@ -472,20 +472,23 @@ class Settings(BaseSettings):
     # bounds the WHOLE step (both research rounds + extraction + the codebase answers).
     knowledge_package_enabled: bool = False
     knowledge_package_time_box_s: float = 900.0
-    # Defence (a): only pages on these documentation / upstream hosts may source an answer
-    # (comma-separated; `host`, `*.suffix`, or `host/path/prefix` for one project on a shared host,
-    # e.g. `github.com/agronholm/anyio`). Anything else -> OPEN `source_not_allowed`. Per-task
-    # entries (the task's own libraries) are added by the caller (build_knowledge_package
-    # source_hosts=...). Deliberately NOT generic github.com / pypi.org / stackoverflow.com /
-    # blogs: anyone can write there, and the reader is a tool-using worker.
+    # The knowledge package's defence: only pages on these documentation hosts may source an answer
+    # (comma-separated; `host` exact, `host/path/prefix` matched on segment boundaries of the
+    # normalised path, or `*.suffix` - none in the defaults). Anything else -> OPEN
+    # `source_not_allowed`. Per-task entries for the task's own libraries are added by the
+    # caller (build_knowledge_package source_hosts=..., e.g. `anyio.readthedocs.io/en/stable`,
+    # `github.com/agronholm/anyio`, `docs.rs/tokio`). NEVER in the defaults: hosts where anyone
+    # can post or publish (github.com, pypi.org, stackoverflow.com, blogs, *.readthedocs.io,
+    # docs.rs, pkg.go.dev, the learn.microsoft.com Q&A forum) - the reader is a tool-using worker.
     knowledge_source_hosts: str = (
-        "docs.python.org,peps.python.org,*.readthedocs.io,docs.pytest.org,www.python-httpx.org,"
+        "docs.python.org,peps.python.org,docs.pytest.org,www.python-httpx.org,"
         "docs.pydantic.dev,fastapi.tiangolo.com,www.starlette.io,docs.sqlalchemy.org,"
         "docs.aiohttp.org,docs.djangoproject.com,flask.palletsprojects.com,numpy.org/doc,"
-        "pandas.pydata.org/docs,developer.mozilla.org,nodejs.org/api,docs.deno.com,"
-        "www.typescriptlang.org/docs,doc.rust-lang.org,docs.rs,pkg.go.dev,go.dev/doc,"
-        "learn.microsoft.com,docs.docker.com,docs.github.com,git-scm.com/docs,"
-        "www.postgresql.org/docs"
+        "pandas.pydata.org/docs,developer.mozilla.org/en-US/docs,nodejs.org/api,docs.deno.com,"
+        "www.typescriptlang.org/docs,doc.rust-lang.org,go.dev/doc,go.dev/ref,"
+        "learn.microsoft.com/en-us/dotnet/api,learn.microsoft.com/en-us/dotnet/csharp,"
+        "learn.microsoft.com/en-us/dotnet/standard,learn.microsoft.com/en-us/dotnet/core,"
+        "docs.docker.com,docs.github.com/en,git-scm.com/docs,www.postgresql.org/docs"
     )
 
     # ── Advisory (Tier 2) — research-grounded answers to design/architecture questions ──
