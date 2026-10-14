@@ -1,0 +1,36 @@
+{
+ "questions": [
+  {
+   "question": "Does FastAPI run a route's body parsing and Pydantic validation before or after an HTTP middleware's `dispatch`, so that an unauthenticated POST with invalid JSON can get 401 instead of 422?",
+   "tag": "external"
+  },
+  {
+   "question": "Does `hmac.compare_digest` stay constant-time when the two byte strings differ in length, and does it accept `bytes` from both `Authorization` headers and settings?",
+   "tag": "external"
+  },
+  {
+   "question": "How does `create_app` in `app/main.py` register its routes today, and how can `verify_table` enumerate every `(method, path template)` pair including `/state/{effort_id}`?",
+   "tag": "codebase"
+  },
+  {
+   "question": "What is the fast test command for agent-bridge, and is the suite green on the base commit before any change?",
+   "tag": "codebase"
+  },
+  {
+   "question": "Which existing tests call the HTTP app without a token, and what helper do they use to build the client (so they can be updated to send an operator bearer)?",
+   "tag": "codebase"
+  },
+  {
+   "question": "How do FastAPI's `docs_url`, `redoc_url` and `openapi_url` settings make `/docs`, `/redoc` and `/openapi.json` return 404 when set to `None`?",
+   "tag": "external"
+  },
+  {
+   "question": "How does `hooks/pretooluse_floor.py` reach the bridge today, and what must a test fake (a refusing bridge, an unreachable bridge) for the fail-closed exit 2 to be visible?",
+   "tag": "codebase"
+  },
+  {
+   "question": "Which names and values does the task fix (`PUBLIC`, `OPERATOR`, `WORKER`, `Tokens`, `load_tokens`, `decide`, `ROUTE_ACCESS`, the 401/403/503 detail strings) that may not change?",
+   "tag": "codebase"
+  }
+ ]
+}

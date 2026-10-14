@@ -104,15 +104,19 @@ class OpenAICompatClient:
     minimal test env; only instantiating this class needs them.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, http_client=None) -> None:
         import instructor  # noqa: PLC0415
         from openai import AsyncOpenAI  # noqa: PLC0415
 
         self._instructor = instructor
         self._AsyncOpenAI = AsyncOpenAI
+        # Tests only: an `httpx.AsyncClient` (e.g. over a MockTransport) so the REAL OpenAI +
+        # Instructor request/response path runs offline. None (prod) = the SDK's own client.
+        self._http_client = http_client
 
     def _client(self, api_base: str, api_key: str):
-        base = self._AsyncOpenAI(base_url=api_base, api_key=api_key or "agent-org")
+        extra = {"http_client": self._http_client} if self._http_client is not None else {}
+        base = self._AsyncOpenAI(base_url=api_base, api_key=api_key or "agent-org", **extra)
         # JSON mode + Pydantic validation with bounded repair retries.
         return self._instructor.from_openai(base, mode=self._instructor.Mode.JSON)
 
@@ -300,13 +304,9 @@ class ModelRouter:
 
         return await self._with_backpressure_retry(_call, label=f"structured:{profile_name}")
 
-    async def complete(self, profile_name: str, system: str, user: str,
-                       temperature: float | None = None) -> str:
-        # `temperature` overrides the profile default for a call that must be deterministic (as
-        # `structured` allows); omitted -> the profile's temperature, unchanged for every caller.
+    async def complete(self, profile_name: str, system: str, user: str) -> str:
         p = self.profiles.get(profile_name)
         api_base, api_key = self._endpoint(p.lane)
-        temp = p.temperature if temperature is None else temperature
 
         def _call():
             return self._get_client().complete(
@@ -314,7 +314,7 @@ class ModelRouter:
                 api_key=api_key,
                 model=p.model,
                 caller_key=p.caller_key,
-                temperature=temp,
+                temperature=p.temperature,
                 system=system,
                 user=user,
             )
