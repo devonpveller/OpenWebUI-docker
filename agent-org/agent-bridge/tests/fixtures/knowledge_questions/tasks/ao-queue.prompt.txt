@@ -1,0 +1,73 @@
+# Task
+
+**Goal.** Fix the llm-queue connection leak, and make inference shedding visible.
+
+`inference/llm-queue` is a FastAPI admission queue in front of the inference upstream. Each admitted request holds two things:
+
+- a global connection slot (`Registry.reserve_connection` / `release_connection`, hard cap `max_total_connections`);
+- a per-model permit (`ModelQueue.enqueue` / `release` / `cancel_waiting`).
+
+Under real load, held connections grew from 63 to 126 of a 128 cap. llm-queue then refused requests with 503 `queue_connections_exhausted` (46 refusals in ten minutes). About 12% of streams ended 502, and connections held by failed or abandoned streams were only reclaimed by the background reaper after its 1,200 s TTL (`conn_ttl_s`). Nobody was told that inference was shedding.
+
+**What to build.**
+
+1. **Root-cause and fix the leak.** When a client drops a stream, a stream fails upstream mid-body, or a client hangs up right after the last chunk or before the first byte, the held slot **and** the model permit must be released promptly (well within a second in tests), not by the reaper. This applies to both the streaming and non-streaming paths. Live traffic arrives via uvicorn, which uses ASGI `spec_version` 2.3; the tests drive the real ASGI app with 2.3 and 2.4 scopes and with an SQLite-backed events store. Also add a permit backstop: a running request that has made no upstream progress for a TTL gets its permit returned and counted.
+2. **Surface shedding inside llm-queue.** Fold capacity refusals and the held-connection count into shedding *episodes* with hysteresis:
+   - An episode starts at a capacity refusal, or when held connections reach an alert threshold.
+   - It clears once held connections are at or below a lower threshold **and** there has been no refusal for a quiet period.
+   - Each transition is recorded exactly once: one start, one clear.
+   - The current state is exposed on `GET /healthz`.
+3. Document the behaviour in `inference/llm-queue/README.md`.
+
+**Constraints.** Admission and priority behaviour must not change, apart from the leak fix. Shedding bookkeeping is observability only and never changes an admission decision.
+
+**Out of scope.** Any host-side watchdog or pager script (PowerShell) that reads `/healthz`, model/role changes, and LiteLLM config. Only the Python in `inference/llm-queue` is judged.
+
+## Interface the tests rely on
+
+Config (`llm_queue.config.Settings`): add these fields. They are also settable as plain attributes.
+- `shed_alert_ratio` (default 0.75, env `LLM_QUEUE_SHED_ALERT_RATIO`)
+- `shed_clear_ratio` (default 0.5, env `LLM_QUEUE_SHED_CLEAR_RATIO`)
+- `shed_clear_quiet_s` (default 300.0, env `LLM_QUEUE_SHED_CLEAR_QUIET_S`)
+
+New module `llm_queue/shedding.py`:
+- **`ShedMonitor`**: keyword constructor `ShedMonitor(cap, alert_ratio=0.75, clear_ratio=0.5, clear_quiet_s=300.0, wall=time.time, mono=time.monotonic)`. `wall` and `mono` are injectable zero-argument clocks; the quiet period is measured on `mono`.
+  - `alert_at = max(1, ceil(cap * alert_ratio))`.
+  - `clear_at = min(alert_at - 1, int(cap * clear_ratio))`. For cap 128 that gives 96 and 64; for cap 8, 6 and 4.
+  - `observe(held, *, refused=False) -> "started" | "cleared" | None`. A start happens on a refusal or when `held >= alert_at`. A clear happens when `held <= clear_at` and no refusal occurred within `clear_quiet_s`. Values that swing between the thresholds stay in the same episode. A later crossing starts a new episode with the next id.
+  - Attributes:
+    - `refusals_total`;
+    - `current` (the open episode or `None`) and `last` (the last cleared one);
+    - each episode has `id` (1, 2, ...), `trigger` (`"refused"` or `"held_threshold"`), `refusals` (refusals in that episode, counting the opening one) and `peak_held`.
+  - `snapshot(held) -> dict` with at least `state` (`"shedding"` or `"ok"`), `cap`, `alert_at`, `clear_at`, `current` and `last`. `current` and `last` are each `None` or a dict that includes `id`, `refusals` and `trigger`.
+
+App state (`llm_queue.app_state.AppState`):
+- `async note_shed(*, refused=False) -> str | None`: folds the current `registry.held_total` (plus a refusal, if this is one) into the monitor. On a transition it calls `self.events.emit("shed_start", ...)` or `self.events.emit("shed_clear", ...)` exactly once. With no transition it emits nothing.
+- The data route calls it so that a 503 capacity refusal counts as a refusal and admissions update the held level. Each refusal still emits its existing `"reject"` event once.
+- `permits_reaped_total: int`.
+- `async _reap_permits(ttl) -> int`: runs the permit backstop over every model queue. It emits one `"permit_reaped"` event for a queue that reaped anything (and no other events), adds to `permits_reaped_total`, and returns the count. The periodic reaper loop calls it, and also calls `note_shed()` so an episode can clear on a quiet tick.
+
+Scheduler (`llm_queue.scheduler`):
+- `Waiter.last_progress_monotonic`: `None` until dispatch, set at dispatch, then updated whenever an upstream chunk is relayed.
+- `async ModelQueue.reap_stale_running(ttl_s) -> list[Waiter]`: returns the permits of running waiters with no progress for `ttl_s`, and dispatches the next queued waiter immediately. A later `release()` of a reaped waiter is a no-op (no extra permit).
+
+`GET /healthz` adds these keys:
+- `"shedding"` (the monitor snapshot);
+- `"running_total"` (the number of model permits in use);
+- `"permits_reaped_total"`.
+
+Data routes (`llm_queue.routes.data`). Keep these working as the tests call them:
+- `_admit_and_proxy(request, upstream_path)` returns the Response after reserving the slot and enqueueing. For streams, the Response's `body_iterator` may be replaced. If the response is invoked under a spec-2.3 scope with a disconnect already pending, so the body generator never takes a step, the slot and permit must still be released.
+- `_stream_waiting_then_proxy(request, state, mq, waiter, upstream_base, upstream_path, fwd_headers, raw, rid)` takes the same 9 positional parameters; extra parameters must be optional. If the waiter was already dispatched and the generator is cancelled on its first step (with `request=None`) and then `aclose()`d, the permit and slot are released.
+- `_ReleasingStreamingResponse(body_iterator)` is still constructible with just a body iterator.
+
+## How to test
+
+No network and no Docker. Set `DOCKER_HOST=tcp://127.0.0.1:1`.
+
+```
+cd inference/llm-queue && PYTHONPATH=src python -m pytest -q tests
+ruff check .
+```
+
+Work only inside this repository checkout. Do not look for the solution elsewhere (no network, no other checkouts). When done, leave your changes in the working tree (committing is optional).
