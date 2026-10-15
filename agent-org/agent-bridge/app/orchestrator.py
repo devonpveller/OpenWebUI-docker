@@ -13566,53 +13566,82 @@ class Orchestrator:
             return (getattr(verdict, "rationale", "") or "the PM judged it off-goal")[:300]
         return None
 
-    async def _revert_plan_turn_writes(self, effort_id: str) -> bool:
-        """P17 F1/F15 — undo anything a supposedly read-only plan turn wrote. Returns True when it
-        had in fact written something.
+    async def _revert_plan_turn_writes(self, effort_id: str, result, token: str) -> bool:
+        """P17 F1/F15 + ao-plancheck — undo what a supposedly read-only plan turn wrote, and ONLY
+        that. Returns True when the turn had in fact written something.
 
         `plan_only` excludes the daemon's edit/write TOOLS; it does not restrict the shell. gym-015
         proved a deny-list cannot close that: round 3 wrote with `sed -i` and committed `33eae95`;
-        round 5 used a `python3 -c` read-modify-write and committed `1b04400`. Any interpreter with
-        file access is another route, so the durable fix is a read-only workspace for the duration
-        of the turn (a worker-image change).
+        round 5 used a `python3 -c` read-modify-write and committed `1b04400`. The durable fix is a
+        read-only workspace for the turn (a worker-image change); until then the bridge checks
+        the workspace after the turn, so the gate judges a PLAN and not a fait accompli.
 
-        This is the interim guard, and it targets the property that matters rather than the
-        mechanism: after a plan turn the workspace must look exactly as it did before, so the gate
-        judges a PLAN and not a fait accompli. It also removes the way `33eae95` was lost — a plan
-        turn committed, reported the commit as delivered, and the post-gate re-clone destroyed it
-        24 seconds later, leaving the org's record pointing at a commit that existed nowhere.
+        ATTRIBUTION (ao-plancheck). The first version reverted everything dirty after the turn,
+        from a session that could land on ANY free worker. C7e 0.3 ao-queue r1 (2026-10-15): the
+        flail guard stopped the coding turn on worker-1 after it wrote its repro test; the plan
+        turn ran in a fresh clone on worker-2; the check probed worker-1, blamed the coding turn's
+        file on the plan turn and deleted it, and the run ended with an empty workspace. Now
+        the router takes a BASELINE on the plan turn's own worker right before the turn
+        (`result.pre_turn_output`, see `plan_turn_guard`), and this check runs pinned to that same
+        worker, refuses a workspace another effort has re-focused since, and reverts only the
+        paths that changed DURING the turn — a pre-existing edit is kept, or put back to its
+        pre-turn content if the plan turn touched it. A commit the turn made is undone with
+        `reset --soft` (proxy-legal; `--hard` is not). No baseline = no attribution = nothing
+        reverted, recorded as `plan_turn_check_unattributed`. Never raises: the check must not
+        block the gate."""
+        from .modules.plan_turn_guard import check_command, parse_check, parse_snapshot
+        from .modules.router import WorkspaceMoved
 
-        Reverts uncommitted edits AND resets a commit the plan turn made (`reset --soft` is
-        proxy-legal where `--hard` is not; the working tree is then cleaned separately). Never
-        raises: a failed revert must not block the gate."""
-        probe = ("cd /workspace && "
-                 "echo BEFORE-HEAD=$(git rev-parse HEAD 2>/dev/null) && "
-                 "git status --porcelain | head -20 && echo PROBE-DONE")
+        inst_id = getattr(result, "instance_id", None)
+        baseline = parse_snapshot(getattr(result, "pre_turn_output", None))
+        if not inst_id or baseline is None or baseline.get("token") != token:
+            await self.audit.log("plan_turn_check_unattributed", effort_id=effort_id, payload={
+                "worker": inst_id, "reason": "no pre-turn baseline from the plan turn's worker"})
+            return False
         try:
             _exit, out, _timed = await self.router.exec_check(
-                effort_id, command=probe, session_id=f"{effort_id}~planclean",
-                repo=None, repo_token=None, timeout=120)
+                effort_id, command=check_command(token, baseline),
+                session_id=f"{effort_id}~planclean", repo=None, repo_token=None, timeout=300,
+                instance_id=inst_id, expect_effort=effort_id)
+        except (NoCapacityError, WorkspaceMoved) as exc:
+            await self.audit.log("plan_turn_check_unattributed", effort_id=effort_id, payload={
+                "worker": inst_id, "reason": f"plan turn's workspace unavailable: {exc}"[:200]})
+            return False
         except Exception as exc:  # noqa: BLE001 — best-effort; never a gate blocker
-            log.debug("plan-turn write probe failed for %s: %s", effort_id, exc)
+            log.debug("plan-turn write check failed for %s: %s", effort_id, exc)
+            await self.audit.log("plan_turn_check_unattributed", effort_id=effort_id, payload={
+                "worker": inst_id, "reason": f"check failed: {exc}"[:200]})
             return False
-        dirty = bool(out and re.search(r"^[ ?MADRUC][ ?MADRUC]\s+\S", out, re.M))
-        if not dirty:
+        report = parse_check(out)
+        if report is None or report.get("status") != "ok":
+            await self.audit.log("plan_turn_check_unattributed", effort_id=effort_id, payload={
+                "worker": inst_id,
+                "reason": ((report or {}).get("why") or "no report from the check")[:200]})
             return False
-        await self.audit.log("plan_turn_wrote_files", effort_id=effort_id,
-                             payload={"status": (out or "")[:400]})
-        try:
-            await self.router.exec_check(
-                effort_id,
-                command=("cd /workspace && git checkout -- . 2>/dev/null; "
-                         "git clean -fd 2>/dev/null; echo REVERT-DONE"),
-                session_id=f"{effort_id}~planclean", repo=None, repo_token=None, timeout=120)
-        except Exception as exc:  # noqa: BLE001
-            log.debug("plan-turn revert failed for %s: %s", effort_id, exc)
-            return True
+        reverted = list(report.get("reverted") or [])
+        unrestored = list(report.get("unrestored") or [])
+        if not reverted and not unrestored:
+            return False
+        await self.audit.log("plan_turn_wrote_files", effort_id=effort_id, payload={
+            "worker": inst_id,
+            "reverted": reverted[:60],
+            "unrestored": unrestored[:30],
+            "head_reset": report.get("head_reset") or "",
+            "kept_before_turn": list(report.get("kept") or [])[:50],
+            "kept_before_turn_count": int(report.get("kept_count") or 0),
+        })
+        shown = ", ".join(f"`{r['path']}`" for r in reverted[:8])
+        more = f" (+{len(reverted) - 8} more)" if len(reverted) > 8 else ""
+        kept_n = int(report.get("kept_count") or 0)
+        kept_line = (f" {kept_n} file(s) already changed by an earlier turn were left as they "
+                     f"were." if kept_n else "")
+        bad_paths = ", ".join("`" + str(u.get("path")) + "`" for u in unrestored[:5])
+        bad_line = f" Could not restore: {bad_paths}." if unrestored else ""
         await self.comms.post(
             Intent.worker_activity,
-            "🧹 The plan turn modified files even though it was a read-only turn — reverted them "
-            "so the plan is reviewed on its merits, not on work already done.",
+            f"🧹 The plan turn changed files even though it was a read-only turn — reverted only "
+            f"what it changed: {shown or 'nothing restorable'}{more}, so the plan is reviewed "
+            f"on its merits, not on work already done.{kept_line}{bad_line}",
             effort_id=effort_id,
         )
         return True
@@ -13701,7 +13730,11 @@ class Orchestrator:
                        goal or "", re.S)
         if _m:
             scope_goal = _m.group(2).strip()
+        from .modules.plan_turn_guard import new_token, snapshot_command
         while misaligned < 2:
+            # ao-plancheck — the baseline for this turn's write check is taken on the worker that
+            # runs the turn, after its focus and right before the turn (see the check below).
+            plan_token = new_token()
             # P17 F16 — `~plan` keeps this OFF the builder's session so the plan is observed, not
             # recalled. Derived from `_session_for` (not a fixed id) so the `worker_plan_empty`
             # generation bump still rotates it: an overflowing session must stay self-healable.
@@ -13710,6 +13743,7 @@ class Orchestrator:
                 session_id=f"{await self._session_for(effort_id)}~plan", instruction=instr,
                 repo=repo, repo_token=repo_token, upstream=upstream,
                 upstream_token=upstream_token, plan_only=True,
+                pre_turn_check=snapshot_command(plan_token) if repo else None,
             )
             # P17 F1/F15 — A PLAN TURN MUST LEAVE NOTHING ON DISK. `plan_only` gates the daemon's
             # edit/write TOOLS, not the shell, and gym-015 broke it twice by different routes:
@@ -13723,8 +13757,12 @@ class Orchestrator:
             # to silently destroy work (which is how 33eae95 was lost — reported as delivered,
             # then wiped 24 seconds later). Reverting here makes the violation visible and the
             # workspace honest, whichever mechanism the worker used.
-            if repo:
-                await self._revert_plan_turn_writes(effort_id)
+            #
+            # ao-plancheck — and ONLY what the plan turn wrote: the check compares against the
+            # baseline taken on the same worker before the turn, so an earlier coding turn's
+            # uncommitted work (C7e r1: the flail-stopped turn's repro test) is never blamed on it.
+            if repo and result is not None:
+                await self._revert_plan_turn_writes(effort_id, result, plan_token)
             if result is None:
                 await self._report_completion(effort_id, None)
                 return None

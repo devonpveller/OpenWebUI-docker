@@ -50,6 +50,11 @@ class WorkResult:
         self.model: str | None = model
         # ao-loopguard — set when the bridge's loop guard stopped this turn (status "flail").
         self.loop_trip: LoopTrip | None = None
+        # ao-plancheck — which pool worker ran the turn, and the output of the pre-turn check the
+        # caller asked the router to run on that worker (`wake(pre_turn_check=...)`). None = not
+        # requested, or it failed: the caller must not attribute anything to the turn.
+        self.instance_id: str | None = None
+        self.pre_turn_output: str | None = None
 
     @property
     def ok(self) -> bool:

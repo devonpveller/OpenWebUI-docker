@@ -68,6 +68,11 @@ def _is_worker_unavailable(exc: Exception) -> bool:
     return isinstance(exc, httpx.TransportError)
 
 
+class WorkspaceMoved(RuntimeError):
+    """ao-plancheck - a pinned `exec_check` found its worker's workspace re-focused for another
+    effort since the turn it was meant to inspect; nothing was run."""
+
+
 class WorkerModelRefused(httpx.HTTPStatusError):
     """A worker's daemon refused the turn's model (422 `model refused: ...`). The router has
     already audited it and posted the actionable message in the effort thread; callers use the
@@ -467,6 +472,7 @@ class Router:
         withhold_goal: bool = False,
         loop_guard: LoopGuard | None = None,
         turn_label: str | None = None,
+        pre_turn_check: str | None = None,
     ) -> WorkResult | None:
         """Wake a worker on an effort and post its reply in-thread. Returns None if the
         effort is frozen (the composition rule refuses to dispatch) or no capacity. If `repo`
@@ -484,7 +490,11 @@ class Router:
         `loop_guard` (ao-loopguard): the turn's loop/no-progress policy. None = the default WORK guard
         (window rules, edit-aware) when `loop_guard_work` is on and the caller did not arm F31.4's
         `max_repeat`. `turn_label` names the turn in the one-line stop message (default: derived
-        from the session suffix)."""
+        from the session suffix).
+        `pre_turn_check` (ao-plancheck): a deterministic command run on THE SAME worker after the
+        focus and right before the turn; its output comes back as `result.pre_turn_output`
+        (None if it failed) beside `result.instance_id`, so the caller can compare the workspace
+        before and after this turn on the worker that ran it."""
         session_id = session_id or thread_id
         if loop_guard is None and not max_repeat:
             loop_guard = self.default_loop_guard(session_id, plan_only=plan_only)
@@ -653,6 +663,18 @@ class Router:
                         )
                     except Exception as exc:  # noqa: BLE001 — best-effort; first delivery has no branch
                         log.debug("delivery-branch sync for %s failed: %s", effort_id, exc)
+                # ao-plancheck - the caller's baseline of THIS workspace, taken on THIS worker after
+                # the focus and before the turn, so whatever the turn changes can be told apart from
+                # what an earlier turn left on disk. Best-effort: a failure leaves it None and the
+                # caller attributes nothing.
+                pre_turn_output: str | None = None
+                if pre_turn_check:
+                    try:
+                        _code, pre_turn_output, _timed = await self.harness.run_check(
+                            inst.base_url, pre_turn_check, timeout=120)
+                    except Exception as exc:  # noqa: BLE001 - never blocks the turn
+                        log.debug("pre-turn check for %s failed: %s", effort_id, exc)
+                        pre_turn_output = None
                 # Stream the worker's activity to the effort THREAD as it happens (observability =
                 # safety, governance §5/§7). Notification discipline (CM.6): coalesce rapid *successful*
                 # commands into one post; failures/denials always post immediately + in context so a
@@ -736,6 +758,11 @@ class Router:
                     inst.base_url, session_id, prompt, on_update=_stream, **extra,
                 )
                 await _flush()  # defensive: surface any tail commands if no answer callback fired
+                try:   # ao-plancheck - which worker ran it, and its pre-turn baseline
+                    result.instance_id = inst.id
+                    result.pre_turn_output = pre_turn_output
+                except AttributeError:  # a duck-typed result that refuses attributes
+                    pass
                 # POLL TIMEOUT = the bridge stopped waiting, but the daemon is STILL running the
                 # turn — cancel it, or the orphaned task keeps the worker busy and the next
                 # dispatch 409s (live 2026-07-08: both burn-down part turns outlived the window
@@ -917,7 +944,7 @@ class Router:
     async def exec_check(
         self, effort_id: str, *, command: str, session_id: str, repo: str | None = None,
         repo_token: str | None = None, recurse_submodules: bool = False, timeout: int = 900,
-        fresh: bool = False,
+        fresh: bool = False, instance_id: str | None = None, expect_effort: str | None = None,
     ) -> tuple[int | None, str, bool]:
         """Run ONE verification command on a pooled worker DETERMINISTICALLY (the daemon's
         `/check` — real exit code + output, no model in the loop). Build verification is a
@@ -925,9 +952,19 @@ class Router:
         (live 2026-07-08). Acquires a slot, optionally focuses `repo` (privileged recursive
         clone for compositions), runs, releases. `fresh` FORCES a clean re-clone of the focus
         (self-heals a partial/parked workspace — e.g. a composition whose nested submodules didn't
-        populate). Exceptions propagate — the orchestrator falls back to the LLM verifier."""
-        inst = await self.scheduler.acquire(effort_id, "verifier", session_id)
+        populate). Exceptions propagate — the orchestrator falls back to the LLM verifier.
+        `instance_id` (ao-plancheck) pins the run to ONE worker (NoCapacityError if it is busy or
+        gone, never another worker); `expect_effort` then refuses to run (WorkspaceMoved) unless
+        that worker's workspace is still focused for that effort - its checkout is the one the
+        caller means, not one another effort re-cloned in between."""
+        inst = await self.scheduler.acquire(effort_id, "verifier", session_id,
+                                            instance_id=instance_id)
         try:
+            if expect_effort is not None:
+                rec = self._ws_focus.get(inst.id)
+                if rec is None or rec[0] != expect_effort:
+                    raise WorkspaceMoved(
+                        f"{inst.id}'s workspace is no longer focused for {expect_effort}")
             if repo:
                 ok, detail, _ = await self.harness.set_project(
                     inst.base_url, repo, token=repo_token,
