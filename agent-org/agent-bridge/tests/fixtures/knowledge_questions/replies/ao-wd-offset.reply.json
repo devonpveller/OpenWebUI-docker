@@ -10,11 +10,11 @@
   },
   {
    "question": "Does Python's `readlines()` on a file opened in binary mode return a final element without a trailing newline when the writer is mid-line, and can one call split a line?",
-   "tag": "external"
+   "tag": "api"
   },
   {
    "question": "Is `seek()` to a cached byte position safe while another process appends to the same file on Windows and Linux?",
-   "tag": "external"
+   "tag": "concept"
   },
   {
    "question": "What is the fast test command for agent-bridge and for little-coder (`PYTHONPATH=src`), and are both suites green on the base?",
@@ -26,7 +26,7 @@
   },
   {
    "question": "How should a module-level cache shared across threads be locked so that eviction at 64 entries is safe under concurrent `read_event_lines` calls?",
-   "tag": "external"
+   "tag": "concept"
   }
  ]
 }

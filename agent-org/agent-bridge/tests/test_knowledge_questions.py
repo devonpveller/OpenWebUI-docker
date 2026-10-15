@@ -113,7 +113,7 @@ async def test_bakeoff_task_through_the_real_schema_path(db, item):
     qs = await kq.generate_questions(models, settings, anchor=_task(item))
     assert qs.status == "ok" and qs.reason == ""
     assert kq.MIN_QUESTIONS <= len(qs.questions) <= kq.MAX_QUESTIONS
-    assert (len(qs.questions), sum(q.tag == "external" for q in qs.questions)) == GOLDEN[item]
+    assert (len(qs.questions), sum(q.tag in ("api", "concept") for q in qs.questions)) == GOLDEN[item]
     assert [(q.tag, q.text) for q in qs.questions] == [
         (i["tag"], i["question"]) for i in _reply_obj(item)["questions"]]
     assert all(q.status == "open" for q in qs.questions)
@@ -136,7 +136,7 @@ async def test_request_carries_the_json_schema_so_decoding_is_constrained(db):
     questions = body["json_schema"]["properties"]["questions"]
     assert questions["maxItems"] == kq.MAX_QUESTIONS
     item = body["json_schema"]["$defs"]["KnowledgeQuestionItem"]
-    assert item["properties"]["tag"]["enum"] == ["codebase", "external"]
+    assert item["properties"]["tag"]["enum"] == ["codebase", "api", "concept"]
     assert set(item["required"]) == {"question", "tag"}
     assert body["response_format"] == {"type": "json_object"}       # Instructor Mode.JSON
 
@@ -153,13 +153,13 @@ async def test_replay_is_deterministic(db, item):
 async def test_code_identifiers_survive_verbatim(db):
     """attempt-2 F-C: dunders, `**`, globs and `**kwargs` reach the caller byte for byte."""
     qs_in = [
-        ("external", "Does `StreamingResponse.__call__` await `body_iterator.aclose()` on disconnect?"),
+        ("concept", "Does `StreamingResponse.__call__` await `body_iterator.aclose()` on disconnect?"),
         ("codebase", "Which fields does `_Waiter.__slots__` declare in `scheduler.py`?"),
         ("codebase", "Where is `__init__.py` re-exporting `ShedMonitor`?"),
-        ("external", "Is the retry backoff capped at `2**31` ms in httpx?"),
+        ("api", "Is the retry backoff capped at `2**31` ms in httpx?"),
         ("codebase", "Does `ModelRouter.complete(**kwargs)` forward `temperature`?"),
         ("codebase", "Which tests match the glob `tests/**/test_*.py` in agent-bridge?"),
-        ("external", "Does __name__ == '__main__' guard __del__ in **bold** text?"),
+        ("concept", "Does __name__ == '__main__' guard __del__ in **bold** text?"),
     ]
     gw = Gateway(json.dumps({"questions": [{"question": q, "tag": t} for t, q in qs_in]}))
     settings, models = await _real_router(db, gw)
@@ -172,7 +172,7 @@ async def test_each_item_keeps_its_own_tag_whatever_its_text_says(db):
     that looks like a header or carries a tag word stays text."""
     qs_in = [
         ("codebase", "**External** - which test already fakes a client disconnect here?"),
-        ("external", "[codebase] Does Starlette call `aclose()` on the body iterator after disconnect?"),
+        ("concept", "[codebase] Does Starlette call `aclose()` on the body iterator after disconnect?"),
         ("codebase", "### External questions: is the base green for `inference/llm-queue`?"),
     ]
     gw = Gateway(json.dumps({"questions": [{"question": q, "tag": t} for t, q in qs_in]}))
@@ -270,7 +270,7 @@ def test_control_and_format_characters_are_dropped(ch):
 def test_edges_are_never_trimmed_only_dropped():
     qs = kq.validate_reply(_items(("codebase", " Where is the permit released on the stream?"),
                                   ("codebase", "Where is the permit released on the stream? "),
-                                  ("external", "Does uvicorn send http.disconnect before the body?")))
+                                  ("concept", "Does uvicorn send http.disconnect before the body?")))
     assert [q.text for q in qs.questions] == ["Does uvicorn send http.disconnect before the body?"]
     assert qs.dropped == {"edge_whitespace": 2}
 
@@ -309,12 +309,12 @@ def test_not_a_question_and_secret_shapes():
 
 def test_chat_offers_are_dropped_but_first_person_task_questions_are_kept():
     qs = kq.validate_reply(_items(
-        ("external", "Would you like a deeper dive into the streaming path?"),
-        ("external", "Want me to also cover retries in the gateway?"),
+        ("concept", "Would you like a deeper dive into the streaming path?"),
+        ("concept", "Want me to also cover retries in the gateway?"),
         ("codebase", "Is this what you wanted for the first pass?"),
         ("codebase", "Can I call `release()` twice without double-returning a permit?"),
         ("codebase", "Should I fake the upstream as slow or as failing for the leak to show?"),
-        ("external", "Do you need to await `aclose()` before the slot is released?"),
+        ("concept", "Do you need to await `aclose()` before the slot is released?"),
     ))
     assert [q.text for q in qs.questions] == [
         "Can I call `release()` twice without double-returning a permit?",
@@ -617,3 +617,100 @@ def test_q2_round2_router_and_section_comment_do_not_claim_gbnf_decoding():
         src = Path(mod.__file__).read_text(encoding="utf-8")
         assert "GBNF" not in src and "constrained to" not in src, mod.__name__
     assert "unverified" in model_router.__doc__ and "unverified" in model_router.OpenAICompatClient.__doc__
+
+
+# ══ kp-route (operator D12, 2026-10-15) ════════════════════════════════════════════════════════
+# The generator tags every question codebase / api / concept (replacing codebase / external), the
+# prompt carries one rule per tag, and agent-bridge has ONE KnowledgeQuestion type with an id
+# assigned by the generator. Real ModelRouter + OpenAICompatClient + Instructor over
+# httpx.MockTransport throughout.
+ROUTE_TAGS = ("codebase", "api", "concept")
+ROUTE_Q = {
+    "codebase": ("Where does `llm_queue/routes/data.py` release the model permit on the stream?",
+                 "Which fixture in `tests/conftest.py` builds the SQLite events store?",
+                 "What is the fast test command for `inference/llm-queue` in this repository?"),
+    "api": ("What parameters does `httpx.AsyncClient.stream` take in httpx 0.27?",
+            "What is the signature of `anyio.CancelScope.__init__` in anyio 4.4?",
+            "Which keyword arguments does `starlette.responses.StreamingResponse` accept in 0.37?"),
+    "concept": ("How does an ASGI server signal a client disconnect to a streaming app?",
+                "Why does cancelling an async generator not always run its `finally` block?",
+                "How should a test simulate an upstream that fails mid-body?"),
+}
+
+
+@pytest.mark.parametrize("tag", ROUTE_TAGS)
+async def test_route_each_tag_passes_the_real_schema_path(db, tag):
+    gw = Gateway(json.dumps({"questions": [{"question": q, "tag": tag} for q in ROUTE_Q[tag]]}))
+    settings, models = await _real_router(db, gw)
+    qs = await kq.generate_questions(models, settings, anchor=_task("ao-queue"))
+    assert (qs.status, qs.reason) == ("ok", "")
+    assert [(q.tag, q.text) for q in qs.questions] == [(tag, q) for q in ROUTE_Q[tag]]
+    assert len(gw.bodies) == 1
+
+
+async def test_route_mixed_tags_keep_their_own_tag_and_get_ids(db):
+    pairs = [(t, ROUTE_Q[t][i]) for i in range(2) for t in ROUTE_TAGS]
+    gw = Gateway(json.dumps({"questions": [{"question": q, "tag": t} for t, q in pairs]}))
+    settings, models = await _real_router(db, gw)
+    qs = await kq.generate_questions(models, settings, anchor=_task("ao-queue"))
+    assert [(q.tag, q.text) for q in qs.questions] == pairs
+    assert [q.id for q in qs.questions] == [f"Q{i}" for i in range(1, len(pairs) + 1)]
+    assert [d["id"] for d in qs.as_dict()["questions"]] == [q.id for q in qs.questions]
+
+
+@pytest.mark.parametrize("bad", ["external", "API", "Api", "Concept", "CODEBASE", "Codebase",
+                                 " api", "api ", "docs", "research", ""])
+async def test_route_miscased_or_unknown_tag_is_schema_invalid(db, bad):
+    content = json.dumps({"questions": [{"question": ROUTE_Q["api"][0], "tag": bad},
+                                        {"question": ROUTE_Q["codebase"][0], "tag": "codebase"}]})
+    gw = Gateway(content)
+    settings, models = await _real_router(db, gw)
+    qs = await kq.generate_questions(models, settings, anchor=_task("ao-auth"))
+    assert (qs.status, qs.reason, qs.questions) == ("model_error", "schema_invalid", [])
+    assert len(gw.bodies) == kq.SCHEMA_ATTEMPTS
+
+
+async def test_route_schema_enum_and_tags_constant(db):
+    assert kq.TAGS == ROUTE_TAGS
+    gw = Gateway(json.dumps(_reply_obj("ao-auth")))
+    settings, models = await _real_router(db, gw)
+    await kq.generate_questions(models, settings, anchor=_task("ao-auth"))
+    item = gw.bodies[0]["json_schema"]["$defs"]["KnowledgeQuestionItem"]
+    assert item["properties"]["tag"]["enum"] == list(ROUTE_TAGS)
+
+
+def test_route_prompt_has_one_rule_line_per_tag_and_no_external():
+    system, _, _ = kq.build_prompt("x")
+    rules = {t: [ln for ln in system.splitlines() if ln.startswith(f"- {t}:")] for t in ROUTE_TAGS}
+    assert all(len(v) == 1 for v in rules.values()), rules
+    assert "repository" in rules["codebase"][0] and "tests" in rules["codebase"][0]
+    api = rules["api"][0]
+    assert "library" in api and "signature" in api and "parameters" in api and "version" in api
+    concept = rules["concept"][0]
+    assert "how" in concept.lower() and "why" in concept.lower()
+    assert "external" not in system.lower()
+    for t in ROUTE_TAGS:                     # the reply example shows every tag
+        assert f'"tag": "{t}"' in system
+
+
+def test_route_one_knowledge_question_type_in_agent_bridge():
+    from app.modules import knowledge_package as kp
+    assert kp.KnowledgeQuestion is kq.KnowledgeQuestion
+    assert kp.TAGS == kq.TAGS == ROUTE_TAGS
+    qs = kq.validate_reply(_items(*[(t, ROUTE_Q[t][0]) for t in ROUTE_TAGS]))
+    assert all(type(q) is kp.KnowledgeQuestion for q in qs.questions)
+    # one class definition named KnowledgeQuestion under app/
+    defs = [p.relative_to(ROOT).as_posix() for p in (ROOT / "app").rglob("*.py")
+            if "class KnowledgeQuestion:" in p.read_text(encoding="utf-8")
+            or "class KnowledgeQuestion(" in p.read_text(encoding="utf-8")]
+    assert len(defs) == 1, defs
+
+
+def test_route_ids_follow_accepted_order_after_drops():
+    qs = kq.validate_reply(_items(("api", "Not a question."), ("api", ROUTE_Q["api"][0]),
+                                  ("concept", ROUTE_Q["concept"][0]),
+                                  ("concept", ROUTE_Q["concept"][0]),            # duplicate
+                                  ("codebase", ROUTE_Q["codebase"][0])))
+    assert [(q.id, q.tag) for q in qs.questions] == [("Q1", "api"), ("Q2", "concept"),
+                                                     ("Q3", "codebase")]
+    assert qs.dropped == {"not_a_question": 1, "duplicate": 1}

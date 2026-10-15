@@ -2,13 +2,15 @@
 
 Agent knowledge package, D2 (plan: implementation-guide/agent-knowledge-package/PLAN.md in the
 plan store). Before a coding effort is assigned, a list of KNOWLEDGE QUESTIONS (built elsewhere,
-kp-questions) is answered:
+kp-questions; the ONE `KnowledgeQuestion` type from `knowledge_types`, tags codebase / api /
+concept per operator D12) is answered:
 
 - `codebase` questions by a caller-supplied answerer (the read-only repo survey; out of scope
   here, so it is a seam);
-- `external` questions by the research engine: ONE job for all of them (the engine's reuse step
-  runs first, so known answers return fast), an EXTRACT step that maps findings to questions,
-  then ONE gap run on the questions still open. Round budget 2, a fixed stopping rule.
+- `api` and `concept` questions by the research engine (their own lanes are kp-api / kp-concept):
+  ONE job for all of them (the engine's reuse step runs first, so known answers return fast),
+  an EXTRACT step that maps findings to questions, then ONE gap run on the questions still
+  open. Round budget 2, a fixed stopping rule.
 
 The package feeds a TOOL-USING coding worker, so research text is treated as hostile (the
 engine's own injection screen, injection.ts, assumes tool-less readers). Defences, in order:
@@ -65,6 +67,8 @@ from urllib.parse import urlsplit
 
 from ..config import DEFAULT_KNOWLEDGE_SOURCE_HOSTS, Settings
 from .grounding import ResearchJob
+from .knowledge_types import MAX_QUESTION_CHARS, MIN_QUESTION_CHARS, KnowledgeQuestion
+from .knowledge_types import TAGS as TAGS  # noqa: F401 - re-exported: the package's tag set
 
 log = logging.getLogger("agent_bridge.knowledge_package")
 
@@ -75,7 +79,6 @@ MAX_OVER_CAP_IDS = 16            # questions past the cap are listed by id up to
 MAX_LINES = 3
 MAX_SOURCES = 2
 LINE_MIN, LINE_MAX = 12, 280
-QUESTION_MAX = 300
 URL_MAX = 160
 FILELINE_MAX = 160
 TOKEN_MAX = 64                   # a whitespace-separated token longer than this is refused
@@ -87,7 +90,6 @@ EXTRACT_MAX_S = 120.0
 MIN_ROUND_S = 30.0
 ROUND_BUDGET = 2
 
-TAGS = ("codebase", "external")
 ANSWERED, OPEN = "answered", "open"
 # OPEN reason codes (closed set; rendered verbatim).
 REASONS = frozenset({
@@ -101,24 +103,8 @@ REASONS = frozenset({
 
 
 # ── Input / seam types ──────────────────────────────────────────────────────────────────────
-_QID_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
-
-
-@dataclass(frozen=True)
-class KnowledgeQuestion:
-    """One knowledge question (the kp-questions output type). `tag` decides who answers it."""
-
-    id: str
-    text: str
-    tag: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.id, str) or not _QID_RE.match(self.id):
-            raise ValueError("question id must match [A-Za-z0-9_-]{1,16}")
-        if self.tag not in TAGS:
-            raise ValueError(f"question tag must be one of {TAGS}")
-        if not isinstance(self.text, str):
-            raise ValueError("question text must be a string")
+# KnowledgeQuestion (id, text, tag, status) is imported from knowledge_types: one type for the
+# generator and this builder.
 
 
 @dataclass(frozen=True)
@@ -350,8 +336,9 @@ def line_ok(s: Any) -> bool:
 
 
 def question_text_ok(s: Any) -> bool:
-    """Question text is shown in the package (and the effort thread): every shape check."""
-    return _shape_ok(s, min_len=3, max_len=QUESTION_MAX)
+    """Question text is shown in the package (and the effort thread): every shape check, within
+    the generator's bounds (MIN_QUESTION_CHARS..MAX_QUESTION_CHARS, 15..600)."""
+    return _shape_ok(s, min_len=MIN_QUESTION_CHARS, max_len=MAX_QUESTION_CHARS)
 
 
 # ── Source predicates and the allow-list ────────────────────────────────────────────────────
@@ -1006,7 +993,7 @@ async def build_knowledge_package(
     """Answer `questions` into a package; None when AO_KNOWLEDGE_PACKAGE_ENABLED is off.
 
     The whole step is bounded by `settings.knowledge_package_time_box_s`. Codebase answers and the
-    research rounds run concurrently. Research: round 1 = one job over every external question;
+    research rounds run concurrently. Research: round 1 = one job over every api/concept question;
     round 2 (only if round 1 COMPLETED and questions are still open) = one gap run over the open
     ones. A round that does not complete stops the research: its questions are OPEN with that
     reason. `source_hosts` adds per-task allow-list entries (e.g. `anyio.readthedocs.io/en/stable`,
@@ -1040,7 +1027,7 @@ async def build_knowledge_package(
         else:
             open_item(q, "question_text_rejected")   # never sent to research or a model
     cb_qs = [q for q in valid if q.tag == "codebase"]
-    ext_qs = [q for q in valid if q.tag == "external"]
+    ext_qs = [q for q in valid if q.tag in ("api", "concept")]   # research, until kp-api/kp-concept
 
     async def codebase_step() -> None:
         if not cb_qs:
