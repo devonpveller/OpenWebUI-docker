@@ -93,6 +93,13 @@ services:
       - "com.centurylinklabs.watchtower.enable=false"
 
   searxng:
+    # Security audit 2026-10-15 (A3): search queries were kept in plaintext container logs with no
+    # rotation. Cap retention here; the gateway also runs without uvicorn's access log.
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
     # PINNED, not :latest (research-trust 2026-09-11). Two reasons, both
     # measured: (1) watchtower.enable=false exists so privacy infrastructure
     # is never silently swapped, and a floating tag does exactly that;
@@ -133,6 +140,15 @@ services:
       dockerfile: Dockerfile
     image: private-search-gateway:local
     container_name: search-gateway
+    # No access log: uvicorn's default access log wrote every GET /search?q=... line (A3).
+    command: ["uvicorn", "gateway.main:app", "--host", "0.0.0.0", "--port", "8080", "--no-access-log"]
+    # Security audit 2026-10-15 (A3): search queries were kept in plaintext container logs with no
+    # rotation. Cap retention here; the gateway also runs without uvicorn's access log.
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
     networks:
       - search-net
       - default
