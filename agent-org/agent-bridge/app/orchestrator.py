@@ -1112,6 +1112,10 @@ class Orchestrator:
         # equals this is a PRE-EXISTING branch resurrected, not a delivery (live 2026-07-07: an
         # empty-workspace run "delivered" yesterday's stale branch and wired an OLD commit).
         self._pre_dispatch_head: dict[str, str] = {}
+        # ao-replancarry - effort-branch heads that are ONLY a stopped turn's carried WIP commit
+        # (per effort). A branch still sitting at one of these after a run is carried work in
+        # progress, never that run's delivery. Re-read from the audit log at every dispatch.
+        self._carried_heads: dict[str, set[str]] = {}
         # P8 #3 — PROVENANCE: the expected BASE per effort, read from the remote at dispatch
         # ({effort_id: {"branch": default_branch, "sha": head_sha}}). Handed to the worker in the
         # brief to ASSERT against (it can't discover it — proxied git), keys workspace reuse in the
@@ -7072,6 +7076,8 @@ class Orchestrator:
             if repo and self.github is not None and self.s.github_app_enabled:
                 pre = await self._verify_delivery(effort_id, repo)
                 self._pre_dispatch_head[effort_id] = pre.head_sha or ""
+            # ao-replancarry - which heads of this effort's branch are carried WIP (restart-safe)
+            await self._load_carried_heads(effort_id)
             # P8 #3 — PROVENANCE: read the CURRENT default-branch head — the expected BASE this
             # run is planned against. Refreshed every dispatch (never carried stale); unreadable
             # ⇒ absent, and nothing downstream claims a base it can't prove.
@@ -7524,6 +7530,11 @@ class Orchestrator:
             # them apart, and its failure output is the burn-down's work list, not a dead end).
             d0 = await self._verify_delivery(effort_id, repo)
             verdict, out, _n = await self._org_build_check(effort_id, on_branch=d0.landed)
+            if verdict == "pass" and d0.landed and self._wip_only(effort_id, d0):
+                # ao-replancarry: the branch holds only the stopped turn's carried WIP - a green
+                # build of it is not this run delivering anything. Same path as a branch that did
+                # not move: re-engage, then state check / escalation.
+                return await self._recover_stale_delivery(effort_id, channel_id, root, repo, d0)
             if verdict == "pass":
                 await self.comms.post(
                     Intent.worker_activity,
@@ -9308,7 +9319,32 @@ class Orchestrator:
         i.e. the branch pre-existed and this run contributed nothing (no pre-head recorded, or a
         changed head, is never stale — fail-open)."""
         pre = self._pre_dispatch_head.get(effort_id, "")
-        return bool(pre) and bool(delivery.head_sha) and delivery.head_sha == pre
+        # ao-replancarry: a head that is only a stopped turn's carried WIP commit is not new
+        # delivered work either, whether or not a pre-dispatch head could be read.
+        return (bool(pre) and bool(delivery.head_sha) and delivery.head_sha == pre) \
+            or self._wip_only(effort_id, delivery)
+
+    def _wip_only(self, effort_id: str, delivery: BranchDelivery) -> bool:
+        """ao-replancarry: the branch head is exactly a commit the bridge CARRIED from a stopped
+        turn (`stopped_turn_work_carried`) - unreviewed work in progress nobody delivered."""
+        return bool(delivery.head_sha) and \
+            delivery.head_sha in self._carried_heads.get(effort_id, set())
+
+    async def _load_carried_heads(self, effort_id: str) -> None:
+        """The carried WIP heads of this effort, from the audit log (survives a bridge restart)."""
+        heads: set[str] = set()
+        try:
+            async with self.db.session_factory() as s:
+                rows = (await s.execute(select(Event.payload).where(
+                    Event.effort_id == effort_id,
+                    Event.kind == "stopped_turn_work_carried"))).all()
+            for (p,) in rows:
+                if isinstance(p, dict) and p.get("pushed"):
+                    heads.update(h for h in (p.get("head"), p.get("commit")) if h)
+        except Exception as exc:  # noqa: BLE001 - keep what is in memory
+            log.debug("carried-heads read for %s failed: %s", effort_id, exc)
+            return
+        self._carried_heads[effort_id] = heads | self._carried_heads.get(effort_id, set())
 
     async def _recover_stale_delivery(
         self, effort_id: str, channel_id: str, root: str, repo: str,
@@ -9324,7 +9360,10 @@ class Orchestrator:
         # a stale head whose branch ALREADY DIFFERS from base is PRIOR DELIVERED WORK, not an
         # empty run. Say that, then let the ORG verify it by building, instead of re-engaging
         # the worker to re-do finished work (or worse, mislabelling success as failure).
-        if (delivery.files_changed and delivery.files_changed > 0
+        # ao-replancarry: EXCEPT when the head is only a stopped turn's carried WIP commit - that
+        # is unreviewed work in progress the bridge saved, not a delivery from an earlier round.
+        wip = self._wip_only(effort_id, delivery)
+        if (not wip and delivery.files_changed and delivery.files_changed > 0
                 and await self._machine_verified_effort(effort_id)):
             await self.comms.post(
                 Intent.worker_activity,
@@ -9377,15 +9416,26 @@ class Orchestrator:
             return None
         await self.comms.post(
             Intent.worker_activity,
-            f"🔍 `{branch}` exists on the remote but its head (`{delivery.head_sha[:10]}`) is "
-            f"UNCHANGED from before this run — nothing new was delivered (a stale branch from an "
-            f"earlier attempt). Re-dispatching with that context (PM monitor, §4.2).",
+            (f"🔍 `{branch}` holds only the stopped turn's carried WIP commit "
+             f"(`{delivery.head_sha[:10]}`) — unreviewed work in progress, not a delivery; this "
+             f"run added nothing on top. Re-dispatching with that context (PM monitor, §4.2)."
+             if wip else
+             f"🔍 `{branch}` exists on the remote but its head (`{delivery.head_sha[:10]}`) is "
+             f"UNCHANGED from before this run — nothing new was delivered (a stale branch from an "
+             f"earlier attempt). Re-dispatching with that context (PM monitor, §4.2)."),
             effort_id=effort_id,
         )
         instruction = (
-            f"NOTHING NEW WAS DELIVERED: `{branch}` already existed on the remote and its head "
-            f"(`{delivery.head_sha[:10]}`) is unchanged from before this run started — your turn "
-            f"produced no pushed commits. Do the task now: implement the goal in the workspace, "
+            (f"NOTHING NEW WAS DELIVERED: `{branch}` holds only a WIP commit "
+             f"(`{delivery.head_sha[:10]}`) the bridge saved from an earlier turn that was stopped "
+             f"before it finished — it is unreviewed and incomplete, and your turn pushed nothing "
+             f"on top of it. Check it against the goal, finish the work, commit, and push NEW "
+             f"commits to `{branch}`. "
+             if wip else
+             f"NOTHING NEW WAS DELIVERED: `{branch}` already existed on the remote and its head "
+             f"(`{delivery.head_sha[:10]}`) is unchanged from before this run started — your turn "
+             f"produced no pushed commits. ")
+            + f"Do the task now: implement the goal in the workspace, "
             f"commit, and push NEW commits to `{branch}`. If the workspace looks empty or wrong, "
             f"SAY SO explicitly. If there is genuinely nothing to change, reply exactly "
             f"`NO CHANGES: <why>`."
@@ -13488,7 +13538,8 @@ class Orchestrator:
             token = await self._project_token(effort_id)
             _exit, out, _timed = await self.router.exec_check(
                 effort_id, command=command, session_id=f"{effort_id}~carry", repo=repo,
-                repo_token=token, timeout=300, instance_id=inst_id, expect_effort=effort_id)
+                repo_token=token, timeout=300, instance_id=inst_id, expect_effort=effort_id,
+                wait_quiet=True)
         except (NoCapacityError, WorkspaceMoved) as exc:
             reason = f"the stopped turn's workspace is unavailable: {exc}"
             report = None
@@ -13526,6 +13577,10 @@ class Orchestrator:
             "left_dirty": report.get("left_dirty"),
         }
         await self.audit.log("stopped_turn_work_carried", effort_id=effort_id, payload=payload)
+        if payload["pushed"]:
+            # the branch now sits at a commit nobody delivered: never count it as delivery
+            self._carried_heads.setdefault(effort_id, set()).update(
+                h for h in (payload["head"], payload["commit"]) if h)
         what = (f"{payload['n_files']} file(s) as WIP commit `{payload['commit'][:12]}`"
                 if payload["commit"] else "its unpushed commits")
         if payload["pushed"]:

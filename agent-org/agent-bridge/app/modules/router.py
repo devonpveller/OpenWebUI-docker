@@ -991,6 +991,7 @@ class Router:
         self, effort_id: str, *, command: str, session_id: str, repo: str | None = None,
         repo_token: str | None = None, recurse_submodules: bool = False, timeout: int = 900,
         fresh: bool = False, instance_id: str | None = None, expect_effort: str | None = None,
+        wait_quiet: bool = False,
     ) -> tuple[int | None, str, bool]:
         """Run ONE verification command on a pooled worker DETERMINISTICALLY (the daemon's
         `/check` — real exit code + output, no model in the loop). Build verification is a
@@ -1002,7 +1003,10 @@ class Router:
         `instance_id` (ao-plancheck) pins the run to ONE worker (NoCapacityError if it is busy or
         gone, never another worker); `expect_effort` then refuses to run (WorkspaceMoved) unless
         that worker's workspace is still focused for that effort - its checkout is the one the
-        caller means, not one another effort re-cloned in between."""
+        caller means, not one another effort re-cloned in between.
+        `wait_quiet` (ao-replancarry) first cancels/waits out a task still running on that worker
+        (a flail-stopped turn may still be writing), as the plan-turn baseline does; if it will
+        not stop, the command still runs and `check_worker_not_quiet` records why."""
         inst = await self.scheduler.acquire(effort_id, "verifier", session_id,
                                             instance_id=instance_id)
         try:
@@ -1011,6 +1015,11 @@ class Router:
                 if rec is None or rec[0] != expect_effort:
                     raise WorkspaceMoved(
                         f"{inst.id}'s workspace is no longer focused for {expect_effort}")
+            if wait_quiet:
+                note = await self._wait_worker_quiet(inst.base_url)
+                if note:
+                    await self.audit.log("check_worker_not_quiet", effort_id=effort_id,
+                                         actor=inst.id, payload={"reason": note})
             if repo:
                 ok, detail, _ = await self.harness.set_project(
                     inst.base_url, repo, token=repo_token,

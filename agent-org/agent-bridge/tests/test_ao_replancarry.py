@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -475,3 +476,158 @@ def test_the_reply_survives_the_channel():
     obj = {"status": "ok", "files": ["a\nb", "ghp_" + "x" * 30], "pushed": True}
     assert parse_carry(_channel(frame(CARRY_TAG, obj) + "\n", "warning: noise")) == obj
     assert parse_carry("nothing framed here") is None
+
+
+# -- tester finding 2: the carried WIP commit is never counted as the run's delivery -------------
+# After a carry the effort branch head is the WIP commit; the re-dispatch records it as the
+# pre-dispatch head. If the execution turn then adds nothing, the "no new commits" paths must not
+# close the effort with the stopped turn's unreviewed WIP as its delivery: neither the stale-head
+# shortcut ("the branch already carries a delivery from an earlier round" + a green org build) nor
+# the NO-CHANGES path (a green org build on the landed branch).
+def _remote_delivery(ws: Workspaces):
+    from app.modules.capabilities import BranchDelivery
+
+    async def verify(effort_id, repo):
+        branch = f"agent/{effort_id}"
+        head = _origin_branches(ws).get(branch, "")
+        if not head:
+            return BranchDelivery(verifiable=True, exists=False, branch=branch)
+        ahead = int(_git(ws.origin, "rev-list", "--count", f"main..{branch}").strip())
+        files = len([f for f in _git(ws.origin, "diff", "--name-only", f"main...{branch}")
+                     .splitlines() if f.strip()])
+        return BranchDelivery(verifiable=True, exists=True, ahead=ahead, files_changed=files,
+                              head_sha=head, branch=branch, base="main")
+    return verify
+
+
+@pytest.mark.parametrize("exec_reply", ["silent", "no-changes", "silent-after-restart",
+                                        "adds-commit"])
+async def test_a_wip_only_branch_is_not_delivered_work(db_url, tmp_path, exec_reply):
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, fresh_exec_on=W2)
+    try:
+        await _keep_worker_1_off_the_new_session(orch)
+        # the GitHub reads, against the local origin: delivery verification + the pre-dispatch head
+        key = tmp_path / "app.pem"
+        key.write_text("not a key - the GitHub reads below are faked\n")
+        orch.github = SimpleNamespace(owner="not-this-repos-owner")   # no PR is ever opened
+        orch.s.github_app_id = "1"
+        orch.s.github_app_private_key_path = str(key)
+        assert orch.s.github_app_enabled
+        orch._verify_delivery = _remote_delivery(ws)
+        builds: list[bool] = []
+
+        async def org_build(effort_id, *, on_branch=True):
+            builds.append(on_branch)
+            return "pass", "1 passed", 0        # the WIP happens to build green
+        orch._org_build_check = org_build
+
+        async def machine_verified(effort_id):
+            return True                          # the project has a check_cmd
+        orch._machine_verified_effort = machine_verified
+
+        async def no_changes_needs_proof(effort_id, output):
+            return False                         # a fix goal: NO CHANGES must be proven by a build
+        orch._no_changes_acceptable = no_changes_needs_proof
+        delivered: list = []
+        orig_pv = orch._publish_and_verify
+
+        async def publish_and_verify(*a, **kw):
+            d = await orig_pv(*a, **kw)
+            delivered.append(d)
+            return d
+        orch._publish_and_verify = publish_and_verify
+        orig_wake = harness.wake
+
+        async def wake(base_url, session_id, prompt, **kw):
+            r = await orig_wake(base_url, session_id, prompt, **kw)
+            if exec_reply == "no-changes" and "PUBLISH YOUR WORK" in prompt:
+                r.output = "NO CHANGES: the repro test is already on the branch"
+            if exec_reply == "adds-commit" and "PUBLISH YOUR WORK" in prompt:
+                # the run's own work: committed and pushed on top of the carried WIP commit
+                d = ws.dirs[base_url]
+                (d / "inference/llm-queue/src/queue.py").write_text("def run():\n    return 2\n")
+                _git(d, "add", "-A")
+                _git(d, "commit", "-q", "-m", "fix the leak")
+                _git(d, "push", "-q", "origin", f"HEAD:refs/heads/agent/{trace['eid']}")
+            return r
+        harness.wake = wake
+        if exec_reply == "silent-after-restart":
+            orig_load = orch._load_carried_heads
+
+            async def load_after_restart(effort_id):
+                orch._carried_heads.clear()      # a bridge restart: only the audit log remains
+                await orig_load(effort_id)
+            orch._load_carried_heads = load_after_restart
+        trace["eid"] = "effort-ao-queue"
+
+        eid = await _run(orch)
+        assert eid == trace["eid"]
+        carried = await orch._last_event_payload(eid, "stopped_turn_work_carried")
+        assert carried and carried["pushed"], carried
+        wip = carried["commit"]
+        head = _origin_branches(ws)[f"agent/{eid}"]
+        assert delivered, "the run never reached publish-and-verify"
+        if exec_reply == "adds-commit":
+            # real work on top of the WIP commit is a delivery, exactly as before
+            assert head != wip
+            assert any(d is not None and d.landed and d.head_sha == head for d in delivered)
+            return
+        # the execution turn added nothing: the branch still sits at the WIP commit
+        assert head == wip
+        for d in delivered:
+            assert not (d is not None and d.landed and d.head_sha == wip), (
+                "the stopped turn's carried WIP commit was accepted as the run's delivery", d)
+        assert orch._org_verified.get(eid) != wip
+        # ... and the operator is told why, not "already delivered"
+        assert await orch._event_count(eid, "delivery_stale_head") == 1
+    finally:
+        await _shutdown(orch, db)
+
+
+# -- the stopped task may still be writing when the carry runs (ao-plancheck round 2's lesson) ---
+async def test_a_stopped_task_still_writing_is_waited_out_before_the_carry(db_url, tmp_path):
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, fresh_exec_on=W2)
+    try:
+        await _keep_worker_1_off_the_new_session(orch)
+        state = {"running_on": None, "order": []}
+        orig_wake, orig_check = harness.wake, harness.run_check
+
+        async def wake(base_url, session_id, prompt, **kw):
+            r = await orig_wake(base_url, session_id, prompt, **kw)
+            if trace["coding_url"] == base_url and state["running_on"] is None \
+                    and trace["plan_url"] is None:
+                state["running_on"] = base_url      # the flail-stopped task has not wound down
+            return r
+
+        async def run_check(base_url, command, **kw):
+            if "b64decode" in command:
+                state["order"].append(("check", base_url))
+            return await orig_check(base_url, command, **kw)
+
+        async def has_running_task(base_url):
+            return state["running_on"] == base_url
+
+        async def running_task_progress(base_url, *a, **kw):
+            return ("stopped-coding-task", 1) if state["running_on"] == base_url else None
+
+        async def cancel_task(base_url, task_id):
+            state["order"].append(("cancel", base_url))
+            if state["running_on"] == base_url:     # its LAST write lands as it is cancelled
+                (ws.dirs[base_url] / "late.py").write_text("late write of the stopped task\n")
+                state["running_on"] = None
+            return True
+
+        harness.wake, harness.run_check = wake, run_check
+        harness.has_running_task = has_running_task
+        harness.running_task_progress = running_task_progress
+        harness.cancel_task = cancel_task
+        eid = await _run(orch)
+        carried = await orch._last_event_payload(eid, "stopped_turn_work_carried")
+        assert carried is not None
+        assert sorted(carried["files"]) == sorted([CODING_FILE, "late.py"]), carried
+        assert state["order"][0] == ("cancel", W1), state["order"]
+        assert trace["exec_saw"].get("late.py") == "late write of the stopped task\n"
+        assert await orch._event_count(eid, "check_worker_not_quiet") == 0
+        _no_denials(ws)
+    finally:
+        await _shutdown(orch, db)
