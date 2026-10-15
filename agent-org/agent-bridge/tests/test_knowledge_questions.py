@@ -497,6 +497,22 @@ async def test_q1_mixed_attempts_are_schema_invalid_only_when_every_attempt_was(
     assert (qs.reason, qs.questions, gw.requests) == (reason, [], 2)
 
 
+async def test_q1_a_truncated_reply_is_schema_invalid(db):
+    """finish_reason=length: Instructor raises its own IncompleteOutputException (not a pydantic
+    error) - still a reply that did not validate, so schema_invalid, not model_unavailable."""
+    class Truncated(ScriptedGateway):
+        async def handler(self, request: httpx.Request) -> httpx.Response:
+            self.requests += 1
+            body = _completion('{"questions": [{"question": "Where is the')
+            body["choices"][0]["finish_reason"] = "length"
+            return httpx.Response(200, json=body)
+
+    gw = Truncated("x")
+    settings, models = await _scripted_router(db, gw)
+    qs = await kq.generate_questions(models, settings, anchor=_task("ao-auth"))
+    assert (qs.reason, qs.questions, gw.requests) == ("schema_invalid", [], 2)
+
+
 async def test_q1_success_after_a_transport_error_stays_inside_the_cap(db):
     gw = ScriptedGateway(500, json.dumps(_reply_obj("ao-queue")))
     settings, models = await _scripted_router(db, gw)
