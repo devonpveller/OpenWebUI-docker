@@ -1,0 +1,47 @@
+{
+ "_provenance": "Copied 2026-10-14 (kp-research) from OB1 5dd45cb integrations/research-service/fixtures/job-5ab36fe0-git-vs-azuredevops.result.json, itself a read-only SELECT of a real research_jobs row (status done). Fields kept as recorded: query, needs, synthesis, cited_sources, needs_status, backstop, report_type. Nothing edited.",
+ "result": {
+  "query": "What are the differences between using a plain git repository (e.g. on GitHub/GitLab/Gitea) and Azure DevOps (Azure Repos/Boards/Pipelines)? Specifically: (1) architectural differences — what Azure DevOps adds on top of git (work items, boards, pipelines, service connections, artifact feeds, environments); (2) day-to-day workflow changes when a team migrates from pure git (branch + PR + tags) to Azure DevOps — how commits, branches, pull requests, releases, and CI/CD pipelines are handled differently; (3) mental model changes: git as a distributed version control tool vs Azure DevOps as an ALM/devops platform — concepts like work-item-driven development, branch policies, build agents, environments/stages, release management, service hooks; (4) key limitations or gotchas (e.g. Azure Repos Git vs TFVC, branch protection rules, PR approval policies, pipeline-as-code YAML vs classic UI release pipelines, identity/SSO with Azure AD/Microsoft Entra ID); (5) how teams actually use them day-to-day: what do developers do differently in the terminal and in the UI.",
+  "needs": [
+   "What are the core architectural components of Azure DevOps (Boards, Repos, Pipelines, Artifacts, Test Plans) and how do they integrate beyond standard git functionality?",
+   "How does the day-to-day workflow for commits, pull requests, and releases differ between a standard git repository and Azure DevOps when using work-item-driven development?",
+   "What are the key differences in CI/CD implementation between standard git-based tools and Azure DevOps, specifically regarding YAML pipelines versus classic release pipelines and build agents?",
+   "What are the specific limitations and gotchas of Azure Repos Git compared to TFVC, including branch protection rules, PR approval policies, and identity management with Microsoft Entra ID?",
+   "How do developers' terminal commands and UI interactions change when migrating from a pure git workflow to an Azure DevOps environment?"
+  ],
+  "synthesis": "[SOURCED] Git is a distributed version control system in which every developer working with a repository has a full copy of the entire repository (every commit, branch, and file), enabling easy branching and merging. [Source 6]\n[SOURCED] The basic Git workflow involves: creating a branch, making changes and committing them, pushing changes to the remote, opening a pull request, collaborating, and merging into main. [Source 6]\n[SOURCED] GitHub, as a representative plain-git hosting platform, is \"at heart a Git repository hosting service\" but additionally implements features for code review (pull requests, diffs, review requests), project management (issue tracking and assignment), integrations with other developer tools, team management, documentation, and \"social coding.\" [Source 1]\n[SOURCED] GitHub centralizes code, version history, and discussion so teams can coordinate contributions without duplicating work, functioning as a web-based social coding platform. [Source 7]\n[SOURCED] GitLab is described as an \"enterprise-grade DevOps platform that goes beyond Git repository management,\" integrating issue tracking, CI/CD, code review, security testing, and Kubernetes management into one cohesive application. [Source 2]\n[SOURCED] The MSBuild repository on GitHub contains both a `.github/workflows` directory and an `.azuredevops/azure-pipelines` directory, along with `.vsts-dotnet-ci.yml` files, demonstrating that Azure DevOps pipelines can be defined as YAML files committed within the repository alongside GitHub Actions workflows. [Source 3]\n[SOURCED] Azure Portal provides role-based access control (RBAC) to assign granular permissions and control who manages resources at each level across teams and services. [Source 4, 5]\n[INFERRED] A project can maintain both GitHub Actions workflows and Azure DevOps pipeline definitions in the same repository, suggesting the two CI/CD systems are structurally parallel (YAML-in-repo) and a team could migrate or run both concurrently. [Source 3]\n[INFERRED] The pattern seen in GitLab (integrating CI/CD, issue tracking, code review, and security testing into one platform) is analogous to what Azure DevOps does with its Repos/Boards/Pipelines triad, representing a broader ALM platform rather than a bare git host. [Source 2]\n[INFERRED] Because Azure DevOps pipelines are stored as YAML in the repo (`.vsts-dotnet-ci.yml`, `azure-pipelines/` folder), the CI/CD definition is version-controlled alongside the code, similar to how GitHub Actions uses `.github/workflows/`. [Source 3]\n[GAP] The provided sources do not describe Azure Boards work items, sprints, backlogs, or work-item-driven development workflows in any detail.\n[GAP] The provided sources do not describe Azure Repos-specific features such as branch protection rules, pull-request approval policies, or the distinction between Azure Repos Git and TFVC (Team Foundation Version Control).\n[GAP] The provided sources do not describe Azure Pipelines build agents (hosted vs. self-hosted), environments/stages, or the distinction between YAML pipeline-as-code and classic UI-based release pipelines.\n[GAP] The provided sources do not describe Azure DevOps service connections, artifact feeds (e.g., Azure Artifacts), or service hooks.\n[GAP] The provided sources do not describe identity/SSO integration with Azure AD or Microsoft Entra ID in the context of Azure DevOps authentication and authorization.\n[GAP] The provided sources do not describe how a team's day-to-day terminal workflow (git clone, git push, git tag, etc.) changes when migrating from a pure git + PR workflow to Azure DevOps.\n[GAP] The provided sources do not describe the mental-model shift from treating git as a distributed version-control tool to treating Azure DevOps as an end-to-end ALM/DevOps platform (work-item-driven development, release management, environment promotion).\n[GAP] The provided sources do not describe specific limitations or gotchas of Azure DevOps (e.g., branch policy constraints, PR approval policy configuration, pipeline YAML vs. classic release pipeline trade-offs, or identity federation issues).\n[GAP] The provided sources do not describe what developers do differently in the terminal versus the Azure DevOps web UI on a day-to-day basis.",
+  "cited_sources": [
+   {
+    "url": "https://www.infoworld.com/article/2266566/what-is-github-more-than-git-version-control-in-the-cloud.html",
+    "title": "What is GitHub? More than Git version control in the cloud | InfoWorld"
+   },
+   {
+    "url": "https://ruby-doc.org/blog/gitea-vs-gitlab-a-comprehensive-comparison-in-2025/",
+    "title": "Gitea vs GitLab: A Comprehensive Comparison in 2025"
+   },
+   {
+    "url": "https://github.com/dotnet/msbuild",
+    "title": "GitHub - dotnet/msbuild: The Microsoft Build Engine (MSBuild) is the build platform for .NET and Visual Studio. · GitHub"
+   },
+   {
+    "url": "https://azure.microsoft.com/en-us/get-started/azure-portal/?msockid=2dbf829dbab96fdf3c0e95e5bb5b6ede",
+    "title": "Azure Portal | Microsoft Azure"
+   },
+   {
+    "url": "https://azure.microsoft.com/en-us/get-started/azure-portal/?msockid=08684ec368046310012759bb6937626c",
+    "title": "Azure Portal | Microsoft Azure"
+   },
+   {
+    "url": "https://github.com/git-guides",
+    "title": "Git · GitHub"
+   },
+   {
+    "url": "https://www.coursera.org/articles/what-is-github?msockid=05632e45c3b46fb33d603985c2f06e7f",
+    "title": "What Is GitHub? Use Cases and FAQ | Coursera"
+   }
+  ],
+  "needs_status": null,
+  "backstop": "complete",
+  "report_type": "product-comparison"
+ }
+}
