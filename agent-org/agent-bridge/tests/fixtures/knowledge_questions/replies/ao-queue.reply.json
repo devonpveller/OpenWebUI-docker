@@ -14,19 +14,19 @@
   },
   {
    "question": "Under ASGI `spec_version` 2.3, does Starlette's `StreamingResponse` call `aclose()` on the body iterator when a disconnect is already pending before the first chunk is sent?",
-   "tag": "external"
+   "tag": "concept"
   },
   {
    "question": "How does Starlette 2.4-scope streaming differ from 2.3 when the client hangs up mid-body: is the generator cancelled, closed, or left suspended?",
-   "tag": "external"
+   "tag": "concept"
   },
   {
    "question": "When an `httpx` streamed upstream response fails mid-body, which exception reaches the relaying async generator, and is its `finally` block guaranteed to run?",
-   "tag": "external"
+   "tag": "api"
   },
   {
    "question": "What must a test fake (a slow upstream that yields one chunk then raises, a receive channel that returns `http.disconnect` immediately) to make the leaked slot visible within a second?",
-   "tag": "external"
+   "tag": "concept"
   }
  ]
 }
