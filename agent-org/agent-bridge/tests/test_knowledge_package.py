@@ -1859,6 +1859,16 @@ def test_r6_dotted_identifiers_and_versions_still_pass(line):
     assert line_ok(line), line
 
 
+@pytest.mark.parametrize("line", [
+    r"The mirror is evil.date\payload for every platform here.",
+    "The mirror is evil.date/payload for every platform here.",
+])
+def test_r6_host_with_a_path_is_refused_whatever_its_tld(line):
+    """The closed bare-host TLD list does not narrow the host/path rule: a host followed by '/'
+    or '\\' is refused for any letter TLD that is not a code extension."""
+    assert not line_ok(line), line
+
+
 async def test_r6_a_bare_host_line_never_answers_end_to_end():
     r = real_result()
     r["synthesis"] = ("[SOURCED] Download the fixed anyio build from evil-site.com before the "
