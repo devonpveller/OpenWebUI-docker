@@ -148,9 +148,11 @@ class Scheduler:
             return reachable == 0
 
     # ── acquire / release (the semaphore) ────────────────────────────────────
-    async def acquire(self, effort_id: str, role: str, session_id: str) -> WorkerInstance:
+    async def acquire(self, effort_id: str, role: str, session_id: str, *,
+                      instance_id: str | None = None) -> WorkerInstance:
         """Move a free instance to `computing` for an effort. Enforces the cap and
-        the composition rule (no computing while frozen)."""
+        the composition rule (no computing while frozen). `instance_id` (ao-plancheck) accepts
+        ONLY that instance - a check of one worker's workspace must never run on another."""
         if not await self.gate.can_dispatch(effort_id):
             raise FrozenEffortError(
                 f"effort {effort_id} is frozen/killed — scheduler will not dispatch "
@@ -176,6 +178,8 @@ class Scheduler:
             # DIFFERENT / empty workspace → "finished but pushed no branch" (nothing to commit) or a
             # 409 if that worker is busy. Prefer the affine instance; fall back to any free one for a
             # brand-new session.
+            if instance_id is not None:
+                base_q = base_q.where(WorkerInstance.id == instance_id)
             inst = (
                 await s.execute(base_q.where(WorkerInstance.session_id == session_id).limit(1))
             ).scalar_one_or_none()

@@ -425,28 +425,61 @@ async def test_a_first_delivery_has_no_previous_head_to_orphan(db_url):
 
 
 # ── F1/F15 — a plan turn leaves nothing on disk ───────────────────────────────
+def _plan_result(token: str, manifest: dict | None = None):
+    """A plan turn's WorkResult as the router returns it: the worker that ran it and the pre-turn
+    baseline taken there (ao-plancheck)."""
+    from types import SimpleNamespace
+
+    from app.modules.plan_turn_guard import SNAP_TAG, frame
+
+    snap = {"status": "ok", "token": token, "head": "abc123", "branch": "main",
+            "manifest": manifest or {}, "count": len(manifest or {})}
+    return SimpleNamespace(instance_id="worker-1", pre_turn_output=frame(SNAP_TAG, snap))
+
+
+def _check_reply(reverted: list[dict]) -> str:
+    from app.modules.plan_turn_guard import CHECK_TAG, frame
+
+    return frame(CHECK_TAG, {"status": "ok", "reverted": reverted, "unrestored": [],
+                             "head_reset": "", "kept": [], "kept_count": 0})
+
+
+def _decoded(command: str) -> str:
+    import base64 as _b64
+    import re as _re
+
+    m = _re.search(r"b64decode\('([A-Za-z0-9+/=]+)'\)", command)
+    return _b64.b64decode(m.group(1)).decode() if m else command
+
+
 async def test_a_plan_turn_that_wrote_files_is_reverted(db_url):
     """`plan_only` gates the daemon's edit/write TOOLS, not the shell. gym-015 broke it twice by
     different routes: `sed -i` + `git commit` (33eae95), then a `python3 -c` read-modify-write +
     commit (1b04400). A command deny-list cannot close that — any interpreter is another route —
-    so the workspace is checked and reverted before the gate judges the plan."""
+    so the workspace is checked and reverted before the gate judges the plan. ao-plancheck: the
+    check runs pinned to the plan turn's worker, against the baseline taken there before the
+    turn, and the record names each reverted path and why."""
     orch, _chat, _harness, db = await _orch(db_url)
     try:
         eid, _c, _r = await _effort(orch)
-        cmds: list[str] = []
+        calls: list[dict] = []
 
         async def _exec(effort_id, *, command, session_id, **kw):
-            cmds.append(command)
-            if "PROBE-DONE" in command:
-                return 0, "BEFORE-HEAD=abc123\n M todo.py\n?? scratch.py\nPROBE-DONE", False
-            return 0, "REVERT-DONE", False
+            calls.append({"command": command, **kw})
+            return 0, _check_reply([
+                {"path": "todo.py", "why": "changed by the plan turn - restored from HEAD"},
+                {"path": "scratch.py", "why": "created by the plan turn - removed"}]), False
 
         orch.router.exec_check = _exec
-        assert await orch._revert_plan_turn_writes(eid) is True
+        assert await orch._revert_plan_turn_writes(eid, _plan_result("t1"), "t1") is True
         assert await orch._event_count(eid, "plan_turn_wrote_files") == 1
-        assert any("git checkout -- ." in c for c in cmds)
-        assert any("git clean -fd" in c for c in cmds)
-        assert not any("reset --hard" in c for c in cmds)   # proxy-illegal
+        payload = await orch._last_event_payload(eid, "plan_turn_wrote_files")
+        assert {r["path"] for r in payload["reverted"]} == {"todo.py", "scratch.py"}
+        assert calls[0]["instance_id"] == "worker-1"          # the plan turn's own worker
+        assert calls[0]["expect_effort"] == eid
+        script = _decoded(calls[0]["command"])
+        assert "reset --hard" not in script and '"--hard"' not in script   # proxy-illegal
+        assert '"clean"' not in script and "checkout -- ." not in script   # no blanket wipe
     finally:
         await _shutdown(orch, db)
 
@@ -456,15 +489,12 @@ async def test_a_clean_plan_turn_is_left_alone(db_url):
     orch, _chat, _harness, db = await _orch(db_url)
     try:
         eid, _c, _r = await _effort(orch)
-        cmds: list[str] = []
 
         async def _exec(effort_id, *, command, session_id, **kw):
-            cmds.append(command)
-            return 0, "BEFORE-HEAD=abc123\nPROBE-DONE", False
+            return 0, _check_reply([]), False
 
         orch.router.exec_check = _exec
-        assert await orch._revert_plan_turn_writes(eid) is False
+        assert await orch._revert_plan_turn_writes(eid, _plan_result("t2"), "t2") is False
         assert await orch._event_count(eid, "plan_turn_wrote_files") == 0
-        assert not any("git clean" in c for c in cmds)      # nothing to clean, nothing run
     finally:
         await _shutdown(orch, db)
