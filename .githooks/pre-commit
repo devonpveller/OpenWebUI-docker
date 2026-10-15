@@ -19,6 +19,7 @@
 #   5b. OB1 recipe tests - a staged OB1 gitlink bump must pass its unit tests
 #   5c. OB1 deno recipes - and must type-check the Deno recipe 5b cannot see
 #   5d. OB1 int. images  - and its integration images must build and resolve
+#   5e. OB1 fork-owned   - and no upstream merge in it may touch intake's fork-owned surface
 
 echo "Running pre-commit validations..."
 
@@ -534,6 +535,17 @@ run_gate ob1-deno-recipes './scripts/checks/check-ob1-deno-recipes.ps1' '' no \
 # execs this file, so a clean merge that bumps the gitlink gets it too.
 run_gate ob1-integration-images './scripts/checks/check-ob1-integration-images.ps1' '' no \
     "Pre-commit validation failed (an OB1 integration image does not build or resolve for the staged gitlink)!"
+
+# --- 5e. OB1 fork-owned surface on gitlink bumps ---------------------------
+# Operator D23 (2026-10-15, intake I1): intake lives in OB1 only on the condition that
+# upstream OB1 can never overwrite or collide with it. OB1/integrations/intake/FORK-OWNED.md
+# lists what the fork owns (paths, the intake schema/role, the screen_verdict and
+# intake_item_id columns); this gate runs its checker over every merge commit in the bump
+# and refuses when an upstream parent brought in a change to that list. Skips instantly with
+# no gitlink staged or a pin from before I1; REFUSES when the guard was removed from the pin
+# or Python is missing.
+run_gate ob1-fork-owned './scripts/checks/check-ob1-fork-owned.ps1' '' no \
+    "Pre-commit validation failed (an upstream OB1 merge touches the fork-owned intake surface)!"
 
 # --- 6. ATTESTATION -------------------------------------------------------
 # Record that these checks actually ran, because otherwise nobody can tell.
