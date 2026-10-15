@@ -22,12 +22,12 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app.config import Settings
+from app.config import DEFAULT_KNOWLEDGE_SOURCE_HOSTS, Settings
 from app.modules.grounding import OpenBrainResearchGrounding, ResearchJob
 from app.modules.knowledge_package import (
     MAX_QUESTIONS, TOKEN_CAP, Candidate, CodebaseAnswer, KnowledgeQuestion, ModelExtractor,
     build_knowledge_package, candidates_from_result, estimate_tokens, fileline_ok, line_ok,
-    parse_extraction, render_package, url_ok, PackageItem, SourceAllowList,
+    parse_extraction, render_package, research_contract, url_ok, PackageItem, SourceAllowList,
 )
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "research_result_5ab36fe0.json")
@@ -508,7 +508,7 @@ async def test_unfiled_report_is_open_never_an_answer():
 
 async def test_hanging_runner_is_cut_by_the_time_box():
     class Hang:
-        async def run_job(self, query, *, budget_s, gap_research=None):
+        async def run_job(self, query, *, budget_s, gap_research=None, contract=None):
             await asyncio.sleep(3600)
     s = _settings(knowledge_package_time_box_s=0.3)
     pkg = await build_knowledge_package(Q_EXT, settings=s, research=Hang(),
@@ -2050,3 +2050,58 @@ def test_r6_round2_real_doc_lines_are_kept():
 ])
 def test_r6_round2_decision_rule(line, refused):
     assert line_ok(line) is (not refused), line
+
+
+# ── kp-contract: the research job carries the source contract (operator D11, PLAN-v2) ───────
+
+SOFTWARE_DOCS = {"sources": {"classes": ["software-docs"]}}
+
+
+async def test_run_job_sends_options_contract_only_when_given():
+    eng, clk = StubEngine([done_with(real_result()), done_with(real_result())]), FakeClock()
+    g = _client(eng, clk)
+    assert (await g.run_job("q", budget_s=600)).state == "done"
+    assert "options" not in eng.bodies[0]                     # no contract = today's body, byte for byte
+    contract = {"sources": {"classes": ["software-docs"], "allow": ["docs.rs/tokio"]}}
+    assert (await g.run_job("q", budget_s=600, contract=contract)).state == "done"
+    assert eng.bodies[1]["options"] == {"contract": contract}
+    assert set(eng.bodies[1]) == set(eng.bodies[0]) | {"options"}
+    contract["sources"]["allow"].append("mutated.example.org")  # the body was a copy
+    assert eng.bodies[1]["options"]["contract"]["sources"]["allow"] == ["docs.rs/tokio"]
+
+
+async def test_knowledge_package_research_job_carries_the_software_docs_contract():
+    eng, clk = StubEngine([done_with(real_result())]), FakeClock()
+    await _build(eng, clk, Q_EXT[:2], extractor=picker({"Q1": ["distributed version control"]}))
+    sent = eng.bodies[0]["options"]["contract"]
+    assert sent == {"sources": {"classes": ["software-docs"],
+                                "allow": ["www.coursera.org/articles", "anyio.readthedocs.io/en/stable"]}}
+    assert eng.bodies[0]["origin"] == "agent"
+
+
+async def test_knowledge_package_gap_round_carries_the_same_contract():
+    res = real_result()
+    eng, clk = StubEngine([done_with(res), done_with(res)]), FakeClock()
+    await _build(eng, clk, Q_EXT[:2], extractor=picker({"Q1": ["distributed version control"]}),
+                 source_hosts=())
+    assert len(eng.bodies) == 2
+    assert all(b["options"] == {"contract": SOFTWARE_DOCS} for b in eng.bodies)
+
+
+def test_research_contract_translates_per_task_entries_and_skips_ignored_ones():
+    s = _settings()
+    c = research_contract(s, ["github.com/agronholm/anyio@4.4.0", "Docs.RS./tokio", "*.example-docs.org",
+                              "github.com/agronholm/anyio", "gist.github.com", "bad entry", ""])
+    assert c == {"sources": {"classes": ["software-docs"], "allow": [
+        "github.com/agronholm/anyio/blob/4.4.0", "github.com/agronholm/anyio/tree/4.4.0",
+        "docs.rs/tokio", "*.example-docs.org"]}}
+
+
+def test_research_contract_sends_a_narrowed_host_list_as_the_allow_list_not_the_class():
+    s = _settings(knowledge_source_hosts="docs.python.org,numpy.org/doc")
+    assert research_contract(s) == {"sources": {"allow": ["docs.python.org", "numpy.org/doc"]}}
+    # the default list, in any order or spelling, is the engine's software-docs class
+    shuffled = ",".join(reversed(DEFAULT_KNOWLEDGE_SOURCE_HOSTS.split(",")))
+    assert research_contract(_settings(knowledge_source_hosts=shuffled)) == SOFTWARE_DOCS
+    # a configured list with no usable entry never sends an unscoped job
+    assert research_contract(_settings(knowledge_source_hosts="github.com")) == SOFTWARE_DOCS

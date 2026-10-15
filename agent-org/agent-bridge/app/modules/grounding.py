@@ -25,7 +25,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 import httpx
 
@@ -234,6 +234,7 @@ class OpenBrainResearchGrounding:
     async def run_job(
         self, query: str, *, budget_s: float, gap_research: str | None = None,
         seed_sources: list[dict[str, str]] | None = None,
+        contract: Mapping[str, Any] | None = None,
     ) -> ResearchJob:
         """Submit ONE research job with a caller deadline and wait for it, never past the deadline.
 
@@ -244,7 +245,11 @@ class OpenBrainResearchGrounding:
           so the bound does not depend on the transport); no poll is sent after the deadline.
         - On the deadline the job is cancelled with a CANCEL_GRACE_S bound, so the call returns
           within budget_s + CANCEL_GRACE_S even when the engine is wedged.
-        - Every failure maps to a closed state; no engine text is returned except `result`."""
+        - Every failure maps to a closed state; no engine text is returned except `result`.
+        - `contract` (kp-contract): when given, sent as `options.contract` - the engine's per-job
+          source scope (classes and/or allow/deny entries, OB1 research-service contract.ts), which
+          it applies to search hits, fetches, redirects, KB recall and reused claims. Not given =
+          the request body is exactly as before. A malformed contract fails the job engine-side."""
         start = self.clock()
         end = start + max(0.0, budget_s)
         poll = max(0.01, float(self.s.grounding_poll_interval_s))
@@ -263,6 +268,9 @@ class OpenBrainResearchGrounding:
             body["seed_sources"] = [
                 {"url": str(s.get("url") or ""), "title": str(s.get("title") or ""),
                  "content": str(s.get("content") or "")} for s in seed_sources]
+        if contract is not None:
+            # a JSON copy: what is sent is what was passed at call time, nothing aliased
+            body["options"] = {"contract": json.loads(json.dumps(dict(contract)))}
 
         def left() -> float:
             return end - self.clock()

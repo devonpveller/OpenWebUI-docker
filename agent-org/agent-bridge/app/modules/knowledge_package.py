@@ -63,7 +63,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
-from ..config import Settings
+from ..config import DEFAULT_KNOWLEDGE_SOURCE_HOSTS, Settings
 from .grounding import ResearchJob
 
 log = logging.getLogger("agent_bridge.knowledge_package")
@@ -141,8 +141,8 @@ class Candidate:
 
 
 class ResearchRunner(Protocol):
-    async def run_job(self, query: str, *, budget_s: float,
-                      gap_research: str | None = None) -> ResearchJob: ...
+    async def run_job(self, query: str, *, budget_s: float, gap_research: str | None = None,
+                      contract: Mapping[str, Any] | None = None) -> ResearchJob: ...
 
 
 CodebaseAnswerer = Callable[[Sequence[KnowledgeQuestion]], Awaitable[Mapping[str, Any]]]
@@ -940,6 +940,52 @@ def _answered_item(q: KnowledgeQuestion, rnd: int,
                        tuple(sources), rnd)
 
 
+#: The research engine's documentation source class (OB1 research-service contract.ts
+#: CLASS_REGISTRY, built from DEFAULT_KNOWLEDGE_SOURCE_HOSTS).
+SOFTWARE_DOCS_CLASS = "software-docs"
+
+
+def _contract_entries(entries: Iterable[str]) -> list[str]:
+    """The engine's spelling of the entries `SourceAllowList` accepts: host, `*.suffix`,
+    host/path/prefix, and a GitHub `org/repo@tag` as its blob and tree prefixes at that tag. An
+    entry SourceAllowList ignores is not sent (the engine would refuse the whole job on it)."""
+    out: list[str] = []
+    for raw in entries:
+        al = SourceAllowList([raw])
+        if al.ignored:
+            continue
+        out += [h for h in sorted(al.exact)]
+        out += ["*" + sfx for sfx in sorted(al.suffixes)]
+        out += [f"{h}/{'/'.join(p)}" for h, p in al.prefixes]
+        for org, repo, tag in al.github:
+            out += [f"github.com/{org}/{repo}/blob/{tag}", f"github.com/{org}/{repo}/tree/{tag}"]
+    return list(dict.fromkeys(out))
+
+
+def research_contract(settings: Settings, source_hosts: Iterable[str] = ()) -> dict[str, Any]:
+    """The `options.contract` a knowledge-package research job carries (kp-contract, operator D11):
+    the engine then never searches, fetches, recalls or reuses a source outside it. The built-in
+    host list is the engine's `software-docs` class; a configured list that differs from it
+    (AO_KNOWLEDGE_SOURCE_HOSTS) is sent as the allow list instead, so narrowing the setting narrows
+    the job. Per-task `source_hosts` are added to the allow list. A configured list with no usable
+    entry falls back to the class - a job is never sent unscoped."""
+    def norm(entries: Iterable[str]) -> set[str]:
+        return {x.strip().lower().rstrip(".") for x in entries if x.strip()}
+    configured = [x for x in str(settings.knowledge_source_hosts or "").split(",") if x.strip()]
+    sources: dict[str, Any] = {}
+    allow: list[str] = []
+    if norm(configured) == norm(DEFAULT_KNOWLEDGE_SOURCE_HOSTS.split(",")):
+        sources["classes"] = [SOFTWARE_DOCS_CLASS]
+    else:
+        allow = _contract_entries(configured)
+        if not allow:
+            sources["classes"] = [SOFTWARE_DOCS_CLASS]
+    allow = list(dict.fromkeys(allow + _contract_entries(source_hosts)))
+    if allow:
+        sources["allow"] = allow
+    return {"sources": sources}
+
+
 def _research_query(rnd: int, qs: Sequence[KnowledgeQuestion]) -> str:
     body = "\n".join(f"{q.id}. {q.text}" for q in qs)
     if rnd == 1:
@@ -975,7 +1021,9 @@ async def build_knowledge_package(
     qs = qs_all[:MAX_QUESTIONS]
     over = tuple(PackageItem(q.id, q.tag, None, OPEN, "over_question_cap")
                  for q in qs_all[MAX_QUESTIONS:])
+    source_hosts = list(source_hosts)
     allow = SourceAllowList.from_settings(settings, source_hosts)
+    contract = research_contract(settings, source_hosts)
     t_end = clock() + max(0.0, float(settings.knowledge_package_time_box_s))
     done: dict[str, PackageItem] = {}
     jobs: list[tuple[int, str]] = []
@@ -1057,7 +1105,8 @@ async def build_knowledge_package(
                 # The runner bounds itself (deadline_at + its own clock); this is the backstop
                 # so a runner that does not cannot hold the step past the time box (C6).
                 job = await asyncio.wait_for(
-                    research.run_job(_research_query(rnd, pending), budget_s=left - reserve),
+                    research.run_job(_research_query(rnd, pending), budget_s=left - reserve,
+                                     contract=contract),
                     timeout=left)
             except asyncio.TimeoutError:
                 job = ResearchJob("timeout")
