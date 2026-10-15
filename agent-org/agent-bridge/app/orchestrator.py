@@ -1112,6 +1112,10 @@ class Orchestrator:
         # equals this is a PRE-EXISTING branch resurrected, not a delivery (live 2026-07-07: an
         # empty-workspace run "delivered" yesterday's stale branch and wired an OLD commit).
         self._pre_dispatch_head: dict[str, str] = {}
+        # ao-replancarry - effort-branch heads that are ONLY a stopped turn's carried WIP commit
+        # (per effort). A branch still sitting at one of these after a run is carried work in
+        # progress, never that run's delivery. Re-read from the audit log at every dispatch.
+        self._carried_heads: dict[str, set[str]] = {}
         # P8 #3 — PROVENANCE: the expected BASE per effort, read from the remote at dispatch
         # ({effort_id: {"branch": default_branch, "sha": head_sha}}). Handed to the worker in the
         # brief to ASSERT against (it can't discover it — proxied git), keys workspace reuse in the
@@ -7072,6 +7076,8 @@ class Orchestrator:
             if repo and self.github is not None and self.s.github_app_enabled:
                 pre = await self._verify_delivery(effort_id, repo)
                 self._pre_dispatch_head[effort_id] = pre.head_sha or ""
+            # ao-replancarry - which heads of this effort's branch are carried WIP (restart-safe)
+            await self._load_carried_heads(effort_id)
             # P8 #3 — PROVENANCE: read the CURRENT default-branch head — the expected BASE this
             # run is planned against. Refreshed every dispatch (never carried stale); unreadable
             # ⇒ absent, and nothing downstream claims a base it can't prove.
@@ -7325,6 +7331,11 @@ class Orchestrator:
         if result is not None and (_FLAIL_MARKER in (result.output or "")
                                    or getattr(result, "loop_trip", None) is not None):
             # ao-loopguard — the bridge's loop guard stopping a coding turn is the same signal.
+            # ao-replancarry — first save what the stopped turn left uncommitted on ITS worker to
+            # the effort branch, so the re-planned turns (any worker; F33 syncs them to the
+            # branch) start from it instead of from base.
+            if repo and self.s.sync_delivery_branch:
+                await self._carry_stopped_turn_work(effort_id, result, repo)
             await self._flail_replan(effort_id, result)
             return None
         # P8 #3 — the worker asserted its checkout is NOT rooted on the expected base and honestly
@@ -7519,6 +7530,11 @@ class Orchestrator:
             # them apart, and its failure output is the burn-down's work list, not a dead end).
             d0 = await self._verify_delivery(effort_id, repo)
             verdict, out, _n = await self._org_build_check(effort_id, on_branch=d0.landed)
+            if verdict == "pass" and d0.landed and self._wip_only(effort_id, d0):
+                # ao-replancarry: the branch holds only the stopped turn's carried WIP - a green
+                # build of it is not this run delivering anything. Same path as a branch that did
+                # not move: re-engage, then state check / escalation.
+                return await self._recover_stale_delivery(effort_id, channel_id, root, repo, d0)
             if verdict == "pass":
                 await self.comms.post(
                     Intent.worker_activity,
@@ -9303,7 +9319,32 @@ class Orchestrator:
         i.e. the branch pre-existed and this run contributed nothing (no pre-head recorded, or a
         changed head, is never stale — fail-open)."""
         pre = self._pre_dispatch_head.get(effort_id, "")
-        return bool(pre) and bool(delivery.head_sha) and delivery.head_sha == pre
+        # ao-replancarry: a head that is only a stopped turn's carried WIP commit is not new
+        # delivered work either, whether or not a pre-dispatch head could be read.
+        return (bool(pre) and bool(delivery.head_sha) and delivery.head_sha == pre) \
+            or self._wip_only(effort_id, delivery)
+
+    def _wip_only(self, effort_id: str, delivery: BranchDelivery) -> bool:
+        """ao-replancarry: the branch head is exactly a commit the bridge CARRIED from a stopped
+        turn (`stopped_turn_work_carried`) - unreviewed work in progress nobody delivered."""
+        return bool(delivery.head_sha) and \
+            delivery.head_sha in self._carried_heads.get(effort_id, set())
+
+    async def _load_carried_heads(self, effort_id: str) -> None:
+        """The carried WIP heads of this effort, from the audit log (survives a bridge restart)."""
+        heads: set[str] = set()
+        try:
+            async with self.db.session_factory() as s:
+                rows = (await s.execute(select(Event.payload).where(
+                    Event.effort_id == effort_id,
+                    Event.kind == "stopped_turn_work_carried"))).all()
+            for (p,) in rows:
+                if isinstance(p, dict) and p.get("pushed"):
+                    heads.update(h for h in (p.get("head"), p.get("commit")) if h)
+        except Exception as exc:  # noqa: BLE001 - keep what is in memory
+            log.debug("carried-heads read for %s failed: %s", effort_id, exc)
+            return
+        self._carried_heads[effort_id] = heads | self._carried_heads.get(effort_id, set())
 
     async def _recover_stale_delivery(
         self, effort_id: str, channel_id: str, root: str, repo: str,
@@ -9319,7 +9360,10 @@ class Orchestrator:
         # a stale head whose branch ALREADY DIFFERS from base is PRIOR DELIVERED WORK, not an
         # empty run. Say that, then let the ORG verify it by building, instead of re-engaging
         # the worker to re-do finished work (or worse, mislabelling success as failure).
-        if (delivery.files_changed and delivery.files_changed > 0
+        # ao-replancarry: EXCEPT when the head is only a stopped turn's carried WIP commit - that
+        # is unreviewed work in progress the bridge saved, not a delivery from an earlier round.
+        wip = self._wip_only(effort_id, delivery)
+        if (not wip and delivery.files_changed and delivery.files_changed > 0
                 and await self._machine_verified_effort(effort_id)):
             await self.comms.post(
                 Intent.worker_activity,
@@ -9372,15 +9416,26 @@ class Orchestrator:
             return None
         await self.comms.post(
             Intent.worker_activity,
-            f"🔍 `{branch}` exists on the remote but its head (`{delivery.head_sha[:10]}`) is "
-            f"UNCHANGED from before this run — nothing new was delivered (a stale branch from an "
-            f"earlier attempt). Re-dispatching with that context (PM monitor, §4.2).",
+            (f"🔍 `{branch}` holds only the stopped turn's carried WIP commit "
+             f"(`{delivery.head_sha[:10]}`) — unreviewed work in progress, not a delivery; this "
+             f"run added nothing on top. Re-dispatching with that context (PM monitor, §4.2)."
+             if wip else
+             f"🔍 `{branch}` exists on the remote but its head (`{delivery.head_sha[:10]}`) is "
+             f"UNCHANGED from before this run — nothing new was delivered (a stale branch from an "
+             f"earlier attempt). Re-dispatching with that context (PM monitor, §4.2)."),
             effort_id=effort_id,
         )
         instruction = (
-            f"NOTHING NEW WAS DELIVERED: `{branch}` already existed on the remote and its head "
-            f"(`{delivery.head_sha[:10]}`) is unchanged from before this run started — your turn "
-            f"produced no pushed commits. Do the task now: implement the goal in the workspace, "
+            (f"NOTHING NEW WAS DELIVERED: `{branch}` holds only a WIP commit "
+             f"(`{delivery.head_sha[:10]}`) the bridge saved from an earlier turn that was stopped "
+             f"before it finished — it is unreviewed and incomplete, and your turn pushed nothing "
+             f"on top of it. Check it against the goal, finish the work, commit, and push NEW "
+             f"commits to `{branch}`. "
+             if wip else
+             f"NOTHING NEW WAS DELIVERED: `{branch}` already existed on the remote and its head "
+             f"(`{delivery.head_sha[:10]}`) is unchanged from before this run started — your turn "
+             f"produced no pushed commits. ")
+            + f"Do the task now: implement the goal in the workspace, "
             f"commit, and push NEW commits to `{branch}`. If the workspace looks empty or wrong, "
             f"SAY SO explicitly. If there is genuinely nothing to change, reply exactly "
             f"`NO CHANGES: <why>`."
@@ -13445,6 +13500,99 @@ class Orchestrator:
             return True
         return self.exec_gate.dry_run_required(await self._effort_risk_str(effort_id))
 
+    async def _carry_stopped_turn_work(self, effort_id: str, result, repo: str) -> bool:
+        """ao-replancarry — commit what a stopped coding turn left uncommitted as a WIP commit on
+        the effort branch and push it there, from the worker that ran the turn. Returns True when
+        work was carried (committed, or unpushed commits pushed).
+
+        C7e 0.3 ao-queue r1 (2026-10-15): the flail guard stopped the coding turn on worker-1 after
+        it wrote its repro test; the forced plan turn and then the execution turn ran on worker-2
+        in fresh clones at base, so the work never reached them. Pinning the next turns to worker-1
+        was the alternative, but it fails whenever that worker is busy, quarantined or re-focused
+        and still strands the work on one disk; a commit on `agent/<effort>` reaches every worker
+        through the F33 delivery-branch sync, survives a /project wipe, and is how a normal turn's
+        work travels. See `modules/replan_carry.py` for what the command does and refuses.
+
+        Runs pinned to `result.instance_id` and only while that worker is still focused for this
+        effort (`expect_effort`). Re-focuses with the effort's current token first (a NOOP for the
+        same repo: the tree is kept, origin's credential re-baked, as `_publish_effort` does), so a
+        long turn's expired clone token cannot fail the push. Never raises: a failed carry is
+        recorded (`stopped_turn_carry_failed`) and the re-plan proceeds as before."""
+        from .modules.replan_carry import carry_command, parse_carry
+        from .modules.router import WorkspaceMoved
+
+        inst_id = getattr(result, "instance_id", None)
+        branch = self._effort_branch(effort_id)
+        if not inst_id:
+            await self.audit.log("stopped_turn_carry_failed", effort_id=effort_id, payload={
+                "worker": None, "branch": branch, "reason": "the stopped turn's worker is unknown"})
+            return False
+        head = (result.output or "").strip().splitlines()[0][:120] if result.output else ""
+        try:
+            command = carry_command(
+                branch, subject=f"wip: {effort_id} - work of a stopped turn, carried to the re-plan",
+                body=("The flail/loop guard stopped this coding turn before it committed. The "
+                      "bridge committed its working tree as it stood (git add -A) so the next turn "
+                      f"starts from it on any worker. Unreviewed work in progress. Stop: {head}"),
+                author=self._agent_identity("worker-default"))
+            token = await self._project_token(effort_id)
+            _exit, out, _timed = await self.router.exec_check(
+                effort_id, command=command, session_id=f"{effort_id}~carry", repo=repo,
+                repo_token=token, timeout=300, instance_id=inst_id, expect_effort=effort_id,
+                wait_quiet=True)
+        except (NoCapacityError, WorkspaceMoved) as exc:
+            reason = f"the stopped turn's workspace is unavailable: {exc}"
+            report = None
+        except Exception as exc:  # noqa: BLE001 — best-effort; never blocks the re-plan
+            log.debug("carry of the stopped turn for %s failed: %s", effort_id, exc)
+            reason = f"carry failed: {exc}"
+            report = None
+        else:
+            report = parse_carry(out)
+            reason = (report or {}).get("why") or "no report from the carry"
+        status = (report or {}).get("status")
+        if status == "clean":
+            await self.audit.log("stopped_turn_carry_clean", effort_id=effort_id, payload={
+                "worker": inst_id, "branch": branch,
+                "head": (report.get("head_before") or "")[:40]})
+            return False
+        if status != "ok":
+            await self.audit.log("stopped_turn_carry_failed", effort_id=effort_id, payload={
+                "worker": inst_id, "branch": branch, "reason": str(reason)[:300]})
+            await self.comms.post(
+                Intent.worker_activity,
+                f"⚠️ I could not save the stopped turn's uncommitted work to `{branch}` "
+                f"({str(reason)[:200]}). It is still only on `{inst_id}`; the re-planned turn may "
+                f"not start from it.",
+                effort_id=effort_id)
+            return False
+        files = [str(f) for f in (report.get("files") or [])]
+        payload = {
+            "worker": inst_id, "branch": branch, "from_branch": report.get("from_branch") or "",
+            "head_before": report.get("head_before") or "", "commit": report.get("commit") or "",
+            "head": report.get("head") or "", "files": files[:60],
+            "n_files": int(report.get("n_files") or 0),
+            "unpushed_before": report.get("unpushed_before"),
+            "pushed": bool(report.get("pushed")), "push_detail": report.get("push_detail") or "",
+            "left_dirty": report.get("left_dirty"),
+        }
+        await self.audit.log("stopped_turn_work_carried", effort_id=effort_id, payload=payload)
+        if payload["pushed"]:
+            # the branch now sits at a commit nobody delivered: never count it as delivery
+            self._carried_heads.setdefault(effort_id, set()).update(
+                h for h in (payload["head"], payload["commit"]) if h)
+        what = (f"{payload['n_files']} file(s) as WIP commit `{payload['commit'][:12]}`"
+                if payload["commit"] else "its unpushed commits")
+        if payload["pushed"]:
+            msg = (f"📦 Saved the stopped turn's work — {what} — to `{branch}`, so the re-planned "
+                   f"turn starts from it on any worker.")
+        else:
+            msg = (f"⚠️ Committed the stopped turn's work ({what}) on `{inst_id}`, but pushing "
+                   f"`{branch}` failed ({payload['push_detail'][:160] or 'no detail'}); only a "
+                   f"turn on `{inst_id}` will start from it.")
+        await self.comms.post(Intent.worker_activity, msg, effort_id=effort_id)
+        return True
+
     async def _flail_replan(self, effort_id: str, result) -> None:
         """The daemon's FLAIL GUARD killed a coding turn that kept READING without one edit
         (operator 2026-07-14: the signal to "stop, fork from original user prompt and re-ask in
@@ -13781,6 +13929,13 @@ class Orchestrator:
                 session_id=f"{await self._session_for(effort_id)}~plan", instruction=instr,
                 repo=repo, repo_token=repo_token, upstream=upstream,
                 upstream_token=upstream_token, plan_only=True,
+                # ao-replancarry — the plan turn observes the SAME tree the execution turn will
+                # start from: the effort branch (F33), which after a flail stop carries the
+                # stopped turn's work. Before, it planned from base on a fresh worker and could not
+                # see that work. The router runs the baseline below after this sync, so the carried
+                # commit is part of the plan turn's baseline, never one of its writes.
+                checkout_branch=(self._effort_branch(effort_id)
+                                 if (repo and self.s.sync_delivery_branch) else None),
                 pre_turn_check=((lambda run, _t=plan_token: take_baseline(run, _t))
                                 if repo else None),
             )
