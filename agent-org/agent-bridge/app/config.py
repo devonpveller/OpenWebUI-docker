@@ -468,6 +468,32 @@ class Settings(BaseSettings):
     repo_sync_enabled: bool = True
     grounding_timeout_s: float = 300.0      # bound the poll; on timeout grounding is skipped
     grounding_poll_interval_s: float = 5.0
+    # Knowledge package (agent-knowledge-package D2, kp-research): before assignment, answer the
+    # effort's knowledge questions (codebase + research engine) into a compact, sourced package.
+    # OFF by default and wired into nothing live yet (the hand-off seam is kp-inject). The time box
+    # bounds the WHOLE step (both research rounds + extraction + the codebase answers).
+    knowledge_package_enabled: bool = False
+    knowledge_package_time_box_s: float = 900.0
+    # The knowledge package's defence: only pages on these documentation hosts may source an answer
+    # (comma-separated; `host` exact, `host/path/prefix` matched on segment boundaries of the
+    # normalised path, or `*.suffix` - none in the defaults). Anything else -> OPEN
+    # `source_not_allowed`. Per-task entries for the task's own libraries are added by the
+    # caller (build_knowledge_package source_hosts=..., e.g. `anyio.readthedocs.io/en/stable`,
+    # `docs.rs/tokio`, and GitHub ONLY as a pinned tag: `github.com/agronholm/anyio@4.4.0`).
+    # NEVER in the defaults: hosts where anyone can post or publish (github.com, pypi.org,
+    # stackoverflow.com, blogs, *.readthedocs.io, docs.rs, pkg.go.dev, the learn.microsoft.com
+    # Q&A forum, MDN outside /en-US/docs, any *.github.com / *.githubusercontent.com host) - the
+    # reader is a tool-using worker. Such user-content hosts are ignored even as per-task entries.
+    knowledge_source_hosts: str = (
+        "docs.python.org,peps.python.org,docs.pytest.org,www.python-httpx.org,"
+        "docs.pydantic.dev,fastapi.tiangolo.com,www.starlette.io,docs.sqlalchemy.org,"
+        "docs.aiohttp.org,docs.djangoproject.com,flask.palletsprojects.com,numpy.org/doc,"
+        "pandas.pydata.org/docs,developer.mozilla.org/en-US/docs,nodejs.org/api,docs.deno.com,"
+        "www.typescriptlang.org/docs,doc.rust-lang.org,go.dev/doc,go.dev/ref,"
+        "learn.microsoft.com/en-us/dotnet/api,learn.microsoft.com/en-us/dotnet/csharp,"
+        "learn.microsoft.com/en-us/dotnet/standard,learn.microsoft.com/en-us/dotnet/core,"
+        "docs.docker.com,git-scm.com/docs,www.postgresql.org/docs"
+    )
 
     # ── Knowledge questions (agent-knowledge-package D1) ─────────────────────
     # Before assignment, ask the LOCAL model role for <= 8 tagged knowledge questions from a fixed
