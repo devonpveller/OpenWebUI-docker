@@ -35,3 +35,4 @@ scripts/stack/test_stack.py | lan-ip~MULLVAD_WG_ADDRESSES=(?P<allow>10\.0\.0\.2)
 # --- third-party content, not the operator's ---------------------------------------------
 frontend/owui/tools/fileshed.py | email~alice@ex\.com | a synthetic address in a usage example of a vendored third-party Open WebUI tool
 scripts/archive/smolcrawl/pyproject.toml | email~^\s*\{ name="[^"]+", email="[^"]+" \},?$ | the upstream package author's published metadata in an archived third-party project
+agent-org/agent-bridge/tests/fixtures/url-normalise-corpus.json | email~"url": "[^"]*" | userinfo-shaped URL probes (a user or host before an at-sign) in a byte copy of OB1's URL parity corpus: the normaliser must refuse them, and a copy cannot be rewritten

@@ -15,31 +15,34 @@ concept per operator D12) is answered:
 The package feeds a TOOL-USING coding worker, so research text is treated as hostile (the
 engine's own injection screen, injection.ts, assumes tool-less readers). Defences, in order:
 
-  (a) SOURCE ALLOW-LIST - the defence. An answer line counts only if EVERY citation resolves to
-      a source whose host (exact) or host + path prefix (segment boundary, on the NORMALISED
-      path) is on the configured documentation allow-list (`AO_KNOWLEDGE_SOURCE_HOSTS`, plus
-      per-call `source_hosts` for the task's own libraries), or it is a repo `path:line` from the
-      codebase answerer. No anyone-can-publish host is in the defaults. A finding the extractor
-      picked from any other source leaves the question OPEN with `source_not_allowed`.
-      PROVENANCE LIMIT: a `[SOURCED]` line is the research engine's own synthesis over EVERY page
+  (a) SOURCE CONTRACT - the scope. Every research job carries `options.contract` (kp-contract,
+      operator D11; `research_scope`): the engine's `software-docs` class (OB1 contract.ts, the
+      same list as `DEFAULT_KNOWLEDGE_SOURCE_HOSTS`) or a narrowed configured list, plus per-task
+      entries. The engine then never searches, fetches, recalls or reuses a source outside it -
+      a filter applied AFTER the job could not stop a non-allowed page from steering a line that
+      cites an allowed URL (kp-cleanup removed that citation filter). A job whose
+      `result.contract` echo is missing or wider than what was sent is not an answer
+      (`research_unscoped`); an entry the engine would refuse is dropped with a recorded reason;
+      a configured list with no usable entry sends no job (`no_usable_sources`).
+      PROVENANCE LIMIT: a `[SOURCED]` line is the research engine's own synthesis over every page
       its job fetched, and its `[Source N]` is the engine model's attribution - not a verified
       quote of the cited page (the engine's fidelity check compares rendered prose with the
-      synthesis, nothing compares the synthesis with the page). So the allow-list constrains
-      which URL a line is ATTRIBUTED to; it does not prove the text came from that page. A
-      non-allowed page fetched in the same job can steer a line that then cites an allowed URL;
-      what remains against that is the engine's source quarantine, `line_ok` and (b).
+      synthesis, nothing compares the synthesis with the page). The contract bounds which pages
+      that synthesis can draw on; it does not prove a line came from the page it cites.
   (b) FRAMING. The header says the package is lines a research engine attributed to the cited
       docs (not verified quotes), never instructions, to verify before relying on it.
-  (A vocabulary filter for "operational" lines was tried in round 2 and removed in round 3: the
-  tester measured it dropping 14/70 real facts while passing 33/40 operational instructions.)
+  External-text safety (the injection verdict, taint label and fence over engine output) belongs
+  to intake (security plan step 1), not to filters here: until intake exists the flag stays OFF
+  and nothing calls this (PLAN-v2, kp-cleanup).
 
 And the C1 shape of every slot: an answer line is a WHOLE `[SOURCED]` synthesis line (split on
 `\\r?\\n` exactly as the engine does) that the extractor SELECTED BY ID (it never writes text),
 passing `line_ok` (length first; a closed character set; no line/paragraph separators, markup,
-mentions, HTML entities, URLs or host/IP:port text, long high-entropy tokens, KEY=value
-assignments, instruction-shaped text). A source is a whole https URL passing `url_ok` or a whole
-`path:line` passing `fileline_ok`. Everything else is from a closed vocabulary. Never `prose`,
-`rendered`, `needs`, `gaps`, `reuse_claims`, source titles or error bodies.
+mentions, HTML entities, engine tags, long high-entropy tokens or KEY=value assignments - the
+secret scrub). A source is a whole https URL passing `url_ok` (urlnorm.py names it) or, for a
+codebase answer, a whole `path:line` passing `fileline_ok`. Everything else is from a closed
+vocabulary. Never `prose`, `rendered`, `needs`, `gaps`, `reuse_claims`, source titles or error
+bodies.
 
 Honesty (C5): an unanswered question is OPEN with a reason, never dropped and never filled.
 Bounds (C6): <= 8 questions answered (the rest listed by id as `over_question_cap`), <= 3 lines,
@@ -59,7 +62,6 @@ import logging
 import math
 import re
 import time
-import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
@@ -68,7 +70,8 @@ from urllib.parse import urlsplit
 from ..config import DEFAULT_KNOWLEDGE_SOURCE_HOSTS, Settings
 from .grounding import ResearchJob
 from .knowledge_types import MAX_QUESTION_CHARS, MIN_QUESTION_CHARS, KnowledgeQuestion
-from .knowledge_types import TAGS as TAGS  # noqa: F401 - re-exported: the package's tag set
+from .knowledge_types import TAGS as TAGS  # re-exported: the package's tag set
+from .urlnorm import host_shape_ok, normalise_url
 
 log = logging.getLogger("agent_bridge.knowledge_package")
 
@@ -94,7 +97,8 @@ ANSWERED, OPEN = "answered", "open"
 # OPEN reason codes (closed set; rendered verbatim).
 REASONS = frozenset({
     "not_found", "time_box", "extract_failed", "question_text_rejected", "no_research_client",
-    "source_not_allowed", "over_question_cap", "over_token_cap", "unsourced_answer",
+    "no_usable_sources", "research_unscoped", "over_question_cap", "over_token_cap",
+    "unsourced_answer",
     "research_timeout", "research_unreachable", "research_model_down", "research_unfiled",
     "research_crashed", "research_cancelled", "research_rejected", "research_unauthorized",
     "research_malformed", "research_failed",
@@ -117,13 +121,12 @@ class CodebaseAnswer:
 
 @dataclass(frozen=True)
 class Candidate:
-    """A research finding that passed every shape predicate: an id, a whole line, its source
-    URLs, and whether every one of those sources is on the allow-list."""
+    """A research finding that passed every shape predicate: an id, a whole line and its source
+    URLs (the job's contract scoped which sources it could draw on)."""
 
     cid: str
     text: str
     sources: tuple[str, ...]
-    allowed: bool = True
 
 
 class ResearchRunner(Protocol):
@@ -147,16 +150,7 @@ _ENTITY_RE = re.compile(r"&(?:[A-Za-z][A-Za-z0-9]{1,15}|#[0-9]{1,7}|#[xX][0-9A-F
 _MENTION_RE = re.compile(r"(?i)@(?:channel|here|all|everyone|online)\b"
                          r"|(?:^|[\s(\[,;:])@[A-Za-z0-9_-]{2,}(?=$|[\s,;:!?)\]])")
 _TAG_RE = re.compile(r"\[(?:SOURCED|INFERRED|UNCERTAIN|GAP)\]", re.I)
-# URL-ish and host-ish text: any scheme://, a dangerous pseudo-scheme, www., an IP, localhost or
-# an internal suffix; dotted host followed by /path or :port is checked in _hostish (a code file
-# name like `grounding.py:120` is not a host).
-_SCHEME_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{1,20}://|\b(?:javascript|vbscript|data|file|"
-                        r"mailto|ssh|git|ftp|smb|ldap|gopher)\s*:|\bwww\.")
-_IP_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b|\[[0-9A-Fa-f:]{2,}\]")
-_INTERNAL_RE = re.compile(r"(?i)\blocalhost\b|\b[a-z0-9-]+\.(?:internal|local|lan|localdomain|"
-                          r"corp|home|intranet|svc)\b|\bnip\.io\b|\bsslip\.io\b|\bxip\.io\b")
-_HOSTPATH_RE = re.compile(r"\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.([A-Za-z]{2,24})(?::\d{1,5})?[/\\]")
-_HOSTPORT_RE = re.compile(r"\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.([A-Za-z]{2,24}):(\d{2,5})\b")
+# File extensions a repo `path:line` source may name without a directory (fileline_ok).
 _CODE_EXT = frozenset({
     "py", "pyi", "pyx", "ts", "tsx", "js", "jsx", "mjs", "cjs", "md", "rst", "txt", "json", "toml",
     "yml", "yaml", "cfg", "ini", "sh", "ps1", "rs", "go", "java", "kt", "cs", "csproj", "sln",
@@ -171,18 +165,8 @@ _ASSIGN_RE = re.compile(
     r"|\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\s*=\s*\S|\b[A-Z]{3,}\s*=\s*\S"
     r"|(?i:\b(?:bearer|basic)\s+[A-Za-z0-9+/=_.-]{8,})|-----BEGIN|\beyJ[A-Za-z0-9_-]{8,}")
 _TOKEN_STRIP = ".,;:!?()[]{}\"'`<>"
-# Instruction-shaped text aimed at a model.
-_DIRECTIVE_RE = re.compile(
-    r"(?i)\b(?:ignore|disregard|forget|override|bypass)\b[^.]{0,60}?"
-    r"\b(?:instructions?|prompts?|rules?|guidelines?|previous|above|earlier|context|polic(?:y|ies)"
-    r"|guardrails?|safety)\b"
-    r"|\b(?:system prompt|developer (?:message|mode)|you are now|act as|pretend to be|jailbreak"
-    r"|new instructions?|prompt injection|do anything now)\b"
-    r"|\b(?:assistant|system|user|human)\s*:"
-    r"|\bdo not (?:tell|reveal|mention|inform|report)\b"
-    r"|\b(?:AI|LLM|language model|assistant)s?\b[^.]{0,30}\b(?:must|should|shall)\b"
-    r"|\brm\s+-[rf]|\bcurl\s|\bwget\s|\bsudo\s|\|\s*(?:sh|bash|zsh|pwsh|powershell)\b"
-    r"|\bbase64\b|\bexfiltrat|--no-verify\b")
+
+
 def _charset_ok(s: str) -> bool:
     return all(0x20 <= ord(ch) <= 0x7E or ch in _EXTRA_CHARS for ch in s)
 
@@ -215,73 +199,6 @@ def _secret_token(tok: str) -> bool:
     return len(alnum) >= 24 and _entropy(alnum) >= 4.3
 
 
-# kp-harden R6: a BARE host (no scheme, path or port) in answer/question text. Round 2: labels may
-# hold `_` (`x_y.evil-site.com`), the TLD ends at its letters (`evil-site.com--it`, `.com_`), and a
-# leading `.` does not hide a host (`.evil-site.com`). A dotted CODE name is never a host: TLDs are
-# split into ones that rarely name code (`_HOST_ONLY_TLDS`: com, org, de, ...) and ones that collide
-# with common identifiers (`_COLLIDING_TLDS`: info, io, net, app, today, lt, cloud, ...).
-#   1. no label after the first is a known TLD (or it is a code extension)  -> not a host
-#   2. a STRONG host signal (a non-TLD label with `-` or a digit, a `www` first label, an `@`
-#      right before it)                                                     -> host
-#   3. a host-only TLD among the later labels (whatever follows: `Evil.Com`, `evil.com(`) -> host
-#   4. reads as code (followed by `(`, a camel/Pascal hump `aB`, or a later label `Capitalised`
-#      like `storage.Client`)                                               -> not a host
-#   5. 3+ labels ending in a colliding TLD (`downloads.evil.io`)             -> host
-#   6. otherwise (`logging.info`, `pandas.io`, `self.net`, `operator.lt`)   -> not a host
-# Trade-off (findings, round 2): a two-label all-lower host on a colliding TLD (`evil.io`,
-# `evil.app`, `badmirror.net`) passes; so does a TLD on neither list (`.date`, `.at`).
-_BARE_HOST_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.[A-Za-z]{2,24}(?![A-Za-z0-9])")
-_HOST_ONLY_TLDS = frozenset({
-    "com", "org", "edu", "gov", "mil", "biz", "xyz", "ru", "cn", "uk", "de", "fr", "nl", "eu",
-    "us", "ca", "au", "jp", "br", "fi", "dk", "cz", "kr", "tk", "cf", "gq", "pw", "icu", "sbs",
-    "cfd", "onion", "mobi", "asia", "ir", "ua", "vn", "tw", "hk", "sg", "nz", "za", "mx", "cl",
-    "gr", "ro", "hu", "sk", "lv", "ee", "il", "ae", "pk", "bd", "ng", "ke", "eg", "gg", "su",
-    "bid",
-})
-_COLLIDING_TLDS = frozenset({
-    "io", "co", "ai", "me", "dev", "app", "info", "net", "today", "cloud", "lt", "es", "pt", "tv",
-    "cc", "ws", "ly", "ch", "se", "tr", "ar", "pl", "sa", "ga", "ml", "page", "link", "live",
-    "store", "shop", "site", "online", "top", "club", "tech", "pro", "fun", "space", "win", "zip",
-    "mov", "network", "systems", "software", "download", "website", "name", "blog", "click",
-})
-_HOST_TLDS = _HOST_ONLY_TLDS | _COLLIDING_TLDS
-_HUMP_RE = re.compile(r"[a-z][A-Z]")
-
-
-def _bare_host(s: str) -> bool:
-    for m in _BARE_HOST_RE.finditer(s):
-        raw = m.group(0).split(".")
-        low = [lb.lower() for lb in raw]
-        tlds = [lb for lb in low[1:] if lb in _HOST_TLDS and lb not in _CODE_EXT]
-        if not tlds:
-            continue
-        before = s[m.start() - 1] if m.start() else ""
-        if (low[0] == "www" or before == "@"
-                or any(("-" in lb or any(c.isdigit() for c in lb)) and lb not in _HOST_TLDS
-                       for lb in low)):
-            return True
-        if any(lb in _HOST_ONLY_TLDS for lb in tlds):
-            return True
-        after = s[m.end():m.end() + 1]
-        if (after == "(" or any(_HUMP_RE.search(lb) for lb in raw)
-                or any(lb[:1].isupper() and lb[1:2].islower() for lb in raw[1:])):
-            continue
-        if len(low) >= 3 and low[-1] in _COLLIDING_TLDS:
-            return True
-    return False
-
-
-def _hostish(s: str) -> bool:
-    for m in _HOSTPATH_RE.finditer(s):
-        if m.group(1).lower() not in _CODE_EXT:
-            return True
-    for m in _HOSTPORT_RE.finditer(s):
-        if m.group(1).lower() not in _CODE_EXT:
-            return True
-    return _bare_host(s)
-
-
 # A key split into equal chunks by one separator (`AKIA:IOSF:ODNN:7EXA:MPLE`, `4eC3 9HqL yjWD ...`):
 # four or more chunks of the same length (3-8) and the same separator, containing a digit, judged
 # JOINED by the unchanged bf4de1a2 `_secret_token`. Ordinary prose rarely has 4 equal-length words in a row, and
@@ -292,8 +209,6 @@ def _chunk_re(n: int, sep: str) -> re.Pattern[str]:
 
 
 _CHUNKS_RES = tuple(_chunk_re(n, sep) for n in range(3, 9) for sep in " :._-")
-# Defanged hosts (`evil[.]com`, `evil(dot)com`): a URL the reader is meant to re-assemble.
-_DEFANGED_RE = re.compile(r"(?i)\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\)")
 
 
 def _chunked_secret(s: str) -> bool:
@@ -324,10 +239,7 @@ def _shape_ok(s: Any, *, min_len: int, max_len: int) -> bool:
     if _chunked_secret(s):
         return False
     return not (_MARKUP_RE.search(s) or _ENTITY_RE.search(s) or _MENTION_RE.search(s)
-                or _DEFANGED_RE.search(s)
-                or _TAG_RE.search(s) or _SCHEME_RE.search(s) or _IP_RE.search(s)
-                or _INTERNAL_RE.search(s) or _hostish(s) or _ASSIGN_RE.search(s)
-                or _DIRECTIVE_RE.search(s))
+                or _TAG_RE.search(s) or _ASSIGN_RE.search(s))
 
 
 def line_ok(s: Any) -> bool:
@@ -341,158 +253,23 @@ def question_text_ok(s: Any) -> bool:
     return _shape_ok(s, min_len=MIN_QUESTION_CHARS, max_len=MAX_QUESTION_CHARS)
 
 
-# ── Source predicates and the allow-list ────────────────────────────────────────────────────
-_HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-_PATH_RE = re.compile(r"^(?:/[A-Za-z0-9._~%!$&'()*+,;=:/-]*)?$")
+# ── Source predicates ──────────────────────────────────────────────────────────────────────
 _SECRET_PARAM_RE = re.compile(r"(?i)(?:^|[?&#;])[A-Za-z0-9_.-]*(?:key|token|secret|sig|signature"
                               r"|pass|auth|session|sid|code|credential|jwt)[A-Za-z0-9_.-]*=")
-_BAD_HOST_SUFFIXES = (".local", ".lan", ".internal", ".localdomain", ".corp", ".home", ".intranet",
-                      ".svc", ".nip.io", ".sslip.io", ".xip.io", ".localtest.me", ".lvh.me",
-                      ".test", ".example", ".invalid", ".onion", ".arpa")
-_ENCODED_DOT_SLASH_RE = re.compile(r"%(?:2e|2f|5c)", re.I)
-_PCT_RUN_RE = re.compile(r"(?:%[0-9A-Fa-f]{2})+")
-# Dot / slash / backslash look-alikes a lenient server may fold to `.` `..` `...` `/` `\`. Most
-# are NFKC-unstable (refused by that rule too); U+3002 IDEOGRAPHIC FULL STOP is NFKC-stable.
-_LOOKALIKE_DOT_SLASH = frozenset("\u2024\u2025\u2026\ufe19\ufe30\ufe52\uff0e\uff0f\uff3c"
-                                 "\ufe68\u3002")
-
-
-def _path_escapes_ok(path: str) -> bool:
-    """kp-harden R3: every run of %XX escapes in a path decodes to bytes; refuse any byte <= 0x20
-    (`%00`, `%09`, `%20`: NUL/space trimming), and any run holding a byte >= 0x80 unless it is
-    STRICT UTF-8 (shortest form - so overlong 2/3/4-byte forms, RFC 2279 5/6-byte forms,
-    surrogates and lone bytes are refused) whose text NFKC leaves unchanged and which holds no
-    dot/slash look-alike."""
-    for m in _PCT_RUN_RE.finditer(path):
-        raw = bytes.fromhex(m.group(0).replace("%", ""))
-        if any(b <= 0x20 for b in raw):
-            return False
-        if all(b < 0x80 for b in raw):
-            continue
-        try:
-            text = raw.decode("utf-8", errors="strict")
-        except UnicodeDecodeError:
-            return False
-        if unicodedata.normalize("NFKC", text) != text or any(ch in _LOOKALIKE_DOT_SLASH
-                                                              for ch in text):
-            return False
-    return True
-_BAD_HOSTS = frozenset({"localhost", "nip.io", "sslip.io", "xip.io", "localtest.me", "lvh.me"})
 
 
 def url_ok(s: Any) -> bool:
-    """A doc URL: printable ASCII only (a URL's non-ASCII is percent-encoded on the wire, and the
-    byte budget stays exact), https, a public-looking DNS host (no IP, no internal suffix, no
-    port, no userinfo), a plain path with NO dot segments, encoded dots/slashes/backslashes or
-    backslashes, no escaped control/space byte, no escaped byte >= 0x80 unless strict UTF-8 that
-    NFKC leaves unchanged and no dot/slash look-alike (`_path_escapes_ok`), no secret-shaped
-    parameter, no pseudo-scheme or instruction-shaped text. Shape only - see `SourceAllowList`
-    for which hosts count."""
-    if not isinstance(s, str) or len(s) > URL_MAX:
+    """A sources-slot URL: https, at most URL_MAX characters, a URL urlnorm can name
+    (`normalise_url` - printable ASCII, a public-looking DNS host with no port or userinfo, no
+    hidden-segment or server-folding path form) and no secret-shaped query or fragment parameter.
+    Shape only: which hosts a job may draw on is the engine contract's job (`research_scope`)."""
+    if not isinstance(s, str) or len(s) > URL_MAX or not s.startswith("https://"):
         return False
-    if not all(0x21 <= ord(ch) <= 0x7E for ch in s):
+    if normalise_url(s) is None:
         return False
-    if not s.startswith("https://") or "@" in s or "\\" in s:
-        return False
-    low = s.lower()
-    if re.search(r"(?:javascript|vbscript|data|file)\s*:", low[len("https:"):]):
-        return False
-    try:
-        parts = urlsplit(s)
-        port = parts.port
-    except ValueError:
-        return False
-    host = (parts.hostname or "")
-    if host.endswith("."):
-        host = host[:-1]                               # a trailing root dot names the same host
-    if port is not None or not host:
-        return False
-    labels = host.lower().split(".")
-    if len(labels) < 2 or not all(_HOST_LABEL_RE.match(lb) for lb in labels):
-        return False
-    if not re.fullmatch(r"[a-z]{2,24}", labels[-1]) or any(lb.isdigit() for lb in labels):
-        return False
-    if any(lb.startswith("xn--") for lb in labels):
-        return False                                   # IDN / punycode: homograph risk, never
-    h = host.lower()
-    if h in _BAD_HOSTS or any(h.endswith(suf) for suf in _BAD_HOST_SUFFIXES):
-        return False
-    path = parts.path or ""
-    if not _PATH_RE.match(path):
-        return False
-    if _ENCODED_DOT_SLASH_RE.search(path):
-        return False                                   # %2e %2f %5c: a hidden segment trick
-    if ";" in path or "%25" in path or re.search(r"%(?![0-9A-Fa-f]{2})", path):
-        return False                                   # server-quirk forms (`..;`, `%252e`, `%u002e`)
-    if not _path_escapes_ok(path):
-        return False                                   # control/space, non-strict-UTF-8, look-alike
-    if any(seg and set(seg) == {"."} for seg in path.split("/")):
-        return False                                   # `.` `..` `...`: dot segments escape a prefix
-    if _SECRET_PARAM_RE.search(parts.query or "") or _SECRET_PARAM_RE.search(parts.fragment or ""):
-        return False
-    words = re.sub(r"[-_/.+%=&?#]+", " ", s[len("https://"):])
-    return not _DIRECTIVE_RE.search(words)
-
-
-_UNRESERVED_PCT_RE = re.compile(r"%([0-9A-Fa-f]{2})")
-
-
-def _decode_unreserved(path: str) -> str:
-    """RFC 3986 6.2.2.2: decode percent-encoded UNRESERVED characters only (ALPHA DIGIT - . _ ~);
-    every other escape is left as is."""
-    def sub(m: re.Match[str]) -> str:
-        ch = chr(int(m.group(1), 16))
-        return ch if (ch.isascii() and (ch.isalnum() or ch in "-._~")) else m.group(0).upper()
-    return _UNRESERVED_PCT_RE.sub(sub, path)
-
-
-def _remove_dot_segments(path: str) -> str:
-    """RFC 3986 5.2.4 remove_dot_segments."""
-    inp, out = path, []
-    while inp:
-        if inp.startswith("../"):
-            inp = inp[3:]
-        elif inp.startswith("./"):
-            inp = inp[2:]
-        elif inp.startswith("/./"):
-            inp = inp[2:]
-        elif inp == "/.":
-            inp = "/"
-        elif inp.startswith("/../"):
-            inp = inp[3:]
-            if out:
-                out.pop()
-        elif inp == "/..":
-            inp = "/"
-            if out:
-                out.pop()
-        elif inp in (".", ".."):
-            inp = ""
-        else:
-            i = inp.find("/", 1)
-            seg, inp = (inp, "") if i == -1 else (inp[:i], inp[i:])
-            out.append(seg)
-    return "".join(out)
-
-
-def normalise_url(url: str) -> tuple[str, list[str]] | None:
-    """(host, path segments) as the allow-list compares them, or None when `url` fails `url_ok`.
-    Host: lower case, trailing root dot stripped. Path: unreserved escapes decoded, then dot
-    segments removed (a raw dot segment or encoded dot/slash is already refused by url_ok).
-
-    The match is at the PARSER level: under RFC 3986, WHATWG URL and httpx the raw and normalised
-    paths name the same resource. It is not a SERVER-level guarantee: a server that folds further
-    (NFKC look-alikes, trimming `%00`/`%20`, decoding overlong UTF-8) could serve a resource
-    outside the prefix. url_ok refuses the folding forms known here (`_path_escapes_ok`), but no
-    shape check can know every server's normalisation."""
-    if not url_ok(url):
-        return None
-    parts = urlsplit(url)
-    host = (parts.hostname or "").lower()
-    if host.endswith("."):
-        host = host[:-1]
-    path = _remove_dot_segments(_decode_unreserved(parts.path or "/")) or "/"
-    return host, path.split("/")[1:]
+    parts = urlsplit(s)
+    return not (_SECRET_PARAM_RE.search(parts.query or "")
+                or _SECRET_PARAM_RE.search(parts.fragment or ""))
 
 
 _FILELINE_RE = re.compile(r"^(?:[A-Za-z0-9_.-]+/){0,12}[A-Za-z0-9_.-]+:\d{1,6}(?:-\d{1,6})?$")
@@ -516,128 +293,6 @@ def fileline_ok(s: Any) -> bool:
     return bool(dot and name and ext.lower() in _CODE_EXT)
 
 
-_ENTRY_RE = re.compile(r"^(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:/[A-Za-z0-9._~-]+)*$")
-# GitHub per-task entries: `github.com/<org>/<repo>@<tag>` - a PINNED tag only.
-_GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
-_GITHUB_ENTRY_RE = re.compile(r"^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100})"
-                              r"@([A-Za-z0-9][A-Za-z0-9._-]{0,99})$")
-# A release tag: `4.4.0`, `v1.2.3`, `1.0.0-rc1`, `2.0.post1` - at least two dot-separated numbers.
-# A sha (any case, any length), a bare number (`@2024`), hex (`@cafe12`) or a branch name never
-# matches, so mutable and commit refs are excluded by construction.
-_RELEASE_TAG_RE = re.compile(r"^v?\d+(?:\.\d+)+(?:[.-][A-Za-z0-9]+)*$")
-# Hosts where anyone can publish (gists, raw user content): never admitted by any entry form.
-_USER_CONTENT_SUFFIXES = (".github.com", ".githubusercontent.com", ".github.io")
-_USER_CONTENT_HOSTS = frozenset({"githubusercontent.com", "github.io"})
-#: Why an allow-list entry was ignored (closed set; `SourceAllowList.ignored` keys).
-IGNORED_ENTRY_REASONS = frozenset({"github_not_pinned_tag", "user_content_host", "invalid_entry",
-                                   "wildcard_with_path", "bad_prefix"})
-
-
-def _user_content_host(host: str) -> bool:
-    """A host (or a `*.suffix` entry) under which anyone can publish. Plain github.com itself is
-    not one here: its entries take the pinned-tag branch before this check."""
-    h = host.lower().rstrip(".")
-    wild = h.startswith("*.")
-    h = h[2:] if wild else h
-    if wild and h == "github.com":
-        return True                                     # `*.github.com` covers gist.github.com
-    return h in _USER_CONTENT_HOSTS or any(h.endswith(s) for s in _USER_CONTENT_SUFFIXES)
-
-
-class SourceAllowList:
-    """Documentation hosts whose pages may source an answer (the defence).
-
-    Entry forms: `host` (exact), `*.suffix` (any subdomain of suffix - not in the defaults; a
-    caller may pass one per task), `host/path/prefix` (EXACT host, and the normalised path at or
-    under the prefix on a segment boundary - e.g. `numpy.org/doc` for the docs tree
-    without admitting all of numpy.org). A punycode (`xn--`) host is never admitted (`url_ok`
-    refuses it). Invalid entries are ignored.
-
-    github.com is special: anyone can post issues, discussions and pull requests under any repo,
-    and GitHub serves commits from any FORK under the parent's URL. So a github.com entry must be
-    `github.com/<org>/<repo>@<tag>` where <tag> looks like a release (`_RELEASE_TAG_RE`: `4.4.0`,
-    `v1.2.3`, `1.0.0-rc1` - never a sha, a bare number or a branch name) and admits ONLY
-    `/<org>/<repo>/blob/<tag>/<file...>`, `/<org>/<repo>/tree/<tag>[/...]` and
-    `/<org>/<repo>/releases/tag/<tag>`. Any other github.com entry (any case, trailing dot) is
-    ignored, and so is any entry for a user-content host (gist.github.com, *.github.com,
-    *.githubusercontent.com, *.github.io).
-
-    Every ignored entry is counted on `ignored` under a reason code from
-    `IGNORED_ENTRY_REASONS` and logged as counts only (the entry text is never logged), so a
-    mis-spelled per-task entry is visible instead of silently yielding `source_not_allowed`."""
-
-    def __init__(self, entries: Iterable[str]) -> None:
-        self.exact: set[str] = set()
-        self.suffixes: set[str] = set()
-        self.prefixes: list[tuple[str, list[str]]] = []
-        self.github: list[tuple[str, str, str]] = []
-        self.ignored: Counter[str] = Counter()
-        for raw in entries:
-            e = str(raw or "").strip()
-            if not e:
-                continue                                # a blank (e.g. a trailing comma)
-            gh_host, _, gh_rest = e.partition("/")
-            if gh_host.lower().rstrip(".") in _GITHUB_HOSTS:
-                m = _GITHUB_ENTRY_RE.match(gh_rest)
-                if m and _RELEASE_TAG_RE.match(m.group(3)):
-                    self.github.append((m.group(1), m.group(2), m.group(3)))
-                else:
-                    self.ignored["github_not_pinned_tag"] += 1
-                continue                                # never a plain github.com host/prefix
-            if _user_content_host(gh_host):
-                self.ignored["user_content_host"] += 1
-                continue                                # gists / raw user content / *.github.com
-            host_part = e.split("/", 1)[0].lower().rstrip(".")
-            e = host_part + (("/" + e.split("/", 1)[1]) if "/" in e else "")
-            if not e or not _ENTRY_RE.match(e):
-                self.ignored["invalid_entry"] += 1
-                continue
-            if e.startswith("*."):
-                if "/" not in e:
-                    self.suffixes.add(e[1:])            # ".example.org"
-                else:
-                    self.ignored["wildcard_with_path"] += 1
-            elif "/" in e:
-                host, path = e.split("/", 1)
-                segs = [s for s in path.split("/") if s]
-                if segs and not any(s in (".", "..") for s in segs):
-                    self.prefixes.append((host, segs))
-                else:
-                    self.ignored["bad_prefix"] += 1
-            else:
-                self.exact.add(e)
-        if self.ignored:
-            log.warning("knowledge source allow-list: %d entries ignored %s",
-                        sum(self.ignored.values()), dict(sorted(self.ignored.items())))
-
-    @classmethod
-    def from_settings(cls, settings: Settings, extra: Iterable[str] = ()) -> "SourceAllowList":
-        base = [x.strip() for x in str(settings.knowledge_source_hosts or "").split(",") if x.strip()]
-        return cls([*base, *extra])
-
-    @staticmethod
-    def _github_ok(segs: list[str], org: str, repo: str, tag: str) -> bool:
-        if segs[:2] != [org, repo]:
-            return False
-        rest = segs[2:]
-        if len(rest) >= 2 and rest[0] in ("blob", "tree") and rest[1] == tag:
-            return rest[0] == "tree" or len(rest) >= 3 and all(rest[2:])
-        return rest == ["releases", "tag", tag]
-
-    def allows(self, url: str) -> bool:
-        norm = normalise_url(url)
-        if norm is None:
-            return False
-        host, segs = norm
-        if host in self.exact:
-            return True
-        if any(h == host and segs[:len(p)] == p for h, p in self.prefixes):
-            return True
-        if host in _GITHUB_HOSTS:
-            return any(self._github_ok(segs, org, repo, tag) for org, repo, tag in self.github)
-        return any(host.endswith(suf) for suf in self.suffixes)
-
-
 def source_ok(s: Any) -> bool:
     return url_ok(s) or fileline_ok(s)
 
@@ -654,13 +309,13 @@ _NUM_RE = re.compile(r"\d{1,4}")
 _ENGINE_LINE_SPLIT = re.compile(r"\r?\n")       # grounding.ts / fidelity.ts split synthesis so
 
 
-def candidates_from_result(result: Any, allow: SourceAllowList) -> list[Candidate]:
+def candidates_from_result(result: Any) -> list[Candidate]:
     """The only path research text takes into the package. Lines are split on `\\r?\\n` exactly
     as the engine does; a [GAP] line marks only itself (a run with gaps still yields its
     [SOURCED] lines). No candidates for `outcome: no_relevant_sources` or an oversize/non-string
     synthesis. Each candidate is a whole `[SOURCED]` line whose citations ALL resolve (the engine
     renumbers `[Source N]` to `cited_sources[N-1]`, lib.ts buildCitedAndRenumber) to URLs passing
-    `url_ok`; `allowed` says whether they are all on the allow-list."""
+    `url_ok`. Which sources the job could draw on is its contract's scope (`research_scope`)."""
     if not isinstance(result, dict):
         return []
     synth = result.get("synthesis")
@@ -698,8 +353,7 @@ def candidates_from_result(result: Any, allow: SourceAllowList) -> list[Candidat
         text = " ".join(_CITE_RE.sub(" ", body).split())
         if not line_ok(text):
             continue
-        out.append(Candidate(f"C{len(out) + 1}", text, tuple(urls),
-                             all(allow.allows(u) for u in urls)))
+        out.append(Candidate(f"C{len(out) + 1}", text, tuple(urls)))
         if len(out) >= MAX_CANDIDATES:
             break
     return out
@@ -775,7 +429,7 @@ class PackageItem:
     reason: str = ""                # a REASONS code when open
     lines: tuple[str, ...] = ()     # each a whole value passing line_ok
     line_src: tuple[int, ...] = ()  # 1-based index into `sources` per line
-    sources: tuple[str, ...] = ()   # each an allow-listed URL or a repo path:line
+    sources: tuple[str, ...] = ()   # each a url_ok URL the job cited or a repo path:line
     round: int = 0                  # 0 = codebase, 1/2 = research round
 
 
@@ -788,6 +442,7 @@ class KnowledgePackage:
     rounds_used: int
     jobs: tuple[tuple[int, str], ...] = field(default=())   # (round, ResearchJob.state)
     over_cap_questions: int = 0
+    contract_drops: tuple["ContractEntryDrop", ...] = field(default=())  # entries not sent, why
 
     @property
     def answered(self) -> int:
@@ -928,49 +583,167 @@ def _answered_item(q: KnowledgeQuestion, rnd: int,
 
 
 #: The research engine's documentation source class (OB1 research-service contract.ts
-#: CLASS_REGISTRY, built from DEFAULT_KNOWLEDGE_SOURCE_HOSTS).
+#: CLASS_REGISTRY["software-docs"]; the same list as DEFAULT_KNOWLEDGE_SOURCE_HOSTS, pinned by a
+#: drift test against contract.ts and the shared URL corpus).
 SOFTWARE_DOCS_CLASS = "software-docs"
 
+# The engine's allow-entry rules (contract.ts parseEntry; the pattern strings are pinned to the TS
+# literals by a test), so only entries the engine accepts are sent: one entry it refuses would fail
+# the whole job (reviews/kp-contract.md FU-3). Matched with fullmatch.
+_ENGINE_HOST_ENTRY_RE = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
+_ENGINE_WILDCARD_ENTRY_RE = re.compile(r"^\*\.[a-z0-9-]+(?:\.[a-z0-9-]+)*$")
+_ENGINE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
+_GITHUB_ORG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")
+_GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+#: A release tag (`4.4.0`, `v1.2.3`, `1.0.0-rc1`): never a sha, a bare number or a branch name, so
+#: mutable and commit refs are excluded by construction.
+_RELEASE_TAG_RE = re.compile(r"^v?\d+(?:\.\d+)+(?:[.-][A-Za-z0-9]+)*$")
+_GITHUB_ENTRY_HOSTS = frozenset({"github.com", "www.github.com"})
+# Hosts where anyone can publish (FU-4): the PLATFORM is never an allow entry, alone or as
+# `*.platform` (an engine host entry admits every subdomain, i.e. every project). One project's
+# docs host on a docs platform (`anyio.readthedocs.io`) is the task naming that project and stays
+# an entry. Under the GitHub user-content suffixes no host is an entry at all (engine rule).
+_PUBLISH_ANYWHERE_HOSTS = frozenset({
+    "readthedocs.io", "readthedocs.org", "rtfd.io", "pages.dev", "gitlab.io", "github.io",
+    "githubusercontent.com", "gist.github.com", "netlify.app", "vercel.app",
+})
+_PUBLISH_ANYWHERE_SUFFIXES = (".github.com", ".githubusercontent.com", ".github.io")
+#: Why an entry was not sent (closed set; `ContractEntryDrop.reason`).
+CONTRACT_DROP_REASONS = frozenset({"invalid_entry", "github_not_pinned_tag", "publish_anywhere_host"})
 
-def _contract_entries(entries: Iterable[str]) -> list[str]:
-    """The engine's spelling of the entries `SourceAllowList` accepts: host, `*.suffix`,
-    host/path/prefix, and a GitHub `org/repo@tag` as its blob and tree prefixes at that tag. An
-    entry SourceAllowList ignores is not sent (the engine would refuse the whole job on it)."""
+
+@dataclass(frozen=True)
+class ContractEntryDrop:
+    """An entry that was not sent. The entry TEXT is never recorded or logged (it is task input)."""
+
+    origin: str     # "configured" (AO_KNOWLEDGE_SOURCE_HOSTS) | "task" (source_hosts)
+    index: int      # its position in that list
+    reason: str     # CONTRACT_DROP_REASONS
+
+
+@dataclass(frozen=True)
+class ResearchScope:
+    """What a knowledge-package research job is sent: `contract` (None = no job; `refused` says
+    why) and the entries dropped on the way."""
+
+    contract: dict[str, Any] | None
+    drops: tuple[ContractEntryDrop, ...] = ()
+    refused: str = ""
+
+
+def _segments_ok(segs: Sequence[str]) -> bool:
+    return all(_ENGINE_SEGMENT_RE.fullmatch(sg) and set(sg) != {"."} for sg in segs)
+
+
+def _contract_entry(raw: Any) -> tuple[tuple[str, ...], str]:
+    """One entry in the engine's canonical spelling - `host`, `*.suffix` or `host/path/prefix`
+    (host lower-cased, one root dot stripped, the path kept as written: paths are case-sensitive)
+    - or ((), reason). A GitHub entry is `github.com/<org>/<repo>@<release-tag>` (sent as its blob
+    and tree prefixes at that tag) or the engine's own `github.com/<org>/<repo>/blob|tree/<tag>`."""
+    e = str(raw or "").strip()
+    slash = e.find("/")
+    host = (e if slash == -1 else e[:slash]).lower()
+    if host.endswith("."):
+        host = host[:-1]
+    path = "" if slash == -1 else e[slash + 1:]
+    wildcard = host.startswith("*.")
+    bare = host[2:] if wildcard else host
+    if bare in _GITHUB_ENTRY_HOSTS:
+        if wildcard:
+            return (), "publish_anywhere_host"                 # *.github.com covers gists
+        org_repo, at, tag = path.partition("@")
+        org, _, repo = org_repo.partition("/")
+        if (at and _GITHUB_ORG_RE.fullmatch(org) and _GITHUB_REPO_RE.fullmatch(repo)
+                and _RELEASE_TAG_RE.fullmatch(tag) and _segments_ok([org, repo, tag])):
+            return (f"github.com/{org}/{repo}/blob/{tag}", f"github.com/{org}/{repo}/tree/{tag}"), ""
+        segs = path.split("/")
+        if (not at and len(segs) == 4 and _GITHUB_ORG_RE.fullmatch(segs[0])
+                and _GITHUB_REPO_RE.fullmatch(segs[1]) and segs[2] in ("blob", "tree")
+                and _RELEASE_TAG_RE.fullmatch(segs[3]) and _segments_ok(segs)):
+            return (f"{host}/{path}",), ""
+        return (), "github_not_pinned_tag"
+    if bare in _PUBLISH_ANYWHERE_HOSTS or any(bare.endswith(s) for s in _PUBLISH_ANYWHERE_SUFFIXES):
+        return (), "publish_anywhere_host"
+    shape = _ENGINE_WILDCARD_ENTRY_RE if wildcard else _ENGINE_HOST_ENTRY_RE
+    if not shape.fullmatch(host) or not host_shape_ok(bare):
+        return (), "invalid_entry"                             # incl. `*.io`, IPs, internal names
+    if slash == -1:
+        return (host,), ""
+    if wildcard or not _segments_ok(path.split("/")):
+        return (), "invalid_entry"                             # no empty, dot or escaped segment
+    return (f"{host}/{path}",), ""
+
+
+def _usable_entries(entries: Iterable[Any], origin: str) -> tuple[list[str], list[ContractEntryDrop]]:
     out: list[str] = []
-    for raw in entries:
-        al = SourceAllowList([raw])
-        if al.ignored:
-            continue
-        out += [h for h in sorted(al.exact)]
-        out += ["*" + sfx for sfx in sorted(al.suffixes)]
-        out += [f"{h}/{'/'.join(p)}" for h, p in al.prefixes]
-        for org, repo, tag in al.github:
-            out += [f"github.com/{org}/{repo}/blob/{tag}", f"github.com/{org}/{repo}/tree/{tag}"]
-    return list(dict.fromkeys(out))
+    drops: list[ContractEntryDrop] = []
+    for i, raw in enumerate(entries):
+        if not str(raw or "").strip():
+            continue                                           # a blank (e.g. a trailing comma)
+        got, why = _contract_entry(raw)
+        if why:
+            drops.append(ContractEntryDrop(origin, i, why))
+        else:
+            out += got
+    return list(dict.fromkeys(out)), drops
 
 
-def research_contract(settings: Settings, source_hosts: Iterable[str] = ()) -> dict[str, Any]:
+_CLASS_ENTRIES = tuple(_usable_entries(DEFAULT_KNOWLEDGE_SOURCE_HOSTS.split(","), "configured")[0])
+
+
+def research_scope(settings: Settings, source_hosts: Iterable[str] = ()) -> ResearchScope:
     """The `options.contract` a knowledge-package research job carries (kp-contract, operator D11):
-    the engine then never searches, fetches, recalls or reuses a source outside it. The built-in
-    host list is the engine's `software-docs` class; a configured list that differs from it
-    (AO_KNOWLEDGE_SOURCE_HOSTS) is sent as the allow list instead, so narrowing the setting narrows
-    the job. Per-task `source_hosts` are added to the allow list. A configured list with no usable
-    entry falls back to the class - a job is never sent unscoped."""
-    def norm(entries: Iterable[str]) -> set[str]:
-        return {x.strip().lower().rstrip(".") for x in entries if x.strip()}
-    configured = [x for x in str(settings.knowledge_source_hosts or "").split(",") if x.strip()]
+    the engine then never searches, fetches, recalls or reuses a source outside it.
+
+    The built-in host list is the engine's `software-docs` class. A configured list
+    (AO_KNOWLEDGE_SOURCE_HOSTS) whose usable entries differ from it is sent as the allow list
+    instead, so narrowing the setting narrows the job; entries compare with the host case-folded
+    and the path case-sensitive. A configured list with NO usable entry is refused
+    (`no_usable_sources`, contract None): it never widens to the class. Per-task `source_hosts` are
+    added to the allow list. Only entries the engine accepts are sent; any other entry (and every
+    anyone-can-publish host) is dropped and recorded on `drops` by position and reason code."""
+    configured = str(settings.knowledge_source_hosts or "").split(",")
+    cfg, drops = _usable_entries(configured, "configured")
+    task, task_drops = _usable_entries(list(source_hosts), "task")
+    drops += task_drops
+    if drops:
+        log.warning("knowledge package contract: %d entries not sent %s", len(drops),
+                    dict(sorted(Counter(f"{d.origin}:{d.reason}" for d in drops).items())))
+    if not cfg:
+        log.warning("knowledge package contract: the configured source list has no usable entry; "
+                    "no research job is sent")
+        return ResearchScope(None, tuple(drops), "no_usable_sources")
     sources: dict[str, Any] = {}
     allow: list[str] = []
-    if norm(configured) == norm(DEFAULT_KNOWLEDGE_SOURCE_HOSTS.split(",")):
+    if set(cfg) == set(_CLASS_ENTRIES):
         sources["classes"] = [SOFTWARE_DOCS_CLASS]
     else:
-        allow = _contract_entries(configured)
-        if not allow:
-            sources["classes"] = [SOFTWARE_DOCS_CLASS]
-    allow = list(dict.fromkeys(allow + _contract_entries(source_hosts)))
+        allow = cfg
+    allow = list(dict.fromkeys(allow + task))
     if allow:
         sources["allow"] = allow
-    return {"sources": sources}
+    return ResearchScope({"sources": sources}, tuple(drops))
+
+
+def research_contract(settings: Settings, source_hosts: Iterable[str] = ()) -> dict[str, Any] | None:
+    """`research_scope(...).contract`: the contract a job is sent, or None (no job)."""
+    return research_scope(settings, source_hosts).contract
+
+
+def contract_echo_ok(result: Any, sent: Mapping[str, Any]) -> bool:
+    """The engine echoes the contract it resolved into `result.contract` (index.ts; contract.ts
+    ResolvedContract). A result counts only if that echo exists and its allow list is non-empty
+    and inside what was sent (the sent allow entries plus the class's hosts): a job an engine ran
+    without the contract, or wider than it, is not an answer (`research_unscoped`)."""
+    echo = result.get("contract") if isinstance(result, dict) else None
+    allow = echo.get("allowDomains") if isinstance(echo, dict) else None
+    if not isinstance(allow, list) or not allow or not all(isinstance(x, str) for x in allow):
+        return False
+    src = sent.get("sources") or {}
+    expected = set(src.get("allow") or [])
+    if SOFTWARE_DOCS_CLASS in (src.get("classes") or []):
+        expected |= set(_CLASS_ENTRIES)
+    return set(allow) <= expected
 
 
 def _research_query(rnd: int, qs: Sequence[KnowledgeQuestion]) -> str:
@@ -996,9 +769,12 @@ async def build_knowledge_package(
     research rounds run concurrently. Research: round 1 = one job over every api/concept question;
     round 2 (only if round 1 COMPLETED and questions are still open) = one gap run over the open
     ones. A round that does not complete stops the research: its questions are OPEN with that
-    reason. `source_hosts` adds per-task allow-list entries (e.g. `anyio.readthedocs.io/en/stable`,
-    or GitHub only as `github.com/<org>/<repo>@<release-tag>`); an entry that is not accepted is
-    ignored and counted on `SourceAllowList.ignored` (logged by reason code, never by text)."""
+    reason. Every job carries the contract from `research_scope`; `source_hosts` adds per-task
+    entries to its allow list (e.g. `anyio.readthedocs.io/en/stable`, or GitHub only as
+    `github.com/<org>/<repo>@<release-tag>`). An entry the engine would refuse, or an
+    anyone-can-publish host, is not sent: it is recorded on `KnowledgePackage.contract_drops` (by
+    position and reason code, never by text). A configured list with no usable entry sends no job:
+    the research questions are OPEN `no_usable_sources`."""
     if not settings.knowledge_package_enabled:
         return None
     qs_all = list(questions)
@@ -1008,9 +784,8 @@ async def build_knowledge_package(
     qs = qs_all[:MAX_QUESTIONS]
     over = tuple(PackageItem(q.id, q.tag, None, OPEN, "over_question_cap")
                  for q in qs_all[MAX_QUESTIONS:])
-    source_hosts = list(source_hosts)
-    allow = SourceAllowList.from_settings(settings, source_hosts)
-    contract = research_contract(settings, source_hosts)
+    scope = research_scope(settings, list(source_hosts))
+    contract = scope.contract
     t_end = clock() + max(0.0, float(settings.knowledge_package_time_box_s))
     done: dict[str, PackageItem] = {}
     jobs: list[tuple[int, str]] = []
@@ -1061,10 +836,7 @@ async def build_knowledge_package(
             if not (isinstance(a, CodebaseAnswer) and isinstance(a.lines, (list, tuple))):
                 open_item(q, "codebase_unanswered")
                 continue
-            if url_ok(a.source) and not allow.allows(a.source):
-                open_item(q, "source_not_allowed")
-                continue
-            if not fileline_ok(a.source) and not allow.allows(a.source):
+            if not fileline_ok(a.source):                    # a codebase answer cites the repo
                 open_item(q, "codebase_unanswered")
                 continue
             item = _answered_item(q, 0, [(ln, [a.source]) for ln in list(a.lines)[:10]])
@@ -1076,10 +848,12 @@ async def build_knowledge_package(
     async def research_step() -> None:
         pending = list(ext_qs)
         reason = "not_found"
-        reasons: dict[str, str] = {}
         for rnd in range(1, ROUND_BUDGET + 1):
             if not pending:
                 return
+            if contract is None:
+                reason = scope.refused or "no_usable_sources"   # never an unscoped job
+                break
             if research is None:
                 reason = "no_research_client"
                 break
@@ -1107,7 +881,12 @@ async def build_knowledge_package(
                 if reason not in REASONS:
                     reason = "research_failed"
                 break
-            cands = candidates_from_result(job.result, allow)
+            if not contract_echo_ok(job.result, contract):
+                log.warning("knowledge package: the research result does not echo the contract "
+                            "it was sent; not used")
+                reason = "research_unscoped"
+                break
+            cands = candidates_from_result(job.result)
             if not cands:
                 reason = "not_found"
                 continue                                     # nothing usable -> the gap run
@@ -1140,23 +919,21 @@ async def build_knowledge_package(
             still: list[KnowledgeQuestion] = []
             for q in pending:
                 cs = chosen[q.id]
-                item = _answered_item(q, rnd, [(c.text, c.sources) for c in cs if c.allowed])
+                item = _answered_item(q, rnd, [(c.text, c.sources) for c in cs])
                 if item is None:
                     still.append(q)
-                    reasons[q.id] = ("source_not_allowed" if any(not c.allowed for c in cs)
-                                     else "not_found")
                 else:
                     done[q.id] = item
-                    reasons.pop(q.id, None)
             pending = still
             reason = "not_found"
         for q in pending:
-            open_item(q, reasons.get(q.id, reason) if reason == "not_found" else reason)
+            open_item(q, reason)
 
     await asyncio.gather(codebase_step(), research_step())
     items = tuple(done[q.id] for q in qs)                     # input order: deterministic
     text, tokens, stage, items = render_package(items, over)   # stage 4/5 may change items
-    pkg = KnowledgePackage(items + over, text, tokens, stage, len(jobs), tuple(jobs), len(over))
+    pkg = KnowledgePackage(items + over, text, tokens, stage, len(jobs), tuple(jobs), len(over),
+                           scope.drops)
     log.info("knowledge package: %d/%d answered, %d research job(s) %s, %d tokens, truncation=%s",
              pkg.answered, len(pkg.items), len(jobs), [s for _, s in jobs], tokens, stage)
     return pkg

@@ -486,16 +486,17 @@ class Settings(BaseSettings):
     # bounds the WHOLE step (both research rounds + extraction + the codebase answers).
     knowledge_package_enabled: bool = False
     knowledge_package_time_box_s: float = 900.0
-    # The knowledge package's defence: only pages on these documentation hosts may source an answer
-    # (comma-separated; `host` exact, `host/path/prefix` matched on segment boundaries of the
-    # normalised path, or `*.suffix` - none in the defaults). Anything else -> OPEN
-    # `source_not_allowed`. Per-task entries for the task's own libraries are added by the
-    # caller (build_knowledge_package source_hosts=..., e.g. `anyio.readthedocs.io/en/stable`,
-    # `docs.rs/tokio`, and GitHub ONLY as a pinned tag: `github.com/agronholm/anyio@4.4.0`).
-    # NEVER in the defaults: hosts where anyone can post or publish (github.com, pypi.org,
-    # stackoverflow.com, blogs, *.readthedocs.io, docs.rs, pkg.go.dev, the learn.microsoft.com
-    # Q&A forum, MDN outside /en-US/docs, any *.github.com / *.githubusercontent.com host) - the
-    # reader is a tool-using worker. Such user-content hosts are ignored even as per-task entries.
+    # The knowledge package's research scope, sent WITH each job as its options.contract
+    # (knowledge_package.research_scope; the engine enforces it, OB1 research-service contract.ts).
+    # The default list IS the engine's `software-docs` class (a test pins the two equal) and is
+    # sent as that class; a different list (comma-separated `host`, `*.suffix` or
+    # `host/path/prefix`, paths case-sensitive) is sent as the allow list instead, so it can only
+    # narrow the job. A list with no usable entry sends NO job (never the class). Per-task entries
+    # are added by the caller (build_knowledge_package source_hosts=..., e.g.
+    # `anyio.readthedocs.io/en/stable`, `docs.rs/tokio`, GitHub ONLY as a pinned tag:
+    # `github.com/agronholm/anyio@4.4.0`). NEVER an entry: hosts where anyone can publish
+    # (readthedocs.io / pages.dev / gitlab.io as platforms, *.github.io, gist.github.com, any
+    # *.github.com / *.githubusercontent.com host) - dropped with a recorded reason, never sent.
     knowledge_source_hosts: str = DEFAULT_KNOWLEDGE_SOURCE_HOSTS
 
     @field_validator("knowledge_source_hosts", mode="before")
