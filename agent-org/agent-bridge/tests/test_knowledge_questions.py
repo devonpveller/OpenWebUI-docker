@@ -607,3 +607,13 @@ def test_q4_an_empty_source_hosts_env_keeps_the_built_in_allow_list(monkeypatch)
     monkeypatch.delenv("AO_KNOWLEDGE_SOURCE_HOSTS")
     s = Settings(_env_file=None)
     assert s.knowledge_questions_enabled is False and s.knowledge_package_enabled is False
+
+
+def test_q2_round2_router_and_section_comment_do_not_claim_gbnf_decoding():
+    """F7 (attempt 1): the router docstrings/comment and the kq section comment no longer say the
+    decoding is GBNF-constrained; they say the request carries the schema (L-2 unverified)."""
+    from app.modules import model_router
+    for mod in (model_router, kq):
+        src = Path(mod.__file__).read_text(encoding="utf-8")
+        assert "GBNF" not in src and "constrained to" not in src, mod.__name__
+    assert "unverified" in model_router.__doc__ and "unverified" in model_router.OpenAICompatClient.__doc__

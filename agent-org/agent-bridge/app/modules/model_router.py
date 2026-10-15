@@ -5,8 +5,9 @@ Responsibilities (PLAN §3.1.1 / §3.4 / §5.4):
   and an underlying model name. Adding a role = adding a profile — never a gateway change.
 - Carry the profile's caller-key so the gateways' spend ledgers attribute traffic by
   role (C7).
-- Emit structured output reliably from weak local models: JSON-schema constrained
-  decoding (GBNF, llama.cpp via llama-swap) + Pydantic validation (Instructor).
+- Emit structured output reliably from weak local models: the request carries the JSON
+  schema (`extra_body`); whether llama.cpp constrains decoding to it is unverified (L-2,
+  Stage A) - Pydantic validation (Instructor) enforces it either way.
 - NEVER probe model health (C5): monitoring uses bounded real completions only.
 
 The concrete OpenAI/Instructor client is created lazily and isolated behind
@@ -99,7 +100,8 @@ class ModelClient(Protocol):
 
 class OpenAICompatClient:
     """Real client: OpenAI-compatible endpoint + Instructor for schema validation,
-    with llama.cpp JSON-schema→GBNF constrained decoding passed via `extra_body`.
+    with the JSON schema sent via `extra_body` (whether llama.cpp constrains decoding to it is
+    unverified - L-2; validation enforces the schema either way).
 
     Imports of `openai`/`instructor` are deferred so the module imports cleanly in a
     minimal test env; only instantiating this class needs them.
@@ -132,8 +134,8 @@ class OpenAICompatClient:
         client = self._client(api_base, api_key, sdk_max_retries)
         # `user=caller_key`: LiteLLM forwards the OpenAI `user` field, so the spend
         # ledger attributes by role even though the caller key is stripped to `dummy`
-        # on the permissive gateway (litellm-proxy-status memory). GBNF grammar is
-        # derived by llama.cpp from the response schema (constrained decoding).
+        # on the permissive gateway (litellm-proxy-status memory). The request carries the
+        # schema; whether llama.cpp turns it into a grammar is unverified (L-2).
         # max_retries=0 lets the P0.5 eval measure FIRST-TRY validity (zero repair).
         return await client.chat.completions.create(
             model=model,

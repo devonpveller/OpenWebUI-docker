@@ -229,28 +229,59 @@ def _secret_token(tok: str) -> bool:
     return len(alnum) >= 24 and _entropy(alnum) >= 4.3
 
 
-# kp-harden R6: a BARE host (no scheme, path or port) - a dotted name with a label after the
-# first that is a common host TLD. A closed list, not "any 2-24 letters", because dotted code
-# names (`asyncio.gather`, `httpx.AsyncClient`, `os.path`) are everywhere in real answers; TLDs
-# that are also common attribute names (`at`, `in`, `is`, `it`, `to`, `ma`, `date`, ...) are left
-# out, and code file extensions (`py`, `md`, `rs`, `sh`) never count.
-_BARE_HOST_RE = re.compile(r"(?<![A-Za-z0-9_.-])[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?![A-Za-z0-9_-])")
-_HOST_TLDS = frozenset({
-    "com", "net", "org", "edu", "gov", "mil", "info", "biz", "io", "co", "ai", "dev", "app", "me",
-    "xyz", "site", "online", "top", "club", "link", "live", "tech", "store", "shop", "cloud",
-    "page", "blog", "ly", "gg", "tv", "cc", "ws", "su", "ru", "cn", "uk", "de", "fr", "nl", "eu",
-    "us", "ca", "au", "jp", "br", "es", "pl", "ch", "se", "fi", "dk", "cz", "kr", "tk", "ml",
-    "ga", "cf", "gq", "pw", "icu", "win", "bid", "zip", "mov", "onion", "sbs", "cfd", "click",
-    "website", "space", "fun", "pro", "mobi", "asia", "ir", "ua", "vn", "tw", "hk", "sg", "nz",
-    "za", "mx", "ar", "cl", "tr", "gr", "pt", "ro", "hu", "sk", "lt", "lv", "ee", "il", "ae",
-    "sa", "pk", "bd", "ng", "ke", "eg", "today", "network", "systems", "software", "download",
+# kp-harden R6: a BARE host (no scheme, path or port) in answer/question text. Round 2: labels may
+# hold `_` (`x_y.evil-site.com`), the TLD ends at its letters (`evil-site.com--it`, `.com_`), and a
+# leading `.` does not hide a host (`.evil-site.com`). A dotted CODE name is never a host: TLDs are
+# split into ones that rarely name code (`_HOST_ONLY_TLDS`: com, org, de, ...) and ones that collide
+# with common identifiers (`_COLLIDING_TLDS`: info, io, net, app, today, lt, cloud, ...).
+#   1. no label after the first is a known TLD (or it is a code extension)  -> not a host
+#   2. a STRONG host signal (a non-TLD label with `-` or a digit, a `www` first label, an `@`
+#      right before it)                                                     -> host
+#   3. a host-only TLD among the later labels (whatever follows: `Evil.Com`, `evil.com(`) -> host
+#   4. reads as code (followed by `(`, a camel/Pascal hump `aB`, or a later label `Capitalised`
+#      like `storage.Client`)                                               -> not a host
+#   5. 3+ labels ending in a colliding TLD (`downloads.evil.io`)             -> host
+#   6. otherwise (`logging.info`, `pandas.io`, `self.net`, `operator.lt`)   -> not a host
+# Trade-off (findings, round 2): a two-label all-lower host on a colliding TLD (`evil.io`,
+# `evil.app`, `badmirror.net`) passes; so does a TLD on neither list (`.date`, `.at`).
+_BARE_HOST_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.[A-Za-z]{2,24}(?![A-Za-z0-9])")
+_HOST_ONLY_TLDS = frozenset({
+    "com", "org", "edu", "gov", "mil", "biz", "xyz", "ru", "cn", "uk", "de", "fr", "nl", "eu",
+    "us", "ca", "au", "jp", "br", "fi", "dk", "cz", "kr", "tk", "cf", "gq", "pw", "icu", "sbs",
+    "cfd", "onion", "mobi", "asia", "ir", "ua", "vn", "tw", "hk", "sg", "nz", "za", "mx", "cl",
+    "gr", "ro", "hu", "sk", "lv", "ee", "il", "ae", "pk", "bd", "ng", "ke", "eg", "gg", "su",
+    "bid",
 })
+_COLLIDING_TLDS = frozenset({
+    "io", "co", "ai", "me", "dev", "app", "info", "net", "today", "cloud", "lt", "es", "pt", "tv",
+    "cc", "ws", "ly", "ch", "se", "tr", "ar", "pl", "sa", "ga", "ml", "page", "link", "live",
+    "store", "shop", "site", "online", "top", "club", "tech", "pro", "fun", "space", "win", "zip",
+    "mov", "network", "systems", "software", "download", "website", "name", "blog", "click",
+})
+_HOST_TLDS = _HOST_ONLY_TLDS | _COLLIDING_TLDS
+_HUMP_RE = re.compile(r"[a-z][A-Z]")
 
 
 def _bare_host(s: str) -> bool:
     for m in _BARE_HOST_RE.finditer(s):
-        labels = m.group(0).lower().split(".")
-        if any(lb in _HOST_TLDS and lb not in _CODE_EXT for lb in labels[1:]):
+        raw = m.group(0).split(".")
+        low = [lb.lower() for lb in raw]
+        tlds = [lb for lb in low[1:] if lb in _HOST_TLDS and lb not in _CODE_EXT]
+        if not tlds:
+            continue
+        before = s[m.start() - 1] if m.start() else ""
+        if (low[0] == "www" or before == "@"
+                or any(("-" in lb or any(c.isdigit() for c in lb)) and lb not in _HOST_TLDS
+                       for lb in low)):
+            return True
+        if any(lb in _HOST_ONLY_TLDS for lb in tlds):
+            return True
+        after = s[m.end():m.end() + 1]
+        if (after == "(" or any(_HUMP_RE.search(lb) for lb in raw)
+                or any(lb[:1].isupper() and lb[1:2].islower() for lb in raw[1:])):
+            continue
+        if len(low) >= 3 and low[-1] in _COLLIDING_TLDS:
             return True
     return False
 

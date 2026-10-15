@@ -113,7 +113,7 @@ BACKPRESSURE_RETRIES = 0        # the router's 429/503 retry loop, for this call
 MAX_HTTP_REQUESTS = SCHEMA_ATTEMPTS * (1 + SDK_MAX_RETRIES) * (1 + BACKPRESSURE_RETRIES)
 
 
-# ── The schema the model is constrained to ───────────────────────────────────────────────────
+# ── The schema the request carries (decoding constraint unverified, L-2) ─────────────────────
 class KnowledgeQuestionItem(BaseModel):
     question: str
     tag: Literal["codebase", "external"]
