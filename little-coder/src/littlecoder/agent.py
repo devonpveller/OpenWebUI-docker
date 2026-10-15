@@ -313,6 +313,12 @@ class AgentRunner:
                 "JITI_FS_CACHE": "false",
             }
         )
+        # ao-temp06: the open-terminal-exec extension overrides pi's per-call temperature with this.
+        # Always set or cleared from the config, never inherited from the daemon's own environment.
+        if self.cfg.agent.temperature is None:
+            env.pop("LC_TEMPERATURE", None)
+        else:
+            env["LC_TEMPERATURE"] = repr(float(self.cfg.agent.temperature))
         return env
 
     def _build_invocation(

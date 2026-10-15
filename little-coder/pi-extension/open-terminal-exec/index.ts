@@ -164,7 +164,29 @@ function runOtExec(command: string, signal: AbortSignal | undefined): Promise<Ex
   });
 }
 
+/** ao-temp06: the per-call sampling temperature a deployment asks for (config `agent.temperature`
+ * -> agent.py -> LC_TEMPERATURE). Unset/blank/not a number in [0, 2] = no override. */
+export function requestedTemperature(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const raw = (env.LC_TEMPERATURE ?? "").trim();
+  if (raw === "") return undefined;
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 && v <= 2 ? v : undefined;
+}
+
 export default function (pi: ExtensionAPI) {
+  // ao-temp06: little-coder's benchmark-profiles extension injects `temperature` 0.3 (its
+  // default_model_profile; our models match no per-model profile) into every provider request. When
+  // LC_TEMPERATURE is set (the agent-org worker configs only) replace it. Only where benchmark-profiles
+  // already put a temperature: its provider guard (hosted reasoning models reject the field) stays the
+  // one decision. This extension loads after benchmark-profiles (extension dirs sort by name), so its
+  // handler runs last; tests/node/e2e_temp06 proves the order against the real pi.
+  pi.on("before_provider_request", async (event: any) => {
+    const t = requestedTemperature();
+    const payload = event?.payload;
+    if (t === undefined || !payload || typeof payload !== "object" || !("temperature" in payload)) return;
+    return { ...payload, temperature: t };
+  });
+
   pi.registerTool({
     name: "bash",
     label: "Bash",
