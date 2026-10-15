@@ -74,6 +74,10 @@ class AgentConfig(_Strict):
     # as before. A task without `model` always runs `model`.
     allowed_models: dict[str, str] = Field(default_factory=dict)
     prompt_mode: Literal["stdin", "arg"] = "stdin"
+    # Per-call sampling temperature (ao-temp06). None = leave pi's own profile value (little-coder's
+    # benchmark-profiles default_model_profile, 0.3 for our model ids). The agent-org worker configs
+    # set it (agent-org/scripts/gen-worker-configs.py); the interactive coder config keeps None.
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     extra_args: list[str] = Field(default_factory=list)
     # Session-per-trigger continuity (design §3.1 follow-up). Each
     # trigger carries a `session_id` (OWUI: chat_id; CLI: a stable

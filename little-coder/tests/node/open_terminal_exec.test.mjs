@@ -47,8 +47,9 @@ cp.spawnSync = function (file, args, opts) {
 syncBuiltinESMExports();
 
 const tools = [];
+const handlers = {};
 const mod = await import(pathToFileURL(EXT).href);
-mod.default({ registerTool: (def) => tools.push(def) });
+mod.default({ registerTool: (def) => tools.push(def), on: (ev, h) => (handlers[ev] = h) });
 const bash = tools.find((t) => t.name === "bash");
 
 const run = (spec, signal) => bash.execute("call-1", { command: JSON.stringify(spec) }, signal);
@@ -259,4 +260,36 @@ test("output cap counts stdout and stderr together (spawnSync maxBuffer)", async
   assert.equal(e.length, 40 * 1024 * 1024, "stderr was written first, all of it kept");
   assert.ok(o.length > 0 && o.length + e.length <= CAP + 2 * 1024 * 1024, "stdout cut at the combined cap");
   assert.deepEqual(r.details, { exitCode: 1 });
+});
+
+// ── ao-temp06: the worker temperature override (LC_TEMPERATURE) ──────────────────────────────────
+
+test("ao-temp06: requestedTemperature reads LC_TEMPERATURE; unset, blank, junk and out-of-range mean no override", () => {
+  const t = mod.requestedTemperature;
+  assert.equal(t({ LC_TEMPERATURE: "0.6" }), 0.6);
+  assert.equal(t({ LC_TEMPERATURE: " 0 " }), 0);
+  for (const bad of [undefined, "", "  ", "hot", "NaN", "-0.1", "2.5", "Infinity"]) {
+    assert.equal(t({ LC_TEMPERATURE: bad }), undefined, JSON.stringify(bad));
+  }
+});
+
+test("ao-temp06: before_provider_request replaces the temperature benchmark-profiles stamped, only when LC_TEMPERATURE is set", async () => {
+  assert.equal(typeof handlers.before_provider_request, "function");
+  const h = handlers.before_provider_request;
+  const was = process.env.LC_TEMPERATURE;
+  try {
+    delete process.env.LC_TEMPERATURE;
+    assert.equal(await h({ payload: { model: "m", temperature: 0.3 } }), undefined, "unset: the payload is left alone");
+    process.env.LC_TEMPERATURE = "0.6";
+    const payload = { model: "m", temperature: 0.3, tools: [1] };
+    const out = await h({ payload });
+    assert.deepEqual(out, { model: "m", temperature: 0.6, tools: [1] });
+    assert.equal(payload.temperature, 0.3, "returns a new payload, never mutates");
+    assert.equal(await h({ payload: { model: "m" } }), undefined, "no temperature field (provider guard): not added");
+    assert.equal(await h({ payload: null }), undefined);
+    process.env.LC_TEMPERATURE = "junk";
+    assert.equal(await h({ payload }), undefined);
+  } finally {
+    if (was === undefined) delete process.env.LC_TEMPERATURE; else process.env.LC_TEMPERATURE = was;
+  }
 });
