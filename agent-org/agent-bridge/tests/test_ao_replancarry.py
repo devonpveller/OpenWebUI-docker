@@ -23,8 +23,10 @@ no GPU, no network (origin is a local path)."""
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -80,6 +82,27 @@ def _pgit(ws: Path, *args: str) -> subprocess.CompletedProcess:
                           text=True)
 
 
+_SHORT_ROOTS: list[Path] = []
+
+
+@pytest.fixture(autouse=True)
+def _drop_short_roots():
+    yield
+    while _SHORT_ROOTS:
+        shutil.rmtree(_SHORT_ROOTS.pop(), onerror=lambda f, p, _e: (Path(p).chmod(0o700), f(p)))
+
+
+def _workspaces(tmp: Path) -> Workspaces:
+    """`Workspaces` under a SHORT root instead of pytest's tmp dir. On a Windows host a push into
+    the local `origin` unpacks under `objects/` and dies past MAX_PATH with a long --basetemp
+    ("unpack-objects abnormal exit"; seen in a full-suite run: every push failed while isolated
+    runs passed; `core.longpaths` does not help receive-pack). The workers are Linux
+    containers - this is test plumbing only. Removed after each test."""
+    root = Path(tempfile.mkdtemp(prefix="arc-"))
+    _SHORT_ROOTS.append(root)
+    return Workspaces(root)
+
+
 _SYNC = re.compile(r"^cd /workspace && git fetch origin (\S+) && git checkout -f -B (\S+) "
                    r"FETCH_HEAD$")
 
@@ -115,7 +138,7 @@ async def _orch(db_url, tmp: Path, *, coding_edits: bool = True, plan_edits_codi
     orch = Orchestrator(settings, db, FakeChatAdapter(), model_client=FakeModelClient(),
                         harness=harness)
     await orch.setup()
-    ws = Workspaces(tmp)
+    ws = _workspaces(tmp)
     if ignore:
         (ws.origin / ".gitignore").write_text(ignore)
         _git(ws.origin, "add", "-A")
@@ -362,7 +385,7 @@ async def test_ignored_files_are_not_carried(db_url, tmp_path):
 
 # -- unit: the carry script against real repositories, through the proxy and the channel --------
 def _clone(tmp: Path) -> tuple[Workspaces, Path]:
-    ws = Workspaces(tmp)
+    ws = _workspaces(tmp)
     ws.focus(W1, True)
     return ws, ws.dirs[W1]
 
