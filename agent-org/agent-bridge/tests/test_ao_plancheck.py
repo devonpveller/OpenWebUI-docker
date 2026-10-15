@@ -117,11 +117,16 @@ def _run_shell_probe(ws: Path, command: str) -> tuple[int, str, bool]:
 LC = ROOT.parents[1] / "little-coder"
 PROXY_DIR = LC / "git-proxy"
 _SHIM = r'''
-import subprocess, sys
+import os, subprocess, sys, time
 sys.path.insert(0, {proxy!r})
 import git_proxy
 argv = sys.argv[1:]
 sub, _r, _e = git_proxy._find_subcommand(argv)
+with open({calls!r}, "a") as fh:
+    fh.write(str(sub) + "\n")
+time.sleep(float(os.environ.get("AO_SHIM_LATENCY") or 0))   # the worker proxy's ~0.27 s per call
+if sub and sub == os.environ.get("AO_SHIM_HANG"):            # a call that never returns in time
+    time.sleep(float(os.environ.get("AO_SHIM_HANG_SECS") or 30))
 needs = sub in {{"fetch", "push", "reset"}}
 remotes = git_proxy._configured_remotes("git") if needs else set()
 is_tag = git_proxy._make_is_tag("git") if needs else (lambda _ref: False)
@@ -163,20 +168,38 @@ def _proxy_log(ws: Path) -> Path:
     return ws.parent / (ws.name + ".git-proxy-denied.log")
 
 
-def _run_python_check(ws: Path, command: str) -> tuple[int, str, bool]:
+def _calls_log(ws: Path) -> Path:
+    return ws.parent / (ws.name + ".git-calls.log")
+
+
+def _git_calls(ws: Path) -> list[str]:
+    f = _calls_log(ws)
+    return f.read_text().split() if f.exists() else []
+
+
+def _run_python_check(ws: Path, command: str, timeout: int = 120,
+                      env: dict | None = None) -> tuple[int | None, str, bool]:
     """Runs the bridge's base64-encoded Python check for real, against this worker's checkout,
-    with EVERY git call routed through the worker's real git-proxy `classify()`."""
+    with EVERY git call routed through the worker's real git-proxy `classify()`. `timeout`
+    kills it like open-terminal does (the reply is then whatever it printed: nothing)."""
+    import os
     m = re.search(r"b64decode\('([A-Za-z0-9+/=]+)'\)", command)
     assert m, command[:120]
     assert len(command) < 120_000, "a /check command must stay under Linux's 128 KB arg limit"
     src = base64.b64decode(m.group(1)).decode()
     shim = ws.parent / (ws.name + ".git-shim.py")
-    shim.write_text(_SHIM.format(proxy=str(PROXY_DIR), log=str(_proxy_log(ws))))
+    shim.write_text(_SHIM.format(proxy=str(PROXY_DIR), log=str(_proxy_log(ws)),
+                                 calls=str(_calls_log(ws))))
     assert "WS = '/workspace'" in src and 'GIT = ["git"]' in src
     src = src.replace("WS = '/workspace'", f"WS = {str(ws)!r}")
     src = src.replace('GIT = ["git"]', f"GIT = [{sys.executable!r}, {str(shim)!r}]")
-    p = subprocess.run([sys.executable, "-c", src], cwd=ws, capture_output=True, text=True,
-                       timeout=120)
+    script = ws.parent / (ws.name + ".check.py")      # a file: Windows caps a command line at 32K
+    script.write_text(src, encoding="utf-8")
+    try:
+        p = subprocess.run([sys.executable, str(script)], cwd=ws, capture_output=True, text=True,
+                           timeout=timeout, env={**os.environ, **(env or {})})
+    except subprocess.TimeoutExpired:
+        return None, "", True
     return p.returncode, _channel(p.stdout, p.stderr), False
 
 
@@ -186,7 +209,7 @@ def _denials(ws: Path) -> str:
 
 
 async def _orch(db_url, tmp: Path, *, coding_edits: bool = True, plan_edits_coding: bool = False,
-                plan_commits: bool = False):
+                plan_commits: bool = False, coding_bulk: int = 0, stale_task: bool = False):
     settings = Settings(
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
@@ -201,7 +224,8 @@ async def _orch(db_url, tmp: Path, *, coding_edits: bool = True, plan_edits_codi
                         harness=harness)
     await orch.setup()
     ws = Workspaces(tmp)
-    trace: dict = {"plan_url": None, "coding_url": None, "after_plan": None, "checks": []}
+    trace: dict = {"plan_url": None, "coding_url": None, "after_plan": None, "checks": [],
+                   "stale": None, "order": []}
 
     orig_set_project = harness.set_project
 
@@ -233,12 +257,19 @@ async def _orch(db_url, tmp: Path, *, coding_edits: bool = True, plan_edits_codi
                 f = d / CODING_FILE
                 f.parent.mkdir(parents=True, exist_ok=True)
                 f.write_text(CODING_TEXT)
+            for i in range(coding_bulk):
+                g = d / "gen" / f"coding-{i:05d}-{'x' * 40}.txt"
+                g.parent.mkdir(exist_ok=True)
+                g.write_text(str(i))
+            if stale_task:
+                trace["stale"] = base_url      # the flail-stopped task has not wound down yet
             harness.output_queue.insert(0, _FLAIL_OUT)
         return await orig_wake(base_url, session_id, prompt, **kw)
 
     async def run_check(base_url, command, *, cwd=None, timeout=600):
         harness.checks.append({"base_url": base_url, "command": command})
         trace["checks"].append((base_url, command))
+        trace["order"].append("check")
         d = ws.dirs.get(base_url)
         if d is None:
             raise RuntimeError("fake /check: worker not focused")
@@ -246,9 +277,26 @@ async def _orch(db_url, tmp: Path, *, coding_edits: bool = True, plan_edits_codi
             return _run_python_check(d, command)
         return _run_shell_probe(d, command)
 
+    async def has_running_task(base_url):
+        return trace["stale"] == base_url
+
+    async def running_task_progress(base_url, *a, **kw):
+        return ("stale-coding-task", 1) if trace["stale"] == base_url else None
+
+    async def cancel_task(base_url, task_id):
+        # the stopped task's LAST write lands as it is being cancelled
+        trace["order"].append("cancel")
+        if trace["stale"] == base_url:
+            (ws.dirs[base_url] / "late.py").write_text("late write of the stopped coding task\n")
+            trace["stale"] = None
+        return True
+
     harness.set_project = set_project
     harness.wake = wake
     harness.run_check = run_check
+    harness.has_running_task = has_running_task
+    harness.running_task_progress = running_task_progress
+    harness.cancel_task = cancel_task
     return orch, harness, db, ws, trace
 
 
@@ -499,12 +547,39 @@ def test_token_shaped_and_unicode_paths_survive_the_channel(tmp_path):
     assert not _denials(d)
 
 
-def test_a_huge_earlier_change_set_still_attributes_from_disk(tmp_path):
-    """Past the size the bridge carries back, the snapshot omits the manifest and the check
-    uses the on-disk baseline (token-matched): still attributed, nothing earlier lost."""
+def _baseline(d: Path, tok: str, env: dict | None = None) -> dict:
+    """What the router's pre-turn hook does: snapshot, paged back if large (`take_baseline`)."""
+    from app.modules.plan_turn_guard import parse_snapshot, take_baseline
+
+    async def run(command: str, timeout: int = 120):
+        return _run_python_check(d, command, timeout, env)[1]
+
+    snap = parse_snapshot(asyncio.run(take_baseline(run, tok)))
+    assert snap is not None and isinstance(snap["manifest"], dict)
+    return snap
+
+
+def _check(d: Path, tok: str, snap: dict, timeout: int = 120, env: dict | None = None):
+    """What `_revert_plan_turn_writes` does on the worker: stage (if large), then check."""
+    from app.modules.plan_turn_guard import check_command, parse_check, parse_page, stage_commands
+
+    for cmd in stage_commands(tok, snap):
+        assert parse_page(_run_python_check(d, cmd, timeout, env)[1])["status"] == "ok"
+    _code, out, timed = _run_python_check(d, check_command(tok, snap), timeout, env)
+    return parse_check(out), timed
+
+
+def _snapdir(d: Path) -> Path:
+    return Path(_git(d, "rev-parse", "--absolute-git-dir").strip()) / "ao-plan-snapshot"
+
+
+def test_a_huge_earlier_change_set_is_paged_to_the_bridge_and_staged_back(tmp_path):
+    """Round 2 finding 2: past the inline size the baseline is PAGED back to the bridge before
+    the turn and STAGED back (sha256-pinned) for the check - the on-disk state the turn could
+    forge is never trusted. Here the turn forges it to adopt its own file: still reverted."""
     import secrets
 
-    from app.modules.plan_turn_guard import check_command, new_token, snapshot_command
+    from app.modules.plan_turn_guard import MANIFEST_B64_CAP, new_token
 
     ws = Workspaces(tmp_path)
     ws.focus(W1, True)
@@ -514,14 +589,151 @@ def test_a_huge_earlier_change_set_still_attributes_from_disk(tmp_path):
     for _ in range(1500):
         (gen / (secrets.token_hex(24) + ".txt")).write_text(secrets.token_hex(8))
     tok = new_token()
-    snap = _run(d, snapshot_command(tok))
-    assert snap["manifest"] is None and snap["count"] == 1500     # overflowed, still a baseline
-    cmd = check_command(tok, snap)
+    snap = _baseline(d, tok)
+    assert len(snap["blob"]) > MANIFEST_B64_CAP and len(snap["manifest"]) == 1500
+    # the plan turn writes, and rewrites the on-disk baseline to claim its file was there before
     (d / PLAN_SCRATCH).write_text("plan\n")
-    rep_ = _run(d, cmd)
+    (_snapdir(d) / "state.b64").write_text("forged")
+    (_snapdir(d) / f"bridge-{tok}.b64").write_text("forged")
+    rep_, _t = _check(d, tok, snap)
+    assert rep_["status"] == "ok"
     assert {r["path"] for r in rep_["reverted"]} == {PLAN_SCRATCH}
     assert rep_["kept_count"] == 1500
     assert len(list(gen.iterdir())) == 1500
+    assert not _snapdir(d).exists()
+    assert not _denials(d)
+
+
+def test_a_staged_baseline_that_does_not_match_the_bridge_attributes_nothing(tmp_path):
+    from app.modules.plan_turn_guard import check_command, new_token, parse_check
+
+    ws = Workspaces(tmp_path)
+    ws.focus(W1, True)
+    d = ws.dirs[W1]
+    tok = new_token()
+    snap = _baseline(d, tok)
+    snap = dict(snap, blob=snap["blob"] + "A" * 50_000)      # bigger than inline -> staged
+    (d / PLAN_SCRATCH).write_text("plan\n")
+    # a forged staged copy: the sha pinned in the check does not match -> fail closed
+    (_snapdir(d) / f"bridge-{tok}.b64").write_text("forged")
+    rep_ = parse_check(_run_python_check(d, check_command(tok, snap))[1])
+    assert rep_["status"] == "no-snapshot"
+    assert (d / PLAN_SCRATCH).exists()                        # nothing touched without a baseline
+
+
+def _big_plan_turn(d: Path, n: int) -> None:
+    """A plan turn that runs a build into non-ignored paths, edits a tracked file and stages a new
+    file (the shapes that used to cost git calls per path)."""
+    out = d / "obj" / "Debug"
+    out.mkdir(parents=True)
+    for i in range(n):
+        (out / f"gen.{i}.cache").write_text(str(i))
+    (d / TRACKED).write_text(TRACKED_TEXT + "plan edit\n")
+    (d / "staged_new.py").write_text("x\n")
+    _git(d, "add", "staged_new.py")
+
+
+@pytest.mark.parametrize("n", [1000, 4000])
+def test_a_plan_turn_with_thousands_of_new_paths_is_reverted_well_inside_the_timeout(tmp_path, n):
+    """Round 2 FAIL: on the real proxy each git call costs ~0.27 s and the check made two per
+    new path, so >~600 paths outlived the 300 s exec timeout and hundreds of plan-turn files
+    stayed. Now an untracked path costs no git call and the rest are batched: the shim charges the
+    proxy's latency per call, and the whole check must finish in a small fraction of 300 s."""
+    import time
+
+    from app.modules.plan_turn_guard import REPORT_CAP, new_token
+
+    lat = {"AO_SHIM_LATENCY": "0.27"}
+    ws = Workspaces(tmp_path)
+    ws.focus(W1, True)
+    d = ws.dirs[W1]
+    (d / CODING_FILE).parent.mkdir(parents=True)
+    (d / CODING_FILE).write_text(CODING_TEXT)                    # the earlier turn's work
+    tok = new_token()
+    snap = _baseline(d, tok, lat)
+    _big_plan_turn(d, n)
+    before = len(_git_calls(d))
+    t0 = time.monotonic()
+    rep_, timed = _check(d, tok, snap, 300, lat)
+    secs = time.monotonic() - t0
+    calls = len(_git_calls(d)) - before
+    print(f"\nn={n} check {secs:.1f}s, {calls} proxied git calls")
+    assert not timed and rep_["status"] == "ok"
+    assert secs < 60, secs
+    assert calls <= 10, calls                                 # flat: not per path
+    assert rep_["reverted_count"] == n + 2                     # n files + README + staged_new.py
+    assert len(rep_["reverted"]) == REPORT_CAP                  # capped, with an exact count
+    assert not (d / "obj").exists() and not (d / "staged_new.py").exists()
+    assert (d / TRACKED).read_text() == TRACKED_TEXT
+    assert (d / CODING_FILE).read_text() == CODING_TEXT
+    assert _git(d, "status", "--porcelain", "-uall").strip() == "?? " + CODING_FILE
+    assert not _snapdir(d).exists()
+    assert not _denials(d)
+
+
+def test_a_check_cut_off_by_its_timeout_resumes_and_reports_everything(tmp_path):
+    """Finding 1: a check killed mid-way (here: `checkout` never returns in time) has already
+    removed files. A second run resumes from the journal and reports BOTH runs' work."""
+    from app.modules.plan_turn_guard import check_command, new_token, parse_check
+
+    ws = Workspaces(tmp_path)
+    ws.focus(W1, True)
+    d = ws.dirs[W1]
+    tok = new_token()
+    snap = _baseline(d, tok)
+    _big_plan_turn(d, 300)
+    _code, out, timed = _run_python_check(d, check_command(tok, snap), 8,
+                                          {"AO_SHIM_HANG": "checkout", "AO_SHIM_HANG_SECS": "20"})
+    assert timed and out == ""                                  # what open-terminal hands back
+    assert not (d / "obj").exists()                             # ...yet the removals happened
+    assert (d / TRACKED).read_text() != TRACKED_TEXT            # and the restore did not
+    rep_ = parse_check(_run_python_check(d, check_command(tok, snap))[1])
+    assert rep_["status"] == "ok" and rep_["resumed"] is True
+    assert rep_["reverted_count"] == 302
+    assert (d / TRACKED).read_text() == TRACKED_TEXT
+
+
+def test_a_check_that_never_finishes_is_reported_partial_from_its_journal(tmp_path):
+    from app.modules.plan_turn_guard import check_command, new_token, parse_check, report_command
+
+    ws = Workspaces(tmp_path)
+    ws.focus(W1, True)
+    d = ws.dirs[W1]
+    tok = new_token()
+    snap = _baseline(d, tok)
+    _big_plan_turn(d, 250)
+    hang = {"AO_SHIM_HANG": "checkout", "AO_SHIM_HANG_SECS": "20"}
+    assert _run_python_check(d, check_command(tok, snap), 8, hang)[2]
+    rep_ = parse_check(_run_python_check(d, report_command(tok))[1])
+    assert rep_["status"] == "partial"
+    assert rep_["reverted_count"] == 251                        # 250 + staged_new.py, removed
+    assert rep_["dirty_after"] == 1                             # README.md still edited
+    assert not _snapdir(d).exists()
+
+
+def test_refs_the_plan_turn_created_are_recorded(tmp_path):
+    """Finding 3: the proxy forbids deleting refs (`branch -D`, `tag -d`, `update-ref`), so a
+    branch or tag the plan turn made is RECORDED (it cannot reach origin: only the effort branch
+    is pushed). The branch switch and the commit are still undone."""
+    from app.modules.plan_turn_guard import new_token
+
+    ws = Workspaces(tmp_path)
+    ws.focus(W1, True)
+    d = ws.dirs[W1]
+    tok = new_token()
+    snap = _baseline(d, tok)
+    _git(d, "branch", "plan-side")
+    _git(d, "tag", "plan-tag")
+    _git(d, "checkout", "-q", "-b", "agent/plan-sneak")
+    (d / "p.txt").write_text("p\n")
+    _git(d, "add", "p.txt")
+    _git(d, "commit", "-q", "-m", "sneak")
+    rep_, _t = _check(d, tok, snap)
+    assert _git(d, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
+    assert not (d / "p.txt").exists()
+    left = {r["ref"]: r["change"] for r in rep_["refs_left"]}
+    assert left == {"refs/heads/plan-side": "created", "refs/heads/agent/plan-sneak": "created",
+                    "refs/tags/plan-tag": "created"}, left
     assert not _denials(d)
 
 
@@ -624,3 +836,118 @@ async def test_a_workspace_refocused_for_another_effort_is_not_touched(db_url, t
 def _git_available():
     if shutil.which("git") is None:
         pytest.skip("git not on PATH")
+
+
+# -- round 2 through `delegate` --------------------------------------------------------------
+async def test_a_large_earlier_change_set_is_staged_and_the_plan_writes_still_reverted(
+        db_url, tmp_path):
+    """Finding 2 end to end: the coding turn left 1500 files, so the baseline is paged to the
+    bridge before the plan turn and staged back for the check (several /check calls, all on the
+    plan turn's worker)."""
+    from app.modules.plan_turn_guard import MANIFEST_B64_CAP
+
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, coding_bulk=1500)
+    try:
+        eid = await _run_c7e(orch)
+        after = trace["after_plan"]
+        assert after[W1].get(CODING_FILE) == CODING_TEXT
+        assert sum(1 for k in after[W1] if k.startswith("gen/")) == 1500
+        assert PLAN_SCRATCH not in after[W1] and after[W1][TRACKED] == TRACKED_TEXT
+        payload = await orch._last_event_payload(eid, "plan_turn_wrote_files")
+        assert _reverted_paths(payload) == {PLAN_SCRATCH, TRACKED}
+        assert payload["kept_before_turn_count"] == 1501 and payload["complete"] is True
+        sent = [c for _u, c in trace["checks"] if "b64decode" in c]
+        assert len(sent) >= 5                 # snapshot + pages + stages + check
+        assert all(len(c) < 120_000 for c in sent)
+        assert all(u == W1 for u, _c in trace["checks"])
+        assert max(len(c) for c in sent) > MANIFEST_B64_CAP
+        _no_denials(ws)
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_a_stopped_task_still_writing_is_waited_out_before_the_baseline(db_url, tmp_path):
+    """Finding 4: the flail-stopped coding task is still running on the worker the plan turn
+    lands on, and writes once more as it dies. The router cancels it and waits for the daemon to
+    report no running task BEFORE the baseline, so that write belongs to the earlier turn - kept,
+    never blamed on (and reverted for) the plan turn."""
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, stale_task=True)
+    try:
+        eid = await _run_c7e(orch)
+        assert trace["plan_url"] == W1
+        assert trace["order"].index("cancel") < trace["order"].index("check")
+        after = trace["after_plan"]
+        assert after[W1].get("late.py") == "late write of the stopped coding task\n"
+        assert after[W1].get(CODING_FILE) == CODING_TEXT
+        payload = await orch._last_event_payload(eid, "plan_turn_wrote_files")
+        assert _reverted_paths(payload) == {PLAN_SCRATCH, TRACKED}
+        assert "late.py" in payload["kept_before_turn"]
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_a_task_that_will_not_die_means_no_baseline_and_says_why(db_url, tmp_path):
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path)
+    try:
+        async def always_running(_url):
+            return True
+
+        harness.has_running_task = always_running
+        note = await orch.router._wait_worker_quiet(W1, attempts=3, pause=0)
+        assert note == "the worker's previous task was still running"
+        from types import SimpleNamespace
+
+        await orch.projects.add("ai-stack", REPO)
+        eid, _c, _r = await orch.router.open_effort("ao-queue", project="ai-stack")
+        res = SimpleNamespace(instance_id="worker-1", pre_turn_output=None, pre_turn_note=note)
+        assert await orch._revert_plan_turn_writes(eid, res, "tok") is False
+        p = await orch._last_event_payload(eid, "plan_turn_check_unattributed")
+        assert "no pre-turn baseline" in p["reason"] and note in p["reason"]
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_a_check_that_times_out_twice_is_recorded_from_its_journal(db_url, tmp_path):
+    """Finding 1 at the gate: two check runs return nothing (timed out); the report run reads
+    the journal. The record says `complete: false` with the exact count - never
+    "unattributed" after files were already removed."""
+    from types import SimpleNamespace
+
+    from app.modules.plan_turn_guard import CHECK_TAG, SNAP_TAG, frame, new_token
+
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("ai-stack", REPO)
+        eid, _c, _r = await orch.router.open_effort("ao-queue", project="ai-stack")
+        orch.router._ws_focus["worker-1"] = (eid, REPO, "")
+        tok = new_token()
+        snap = frame(SNAP_TAG, {"status": "ok", "token": tok, "head": "h", "branch": "main",
+                                "manifest": {}, "count": 0})
+        calls: list[str] = []
+
+        async def _exec(effort_id, *, command, session_id, **kw):
+            import base64 as b64
+            import re as _re
+
+            src = b64.b64decode(_re.search(r"b64decode\('([^']+)'\)", command).group(1)).decode()
+            kind = "report" if "journal" in src and "dirty_after" in src else "check"
+            calls.append(kind)
+            if kind == "check":
+                return None, "", True
+            return 0, frame(CHECK_TAG, {
+                "status": "partial", "reverted": [{"path": f"obj/{i}", "why": "created by the "
+                                                   "plan turn - removed"} for i in range(200)],
+                "reverted_count": 640, "unrestored": [], "unrestored_count": 0,
+                "head_reset": "", "kept": [], "kept_count": 0, "refs_left": [],
+                "dirty_after": 363}), False
+
+        orch.router.exec_check = _exec
+        res = SimpleNamespace(instance_id="worker-1", pre_turn_output=snap)
+        assert await orch._revert_plan_turn_writes(eid, res, tok) is True
+        assert calls == ["check", "check", "report"]
+        p = await orch._last_event_payload(eid, "plan_turn_wrote_files")
+        assert p["complete"] is False and p["reverted_count"] == 640
+        assert p["dirty_after"] == 363 and len(p["reverted"]) == 60
+        assert await orch._event_count(eid, "plan_turn_check_unattributed") == 0
+    finally:
+        await _shutdown(orch, db)

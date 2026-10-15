@@ -55,6 +55,7 @@ class WorkResult:
         # requested, or it failed: the caller must not attribute anything to the turn.
         self.instance_id: str | None = None
         self.pre_turn_output: str | None = None
+        self.pre_turn_note: str = ""      # why no baseline was taken, when none was
 
     @property
     def ok(self) -> bool:

@@ -13589,20 +13589,44 @@ class Orchestrator:
         `reset --soft` (proxy-legal; `--hard` is not). No baseline = no attribution = nothing
         reverted, recorded as `plan_turn_check_unattributed`. Never raises: the check must not
         block the gate."""
-        from .modules.plan_turn_guard import check_command, parse_check, parse_snapshot
+        from .modules.plan_turn_guard import (check_command, parse_check, parse_page,
+                                              parse_snapshot, report_command, stage_commands)
         from .modules.router import WorkspaceMoved
 
+        # ao-plancheck round 2 — the baseline is the BRIDGE's (paged back before the turn when
+        # large, never re-read from the workspace the turn could forge); git calls are batched;
+        # the check journals every revert so a run cut off by its timeout is resumed once and,
+        # failing that, reported from its journal as `partial` — never as "unattributed" after
+        # files were already reverted.
         inst_id = getattr(result, "instance_id", None)
         baseline = parse_snapshot(getattr(result, "pre_turn_output", None))
-        if not inst_id or baseline is None or baseline.get("token") != token:
+        if not inst_id or baseline is None or baseline.get("token") != token                 or not isinstance(baseline.get("manifest"), dict):
+            note = getattr(result, "pre_turn_note", "") or ""
             await self.audit.log("plan_turn_check_unattributed", effort_id=effort_id, payload={
-                "worker": inst_id, "reason": "no pre-turn baseline from the plan turn's worker"})
+                "worker": inst_id,
+                "reason": ("no pre-turn baseline from the plan turn's worker"
+                           + (f": {note}" if note else ""))[:200]})
             return False
-        try:
+
+        async def _run(command: str, timeout: int) -> str | None:
             _exit, out, _timed = await self.router.exec_check(
-                effort_id, command=check_command(token, baseline),
-                session_id=f"{effort_id}~planclean", repo=None, repo_token=None, timeout=300,
-                instance_id=inst_id, expect_effort=effort_id)
+                effort_id, command=command, session_id=f"{effort_id}~planclean", repo=None,
+                repo_token=None, timeout=timeout, instance_id=inst_id, expect_effort=effort_id)
+            return out
+
+        report = None
+        try:
+            for cmd in stage_commands(token, baseline):
+                staged = parse_page(await _run(cmd, 120))
+                if not staged or staged.get("status") != "ok":
+                    raise RuntimeError("could not stage the baseline on the worker")
+            check = check_command(token, baseline)
+            for _attempt in range(2):          # a timed-out check resumes from its journal
+                report = parse_check(await _run(check, 300))
+                if report is not None:
+                    break
+            if report is None:
+                report = parse_check(await _run(report_command(token), 120))
         except (NoCapacityError, WorkspaceMoved) as exc:
             await self.audit.log("plan_turn_check_unattributed", effort_id=effort_id, payload={
                 "worker": inst_id, "reason": f"plan turn's workspace unavailable: {exc}"[:200]})
@@ -13612,36 +13636,50 @@ class Orchestrator:
             await self.audit.log("plan_turn_check_unattributed", effort_id=effort_id, payload={
                 "worker": inst_id, "reason": f"check failed: {exc}"[:200]})
             return False
-        report = parse_check(out)
-        if report is None or report.get("status") != "ok":
+        if report is None or report.get("status") not in ("ok", "partial"):
             await self.audit.log("plan_turn_check_unattributed", effort_id=effort_id, payload={
                 "worker": inst_id,
                 "reason": ((report or {}).get("why") or "no report from the check")[:200]})
             return False
         reverted = list(report.get("reverted") or [])
         unrestored = list(report.get("unrestored") or [])
-        if not reverted and not unrestored:
+        refs_left = list(report.get("refs_left") or [])
+        n_rev = int(report.get("reverted_count") or len(reverted))
+        n_unr = int(report.get("unrestored_count") or len(unrestored))
+        complete = report.get("status") == "ok"
+        if not n_rev and not n_unr and not refs_left and complete:
             return False
         await self.audit.log("plan_turn_wrote_files", effort_id=effort_id, payload={
             "worker": inst_id,
+            "complete": complete,
             "reverted": reverted[:60],
+            "reverted_count": n_rev,
             "unrestored": unrestored[:30],
+            "unrestored_count": n_unr,
             "head_reset": report.get("head_reset") or "",
+            "refs_left": refs_left[:30],
             "kept_before_turn": list(report.get("kept") or [])[:50],
             "kept_before_turn_count": int(report.get("kept_count") or 0),
+            **({} if complete else {"dirty_after": report.get("dirty_after")}),
         })
         shown = ", ".join(f"`{r['path']}`" for r in reverted[:8])
-        more = f" (+{len(reverted) - 8} more)" if len(reverted) > 8 else ""
+        more = f" (+{n_rev - 8} more)" if n_rev > 8 else ""
         kept_n = int(report.get("kept_count") or 0)
         kept_line = (f" {kept_n} file(s) already changed by an earlier turn were left as they "
                      f"were." if kept_n else "")
         bad_paths = ", ".join("`" + str(u.get("path")) + "`" for u in unrestored[:5])
-        bad_line = f" Could not restore: {bad_paths}." if unrestored else ""
+        bad_line = f" Could not restore ({n_unr}): {bad_paths}." if n_unr else ""
+        refs_line = (" Refs it created or moved (the proxy cannot delete refs; left in place): "
+                     + ", ".join(f"`{r.get('ref')}` ({r.get('change')})" for r in refs_left[:5])
+                     + "." if refs_left else "")
+        partial_line = ("" if complete else " ⚠️ The check did not finish: this is what its "
+                        "journal shows was reverted; some of the plan turn's changes may remain.")
         await self.comms.post(
             Intent.worker_activity,
             f"🧹 The plan turn changed files even though it was a read-only turn — reverted only "
             f"what it changed: {shown or 'nothing restorable'}{more}, so the plan is reviewed "
-            f"on its merits, not on work already done.{kept_line}{bad_line}",
+            f"on its merits, not on work already done.{kept_line}{bad_line}{refs_line}"
+            f"{partial_line}",
             effort_id=effort_id,
         )
         return True
@@ -13730,7 +13768,7 @@ class Orchestrator:
                        goal or "", re.S)
         if _m:
             scope_goal = _m.group(2).strip()
-        from .modules.plan_turn_guard import new_token, snapshot_command
+        from .modules.plan_turn_guard import new_token, take_baseline
         while misaligned < 2:
             # ao-plancheck — the baseline for this turn's write check is taken on the worker that
             # runs the turn, after its focus and right before the turn (see the check below).
@@ -13743,7 +13781,8 @@ class Orchestrator:
                 session_id=f"{await self._session_for(effort_id)}~plan", instruction=instr,
                 repo=repo, repo_token=repo_token, upstream=upstream,
                 upstream_token=upstream_token, plan_only=True,
-                pre_turn_check=snapshot_command(plan_token) if repo else None,
+                pre_turn_check=((lambda run, _t=plan_token: take_baseline(run, _t))
+                                if repo else None),
             )
             # P17 F1/F15 — A PLAN TURN MUST LEAVE NOTHING ON DISK. `plan_only` gates the daemon's
             # edit/write TOOLS, not the shell, and gym-015 broke it twice by different routes:

@@ -472,7 +472,7 @@ class Router:
         withhold_goal: bool = False,
         loop_guard: LoopGuard | None = None,
         turn_label: str | None = None,
-        pre_turn_check: str | None = None,
+        pre_turn_check: str | Callable[..., Awaitable[str | None]] | None = None,
     ) -> WorkResult | None:
         """Wake a worker on an effort and post its reply in-thread. Returns None if the
         effort is frozen (the composition rule refuses to dispatch) or no capacity. If `repo`
@@ -492,9 +492,14 @@ class Router:
         `max_repeat`. `turn_label` names the turn in the one-line stop message (default: derived
         from the session suffix).
         `pre_turn_check` (ao-plancheck): a deterministic command run on THE SAME worker after the
-        focus and right before the turn; its output comes back as `result.pre_turn_output`
-        (None if it failed) beside `result.instance_id`, so the caller can compare the workspace
-        before and after this turn on the worker that ran it."""
+        focus and right before the turn - or an async callable given a `run(command)` that
+        executes on that worker, for a multi-step baseline; its output comes back as
+        `result.pre_turn_output` (None if it failed) beside `result.instance_id`, so the caller can
+        compare the workspace before and after this turn on the worker that ran it. Before it runs,
+        any task still running on that worker (a stopped turn the daemon has not wound down yet)
+        is cancelled and waited out; if it will not die, no baseline is taken
+        (`result.pre_turn_note` says why) - a baseline taken while it still writes would blame
+        its writes on this turn."""
         session_id = session_id or thread_id
         if loop_guard is None and not max_repeat:
             loop_guard = self.default_loop_guard(session_id, plan_only=plan_only)
@@ -668,13 +673,26 @@ class Router:
                 # what an earlier turn left on disk. Best-effort: a failure leaves it None and the
                 # caller attributes nothing.
                 pre_turn_output: str | None = None
+                pre_turn_note = ""
                 if pre_turn_check:
                     try:
-                        _code, pre_turn_output, _timed = await self.harness.run_check(
-                            inst.base_url, pre_turn_check, timeout=120)
+                        pre_turn_note = await self._wait_worker_quiet(inst.base_url)
+                        if not pre_turn_note:
+                            base_url = inst.base_url
+
+                            async def _run_here(command: str, timeout: int = 120) -> str | None:
+                                _c, out, _t = await self.harness.run_check(
+                                    base_url, command, timeout=timeout)
+                                return out
+
+                            if callable(pre_turn_check):
+                                pre_turn_output = await pre_turn_check(_run_here)
+                            else:
+                                pre_turn_output = await _run_here(pre_turn_check)
                     except Exception as exc:  # noqa: BLE001 - never blocks the turn
                         log.debug("pre-turn check for %s failed: %s", effort_id, exc)
                         pre_turn_output = None
+                        pre_turn_note = pre_turn_note or f"pre-turn check failed: {exc}"[:200]
                 # Stream the worker's activity to the effort THREAD as it happens (observability =
                 # safety, governance §5/§7). Notification discipline (CM.6): coalesce rapid *successful*
                 # commands into one post; failures/denials always post immediately + in context so a
@@ -761,6 +779,7 @@ class Router:
                 try:   # ao-plancheck - which worker ran it, and its pre-turn baseline
                     result.instance_id = inst.id
                     result.pre_turn_output = pre_turn_output
+                    result.pre_turn_note = pre_turn_note
                 except AttributeError:  # a duck-typed result that refuses attributes
                     pass
                 # POLL TIMEOUT = the bridge stopped waiting, but the daemon is STILL running the
@@ -941,6 +960,33 @@ class Router:
             await self.scheduler.release(inst.id)
 
     # ── deterministic verification exec (2026-07-08) ─────────────────────────
+    async def _wait_worker_quiet(self, base_url: str, *, attempts: int = 30,
+                                 pause: float = 1.0) -> str:
+        """ao-plancheck - make sure no earlier task is still running on this worker before a
+        baseline is taken (a flail-stopped turn is cancelled best-effort and may still be writing).
+        Cancels a running task, then waits for the daemon to report none. Returns "" when quiet,
+        else why not."""
+        import asyncio
+
+        cancelled = False
+        for _ in range(max(1, attempts)):
+            try:
+                running = await self.harness.has_running_task(base_url)
+            except Exception:  # noqa: BLE001 - an unanswerable daemon is not "quiet"
+                return "could not confirm the worker's previous task had stopped"
+            if not running:
+                return ""
+            if not cancelled:
+                try:
+                    prog = await self.harness.running_task_progress(base_url)
+                    if prog:
+                        await self.harness.cancel_task(base_url, prog[0])
+                except Exception:  # noqa: BLE001 - cancel is best-effort; we keep waiting
+                    pass
+                cancelled = True
+            await asyncio.sleep(pause)
+        return "the worker's previous task was still running"
+
     async def exec_check(
         self, effort_id: str, *, command: str, session_id: str, repo: str | None = None,
         repo_token: str | None = None, recurse_submodules: bool = False, timeout: int = 900,
