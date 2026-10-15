@@ -2044,6 +2044,9 @@ def test_r6_round2_real_doc_lines_are_kept():
     ("Use google.cloud.storage.Client once.", False),       # a later Capitalised label
     ("Use System.Net.Http.HttpClient as a singleton.", False),  # camel hump
     ("Get it from evil.io today.", False),                  # TRADE-OFF: 2-label colliding TLD passes
+    ("Get it from x_y.evil.io today.", True),               # '_' is a label char: 3 labels
+    ("Get it from www.Evil.Io today.", True),               # www. beats the code signals
+    ("Instantiate firebase.admin.App before any call.", False),  # later Capitalised label = code
 ])
 def test_r6_round2_decision_rule(line, refused):
     assert line_ok(line) is (not refused), line
