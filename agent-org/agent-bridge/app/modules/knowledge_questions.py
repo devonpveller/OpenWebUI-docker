@@ -11,11 +11,14 @@ OFF by default (`AO_KNOWLEDGE_QUESTIONS_ENABLED=false`) and wired to no live cal
 the flag off `generate_questions` returns status "disabled" without calling the model.
 
 STRUCTURED OUTPUT, not markdown parsing (round 3): the reply is requested through the router's
-schema path (`ModelRouter.structured` -> Instructor + the JSON schema sent as `extra_body`, which
-llama.cpp turns into a GBNF grammar), so the model can only emit
-`{"questions": [{"question": str, "tag": "codebase"|"external"}]}` with at most 8 items. Every
-defect of the two markdown-parsing rounds (failure class C8: interpreting text it does not own)
-was in reading free-form formatting; there is no free-form text to read now.
+schema path (`ModelRouter.structured` -> Instructor `Mode.JSON` + the JSON schema of
+`{"questions": [{"question": str, "tag": "codebase"|"external"}]}` (at most 8 items) sent as
+`extra_body`). The REQUEST carries the schema; whether llama.cpp constrains decoding to it is
+unverified (L-2: with `response_format: json_object` also sent it may decode any JSON object -
+Stage A checks a live request). The bounds below are enforced by validation either way: the
+reply is validated against the schema (one repair attempt), then every item by
+`_accept_question`. Every defect of the two markdown-parsing rounds (failure class C8:
+interpreting text it does not own) was in reading free-form formatting; none is read now.
 
 What leaves this module (allow-list, C1): a question is the model's `question` value AS IS - never
 trimmed, cut, unescaped or rewritten - and only if it passes `_accept_question`: one line (no
@@ -25,13 +28,23 @@ counted under a fixed key. A schema-invalid or failed reply yields zero question
 from a fixed set - never an invented question (C5).
 
 Bounds (C6): every input field is capped before the prompt is built; the model call is bounded
-by `knowledge_questions_timeout_s` and one schema-repair retry; a question's length is checked
-before any other per-character work; at most `MAX_QUESTIONS` are kept.
+by `knowledge_questions_timeout_s` and by at most `MAX_HTTP_REQUESTS` (2) HTTP requests per
+`generate_questions` call: Instructor makes at most `SCHEMA_ATTEMPTS` attempts (a first try + one
+repair), and for this call the openai SDK's own retries and the router's 429/503 backpressure
+retries are both 0, so nothing multiplies them. A question's length is checked before any other
+per-character work; at most `MAX_QUESTIONS` are kept.
+
+Failure reasons (kp-harden Q1) come from what each failed attempt actually RAISED (Instructor's
+`failed_attempts`, else the `__cause__` chain), never from the wrapper's type or message text:
+schema_invalid only when every attempt failed on JSON/validation; an HTTP 429/503 ->
+backpressure; any other transport/API error (5xx, 401, 404, connection) -> model_unavailable.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib
+import json
 import logging
 import re
 import unicodedata
@@ -94,6 +107,10 @@ MAX_ANCHOR_CHARS = 12_000       # input caps (the prompt is bounded whatever the
 MAX_PLAN_CHARS = 6_000
 MAX_MAP_CHARS = 6_000
 SCHEMA_ATTEMPTS = 2             # Instructor max_retries = TOTAL attempts: one first try + one repair
+SDK_MAX_RETRIES = 0             # the openai SDK's own retry loop, for this call only (default 2)
+BACKPRESSURE_RETRIES = 0        # the router's 429/503 retry loop, for this call only (default 3)
+#: The hard cap on HTTP requests one generate_questions call makes (asserted by the tests).
+MAX_HTTP_REQUESTS = SCHEMA_ATTEMPTS * (1 + SDK_MAX_RETRIES) * (1 + BACKPRESSURE_RETRIES)
 
 
 # ── The schema the model is constrained to ───────────────────────────────────────────────────
@@ -264,21 +281,69 @@ def validate_reply(reply: object) -> QuestionSet:
     return QuestionSet(status="ok", questions=accepted, dropped=dropped)
 
 
+def _instructor_schema_types() -> tuple[type, ...]:
+    """Instructor's own validation-failure types, from `instructor.core.exceptions` (>= 1.11),
+    else the pre-1.11 `instructor.exceptions`, else none (then only pydantic/JSON failures count
+    as schema failures - an unknown error is never guessed to be one)."""
+    for mod in ("instructor.core.exceptions", "instructor.exceptions"):
+        try:
+            m = importlib.import_module(mod)
+        except Exception:  # noqa: BLE001 - module absent or blocked: try the next spelling
+            continue
+        return tuple(t for t in (getattr(m, n, None) for n in (
+            "ValidationError", "AsyncValidationError", "IncompleteOutputException"))
+            if isinstance(t, type))
+    return ()
+
+
 def _is_schema_error(exc: BaseException) -> bool:
-    """Instructor's own error family (a reply that never validated against the schema, after the
-    repair retry) or a raw pydantic ValidationError. Checked lazily: the test env may lack
-    instructor, and importing it here would load the OpenAI stack for every importer."""
-    try:
-        from pydantic import ValidationError  # noqa: PLC0415
-        if isinstance(exc, ValidationError):
-            return True
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        from instructor.core.exceptions import InstructorError  # noqa: PLC0415
-        return isinstance(exc, InstructorError)
-    except Exception:  # noqa: BLE001 - instructor absent: no instructor error can occur
-        return False
+    """True only when ONE failed attempt's exception is a reply that did not parse or validate:
+    pydantic ValidationError, json.JSONDecodeError, or Instructor's own validation types. A
+    wrapper (InstructorRetryException) is never judged by its type - Instructor wraps transport
+    errors in it too - so `_classify_failure` unwraps it and calls this per failed attempt."""
+    from pydantic import ValidationError  # noqa: PLC0415
+    return isinstance(exc, (ValidationError, json.JSONDecodeError, *_instructor_schema_types()))
+
+
+def _status_of(exc: BaseException) -> int | None:
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def _failed_attempts(exc: BaseException) -> list[BaseException]:
+    """The exception each attempt raised: Instructor's `failed_attempts` when present, else the
+    last attempt behind a tenacity RetryError (`__cause__`), else `exc` itself."""
+    from .model_router import ModelBackpressureError  # noqa: PLC0415 - avoid an import cycle
+
+    for _ in range(4):                                # the router's wrapper: judge what it wrapped
+        if isinstance(exc, ModelBackpressureError) and exc.__cause__ is not None:
+            exc = exc.__cause__
+    attempts = getattr(exc, "failed_attempts", None)
+    if isinstance(attempts, (list, tuple)) and attempts:
+        out = [getattr(a, "exception", None) for a in attempts]
+        if all(isinstance(e, BaseException) for e in out):
+            return out
+    last = getattr(exc.__cause__, "last_attempt", None)
+    if last is not None:
+        try:
+            inner = last.exception()
+        except Exception:  # noqa: BLE001 - not a finished tenacity attempt
+            inner = None
+        if isinstance(inner, BaseException):
+            return [inner]
+    return [exc]
+
+
+def _classify_failure(exc: BaseException) -> str:
+    """schema_invalid only when EVERY failed attempt was a parse/validation failure; otherwise
+    the last non-schema attempt decides: HTTP 429/503 -> backpressure, anything else (5xx, 401,
+    404, connection error, an unknown exception) -> model_unavailable."""
+    other = [e for e in _failed_attempts(exc) if not _is_schema_error(e)]
+    if not other:
+        return "schema_invalid"
+    return "backpressure" if _status_of(other[-1]) in (429, 503) else "model_unavailable"
 
 
 # ── The model call ───────────────────────────────────────────────────────────────────────────
@@ -309,7 +374,6 @@ async def generate_questions(
                     profile, p.lane)
         return QuestionSet(status="model_error", reason="profile_not_local")
     system, user, truncated = build_prompt(anchor, plan_steps, orientation_map)
-    from .model_router import ModelBackpressureError  # noqa: PLC0415 - avoid an import cycle
 
     def failed(reason: str) -> QuestionSet:
         return QuestionSet(status="model_error", reason=reason, input_truncated=truncated)
@@ -317,23 +381,23 @@ async def generate_questions(
     try:
         reply = await asyncio.wait_for(
             models.structured(profile, system, user, KnowledgeQuestionsReply,
-                              max_retries=SCHEMA_ATTEMPTS, temperature=0.0),
+                              max_retries=SCHEMA_ATTEMPTS, temperature=0.0,
+                              sdk_max_retries=SDK_MAX_RETRIES,
+                              backpressure_retries=BACKPRESSURE_RETRIES),
             timeout=settings.knowledge_questions_timeout_s,
         )
     except asyncio.TimeoutError:
         log.warning("knowledge questions: model call exceeded %ss",
                     settings.knowledge_questions_timeout_s)
         return failed("timeout")
-    except ModelBackpressureError:
-        log.warning("knowledge questions: model shed the request (backpressure)")
-        return failed("backpressure")
     except Exception as exc:  # noqa: BLE001 - advisory step: degrade to zero questions + reason
-        if _is_schema_error(exc):
-            log.warning("knowledge questions: reply did not validate against the schema (%s)",
-                        type(exc).__name__)
-            return failed("schema_invalid")
-        log.warning("knowledge questions: model call failed: %s", type(exc).__name__)
-        return failed("model_unavailable")
+        # ModelBackpressureError included: the router decides "shed" from a status OR message
+        # text, so the attempts it wrapped are re-judged here by type (a schema failure whose
+        # reply text says "rate limit" is still a schema failure).
+        reason = _classify_failure(exc)
+        log.warning("knowledge questions: model call failed: %s (%s)", reason,
+                    type(exc).__name__)
+        return failed(reason)
     qs = validate_reply(reply)
     qs.input_truncated = truncated
     log.info("knowledge questions: status=%s reason=%s n=%d dropped=%s",

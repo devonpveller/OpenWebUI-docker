@@ -431,3 +431,163 @@ def test_openai_client_default_is_unchanged():
     assert c._http_client is None
     sdk = c._client("http://llm-gateway:4000/v1", "k")
     assert sdk is not None
+
+
+# ══ kp-harden ══════════════════════════════════════════════════════════════════════════════════
+# Q1 (F-E): a failure is classified by what each failed attempt actually raised, on the REAL
+# ModelRouter + OpenAICompatClient + Instructor over httpx.MockTransport, and one
+# generate_questions call makes at most kq.MAX_HTTP_REQUESTS requests whatever the router's
+# backpressure-retry setting (the production default, 3, is used here).
+class ScriptedGateway:
+    """Answers each request with the next scripted step (the last repeats): an int = that HTTP
+    status with an error body, an Exception = raised by the transport, a str = a 200 completion
+    with that content. Counts every request that reached the transport."""
+
+    def __init__(self, *steps) -> None:
+        self.steps = list(steps)
+        self.requests = 0
+
+    async def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests += 1
+        step = self.steps.pop(0) if len(self.steps) > 1 else self.steps[0]
+        if isinstance(step, BaseException):
+            raise step
+        if isinstance(step, int):
+            return httpx.Response(step, json={"error": {"message": "boom", "type": "x"}})
+        return httpx.Response(200, json=_completion(step))
+
+
+async def _scripted_router(db, gw: ScriptedGateway, **overrides):
+    kw = {"model_backpressure_retries": 3, "model_backpressure_base_delay_s": 0.0,
+          "model_backpressure_max_delay_s": 0.0, **overrides}
+    settings = _settings(**kw)
+    client = OpenAICompatClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(gw.handler)))
+    return settings, ModelRouter(settings, await _profiles(db), client=client)
+
+
+@pytest.mark.parametrize("step,reason", [
+    (500, "model_unavailable"),
+    (401, "model_unavailable"),
+    (404, "model_unavailable"),
+    (httpx.ConnectError("refused"), "model_unavailable"),
+    (429, "backpressure"),
+    (503, "backpressure"),
+    ("not json at all", "schema_invalid"),
+    # a schema failure whose reply TEXT looks like a shed is still a schema failure: the reason
+    # comes from the attempt's exception type, never from matching words in a message
+    ('{"questions": "rate limit exceeded - service unavailable"}', "schema_invalid"),
+])
+async def test_q1_failure_reason_and_request_count_on_the_real_channel(db, step, reason):
+    gw = ScriptedGateway(step)
+    settings, models = await _scripted_router(db, gw)
+    qs = await kq.generate_questions(models, settings, anchor=_task("ao-auth"))
+    assert (qs.status, qs.reason, qs.questions) == ("model_error", reason, [])
+    assert gw.requests == kq.MAX_HTTP_REQUESTS == kq.SCHEMA_ATTEMPTS == 2
+
+
+@pytest.mark.parametrize("steps,reason", [
+    (("not json", 500), "model_unavailable"),          # the repair attempt hit a transport error
+    (("not json", 503), "backpressure"),
+    ((500, "not json"), "model_unavailable"),           # a transport error is never "schema"
+])
+async def test_q1_mixed_attempts_are_schema_invalid_only_when_every_attempt_was(db, steps, reason):
+    gw = ScriptedGateway(*steps)
+    settings, models = await _scripted_router(db, gw)
+    qs = await kq.generate_questions(models, settings, anchor=_task("ao-auth"))
+    assert (qs.reason, qs.questions, gw.requests) == (reason, [], 2)
+
+
+async def test_q1_success_after_a_transport_error_stays_inside_the_cap(db):
+    gw = ScriptedGateway(500, json.dumps(_reply_obj("ao-queue")))
+    settings, models = await _scripted_router(db, gw)
+    qs = await kq.generate_questions(models, settings, anchor=_task("ao-queue"))
+    assert qs.status == "ok" and len(qs.questions) == 7 and gw.requests == 2
+
+
+async def test_q1_router_defaults_are_unchanged_for_every_other_caller(db):
+    """The request cap is per call (generate_questions), not router-wide: a plain
+    ModelRouter.structured call keeps the SDK's own retries and the router's backpressure
+    retries, and passes no new keyword to a client."""
+    fake = FakeModelClient()
+    settings, models, _ = await _fake_router(db, fake)
+    await models.structured("planner", "s", "u", kq.KnowledgeQuestionsReply)
+    assert "sdk_max_retries" not in fake.calls[-1]
+    c = OpenAICompatClient()
+    assert c._client("http://llm-gateway:4000/v1", "k").client.max_retries == 2   # SDK default
+    gw = ScriptedGateway(503)
+    settings, models = await _scripted_router(db, gw, model_backpressure_retries=1)
+    with pytest.raises(Exception):
+        await models.structured("planner", "s", "u", kq.KnowledgeQuestionsReply, max_retries=1)
+    assert gw.requests == 2 * 3          # (1 + 1 router retry) x (1 + 2 SDK retries): unchanged
+
+
+# Q2 (L-2 / FU-1): the docstrings say what is verified - the schema is SENT; whether llama.cpp
+# constrains decoding to it is unverified; the bounds hold by validation either way.
+def test_q2_module_docstring_does_not_claim_constrained_decoding():
+    doc = " ".join(kq.__doc__.split())
+    assert "can only emit" not in doc and "turns into a GBNF grammar" not in doc
+    assert "unverified" in doc and "Stage A" in doc
+    assert "enforced by validation" in doc
+
+
+def test_q2_schema_error_docstring_does_not_call_every_instructor_error_a_schema_failure():
+    doc = " ".join(kq._is_schema_error.__doc__.split())
+    assert "never validated against the schema" not in doc
+    assert "failed attempt" in doc and "transport" in doc
+
+
+# Q3 (FU-4): an Instructor without `instructor.core.exceptions` must not silently turn schema
+# failures into `model_unavailable`: requirements pin >= 1.11, and the classifier has a tested
+# fallback when that module cannot be imported.
+def test_q3_requirements_pin_instructor_at_least_1_11():
+    import re as _re
+    req = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    m = _re.search(r"^instructor>=(\d+)\.(\d+)", req, _re.M)
+    assert m and (int(m.group(1)), int(m.group(2))) >= (1, 11), req
+
+
+@pytest.mark.parametrize("blocked", [("instructor.core.exceptions",),
+                                     ("instructor.core.exceptions", "instructor.exceptions")])
+@pytest.mark.parametrize("step,reason", [("not json", "schema_invalid"), (500, "model_unavailable"),
+                                         (503, "backpressure")])
+async def test_q3_classification_survives_a_missing_instructor_exceptions_module(
+        db, monkeypatch, blocked, step, reason):
+    import sys as _sys
+    for name in blocked:
+        monkeypatch.setitem(_sys.modules, name, None)     # `from <name> import ...` -> ImportError
+    gw = ScriptedGateway(step)
+    settings, models = await _scripted_router(db, gw)
+    qs = await kq.generate_questions(models, settings, anchor=_task("ao-auth"))
+    assert (qs.reason, gw.requests) == (reason, 2)
+
+
+# Q4 (FU-5): the three flags are documented in agent-org/docker/.env.example and listed in the
+# bridge's compose environment like AO_GROUNDING_ENABLED, defaulting off; an unset
+# AO_KNOWLEDGE_SOURCE_HOSTS (compose then passes "") keeps the built-in allow-list.
+DOCKER = ROOT.parent / "docker"
+
+
+@pytest.mark.parametrize("name,default", [("AO_KNOWLEDGE_QUESTIONS_ENABLED", "false"),
+                                          ("AO_KNOWLEDGE_PACKAGE_ENABLED", "false"),
+                                          ("AO_KNOWLEDGE_SOURCE_HOSTS", "")])
+def test_q4_flags_in_env_example_and_compose(name, default):
+    import re as _re
+    env = (DOCKER / ".env.example").read_text(encoding="utf-8")
+    assert _re.search(rf"^{name}={_re.escape(default)}$", env, _re.M), name
+    compose = (DOCKER / "docker-compose.yml").read_text(encoding="utf-8")
+    bridge = compose.split("\n  agent-bridge:\n", 1)[1].split("\n  agent-bridge-db:\n", 1)[0]
+    assert "AO_GROUNDING_ENABLED: ${AO_GROUNDING_ENABLED:-false}" in bridge
+    assert f"{name}: ${{{name}:-{default}}}" in bridge, name
+
+
+def test_q4_an_empty_source_hosts_env_keeps_the_built_in_allow_list(monkeypatch):
+    default = Settings(_env_file=None).knowledge_source_hosts
+    assert "docs.python.org" in default
+    for blank in ("", "  "):
+        monkeypatch.setenv("AO_KNOWLEDGE_SOURCE_HOSTS", blank)
+        assert Settings(_env_file=None).knowledge_source_hosts == default
+    monkeypatch.setenv("AO_KNOWLEDGE_SOURCE_HOSTS", "docs.python.org")
+    assert Settings(_env_file=None).knowledge_source_hosts == "docs.python.org"
+    monkeypatch.delenv("AO_KNOWLEDGE_SOURCE_HOSTS")
+    s = Settings(_env_file=None)
+    assert s.knowledge_questions_enabled is False and s.knowledge_package_enabled is False

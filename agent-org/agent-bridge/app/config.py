@@ -9,8 +9,20 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The knowledge package's built-in documentation allow-list (see `knowledge_source_hosts`).
+DEFAULT_KNOWLEDGE_SOURCE_HOSTS = (
+    "docs.python.org,peps.python.org,docs.pytest.org,www.python-httpx.org,"
+    "docs.pydantic.dev,fastapi.tiangolo.com,www.starlette.io,docs.sqlalchemy.org,"
+    "docs.aiohttp.org,docs.djangoproject.com,flask.palletsprojects.com,numpy.org/doc,"
+    "pandas.pydata.org/docs,developer.mozilla.org/en-US/docs,nodejs.org/api,docs.deno.com,"
+    "www.typescriptlang.org/docs,doc.rust-lang.org,go.dev/doc,go.dev/ref,"
+    "learn.microsoft.com/en-us/dotnet/api,learn.microsoft.com/en-us/dotnet/csharp,"
+    "learn.microsoft.com/en-us/dotnet/standard,learn.microsoft.com/en-us/dotnet/core,"
+    "docs.docker.com,git-scm.com/docs,www.postgresql.org/docs"
+)
 
 
 class Settings(BaseSettings):
@@ -484,16 +496,13 @@ class Settings(BaseSettings):
     # stackoverflow.com, blogs, *.readthedocs.io, docs.rs, pkg.go.dev, the learn.microsoft.com
     # Q&A forum, MDN outside /en-US/docs, any *.github.com / *.githubusercontent.com host) - the
     # reader is a tool-using worker. Such user-content hosts are ignored even as per-task entries.
-    knowledge_source_hosts: str = (
-        "docs.python.org,peps.python.org,docs.pytest.org,www.python-httpx.org,"
-        "docs.pydantic.dev,fastapi.tiangolo.com,www.starlette.io,docs.sqlalchemy.org,"
-        "docs.aiohttp.org,docs.djangoproject.com,flask.palletsprojects.com,numpy.org/doc,"
-        "pandas.pydata.org/docs,developer.mozilla.org/en-US/docs,nodejs.org/api,docs.deno.com,"
-        "www.typescriptlang.org/docs,doc.rust-lang.org,go.dev/doc,go.dev/ref,"
-        "learn.microsoft.com/en-us/dotnet/api,learn.microsoft.com/en-us/dotnet/csharp,"
-        "learn.microsoft.com/en-us/dotnet/standard,learn.microsoft.com/en-us/dotnet/core,"
-        "docs.docker.com,git-scm.com/docs,www.postgresql.org/docs"
-    )
+    knowledge_source_hosts: str = DEFAULT_KNOWLEDGE_SOURCE_HOSTS
+
+    @field_validator("knowledge_source_hosts", mode="before")
+    @classmethod
+    def _blank_source_hosts_is_the_default(cls, v: object) -> object:
+        # compose passes AO_KNOWLEDGE_SOURCE_HOSTS="" when unset (kp-harden Q4): blank = built-in.
+        return DEFAULT_KNOWLEDGE_SOURCE_HOSTS if v is None or (isinstance(v, str) and not v.strip()) else v
 
     # ── Knowledge questions (agent-knowledge-package D1) ─────────────────────
     # Before assignment, ask the LOCAL model role for <= 8 tagged knowledge questions from a fixed

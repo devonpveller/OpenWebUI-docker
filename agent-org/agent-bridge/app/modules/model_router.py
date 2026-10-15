@@ -76,6 +76,7 @@ class ModelClient(Protocol):
         user: str,
         schema: type[T],
         max_retries: int = 2,
+        sdk_max_retries: int | None = None,
     ) -> T: ...
 
     async def complete(
@@ -114,17 +115,21 @@ class OpenAICompatClient:
         # Instructor request/response path runs offline. None (prod) = the SDK's own client.
         self._http_client = http_client
 
-    def _client(self, api_base: str, api_key: str):
+    def _client(self, api_base: str, api_key: str, sdk_max_retries: int | None = None):
         extra = {"http_client": self._http_client} if self._http_client is not None else {}
+        if sdk_max_retries is not None:
+            # Per call (opt-in): the openai SDK's own retry loop (default 2 retries on 429/5xx/
+            # connection errors) multiplies every Instructor attempt. None = the SDK default.
+            extra["max_retries"] = sdk_max_retries
         base = self._AsyncOpenAI(base_url=api_base, api_key=api_key or "agent-org", **extra)
         # JSON mode + Pydantic validation with bounded repair retries.
         return self._instructor.from_openai(base, mode=self._instructor.Mode.JSON)
 
     async def structured(
         self, *, api_base, api_key, model, caller_key, temperature, system, user, schema,
-        max_retries=2,
+        max_retries=2, sdk_max_retries=None,
     ):
-        client = self._client(api_base, api_key)
+        client = self._client(api_base, api_key, sdk_max_retries)
         # `user=caller_key`: LiteLLM forwards the OpenAI `user` field, so the spend
         # ledger attributes by role even though the caller key is stripped to `dummy`
         # on the permissive gateway (litellm-proxy-status memory). GBNF grammar is
@@ -249,12 +254,13 @@ class ModelRouter:
         api_base, api_key = self._endpoint(lane)
         return set(await self._get_client().list_models(api_base=api_base, api_key=api_key))
 
-    async def _with_backpressure_retry(self, make_call, *, label: str):
+    async def _with_backpressure_retry(self, make_call, *, label: str, retries: int | None = None):
         """Run an inference call, retrying on 429/503 admission backpressure with exponential
         backoff (a batch job may be squeezing the shared GPU). `make_call` is a zero-arg factory
         that returns a FRESH awaitable each attempt. Raises ModelBackpressureError once retries are
-        exhausted (so an interactive caller can degrade honestly); other errors propagate as-is."""
-        attempts = max(0, self.s.model_backpressure_retries)
+        exhausted (so an interactive caller can degrade honestly); other errors propagate as-is.
+        `retries` overrides `model_backpressure_retries` for one call (None = the setting)."""
+        attempts = max(0, self.s.model_backpressure_retries if retries is None else retries)
         delay = self.s.model_backpressure_base_delay_s
         for i in range(attempts + 1):
             try:
@@ -280,7 +286,8 @@ class ModelRouter:
 
     async def structured(
         self, profile_name: str, system: str, user: str, schema: type[T], max_retries: int = 2,
-        temperature: float | None = None,
+        temperature: float | None = None, *, sdk_max_retries: int | None = None,
+        backpressure_retries: int | None = None,
     ) -> T:
         # P21 F2a — `temperature` overrides the profile default for a call that must be DETERMINISTIC
         # (a governance decision, not a creative one — the readiness/risk gate). Omitted → the
@@ -288,6 +295,10 @@ class ModelRouter:
         p = self.profiles.get(profile_name)
         api_base, api_key = self._endpoint(p.lane)
         temp = p.temperature if temperature is None else temperature
+        # kp-harden Q1: `sdk_max_retries` / `backpressure_retries` let ONE caller bound its total
+        # request count (SDK tries x Instructor attempts x backpressure tries). Both default to
+        # None = unchanged behaviour, and `sdk_max_retries` is passed to the client only when set.
+        extra = {"sdk_max_retries": sdk_max_retries} if sdk_max_retries is not None else {}
 
         def _call():
             return self._get_client().structured(
@@ -300,9 +311,11 @@ class ModelRouter:
                 user=user,
                 schema=schema,
                 max_retries=max_retries,
+                **extra,
             )
 
-        return await self._with_backpressure_retry(_call, label=f"structured:{profile_name}")
+        return await self._with_backpressure_retry(_call, label=f"structured:{profile_name}",
+                                                   retries=backpressure_retries)
 
     async def complete(self, profile_name: str, system: str, user: str) -> str:
         p = self.profiles.get(profile_name)
