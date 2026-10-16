@@ -984,24 +984,46 @@ async def _host_effort(orch, ws, name: str):
     async def vendored_host(slug):
         return ("engine", "vendor/proj", REPO, "")
     orch._vendored_host = vendored_host
+    # the turn runs on worker-2 (worker-1 busy); worker-1 is free again by the time the salvage
+    # runs, so only a salvage PINNED to the turn's worker reaches worker-2
+    await _set_worker(orch, W1, sched_state=SCHED_COMPUTING)
     return eid
 
 
+async def _free_worker_1(orch):
+    await _set_worker(orch, W1, sched_state=SCHED_IDLE)
+
+
+def _record_exec_pins(orch) -> list:
+    """The pin of every exec_check (session affinity alone may pick the right worker by luck)."""
+    pins: list = []
+    orig = orch.router.exec_check
+
+    async def exec_check(effort_id, **kw):
+        pins.append((kw.get("session_id"), kw.get("instance_id")))
+        return await orig(effort_id, **kw)
+    orch.router.exec_check = exec_check
+    return pins
+
+
 async def test_r2_a_host_burndown_round_that_stops_is_salvaged_on_its_own_worker(db_url, tmp_path):
-    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [
-        {"status": "abandoned", "detail": TIMEOUT_DETAIL, "task": "hb-1"}])
+    spec = {"status": "abandoned", "detail": TIMEOUT_DETAIL, "task": "hb-1"}
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [spec])
+    spec["during"] = lambda: _free_worker_1(orch)
     try:
         eid = await _host_effort(orch, ws, "host-bd")
+        pins = _record_exec_pins(orch)
         loc = await orch.router.effort_thread(eid)
         await orch._burndown_wake(eid, loc[0], loc[1], 3, ["error CS1: a.cs(1): x"], part=None,
                                   host=("engine", "vendor/proj", REPO, ""),
                                   branch=f"agent/{eid}", repo=REPO, branch_exists=True)
         assert len(trace["stranded"]) == 1
         url, cmd = trace["stranded"][0]
-        assert url == trace["turns"][0]["url"]                       # pinned to the round's worker
+        assert url == trace["turns"][0]["url"] == W2                 # pinned to the round's worker
+        assert [p for _s, p in pins] == ["worker-2"], pins
         assert cmd.startswith("cd vendor/proj ") and f"git push origin agent/{eid}" in cmd
         pub = await orch._last_event_payload(eid, "pm_published_stranded_work")
-        assert pub["cause"] == "task_timeout" and pub["worker"] == "worker-1"
+        assert pub["cause"] == "task_timeout" and pub["worker"] == "worker-2"
     finally:
         await _shutdown(orch, db)
 
@@ -1010,10 +1032,12 @@ async def test_r2_a_host_context_turn_that_stops_is_salvaged_even_when_a_branch_
         db_url, tmp_path):
     from app.modules.capabilities import BranchDelivery
 
-    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [
-        {"status": "abandoned", "detail": TIMEOUT_DETAIL, "task": "hc-1"}])
+    spec = {"status": "abandoned", "detail": TIMEOUT_DETAIL, "task": "hc-1"}
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [spec])
+    spec["during"] = lambda: _free_worker_1(orch)
     try:
         eid = await _host_effort(orch, ws, "host-ctx")
+        pins = _record_exec_pins(orch)
 
         async def verify(effort_id, repo):      # an earlier round's branch already landed
             return BranchDelivery(verifiable=True, exists=True, ahead=1, head_sha="h" * 40,
@@ -1025,7 +1049,8 @@ async def test_r2_a_host_context_turn_that_stops_is_salvaged_even_when_a_branch_
         orch._gate_standing_intent = standing
         await orch._run_in_host_context(eid)
         assert len(trace["stranded"]) == 1
-        assert trace["stranded"][0][0] == trace["turns"][0]["url"]
+        assert trace["stranded"][0][0] == trace["turns"][0]["url"] == W2
+        assert [p for _s, p in pins] == ["worker-2"], pins
         assert (await orch._last_event_payload(eid, "pm_published_stranded_work"))["cause"] \
             == "task_timeout"
     finally:
