@@ -276,29 +276,73 @@ def judge_live_ports(plane: str, data: dict) -> tuple:
     return [], ("set to one specific IPv4 unicast address - ok" if lan else "inert (loopback only)")
 
 
-def native_render_verdict(plane: str, compose: str, cwd: Path) -> tuple:
-    """(problems, verdict) from compose's own render of `compose` under `cwd` (its .env loaded natively)."""
-    env = {k: v for k, v in os.environ.items()
-           if k.upper() not in {n.upper() for n in ALL_VARS} and k != "COMPOSE_PROFILES"}
-    cmd = ["docker", "compose", "-f", compose, "config", "--format", "json"]
+# Process-environment names that change what compose renders. Scrubbed (case-insensitively) so
+# the verdict reflects the plane's own .env and the profile rows below, nothing inherited.
+SCRUB = {n.upper() for n in ALL_VARS} | {"COMPOSE_PROFILES", "COMPOSE_ENV_FILES", "COMPOSE_FILE",
+                                          "COMPOSE_PROJECT_NAME", "COMPOSE_PATH_SEPARATOR"}
+
+
+def native_render_verdict(plane: str, compose: str, cwd: Path, profiles=None) -> tuple:
+    """(problems, verdict) from compose's own render of `compose` under `cwd` (its .env loaded natively).
+
+    profiles None = no --profile flag (what the plane's own .env alone selects); a tuple = those
+    --profile flags explicitly (the driver passes them from .stack/state.json, not from the .env).
+    """
+    env = {k: v for k, v in os.environ.items() if k.upper() not in SCRUB}
+    cmd = ["docker", "compose", "-f", compose]
+    for profile in profiles or ():
+        cmd += ["--profile", profile]
+    cmd += ["config", "--format", "json"]
+    row = "[" + (",".join(profiles) if profiles else ("no profile" if profiles is not None else ".env profiles")) + "]"
     proc = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True, text=True,
                           encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         # stderr may quote the value: never printed
-        return ([f"live-env {plane}: compose cannot render the plane with its .env "
+        return ([f"live-env {plane} {row}: compose cannot render the plane with its .env "
                  "(fail-closed - a value compose rejects is not OK)"], "REFUSED")
     try:
         data = json.loads(proc.stdout)
     except ValueError:
-        return ([f"live-env {plane}: compose output unreadable (fail-closed)"], "REFUSED")
-    return judge_live_ports(plane, data)
+        return ([f"live-env {plane} {row}: compose output unreadable (fail-closed)"], "REFUSED")
+    probs, verdict = judge_live_ports(plane, data)
+    return [p.replace(f"live-env {plane}:", f"live-env {plane} {row}:", 1) for p in probs], verdict
+
+
+def live_rows(plane: str) -> list:
+    """The profile rows to judge for a plane: the .env's own selection (None), then every RENDERS
+    row that names profiles. Services without a profile appear in every row, so the empty row adds
+    nothing."""
+    return [None] + [tuple(profiles) for (pl, profiles, _b) in RENDERS if pl == plane and profiles]
+
+
+def live_plane_verdicts(plane: str, compose: str, cwd: Path) -> tuple:
+    """(problems, label, notes) for one plane judged under every live profile row."""
+    problems, verdicts, notes = [], [], []
+    rows = live_rows(plane)
+    for profiles in rows:
+        found, verdict = native_render_verdict(plane, compose, cwd, profiles)
+        if profiles is None and found and "cannot render" in found[0]:
+            # the .env's own COMPOSE_PROFILES alone may be an incomplete set (e.g. only
+            # `tailscale`, which needs openwebui): the explicit rows decide
+            notes.append(f"  live-env {plane}: note - the .env's own profile selection does not render alone")
+            continue
+        problems += found
+        verdicts.append("REFUSED" if found else verdict)
+    label = "REFUSED in some profile row" if "REFUSED" in verdicts else (
+        "set to one specific IPv4 unicast address - ok" if any("ok" in v for v in verdicts)
+        else "inert (loopback only)")
+    return problems, f"{label} ({len(rows)} profile rows judged)", notes
 
 
 def live_env_problems() -> list:
     """Verdicts from compose's OWN render of each plane with its real .env loaded natively.
 
     No hand-written .env parser: quoting, multi-line values, duplicate keys, case-insensitive
-    names, interpolation and everything else is compose's. A render that fails is fail-closed.
+    names, interpolation and everything else is compose's. Each plane is judged under the .env's
+    own profile selection AND every profile row the RENDERS table uses, each with --profile
+    explicit, because the driver passes profiles from .stack/state.json and the .env need not list
+    them. An explicit row compose rejects is reported (fail-closed), never skipped; the .env-only
+    row is a note when it does not render alone (its COMPOSE_PROFILES may be a partial set).
     """
     problems = []
     for plane, (compose, _example) in COMPOSE.items():
@@ -306,10 +350,11 @@ def live_env_problems() -> list:
         if not env_path.is_file():
             print(f"  live-env {plane}: NOT VERIFIED ({env_path.relative_to(REPO).as_posix()} absent)")
             continue
-        found, verdict = native_render_verdict(plane, compose, REPO)
+        found, label, notes = live_plane_verdicts(plane, compose, REPO)
         problems += found
-        if not found:
-            print(f"  live-env {plane}: {verdict}")
+        for n in notes:
+            print(n)
+        print(f"  live-env {plane}: {label}")
     return problems
 
 

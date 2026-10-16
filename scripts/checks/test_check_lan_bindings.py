@@ -181,6 +181,60 @@ class LiveVerdictIntegration(unittest.TestCase):
         self.assertEqual(self.run_env('LITELLM_UI_LAN_IP="192.0.2.10\n')[1], "REFUSED")
 
 
+@unittest.skipUnless(shutil.which("docker"), "needs docker compose (render only)")
+class LiveProfilesAndScrub(unittest.TestCase):
+    """Profile-gated services and the process-env scrub, through a real compose render."""
+
+    COMPOSE = ("services:\n  llm-gateway-ui:\n    image: x\n    profiles: [gpu]\n    ports:\n"
+               "      - '${LITELLM_UI_LAN_IP:-127.0.0.1}:8445:8080'\n  other:\n    image: y\n")
+
+    def project(self, env_text):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        (Path(d.name) / "docker-compose.yml").write_text(self.COMPOSE, encoding="utf-8")
+        (Path(d.name) / ".env").write_bytes(env_text.encode("utf-8"))
+        return Path(d.name)
+
+    def test_profile_gated_wildcard_is_invisible_without_the_profile_and_seen_with_it(self):
+        d = self.project("LITELLM_UI_LAN_IP=0.0.0.0\n")
+        self.assertEqual(c.native_render_verdict("inference", "docker-compose.yml", d)[1],
+                         "inert (loopback only)")  # why the profile rows exist
+        self.assertEqual(c.native_render_verdict("inference", "docker-compose.yml", d, ("gpu",))[1], "REFUSED")
+
+    def test_live_rows_cover_every_renders_profile_set(self):
+        for plane in c.LAN:
+            want = {tuple(pr) for (pl, pr, _b) in c.RENDERS if pl == plane and pr}
+            self.assertTrue(want <= set(c.live_rows(plane)), plane)
+        self.assertIn(("gpu",), c.live_rows("frontend"))
+        self.assertIn(("stock",), c.live_rows("frontend"))
+
+    def test_partial_env_profile_set_is_a_note_not_a_refusal(self):
+        d = self.project("COMPOSE_PROFILES=nope\nLITELLM_UI_LAN_IP=192.0.2.10\n")
+        with mock.patch.object(c, "live_rows", return_value=[None, ("gpu",)]):
+            probs, label, notes = c.live_plane_verdicts("inference", "docker-compose.yml", d)
+        # an unknown profile in the .env still renders (nothing selected) - and the gpu row sees the port
+        self.assertEqual(probs, [], probs)
+        self.assertIn("ok", label)
+
+    def test_process_env_cannot_change_the_verdict(self):
+        d = self.project("OTHER=1\n")
+        hostile = {"LITELLM_UI_LAN_IP": "0.0.0.0", "litellm_ui_lan_ip": "0.0.0.0",
+                   "COMPOSE_PROJECT_NAME": "zzz", "COMPOSE_FILE": "does-not-exist.yml",
+                   "COMPOSE_ENV_FILES": str(d / "nope.env"), "COMPOSE_PROFILES": "gpu"}
+        with mock.patch.dict(os.environ, hostile):
+            probs, v = c.native_render_verdict("inference", "docker-compose.yml", d)
+        self.assertEqual((probs, v), ([], "inert (loopback only)"))
+
+    def test_compose_env_files_pointing_at_a_bad_file_is_ignored(self):
+        d = self.project("LITELLM_UI_LAN_IP=192.0.2.10\n")
+        bad = d / "bad.env"
+        bad.write_text("LITELLM_UI_LAN_IP=0.0.0.0\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"COMPOSE_ENV_FILES": str(bad)}):
+            probs, v = c.native_render_verdict("inference", "docker-compose.yml", d, ("gpu",))
+        self.assertEqual(probs, [])
+        self.assertIn("ok", v)
+
+
 class RenderWithoutLiveEnv(unittest.TestCase):
     def _cmd(self, env_present):
         seen = {}
