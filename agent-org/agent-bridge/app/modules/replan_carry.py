@@ -98,7 +98,9 @@ if paths:
     rc, _o, e = gitx("commit", "-q", "-m", SUBJ, "-m", BODY)
     if rc == 0:
         commit = head()
-    elif unpushed == 0 or not pre_head:
+    elif not unpushed or not pre_head:
+        # nothing committed, and no KNOWN unpushed commit to carry instead (`rev-list` gave 0, or
+        # failed: None) - a push now would report "ok" for nothing (ao-preflight2, review R3)
         out(status="error", from_branch=pre_branch, head_before=pre_head,
             why="git commit failed: " + scrub(e))
 files = []

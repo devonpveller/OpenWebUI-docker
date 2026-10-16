@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,36 @@ class Workspaces:
         return out
 
 
+_SHORT_ROOTS: list[Path] = []
+
+
+@pytest.fixture(autouse=True)
+def _drop_short_roots():
+    yield
+    def _retry(func, path, _exc):
+        try:
+            Path(path).chmod(0o700)
+            func(path)
+        except OSError:
+            pass    # e.g. a hung proxy call a timed-out check left behind still holds its cwd
+
+    while _SHORT_ROOTS:
+        shutil.rmtree(_SHORT_ROOTS.pop(), onerror=_retry)
+
+
+def _workspaces(tmp: Path) -> Workspaces:
+    """`Workspaces` under a SHORT root instead of pytest's tmp dir (`tmp` is unused, kept so the
+    call sites read the same). On a Windows host a long --basetemp pushes the workspaces' paths
+    past MAX_PATH: `git clone` exits 128 (19 failures in a full-suite run under a 211-char
+    workspace path) and a push into the local `origin` dies in unpack-objects; `core.longpaths`
+    does not help receive-pack. The workers are Linux containers - this is test plumbing only.
+    Removed after each test (`_drop_short_roots`; test modules that import `_workspaces` import
+    that fixture too)."""
+    root = Path(tempfile.mkdtemp(prefix="apc-"))
+    _SHORT_ROOTS.append(root)
+    return Workspaces(root)
+
+
 def _run_shell_probe(ws: Path, command: str) -> tuple[int, str, bool]:
     """Emulates the pre-fix check's two shell commands (only so the RED run is faithful)."""
     if "PROBE-DONE" in command:
@@ -127,6 +158,9 @@ with open({calls!r}, "a") as fh:
 time.sleep(float(os.environ.get("AO_SHIM_LATENCY") or 0))   # the worker proxy's ~0.27 s per call
 if sub and sub == os.environ.get("AO_SHIM_HANG"):            # a call that never returns in time
     time.sleep(float(os.environ.get("AO_SHIM_HANG_SECS") or 30))
+if sub and sub in (os.environ.get("AO_SHIM_FAIL") or "").split(","):   # a call that fails
+    sys.stderr.write("shim: forced failure of " + sub + "\n")
+    sys.exit(1)
 needs = sub in {{"fetch", "push", "reset"}}
 remotes = git_proxy._configured_remotes("git") if needs else set()
 is_tag = git_proxy._make_is_tag("git") if needs else (lambda _ref: False)
@@ -223,7 +257,7 @@ async def _orch(db_url, tmp: Path, *, coding_edits: bool = True, plan_edits_codi
     orch = Orchestrator(settings, db, FakeChatAdapter(), model_client=FakeModelClient(),
                         harness=harness)
     await orch.setup()
-    ws = Workspaces(tmp)
+    ws = _workspaces(tmp)
     trace: dict = {"plan_url": None, "coding_url": None, "after_plan": None, "checks": [],
                    "stale": None, "order": []}
 
@@ -461,7 +495,7 @@ def test_a_turn_that_deletes_the_snapshot_still_has_its_new_files_reverted(tmp_p
     pre-existing file it changed is reported as not restorable rather than silently kept."""
     from app.modules.plan_turn_guard import check_command, new_token, snapshot_command
 
-    ws = Workspaces(tmp_path)
+    ws = _workspaces(tmp_path)
     ws.focus(W1, True)
     d = ws.dirs[W1]
     (d / "earlier.py").write_text("from an earlier turn\n")
@@ -486,7 +520,7 @@ def test_a_tampered_copy_is_never_restored(tmp_path):
     matches the baseline the bridge holds."""
     from app.modules.plan_turn_guard import check_command, new_token, snapshot_command
 
-    ws = Workspaces(tmp_path)
+    ws = _workspaces(tmp_path)
     ws.focus(W1, True)
     d = ws.dirs[W1]
     (d / "earlier.py").write_text("from an earlier turn\n")
@@ -507,7 +541,7 @@ def test_a_plan_turn_that_wipes_the_tree_gets_the_earlier_work_back(tmp_path):
     new file come back from the snapshot, exactly as they were."""
     from app.modules.plan_turn_guard import check_command, new_token, snapshot_command
 
-    ws = Workspaces(tmp_path)
+    ws = _workspaces(tmp_path)
     ws.focus(W1, True)
     d = ws.dirs[W1]
     (d / TRACKED).write_text(TRACKED_TEXT + "coding edit\n")
@@ -530,7 +564,7 @@ def test_token_shaped_and_unicode_paths_survive_the_channel(tmp_path):
     paths)."""
     from app.modules.plan_turn_guard import check_command, new_token, snapshot_command
 
-    ws = Workspaces(tmp_path)
+    ws = _workspaces(tmp_path)
     ws.focus(W1, True)
     d = ws.dirs[W1]
     odd = ["ghp_" + "A1b2C3d4E5" * 4 + ".txt", "dir with space/caf\u00e9 \u00fc.py"]
@@ -581,7 +615,7 @@ def test_a_huge_earlier_change_set_is_paged_to_the_bridge_and_staged_back(tmp_pa
 
     from app.modules.plan_turn_guard import MANIFEST_B64_CAP, new_token
 
-    ws = Workspaces(tmp_path)
+    ws = _workspaces(tmp_path)
     ws.focus(W1, True)
     d = ws.dirs[W1]
     gen = d / "gen"
@@ -607,7 +641,7 @@ def test_a_huge_earlier_change_set_is_paged_to_the_bridge_and_staged_back(tmp_pa
 def test_a_staged_baseline_that_does_not_match_the_bridge_attributes_nothing(tmp_path):
     from app.modules.plan_turn_guard import check_command, new_token, parse_check
 
-    ws = Workspaces(tmp_path)
+    ws = _workspaces(tmp_path)
     ws.focus(W1, True)
     d = ws.dirs[W1]
     tok = new_token()
@@ -644,7 +678,7 @@ def test_a_plan_turn_with_thousands_of_new_paths_is_reverted_well_inside_the_tim
     from app.modules.plan_turn_guard import REPORT_CAP, new_token
 
     lat = {"AO_SHIM_LATENCY": "0.27"}
-    ws = Workspaces(tmp_path)
+    ws = _workspaces(tmp_path)
     ws.focus(W1, True)
     d = ws.dirs[W1]
     (d / CODING_FILE).parent.mkdir(parents=True)
@@ -676,7 +710,7 @@ def test_a_check_cut_off_by_its_timeout_resumes_and_reports_everything(tmp_path)
     removed files. A second run resumes from the journal and reports BOTH runs' work."""
     from app.modules.plan_turn_guard import check_command, new_token, parse_check
 
-    ws = Workspaces(tmp_path)
+    ws = _workspaces(tmp_path)
     ws.focus(W1, True)
     d = ws.dirs[W1]
     tok = new_token()
@@ -696,7 +730,7 @@ def test_a_check_cut_off_by_its_timeout_resumes_and_reports_everything(tmp_path)
 def test_a_check_that_never_finishes_is_reported_partial_from_its_journal(tmp_path):
     from app.modules.plan_turn_guard import check_command, new_token, parse_check, report_command
 
-    ws = Workspaces(tmp_path)
+    ws = _workspaces(tmp_path)
     ws.focus(W1, True)
     d = ws.dirs[W1]
     tok = new_token()
@@ -717,7 +751,7 @@ def test_refs_the_plan_turn_created_are_recorded(tmp_path):
     is pushed). The branch switch and the commit are still undone."""
     from app.modules.plan_turn_guard import new_token
 
-    ws = Workspaces(tmp_path)
+    ws = _workspaces(tmp_path)
     ws.focus(W1, True)
     d = ws.dirs[W1]
     tok = new_token()
@@ -772,7 +806,7 @@ def test_every_git_call_the_scripts_make_is_allowed_by_the_worker_proxy():
 def test_no_baseline_means_nothing_is_attributed_or_reverted(tmp_path):
     from app.modules.plan_turn_guard import check_command, new_token
 
-    ws = Workspaces(tmp_path)
+    ws = _workspaces(tmp_path)
     ws.focus(W1, True)
     d = ws.dirs[W1]
     (d / "work.py").write_text("an earlier turn's work\n")
@@ -786,7 +820,7 @@ def test_a_staged_coding_edit_survives_a_plan_turn_commit(tmp_path):
     edit into its commit: the commit is undone and the earlier edit stays on disk."""
     from app.modules.plan_turn_guard import check_command, new_token, snapshot_command
 
-    ws = Workspaces(tmp_path)
+    ws = _workspaces(tmp_path)
     ws.focus(W1, True)
     d = ws.dirs[W1]
     base = _git(d, "rev-parse", "HEAD").strip()

@@ -23,10 +23,8 @@ no GPU, no network (origin is a local path)."""
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -59,11 +57,13 @@ from test_ao_plancheck import (
     _channel,
     _denials,
     _drain,
+    _drop_short_roots,  # noqa: F401 - autouse fixture for _workspaces
     _git,
     _proxy_log,
     _reverted_paths,
     _run_python_check,
     _shutdown,
+    _workspaces,
 )
 
 _EXEC_OUT = "Implemented the fix; tests pass."
@@ -82,44 +82,28 @@ def _pgit(ws: Path, *args: str) -> subprocess.CompletedProcess:
                           text=True)
 
 
-_SHORT_ROOTS: list[Path] = []
-
-
-@pytest.fixture(autouse=True)
-def _drop_short_roots():
-    yield
-    while _SHORT_ROOTS:
-        shutil.rmtree(_SHORT_ROOTS.pop(), onerror=lambda f, p, _e: (Path(p).chmod(0o700), f(p)))
-
-
-def _workspaces(tmp: Path) -> Workspaces:
-    """`Workspaces` under a SHORT root instead of pytest's tmp dir. On a Windows host a push into
-    the local `origin` unpacks under `objects/` and dies past MAX_PATH with a long --basetemp
-    ("unpack-objects abnormal exit"; seen in a full-suite run: every push failed while isolated
-    runs passed; `core.longpaths` does not help receive-pack). The workers are Linux
-    containers - this is test plumbing only. Removed after each test."""
-    root = Path(tempfile.mkdtemp(prefix="arc-"))
-    _SHORT_ROOTS.append(root)
-    return Workspaces(root)
-
-
-_SYNC = re.compile(r"^cd /workspace && git fetch origin (\S+) && git checkout -f -B (\S+) "
-                   r"FETCH_HEAD$")
-
-
 def _run_sync(ws: Path, command: str) -> tuple[int, str, bool]:
-    """F33's delivery-branch sync (`router.wake(checkout_branch=)`), step by step through the
-    proxy with the shell's `&&` semantics. The real shell runs it in the open-terminal e2e."""
-    m = _SYNC.match(command)
-    assert m, f"unexpected sync command {command!r}"
-    out = ""
-    for argv in (("fetch", "origin", m.group(1)), ("checkout", "-f", "-B", m.group(2),
-                                                   "FETCH_HEAD")):
-        p = _pgit(ws, *argv)
-        out += p.stdout + p.stderr
-        if p.returncode != 0:
-            return p.returncode, _channel(out, ""), False
-    return 0, _channel(out, ""), False
+    """F33's delivery-branch sync (`router.delivery_sync_command`), step by step through the
+    proxy with the shell's `&&` semantics: fetch, unstage files staged as new (ao-preflight2),
+    checkout -f -B. The real shell runs it in the open-terminal e2e."""
+    from app.modules.router import delivery_sync_command
+
+    m = re.match(r"^cd /workspace && git fetch origin (\S+) && ", command)
+    assert m and command == delivery_sync_command(m.group(1)), \
+        f"unexpected sync command {command!r}"
+    branch = m.group(1)
+    p = _pgit(ws, "fetch", "origin", branch)
+    out = p.stdout + p.stderr
+    if p.returncode != 0:
+        return p.returncode, _channel(out, ""), False
+    added = _pgit(ws, "diff", "--cached", "--name-only", "--diff-filter=A", "-z").stdout
+    names = [x for x in added.split("\0") if x]
+    if names:
+        _pgit(ws, "--literal-pathspecs", "rm", "-q", "--cached", "-f", "--ignore-unmatch", "--",
+              *names)
+    p = _pgit(ws, "checkout", "-f", "-B", branch, "FETCH_HEAD")
+    out += p.stdout + p.stderr
+    return p.returncode, _channel(out, ""), False
 
 
 async def _orch(db_url, tmp: Path, *, coding_edits: bool = True, plan_edits_coding: bool = False,
