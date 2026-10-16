@@ -74,10 +74,24 @@
 # plane-internal and native here - nothing outside inference may join it.
 name: inference
 
+# THE LITELLM ADMIN UI's OPT-IN LAN PORT (edge-b2-pub, cluster-transition 5.1
+# B2) is why gateway.yml is included with an OVERRIDE file beside it. The UI
+# publishes nothing today, so there is no loopback line for a LAN entry to
+# collapse into when it is off (the trick openwebui and mattermost use), and a
+# ports entry cannot interpolate to nothing (compose: "no port specified").
+# The include path is interpolated instead, from inference/.env like any other
+# value - so the driver, emergency-recovery.ps1 and a hand-typed
+# `docker compose -f inference/docker-compose.yml` all pick it up unchanged:
+#   LITELLM_UI_LAN_IP unset/empty -> compose/gateway-lan.yml     (no service, inert)
+#   LITELLM_UI_LAN_IP=<lan ip>    -> compose/gateway-lan-on.yml  (<ip>:8445 -> 8080)
+# Only llm-gateway-ui gains the port; llm-gateway (the gateway itself) gets no
+# port, network or egress. Guarded by scripts/checks/check_lan_bindings.py.
 include:
   - compose/upstreams.yml
   - compose/queue.yml
-  - compose/gateway.yml
+  - path:
+      - compose/gateway.yml
+      - compose/gateway-lan${LITELLM_UI_LAN_IP:+-on}.yml
   - compose/backups.yml
 
 volumes:
