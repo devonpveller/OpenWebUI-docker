@@ -349,17 +349,27 @@ class LittleCoderDaemon:
             await asyncio.to_thread(self._ensure_git_credentials)
             result = await asyncio.to_thread(self.agent.run_task, ctx, timeout)
         except TaskTimeout:
-            self.journals.write(ctx.abandoned("timeout"))
-            state.status = TaskStatus.ABANDONED
-            state.detail = f"abandoned: exceeded {timeout}s"
-            metrics.record_task("abandoned")
+            if state.status is TaskStatus.ABANDONED:
+                # Cancelled (or drained) first: the cancel already closed it, keep its detail.
+                pass
+            else:
+                self.journals.write(ctx.abandoned("timeout"))
+                state.status = TaskStatus.ABANDONED
+                state.detail = f"abandoned: exceeded {timeout}s"
+                metrics.record_task("abandoned")
         except Exception as exc:  # never let a task crash the worker
             self.journals.write(ctx.error("daemon_error", str(exc)))
-            self.journals.write(ctx.ended("unverified"))
-            state.status = TaskStatus.DONE
-            state.outcome = "unverified"
-            state.detail = f"daemon error: {exc}"
-            metrics.record_task("unverified")
+            if state.status is TaskStatus.ABANDONED:
+                # ao-abandoncarry F5: a cancel (or the drain) killed the agent and its thread then
+                # raised - the task stays ABANDONED with the cancel's detail. Overwriting it with
+                # DONE/unverified made a cancelled turn reach the bridge as `done`.
+                pass
+            else:
+                self.journals.write(ctx.ended("unverified"))
+                state.status = TaskStatus.DONE
+                state.outcome = "unverified"
+                state.detail = f"daemon error: {exc}"
+                metrics.record_task("unverified")
         else:
             if state.status is TaskStatus.ABANDONED:
                 # The drain already abandoned this task — don't double-close.

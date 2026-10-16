@@ -98,7 +98,7 @@ async def _orch(db_url, tmp: Path, script: list[dict], *, sync: bool = True,
     await orch.setup()
     orch._carry_slot_pause = 0.05          # the hung-path carry waits for the slot in short steps
     ws = _workspaces(tmp)
-    trace: dict = {"turns": [], "checks": [], "publish": 0}
+    trace: dict = {"turns": [], "checks": [], "publish": 0, "stranded": []}
     script = list(script)
 
     orig_set_project = harness.set_project
@@ -111,9 +111,11 @@ async def _orch(db_url, tmp: Path, script: list[dict], *, sync: bool = True,
 
     async def wake(base_url, session_id, prompt, **kw):
         d = ws.dirs[base_url]
-        if "PUBLISH YOUR WORK" in prompt or "NOT PUBLISHED" in prompt:
+        is_publish = "PUBLISH YOUR WORK" in prompt or "NOT PUBLISHED" in prompt
+        if is_publish:
             trace["publish"] += 1
-            return await orig_wake(base_url, session_id, prompt, **kw)
+            if not (script and script[0].get("publish")):
+                return await orig_wake(base_url, session_id, prompt, **kw)
         if not script:
             harness.output_queue.insert(0, _EXEC_OUT)
             return await orig_wake(base_url, session_id, prompt, **kw)
@@ -143,6 +145,9 @@ async def _orch(db_url, tmp: Path, script: list[dict], *, sync: bool = True,
             return _run_python_check(d, command)
         if command.startswith("cd /workspace && git fetch origin "):
             return _run_sync(d, command)
+        if "PM_PUBLISH_DONE" in command:            # the PM's stranded-work salvage (host)
+            trace["stranded"].append((base_url, command))
+            return 0, "PM_PUBLISH_DONE", False
         if "git checkout -- ." in command and "DISCARD-DONE" in command:   # P16's discard
             st = _git(d, "status", "--porcelain")
             _git(d, "checkout", "--", ".")
@@ -171,6 +176,12 @@ def _posts(orch) -> list[str]:
 def _no_false_intact(orch) -> None:
     bad = [m for m in _posts(orch) if _INTACT in m]
     assert not bad, f"claimed committed work that nobody committed: {bad}"
+
+
+async def _kinds(orch, eid: str) -> list[str]:
+    async with orch.db.session_factory() as s:
+        return [r[0] for r in (await s.execute(select(Event.kind).where(
+            Event.effort_id == eid).order_by(Event.id))).all()]
 
 
 async def _payloads(orch, eid: str, kind: str) -> list[dict]:
@@ -203,7 +214,14 @@ async def test_c7f_an_abandoned_turns_work_reaches_the_next_turn_on_another_work
                                  "watchdog (C7f: 1,049 s)")
         first, second = turns[0], turns[1]
         assert first["url"] == W1 and second["url"] == W2, (first["url"], second["url"])
-        assert second["t"] - first["t_end"] < 10, "the next turn did not start within seconds"
+        # F6: ordered by events, not only by wall time - the re-dispatch is recorded before the
+        # next turn's acquire, with nothing from the watchdog in between; the wall bound is
+        # generous (a loaded host), the 1,049-s C7f wait is what it rules out.
+        assert second["t"] - first["t_end"] < 60, "the next turn did not start at once"
+        order = await _kinds(orch, eid)
+        i_red = order.index("abandoned_turn_redispatched")
+        assert "worker_acquire" in order[i_red:], order
+        assert "stall_recovered" not in order, order
         # THE BAR: the next turn's workspace holds the abandoned turn's work
         assert second["saw"].get(CODING_FILE) == CODING_TEXT, sorted(second["saw"])
         assert second["saw"].get(SRC) == SRC_EDIT
@@ -416,7 +434,7 @@ async def test_a_turn_the_watchdog_cancelled_is_carried_by_the_watchdog_not_twic
          "write": {CODING_FILE: CODING_TEXT}},
     ])
     try:
-        orch._watchdog_cancelled.add("t-hung")
+        orch._stop_claims["t-hung"] = "watchdog"     # the watchdog claimed it first
         eid = await _run(orch)
         assert await orch._event_count(eid, "stopped_turn_work_carried") == 0
         assert not [c for c in _checks_on(trace, W1) if "b64decode" in c]
@@ -466,7 +484,7 @@ async def test_hung_turn_is_carried_from_its_worker_after_the_slot_frees_never_d
         await orch._recover_hung_worker(W1, "t-hung", eid, why, set(), None)
         await _drain(orch)
         assert (W1, "t-hung") in harness.cancelled
-        assert "t-hung" in orch._watchdog_cancelled
+        assert orch._stop_claims.get("t-hung") == "watchdog"
         carried = await orch._last_event_payload(eid, "stopped_turn_work_carried")
         assert carried is not None and carried["worker"] == "worker-1" and carried["cause"] == "hung"
         assert not [c for _u, c in trace["checks"] if "DISCARD-DONE" in c]
@@ -543,6 +561,8 @@ async def test_a_turn_orphaned_by_a_bridge_restart_is_carried_at_boot(db_url, tm
     orch2 = None
     try:
         eid = await _effort_with_dirty_worker_1(orch, ws, "boot")
+        await orch.audit.log("worker_project_set", effort_id=eid, actor="worker-1",
+                             payload={"repo": REPO, "ok": True})
         await _set_worker(orch, W1, sched_state=SCHED_COMPUTING, effort_id=eid)
         harness.busy_urls = {W1}
         harness.progress_task_ids = {W1: "t-orphan"}
@@ -672,3 +692,403 @@ def test_the_carry_commit_body_names_the_cause_never_model_text():
     for c in ("loop", "task_timeout", "worker_shutdown", "poll_timeout", "cancelled", "rejected",
               "error", "backpressure", "hung", "stall"):
         assert "ghp_" not in _carry_body(c) and _carry_body(c)
+
+
+# == round 2 (tester attempt 1) ===================================================================
+async def _race_run(db_url, tmp_path, pause: float):
+    """Tester P1: the watchdog judges turn 1 hung (and cancels it) while the daemon's own task
+    timeout ends the same task; `pause` = how far the watchdog gets before the result arrives."""
+    import asyncio
+
+    holder: dict = {}
+
+    async def race():
+        o = holder["orch"]
+        eid = next(iter(o._delegating))
+        o._spawn(o._recover_hung_worker(W1, "task-1", eid, {"rule": "silent", "silent_s": 1200},
+                                        set(), None))
+        await asyncio.sleep(pause)
+
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [
+        {"status": "abandoned", "detail": TIMEOUT_DETAIL, "task": "task-1",
+         "write": {CODING_FILE: CODING_TEXT, SRC: SRC_EDIT}, "during": race},
+        {"status": "done", "output": _EXEC_OUT},
+        {"status": "done", "output": _EXEC_OUT},
+        {"status": "done", "output": _EXEC_OUT},
+    ])
+    holder["orch"] = orch
+    return orch, db, ws, trace
+
+
+@pytest.mark.parametrize("pause", [0.0, 0.05, 0.2, 0.2, 0.2, 1.0])
+async def test_r2_watchdog_hung_verdict_racing_the_task_timeout_re_engages_once(
+        db_url, tmp_path, pause):
+    """FAILURE 1 / P1: one owner per stopped task. Exactly one follow-up turn, it starts from the
+    work, it is told about the commit that was actually made, and no post contradicts it."""
+    orch, db, ws, trace = await _race_run(db_url, tmp_path, pause)
+    try:
+        eid = await _run(orch)
+        await _drain(orch, rounds=6)
+        turns = trace["turns"]
+        assert len(turns) == 2, [(t["url"], t["session"]) for t in turns]
+        follow = turns[1]
+        assert follow["saw"].get(CODING_FILE) == CODING_TEXT
+        carried = await _payloads(orch, eid, "stopped_turn_work_carried")
+        assert len(carried) == 1, carried                  # one carry, by its owner
+        assert await orch._event_count(eid, "stopped_turn_carry_failed") == 0
+        owners = (await orch._event_count(eid, "abandoned_turn_redispatched")
+                  + await orch._event_count(eid, "stall_recovered"))
+        assert owners == 1
+        assert follow["head"] == carried[0]["commit"]
+        assert "CARRIED WORK" in follow["prompt"] and carried[0]["commit"][:12] in follow["prompt"]
+        assert not any("could not save" in m.lower() for m in _posts(orch)), _posts(orch)
+        _no_false_intact(orch)
+        _no_denials(ws)
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_r2_restart_during_the_race_re_engages_once(db_url, tmp_path):
+    """The delegate recorded the re-dispatch, the bridge died before launching it; after the
+    restart the watchdog judges the turn hung: ONE re-engage, and the dead run's record does not
+    queue a second one."""
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [
+        {"status": "done", "output": _EXEC_OUT}, {"status": "done", "output": _EXEC_OUT}])
+    orch2 = None
+    try:
+        eid = await _effort_with_dirty_worker_1(orch, ws, "race-restart")
+        res = _result({"status": "abandoned", "detail": TIMEOUT_DETAIL, "task": "task-1"}, 1)
+        res.instance_id = "worker-1"
+        assert orch._claim_stop("task-1", "delegate")
+        assert await orch._redispatch_abandoned(eid, res, "task_timeout", None) is True
+        orch2 = Orchestrator(orch.s, db, FakeChatAdapter(), model_client=FakeModelClient(),
+                             harness=harness)
+        await orch2.setup()
+        orch2._carry_slot_pause = 0.05
+        orch2.router._ws_focus["worker-1"] = (eid, REPO, ws.base)
+        await orch2._recover_hung_worker(W1, "task-1", eid, {"rule": "silent"}, set(), None)
+        assert await orch2._redispatch_abandoned(eid, res, "task_timeout", None) is True
+        assert not orch2._iterate_after.get(eid)
+        await _drain(orch2, rounds=6)
+        assert len(trace["turns"]) == 1, [(t["url"], t["session"]) for t in trace["turns"]]
+        assert trace["turns"][0]["saw"].get(CODING_FILE) == CODING_TEXT
+        assert await orch2._event_count(eid, "stall_recovered") == 1
+    finally:
+        if orch2 is not None:
+            await _drain(orch2)
+        await _shutdown(orch, db)
+
+
+def test_r2_a_finishing_holder_never_clears_a_newer_holders_marker():
+    o = Orchestrator.__new__(Orchestrator)
+    o._delegating, o._delegating_tok = set(), {}
+    old = o._take_delegating("e")
+    assert o._take_delegating("e") is None            # single flight
+    o._drop_delegating("e")                           # the watchdog: the old run is dead
+    new = o._take_delegating("e")
+    o._release_delegating("e", old)                   # the old run's finally
+    assert "e" in o._delegating                       # ... leaves the new run's marker
+    o._release_delegating("e", new)
+    assert "e" not in o._delegating
+
+
+async def test_r2_f2_abandon_re_dispatches_and_watchdog_recoveries_share_one_cap(db_url, tmp_path):
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [
+        {"status": "done", "output": _EXEC_OUT}], max_recoveries=2)
+    try:
+        eid = await _effort_with_dirty_worker_1(orch, ws, "cap")
+        for n in (1, 2, 3):
+            res = _result({"status": "abandoned", "detail": TIMEOUT_DETAIL, "task": f"t-{n}"}, n)
+            res.instance_id = "worker-1"
+            ok = await orch._redispatch_abandoned(eid, res, "task_timeout", None)
+            assert ok is (n <= 2), n
+        orch._iterate_after.clear()
+        await _age_effort(orch, eid)
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count(eid, "stall_recovered") == 0
+        assert await orch._event_count(eid, "stall_escalated") == 1
+    finally:
+        await _shutdown(orch, db)
+
+
+@pytest.mark.parametrize("stop", ["aborted", "frozen"])
+async def test_r2_f3_a_task_timeout_on_an_aborted_or_frozen_effort_is_never_re_dispatched(
+        db_url, tmp_path, stop):
+    from app.schemas import Concern, Trigger
+
+    holder: dict = {}
+
+    async def stop_it():
+        o, e = holder["orch"], holder["eid"]
+        if stop == "aborted":
+            await o.gate.set_lifecycle(e, "aborted")
+        else:
+            await o.gate.freeze(e, Trigger.refusal, Concern(
+                intent_thread=f"effort {e}", what_surfaced="concern mid-turn",
+                intent_of_change="test", pm_recommendation="review", blocked_efforts=[e]))
+
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [
+        {"status": "abandoned", "detail": TIMEOUT_DETAIL, "write": {CODING_FILE: CODING_TEXT},
+         "during": stop_it},
+        {"status": "done", "output": _EXEC_OUT},
+    ])
+    holder["orch"] = orch
+    try:
+        await orch.projects.add("ai-stack", REPO)
+        eid, chan, root = await orch.router.open_effort(f"t-{stop}", project="ai-stack")
+        holder["eid"] = eid
+        await orch.delegate(eid, chan, root, "fix the llm-queue connection leak")
+        await _drain(orch)
+        assert len(trace["turns"]) == 1
+        assert await orch._event_count(eid, "abandoned_turn_redispatched") == 0
+        assert (ws.dirs[W1] / CODING_FILE).read_text() == CODING_TEXT   # never discarded
+    finally:
+        await _shutdown(orch, db)
+
+
+@pytest.mark.parametrize("detail,cause", [("abandoned: exceeded 3600s", "task_timeout"),
+                                          ("cancelled by the operator", "cancelled"),
+                                          ("abandoned: drain deadline exceeded", "worker_shutdown")])
+async def test_r2_f4_the_real_harness_copies_the_daemons_detail(detail, cause):
+    from app.worker.harness import LittleCoderHarness
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "POST" and req.url.path == "/tasks":
+            return httpx.Response(200, json={"task_id": "t-1", "status": "queued"})
+        if req.url.path == "/tasks/t-1":     # little-coder TaskState.public() of a terminal task
+            return httpx.Response(200, json={"task_id": "t-1", "status": "abandoned",
+                                             "detail": detail, "answer": "", "activity": []})
+        return httpx.Response(404)
+    h = LittleCoderHarness(poll_interval_s=0.01, poll_timeout_s=5,
+                           transport=httpx.MockTransport(handler))
+    res = await h.wake("http://w1:8090", "s", "p")
+    assert res.status == "abandoned" and res.detail == detail
+    assert Orchestrator._stopped_turn_cause(res) == cause
+
+
+async def test_r2_f7_the_boot_carry_refuses_a_worker_last_focused_for_another_effort(
+        db_url, tmp_path):
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [])
+    orch2 = None
+    try:
+        eid = await _effort_with_dirty_worker_1(orch, ws, "boot-mismatch")
+        await orch.audit.log("worker_project_set", effort_id=eid, actor="worker-1",
+                             payload={"repo": REPO, "ok": True})
+        # ... then worker-1 was re-focused for another effort (its tree is that effort's now)
+        await orch.audit.log("worker_project_set", effort_id="effort-other", actor="worker-1",
+                             payload={"repo": REPO, "ok": True})
+        await _set_worker(orch, W1, sched_state=SCHED_COMPUTING, effort_id=eid)
+        harness.busy_urls = {W1}
+        harness.progress_task_ids = {W1: "t-orphan"}
+        orig_cancel = harness.cancel_task
+
+        async def cancel(base_url, task_id):
+            harness.busy_urls.discard(base_url)
+            return await orig_cancel(base_url, task_id)
+        harness.cancel_task = cancel
+        orch2 = Orchestrator(orch.s, db, FakeChatAdapter(), model_client=FakeModelClient(),
+                             harness=harness)
+        await orch2.setup()
+        await _drain(orch2)
+        assert await orch2._event_count(eid, "stopped_turn_work_carried") == 0
+        failed = await orch2._last_event_payload(eid, "stopped_turn_carry_failed")
+        assert failed and "effort-other" in failed["reason"]
+        assert not [c for _u, c in trace["checks"] if "b64decode" in c]
+        assert f"agent/{eid}" not in _origin_branches(ws)
+    finally:
+        if orch2 is not None:
+            await _drain(orch2)
+        await _shutdown(orch, db)
+
+
+# -- FAILURE 2: every coding wake site outside _run_step -------------------------------------------
+async def _route_round_2_to_worker_2(orch, marker: str) -> None:
+    orig = orch.scheduler.acquire
+
+    async def acquire(effort_id, role, session_id, *a, **kw):
+        if marker not in session_id:
+            return await orig(effort_id, role, session_id, *a, **kw)
+        await _set_worker(orch, W1, sched_state=SCHED_COMPUTING)
+        try:
+            return await orig(effort_id, role, session_id, *a, **kw)
+        finally:
+            await _set_worker(orch, W1, sched_state=SCHED_IDLE)
+    orch.scheduler.acquire = acquire
+
+
+async def test_r2_burndown_round_abandoned_work_reaches_the_next_round_on_another_worker(
+        db_url, tmp_path):
+    """Tester P2: round 1 on worker-1 is abandoned at the task timeout with an uncommitted file;
+    round 2 runs on worker-2 and must start from it (carry + the F33 sync on burn-down rounds)."""
+    from types import SimpleNamespace
+
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [
+        {"status": "abandoned", "detail": TIMEOUT_DETAIL, "task": "bd-1",
+         "write": {CODING_FILE: CODING_TEXT}},
+        {"status": "done", "output": "fixed"},
+    ])
+    try:
+        await orch.projects.add("ai-stack", REPO)
+        eid, _c, _r = await orch.router.open_effort("burn", project="ai-stack")
+        await orch.charters.set_goal(eid, "fix the build", created_by="po")
+        checks = iter([("fail", "error CS0001: a.cs(1): x\nerror CS0002: b.cs(2): y", 2),
+                       ("pass", "ok", 0)])
+
+        async def build_check(effort_id, on_branch=False):
+            return next(checks)
+
+        async def verify(effort_id, repo):
+            return SimpleNamespace(landed=True, head_sha="h", summary="")
+
+        async def finish(effort_id, res, delivery=None):
+            return None
+
+        async def standing(*a, **kw):
+            return True
+        orch._org_build_check = build_check
+        orch._verify_delivery = verify
+        orch._finish_effort = finish
+        orch._gate_standing_intent = standing
+        await _route_round_2_to_worker_2(orch, "~bd2")
+        await orch._burndown_loop(eid, "error CS0001: a.cs(1): x\nerror CS0002: b.cs(2): y\n"
+                                       "error CS0003: c.cs(3): z")
+        await _drain(orch)
+        turns = trace["turns"]
+        assert [t["url"] for t in turns] == [W1, W2]
+        assert turns[1]["saw"].get(CODING_FILE) == CODING_TEXT
+        carried = await orch._last_event_payload(eid, "stopped_turn_work_carried")
+        assert carried["cause"] == "task_timeout" and carried["branch"] == f"agent/{eid}"
+        assert turns[1]["head"] == carried["commit"]
+        _no_denials(ws)
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_r2_a_burndown_part_round_carries_to_its_part_branch(db_url, tmp_path):
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [])
+    try:
+        eid = await _effort_with_dirty_worker_1(orch, ws, "part")
+        res = _result({"status": "abandoned", "detail": TIMEOUT_DETAIL, "task": "pt"}, 1)
+        res.instance_id = "worker-1"
+        out = await orch._carry_if_stopped(eid, res, REPO, site="burndown r2",
+                                           branch=f"agent/{eid}-pt1r2")
+        assert out["status"] == "carried" and out["pushed"]
+        assert _origin_file(ws, f"agent/{eid}-pt1r2", CODING_FILE) == CODING_TEXT
+    finally:
+        await _shutdown(orch, db)
+
+
+async def _host_effort(orch, ws, name: str):
+    eid = await _effort_with_dirty_worker_1(orch, ws, name)
+
+    async def vendored_host(slug):
+        return ("engine", "vendor/proj", REPO, "")
+    orch._vendored_host = vendored_host
+    return eid
+
+
+async def test_r2_a_host_burndown_round_that_stops_is_salvaged_on_its_own_worker(db_url, tmp_path):
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [
+        {"status": "abandoned", "detail": TIMEOUT_DETAIL, "task": "hb-1"}])
+    try:
+        eid = await _host_effort(orch, ws, "host-bd")
+        loc = await orch.router.effort_thread(eid)
+        await orch._burndown_wake(eid, loc[0], loc[1], 3, ["error CS1: a.cs(1): x"], part=None,
+                                  host=("engine", "vendor/proj", REPO, ""),
+                                  branch=f"agent/{eid}", repo=REPO, branch_exists=True)
+        assert len(trace["stranded"]) == 1
+        url, cmd = trace["stranded"][0]
+        assert url == trace["turns"][0]["url"]                       # pinned to the round's worker
+        assert cmd.startswith("cd vendor/proj ") and f"git push origin agent/{eid}" in cmd
+        pub = await orch._last_event_payload(eid, "pm_published_stranded_work")
+        assert pub["cause"] == "task_timeout" and pub["worker"] == "worker-1"
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_r2_a_host_context_turn_that_stops_is_salvaged_even_when_a_branch_landed(
+        db_url, tmp_path):
+    from app.modules.capabilities import BranchDelivery
+
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [
+        {"status": "abandoned", "detail": TIMEOUT_DETAIL, "task": "hc-1"}])
+    try:
+        eid = await _host_effort(orch, ws, "host-ctx")
+
+        async def verify(effort_id, repo):      # an earlier round's branch already landed
+            return BranchDelivery(verifiable=True, exists=True, ahead=1, head_sha="h" * 40,
+                                  branch=f"agent/{effort_id}")
+
+        async def standing(*a, **kw):
+            return False                        # stop after the salvage (nothing else under test)
+        orch._verify_delivery = verify
+        orch._gate_standing_intent = standing
+        await orch._run_in_host_context(eid)
+        assert len(trace["stranded"]) == 1
+        assert trace["stranded"][0][0] == trace["turns"][0]["url"]
+        assert (await orch._last_event_payload(eid, "pm_published_stranded_work"))["cause"] \
+            == "task_timeout"
+    finally:
+        await _shutdown(orch, db)
+
+
+@pytest.mark.parametrize("site", ["publish", "stale_delivery", "empty_delivery"])
+async def test_r2_publish_and_re_engage_turns_that_stop_are_carried(db_url, tmp_path, site):
+    from app.modules.capabilities import BranchDelivery
+
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [
+        {"status": "abandoned", "detail": TIMEOUT_DETAIL, "task": f"{site}-1", "publish": True,
+         "write": {CODING_FILE: CODING_TEXT}},
+        {"status": "abandoned", "detail": TIMEOUT_DETAIL, "task": f"{site}-2"}])
+    try:
+        eid = await _effort_with_dirty_worker_1(orch, ws, site.replace("_", "-"))
+        await _set_worker(orch, W2, sched_state=SCHED_COMPUTING)   # the turn lands on worker-1
+        chan, root = await orch.router.effort_thread(eid)
+        stale = BranchDelivery(verifiable=True, exists=True, ahead=1, files_changed=0,
+                               head_sha="a" * 40, branch=f"agent/{eid}")
+        if site == "publish":
+            await orch._publish_effort(eid, chan, root, REPO)
+        elif site == "stale_delivery":
+            await orch._recover_stale_delivery(eid, chan, root, REPO, stale)
+        else:
+            await orch._recover_empty_delivery(eid, chan, root, REPO, stale)
+        carried = await orch._last_event_payload(eid, "stopped_turn_work_carried")
+        assert carried is not None and carried["cause"] == "task_timeout"
+        assert carried["worker"] == "worker-1"
+        assert _origin_file(ws, f"agent/{eid}", CODING_FILE) == CODING_TEXT
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_r2_a_flail_stop_the_watchdog_owns_is_left_to_it(db_url, tmp_path):
+    """The flail/loop path takes the same one-owner rule: a task the watchdog claimed first is
+    neither carried nor re-planned here."""
+    from test_ao_plancheck import _FLAIL_OUT
+
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [
+        {"status": "done", "output": _FLAIL_OUT, "task": "t-fl",
+         "write": {CODING_FILE: CODING_TEXT}}])
+    try:
+        orch._stop_claims["t-fl"] = "watchdog"
+        eid = await _run(orch)
+        assert await orch._event_count(eid, "flail_replanned") == 0
+        assert await orch._event_count(eid, "stopped_turn_work_carried") == 0
+        assert await orch._event_count(eid, "stopped_turn_left_to_watchdog") == 1
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_r2_a_publish_turn_the_watchdog_owns_is_left_to_it(db_url, tmp_path):
+    orch, harness, db, ws, trace = await _orch(db_url, tmp_path, [
+        {"status": "abandoned", "detail": TIMEOUT_DETAIL, "task": "pub-w", "publish": True,
+         "write": {CODING_FILE: CODING_TEXT}}])
+    try:
+        eid = await _effort_with_dirty_worker_1(orch, ws, "pub-watchdog")
+        await _set_worker(orch, W2, sched_state=SCHED_COMPUTING)
+        orch._stop_claims["pub-w"] = "watchdog"
+        chan, root = await orch.router.effort_thread(eid)
+        await orch._publish_effort(eid, chan, root, REPO)
+        assert await orch._event_count(eid, "stopped_turn_work_carried") == 0
+        assert await orch._event_count(eid, "stopped_turn_left_to_watchdog") == 1
+    finally:
+        await _shutdown(orch, db)
