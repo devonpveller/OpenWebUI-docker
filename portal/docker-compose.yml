@@ -638,6 +638,11 @@ networks:
   # NOT internal - the single internet-egress chokepoint in the portal.
   notify-net:
     driver: bridge
+    # Fixed subnet (edge-notify-subnet, 2026-10-16): left to Docker this got 192.168.0.0/20,
+    # which contains the home LAN and made every container unable to reach 192.168.1.x.
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
   # The ai-stack seam: owned by the ai-stack project; caddy joins it to reach
   # openwebui:8080 and open_notebook. ai-stack must be up first.
   app-net:

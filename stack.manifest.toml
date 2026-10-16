@@ -540,14 +540,14 @@ opt_in      = true
 [planes.portal]
 # The internet-exposed auth front-end. MANUAL on purpose: exposing the stack
 # stays a human action, exactly as scripts/stack/stack.ps1's header says.
-# requires anchor: portal/docker-compose.yml:618-620 (app-net, external: true,
+# requires anchor: portal/docker-compose.yml:648-650 (app-net, external: true,
 #   name: ai-stack_app-net). RE-DERIVED 2026-09-19 (sl-env-split): these two
 #   read :603-605 and :601-602, which were ALREADY four lines short of the
 #   blocks they name at base 4934529 - :603 was `notify-net:`. Corrected to the
 #   real lines, then shifted by the +25 sl-env-split added to that file's
 #   header - and again by the -14 sl-compose-anchors then took out of it,
-#   which is the pair of numbers standing here now.
-# requires frontend: portal/docker-compose.yml:616-617 - caddy joins
+#   which is the pair of numbers standing here now (re-derived 2026-10-16, edge-notify-subnet).
+# requires frontend: portal/docker-compose.yml:646-647 - caddy joins
 #   ai-stack_app-net "to reach openwebui:8080 and open_notebook", and
 #   config/caddy/Caddyfile:197 proxies openwebui:8080. Without the frontend the
 #   portal's primary vhost 502s.
