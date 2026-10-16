@@ -73,8 +73,9 @@ $Prefix = 'ai-stack-lan-guard-'
 $RuleGroup = 'ai-stack LAN ingress guard'
 $V6All = '::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff'
 $Octet = '(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
-$V4Rx = '^' + $Octet + '\.' + $Octet + '\.' + $Octet + '\.' + $Octet + '$'
-$SvcRx = '^[a-z0-9][a-z0-9-]{0,40}$'
+# \z, never $: in .NET `$` also matches before a final newline, so "192.0.2.11`n" would pass.
+$V4Rx = '^' + $Octet + '\.' + $Octet + '\.' + $Octet + '\.' + $Octet + '\z'
+$SvcRx = '^[a-z0-9][a-z0-9-]{0,40}\z'
 $Dry = [bool]($DryRun -or $WhatIfPreference)
 
 function Say([string]$Text) { Write-Host $Text }
@@ -125,17 +126,17 @@ function ConvertTo-Interval([string]$tok) {
         $fam = 4; $bits = 32
         $parse = { param($t) $v = ConvertFrom-V4 $t; if ($null -eq $v) { return $null } return [System.Numerics.BigInteger]$v }
     }
-    if ($tok -match '^([^-/]+)-([^-/]+)$') {
+    if ($tok -match '^([^-/]+)-([^-/]+)\z') {
         $m1 = $Matches[1]; $m2 = $Matches[2]
         $a = & $parse $m1; $b = & $parse $m2
         if ($null -eq $a -or $null -eq $b -or $a -gt $b) { return $null }
         return , @($fam, $a, $b)
     }
-    if ($tok -match '^([^-/]+)/([^-/]+)$') {
+    if ($tok -match '^([^-/]+)/([^-/]+)\z') {
         $m1 = $Matches[1]; $m = $Matches[2]
         $base = & $parse $m1
         if ($null -eq $base) { return $null }
-        if ($m -match '^[0-9]{1,3}$') { $len = [int]$m }
+        if ($m -match '^[0-9]{1,3}\z') { $len = [int]$m }
         elseif ($fam -eq 4 -and (Test-StrictV4 $m)) {
             $mv = ConvertFrom-V4 $m; $len = $null
             for ($l = 0; $l -le 32; $l++) {
@@ -244,8 +245,11 @@ function Test-Source($src) {
     $props = Get-Props $li
     if ($null -eq $props) { Stop-Abort '[lan_ingress] is not a table' }
     $known = @('host_ip', 'allowed_remote', 'ports')
-    foreach ($p in $props) { if ($known -notcontains $p.Name) { Stop-Abort "[lan_ingress] in the manifest has an unknown key '$($p.Name)' (known: $($known -join ', '))" } }
-    $val = @{}; $from = @{}
+    # Case-SENSITIVE throughout, like the host file: TOML keys are case-sensitive, so
+    # `Allowed_Remote` is an unknown key, not a spelling of allowed_remote.
+    foreach ($p in $props) { if ($known -cnotcontains $p.Name) { Stop-Abort "[lan_ingress] in the manifest has an unknown key '$($p.Name)' (known: $($known -join ', '))" } }
+    $val = New-Object System.Collections.Hashtable ([StringComparer]::Ordinal)
+    $from = New-Object System.Collections.Hashtable ([StringComparer]::Ordinal)
     foreach ($p in $props) { $val[$p.Name] = $p.Value; $from[$p.Name] = 'manifest' }
 
     if ($src.HostPresent) {
@@ -287,7 +291,7 @@ function Test-Source($src) {
         if ($svc -cnotmatch $SvcRx) { Stop-Abort "[lan_ingress.ports] service name '$svc' must match $SvcRx" }
         $e = Get-Props $p.Value
         if ($null -eq $e) { Stop-Abort "[lan_ingress.ports] $svc must be { plane = ..., port = ... }" }
-        foreach ($x in $e) { if (@('plane', 'port') -notcontains $x.Name) { Stop-Abort "[lan_ingress.ports] $svc has an unknown key '$($x.Name)'" } }
+        foreach ($x in $e) { if (@('plane', 'port') -cnotcontains $x.Name) { Stop-Abort "[lan_ingress.ports] $svc has an unknown key '$($x.Name)'" } }
         $plane = $p.Value.PSObject.Properties['plane']; $port = $p.Value.PSObject.Properties['port']
         if (-not $plane -or -not $port) { Stop-Abort "[lan_ingress.ports] $svc needs both plane and port" }
         if (-not ($plane.Value -is [string]) -or ($planes -cnotcontains $plane.Value)) { Stop-Abort "[lan_ingress.ports] $svc names plane '$($plane.Value)', which the manifest does not declare" }
@@ -325,6 +329,16 @@ function Get-DesiredRules($cfg) {
 function Test-OwnName([string]$Name) { return ($Name -and $Name.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase)) }
 
 function Get-GuardRules {
+    # A property's value as one comparable string: $null when the object lacks it (StrictMode-safe),
+    # arrays joined with ','. A missing property can therefore never read as the expected value.
+    function Get-FieldText($o, [string]$Name) {
+        if ($null -eq $o) { return $null }
+        $p = $o.PSObject.Properties[$Name]
+        if ($null -eq $p) { return $null }
+        if ($null -eq $p.Value) { return '' }
+        return ((@($p.Value) | ForEach-Object { [string]$_ }) -join ',')
+    }
+    # (nested, so Get-GuardRules is self-contained)
     try { $all = @(Get-NetFirewallRule -Name ($Prefix + '*') -ErrorAction Stop) }
     catch {
         if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { $all = @() }
@@ -333,40 +347,76 @@ function Get-GuardRules {
     $out = @()
     foreach ($r in $all) {
         if (-not (Test-OwnName ([string]$r.Name))) { continue }
+        # EVERY filter a rule has, because each one can narrow where a BLOCK applies: a block
+        # rule limited to remote port 1, one service, one interface, one user or one package
+        # blocks (almost) nothing while still looking present (tester finding TF1).
         try {
             $pf = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r -ErrorAction Stop
             $af = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r -ErrorAction Stop
             $ap = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $r -ErrorAction Stop
+            $sv = Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $r -ErrorAction Stop
+            $it = Get-NetFirewallInterfaceTypeFilter -AssociatedNetFirewallRule $r -ErrorAction Stop
+            $if = Get-NetFirewallInterfaceFilter -AssociatedNetFirewallRule $r -ErrorAction Stop
+            $sf = Get-NetFirewallSecurityFilter -AssociatedNetFirewallRule $r -ErrorAction Stop
         }
         catch { Stop-Abort ("could not read the filters of rule $($r.Name): " + $_.Exception.Message) }
         $out += [pscustomobject]@{
-            Name          = [string]$r.Name
-            Direction     = [string]$r.Direction
-            Action        = [string]$r.Action
-            Enabled       = [string]$r.Enabled
-            Profile       = [string]$r.Profile
-            Protocol      = [string]$pf.Protocol
-            LocalPort     = @($pf.LocalPort | ForEach-Object { [string]$_ })
-            LocalAddress  = @($af.LocalAddress | ForEach-Object { [string]$_ })
-            RemoteAddress = @($af.RemoteAddress | ForEach-Object { [string]$_ })
-            Program       = [string]$ap.Program
+            Name               = [string]$r.Name
+            Direction          = Get-FieldText $r 'Direction'
+            Action             = Get-FieldText $r 'Action'
+            Enabled            = Get-FieldText $r 'Enabled'
+            Profile            = Get-FieldText $r 'Profile'
+            Owner              = Get-FieldText $r 'Owner'
+            Platform           = Get-FieldText $r 'Platform'
+            Protocol           = Get-FieldText $pf 'Protocol'
+            LocalPort          = @(@($pf.LocalPort) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
+            RemotePort         = Get-FieldText $pf 'RemotePort'
+            DynamicTarget      = Get-FieldText $pf 'DynamicTarget'
+            LocalAddress       = Get-FieldText $af 'LocalAddress'
+            RemoteAddress      = @(@($af.RemoteAddress) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
+            Program            = Get-FieldText $ap 'Program'
+            Package            = Get-FieldText $ap 'Package'
+            Service            = Get-FieldText $sv 'Service'
+            InterfaceType      = Get-FieldText $it 'InterfaceType'
+            InterfaceAlias     = Get-FieldText $if 'InterfaceAlias'
+            LocalUser          = Get-FieldText $sf 'LocalUser'
+            RemoteUser         = Get-FieldText $sf 'RemoteUser'
+            RemoteMachine      = Get-FieldText $sf 'RemoteMachine'
+            Authentication     = Get-FieldText $sf 'Authentication'
+            Encryption         = Get-FieldText $sf 'Encryption'
+            OverrideBlockRules = Get-FieldText $sf 'OverrideBlockRules'
         }
     }
     return $out
 }
 
+# The drift check. EVERY field below must hold exactly this value (shapes measured read-only
+# on this host's rules, 2026-10-16: an unrestricted filter reads 'Any', no package/owner/
+# platform reads empty). Anything else - including a field the read could not find - is
+# drift, and -Apply replaces the rule. LocalPort and RemoteAddress are compared separately.
 function Get-Drift($have, $want) {
+    $expect = [ordered]@{
+        Direction = 'Inbound'; Action = 'Block'; Enabled = 'True'; Profile = 'Any'
+        Owner = ''; Platform = ''
+        Protocol = 'TCP'; RemotePort = 'Any'; DynamicTarget = 'Any'
+        LocalAddress = 'Any'
+        Program = 'Any'; Package = ''
+        Service = 'Any'; InterfaceType = 'Any'; InterfaceAlias = 'Any'
+        LocalUser = 'Any'; RemoteUser = 'Any'; RemoteMachine = 'Any'
+        Authentication = 'NotRequired'; Encryption = 'NotRequired'; OverrideBlockRules = 'False'
+    }
     $why = @()
-    if ($have.Direction -ne 'Inbound') { $why += "direction $($have.Direction)" }
-    if ($have.Action -ne 'Block') { $why += "action $($have.Action)" }
-    if ($have.Enabled -ne 'True') { $why += "enabled $($have.Enabled)" }
-    if ($have.Profile -ne 'Any') { $why += "profile $($have.Profile)" }
-    if ($have.Protocol -ne 'TCP') { $why += "protocol $($have.Protocol)" }
-    if ((@($have.LocalPort) -join ',') -ne [string]$want.Port) { $why += "local port $(@($have.LocalPort) -join ',')" }
-    if ((@($have.LocalAddress) -join ',') -ne 'Any') { $why += "local address $(@($have.LocalAddress) -join ',')" }
-    if ($have.Program -ne 'Any') { $why += "program $($have.Program)" }
+    foreach ($f in $expect.Keys) {
+        $p = $have.PSObject.Properties[$f]
+        $v = if ($null -eq $p) { $null } else { $p.Value }
+        if ($null -eq $v -or [string]$v -ne $expect[$f]) {
+            $shown = if ($null -eq $v) { '<unreadable>' } elseif ([string]$v -eq '') { '<empty>' } else { [string]$v }
+            $why += ("{0} {1}" -f $f.ToLowerInvariant(), $shown)
+        }
+    }
+    if ((@($have.LocalPort) -join ',') -ne [string]$want.Port) { $why += "localport $(@($have.LocalPort) -join ',')" }
     $k = Get-AddressKey @($have.RemoteAddress)
-    if ($null -eq $k -or $k -ne $want.RemoteKey) { $why += "remote addresses $(@($have.RemoteAddress) -join ',')" }
+    if ($null -eq $k -or $k -ne $want.RemoteKey) { $why += "remoteaddress $(@($have.RemoteAddress) -join ',')" }
     return $why
 }
 

@@ -20,6 +20,22 @@ so Docker's rule is left alone and simply loses. Each rule covers the port on
 every local address (not only the LAN IP), so a port that ends up published on
 `0.0.0.0` or on an IPv6 address is covered too.
 
+Docker's allow rules on this host apply to the **Public** profile, and the LAN
+connection is Public today (read 2026-10-16). If the LAN is ever switched to
+Private, Docker's rule stops matching it, and the guard is then belt and
+braces. The guard's rules apply to all profiles, so either way they hold.
+
+`-Status` treats a rule as in sync only when EVERY one of its filters matches.
+The direction must be Inbound and the action Block. The rule must be enabled,
+cover all profiles and be TCP on the listed port. Its remote addresses must be
+exactly the complement of the nodes. Every other filter must be Any: local
+address, remote port, dynamic target, program, service, interface type,
+interface, local user, remote user, remote machine. Package, owner and platform
+must be empty. Authentication and encryption must be NotRequired, and
+OverrideBlockRules must be False. A rule narrowed in any of these ways (for
+example, to one remote port) blocks almost nothing. `-Status` shows it as DRIFT,
+naming the field, and `-Apply` replaces it.
+
 | | |
 |---|---|
 | Port list (tracked) | `stack.manifest.toml` `[lan_ingress.ports]`: one line per service |

@@ -44,9 +44,18 @@ New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 # ---------------------------------------------------------------- the fake firewall
 $global:LGT = @{ Rules = [ordered]@{}; Calls = @(); Violations = @(); Admin = $false; Listen = @() }
 
+# The fields an unrestricted rule reports through the real cmdlets (shapes measured read-only
+# on this host 2026-10-16): 'Any' for every unrestricted filter, $null package, '' owner,
+# an empty platform list. Every rule in the fake store carries all of them.
+function Get-FakeDefaults {
+    return @{ RemotePort = 'Any'; DynamicTarget = 'Any'; Program = 'Any'; Package = $null; Service = 'Any'; InterfaceType = 'Any';
+        InterfaceAlias = 'Any'; LocalUser = 'Any'; RemoteUser = 'Any'; RemoteMachine = 'Any'; Authentication = 'NotRequired';
+        Encryption = 'NotRequired'; OverrideBlockRules = $false; Owner = ''; Platform = @() }
+}
 function New-FakeRule([string]$Name, [string]$Port, [string[]]$Remote, [hashtable]$Over) {
-    $r = @{ Name = $Name; DisplayName = $Name; Group = ''; Direction = 'Inbound'; Action = 'Block'; Enabled = 'True';
-        Profile = 'Any'; Protocol = 'TCP'; LocalPort = @($Port); LocalAddress = @('Any'); RemoteAddress = @($Remote); Program = 'Any' }
+    $r = Get-FakeDefaults
+    foreach ($kv in @{ Name = $Name; DisplayName = $Name; Group = ''; Direction = 'Inbound'; Action = 'Block'; Enabled = 'True';
+        Profile = 'Any'; Protocol = 'TCP'; LocalPort = @($Port); LocalAddress = @('Any'); RemoteAddress = @($Remote) }.GetEnumerator()) { $r[$kv.Key] = $kv.Value }
     if ($Over) { foreach ($k in $Over.Keys) { $r[$k] = $Over[$k] } }
     return $r
 }
@@ -58,7 +67,13 @@ function Reset-Fake {
     $global:LGT.Rules['ai-stack-lan-guardian'] = (New-FakeRule 'ai-stack-lan-guardian' '3000' @('Any') @{ Action = 'Allow' })
     $global:LGT.Rules['other-ai-stack-lan-guard-x'] = (New-FakeRule 'other-ai-stack-lan-guard-x' '3000' @('Any') @{ Action = 'Allow' })
 }
-function Get-Snapshot { ($global:LGT.Rules.Keys | Sort-Object | ForEach-Object { $r = $global:LGT.Rules[$_]; "$_|$($r.Action)|$($r.LocalPort -join ',')|$($r.RemoteAddress -join ',')" }) -join "`n" }
+# The WHOLE store, every field of every rule (Docker's included), so "no change" means no change.
+function Get-Snapshot {
+    ($global:LGT.Rules.Keys | Sort-Object | ForEach-Object {
+        $r = $global:LGT.Rules[$_]
+        $_ + '|' + (($r.Keys | Sort-Object | ForEach-Object { $_ + '=' + ((@($r[$_]) | ForEach-Object { [string]$_ }) -join ',') }) -join ';')
+    }) -join "`n"
+}
 function Get-Mutations { @($global:LGT.Calls | Where-Object { $_.Op -ne 'Get' }) }
 
 function Get-NetFirewallRule {
@@ -66,8 +81,15 @@ function Get-NetFirewallRule {
     $global:LGT.Calls += @{ Op = 'Get' }
     foreach ($k in @($global:LGT.Rules.Keys)) {
         $r = $global:LGT.Rules[$k]
-        [pscustomobject]@{ Name = $r.Name; DisplayName = $r.DisplayName; Group = $r.Group; Direction = $r.Direction; Action = $r.Action; Enabled = $r.Enabled; Profile = $r.Profile }
+        New-FakeFilter $r @('Name', 'DisplayName', 'Group', 'Direction', 'Action', 'Enabled', 'Profile', 'Owner', 'Platform')
     }
+}
+# A filter object carrying only the fields the stored rule HAS: a field removed from a stored
+# rule comes back as a property the object lacks, the way an unreadable field would.
+function New-FakeFilter($r, [string[]]$Fields) {
+    $o = [ordered]@{}
+    foreach ($f in $Fields) { if ($r.ContainsKey($f)) { $o[$f] = $r[$f] } }
+    return [pscustomobject]$o
 }
 function Get-FakeRuleFor($AssociatedNetFirewallRule) {
     $n = $AssociatedNetFirewallRule.Name
@@ -76,15 +98,31 @@ function Get-FakeRuleFor($AssociatedNetFirewallRule) {
 }
 function Get-NetFirewallPortFilter {
     [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule)
-    process { $r = Get-FakeRuleFor $AssociatedNetFirewallRule; [pscustomobject]@{ Protocol = $r.Protocol; LocalPort = $r.LocalPort; RemotePort = 'Any' } }
+    process { New-FakeFilter (Get-FakeRuleFor $AssociatedNetFirewallRule) @('Protocol', 'LocalPort', 'RemotePort', 'DynamicTarget') }
 }
 function Get-NetFirewallAddressFilter {
     [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule)
-    process { $r = Get-FakeRuleFor $AssociatedNetFirewallRule; [pscustomobject]@{ LocalAddress = $r.LocalAddress; RemoteAddress = $r.RemoteAddress } }
+    process { New-FakeFilter (Get-FakeRuleFor $AssociatedNetFirewallRule) @('LocalAddress', 'RemoteAddress') }
 }
 function Get-NetFirewallApplicationFilter {
     [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule)
-    process { $r = Get-FakeRuleFor $AssociatedNetFirewallRule; [pscustomobject]@{ Program = $r.Program } }
+    process { New-FakeFilter (Get-FakeRuleFor $AssociatedNetFirewallRule) @('Program', 'Package') }
+}
+function Get-NetFirewallServiceFilter {
+    [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule)
+    process { New-FakeFilter (Get-FakeRuleFor $AssociatedNetFirewallRule) @('Service') }
+}
+function Get-NetFirewallInterfaceTypeFilter {
+    [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule)
+    process { New-FakeFilter (Get-FakeRuleFor $AssociatedNetFirewallRule) @('InterfaceType') }
+}
+function Get-NetFirewallInterfaceFilter {
+    [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule)
+    process { New-FakeFilter (Get-FakeRuleFor $AssociatedNetFirewallRule) @('InterfaceAlias') }
+}
+function Get-NetFirewallSecurityFilter {
+    [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule)
+    process { New-FakeFilter (Get-FakeRuleFor $AssociatedNetFirewallRule) @('LocalUser', 'RemoteUser', 'RemoteMachine', 'Authentication', 'Encryption', 'OverrideBlockRules') }
 }
 function New-NetFirewallRule {
     [CmdletBinding()] param([string]$Name, [string]$DisplayName, [string]$Group, [string]$Description, [string]$Direction,
@@ -93,8 +131,10 @@ function New-NetFirewallRule {
     $global:LGT.Calls += @{ Op = 'New'; Name = $Name; Direction = $Direction; Action = $Action; Protocol = $Protocol; LocalPort = $LocalPort;
         LocalAddress = $LocalAddress; RemoteAddress = $RemoteAddress; Profile = $Profile; Enabled = $Enabled }
     if ($global:LGT.Rules.Contains($Name)) { throw "fake: a rule named $Name already exists" }
-    $global:LGT.Rules[$Name] = @{ Name = $Name; DisplayName = $DisplayName; Group = $Group; Direction = $Direction; Action = $Action; Enabled = $Enabled;
-        Profile = $Profile; Protocol = $Protocol; LocalPort = @($LocalPort); LocalAddress = @($LocalAddress); RemoteAddress = @($RemoteAddress); Program = 'Any' }
+    $new = Get-FakeDefaults
+    foreach ($kv in @{ Name = $Name; DisplayName = $DisplayName; Group = $Group; Direction = $Direction; Action = $Action; Enabled = $Enabled;
+        Profile = $Profile; Protocol = $Protocol; LocalPort = @($LocalPort); LocalAddress = @($LocalAddress); RemoteAddress = @($RemoteAddress) }.GetEnumerator()) { $new[$kv.Key] = $kv.Value }
+    $global:LGT.Rules[$Name] = $new
 }
 function Remove-NetFirewallRule {
     [CmdletBinding()] param([string[]]$Name, [Parameter(ValueFromPipeline = $true)]$InputObject)
@@ -299,6 +339,15 @@ $bad = [ordered]@{
     'unknown-key'    = '[lan_ingress]' + "`n" + 'host_ip = "192.0.2.69"' + "`n" + 'allowed_remote = ["192.0.2.11"]' + "`n" + 'allow_all = true' + "`n" + '[lan_ingress.ports]' + "`n" + 'openwebui = { plane = "frontend", port = 3000 }'
     'no-table'       = ''
     'bad-toml'       = '[lan_ingress' + "`n" + 'host_ip = '
+    'prefix-garbage' = '[lan_ingress]' + "`n" + 'host_ip = "192.0.2.69"' + "`n" + 'allowed_remote = ["1192.0.2.11"]' + "`n" + '[lan_ingress.ports]' + "`n" + 'openwebui = { plane = "frontend", port = 3000 }'
+    'lead-space' = '[lan_ingress]' + "`n" + 'host_ip = "192.0.2.69"' + "`n" + 'allowed_remote = [" 192.0.2.11"]' + "`n" + '[lan_ingress.ports]' + "`n" + 'openwebui = { plane = "frontend", port = 3000 }'
+    'trail-nl' = '[lan_ingress]' + "`n" + 'host_ip = "192.0.2.69"' + "`n" + 'allowed_remote = ["192.0.2.11\n"]' + "`n" + '[lan_ingress.ports]' + "`n" + 'openwebui = { plane = "frontend", port = 3000 }'
+    'host-trail-nl' = '[lan_ingress]' + "`n" + 'host_ip = "192.0.2.69\n"' + "`n" + 'allowed_remote = ["192.0.2.11"]' + "`n" + '[lan_ingress.ports]' + "`n" + 'openwebui = { plane = "frontend", port = 3000 }'
+    'mapped-v6' = '[lan_ingress]' + "`n" + 'host_ip = "192.0.2.69"' + "`n" + 'allowed_remote = ["::ffff:192.0.2.11"]' + "`n" + '[lan_ingress.ports]' + "`n" + 'openwebui = { plane = "frontend", port = 3000 }'
+    'svc-trail-nl' = '[lan_ingress]' + "`n" + 'host_ip = "192.0.2.69"' + "`n" + 'allowed_remote = ["192.0.2.11"]' + "`n" + '[lan_ingress.ports]' + "`n" + '"openwebui\n" = { plane = "frontend", port = 3000 }'
+    'miscased-port' = '[lan_ingress]' + "`n" + 'host_ip = "192.0.2.69"' + "`n" + 'allowed_remote = ["192.0.2.11"]' + "`n" + '[lan_ingress.ports]' + "`n" + 'openwebui = { plane = "frontend", Port = 3000 }'
+    'miscased-extra' = '[lan_ingress]' + "`n" + 'host_ip = "192.0.2.69"' + "`n" + 'allowed_remote = ["192.0.2.11"]' + "`n" + 'Allowed_Remote = ["0.0.0.0"]' + "`n" + '[lan_ingress.ports]' + "`n" + 'openwebui = { plane = "frontend", port = 3000 }'
+    'miscased-keys' = '[lan_ingress]' + "`n" + 'Host_Ip = "192.0.2.69"' + "`n" + 'Allowed_Remote = ["192.0.2.11"]' + "`n" + '[lan_ingress.ports]' + "`n" + 'openwebui = { plane = "frontend", port = 3000 }'
 }
 # Each case runs in BOTH layouts: 'm' keeps the addresses in the manifest (no host file),
 # 'h' moves the host_ip / allowed_remote lines into .stack\lan-ingress.toml (the real layout).
@@ -308,18 +357,21 @@ function Split-Case([string]$toml) {
     if ($hostLines.Count -eq 0) { return $null }
     return @{ Manifest = ($rest -join "`n"); Host = ("[lan_ingress]`n" + ($hostLines -join "`n")) }
 }
-function Test-AbortNoChange([string]$Id, [string]$Title, [string]$ManifestPath) {
+# Where the REASON matters (two code paths could both abort), $Reason pins it.
+$T7Reason = @{ 'miscased-keys' = "unknown key 'Host_Ip'"; 'miscased-port' = "unknown key 'Port'"; 'svc-trail-nl' = 'service name' }
+function Test-AbortNoChange([string]$Id, [string]$Title, [string]$ManifestPath, [string]$Reason = '') {
     Reset-Fake; $global:LGT.Admin = $true
     $null = Invoke-Guard @('-Apply', '-ManifestPath', $good)   # a guard is in place from an earlier good apply
     $before = Get-Snapshot
     $global:LGT.Calls = @()
     $r = Invoke-Guard @('-Apply', '-ManifestPath', $ManifestPath)
     $m = Get-Mutations
-    $ok = ($r.Code -eq 1) -and ($m.Count -eq 0) -and ((Get-Snapshot) -eq $before) -and ($r.Out -match 'ABORT:') -and ($r.Out -notmatch 'unexpected error')
+    $ok = ($r.Code -eq 1) -and ($m.Count -eq 0) -and ((Get-Snapshot) -eq $before) -and ($r.Out -match 'ABORT:') -and ($r.Out -notmatch 'unexpected error') -and
+        ((-not $Reason) -or ($r.Out -match [regex]::Escape($Reason)))
     Write-Case $Id $Title $ok ("exit=$($r.Code) mutations=$($m.Count)`n$($r.Out)")
 }
 foreach ($k in $bad.Keys) {
-    Test-AbortNoChange "T7m.$k" "an invalid source ($k; addresses in the manifest) aborts with no change" (New-Fixture ('bad-m-' + $k) $bad[$k] $null)
+    Test-AbortNoChange "T7m.$k" "an invalid source ($k; addresses in the manifest) aborts with no change" (New-Fixture ('bad-m-' + $k) $bad[$k] $null) $T7Reason[$k]
     $split = Split-Case $bad[$k]
     if ($split) {
         Test-AbortNoChange "T7h.$k" "an invalid source ($k; addresses in the host file) aborts with no change" (New-Fixture ('bad-h-' + $k) $split.Manifest $split.Host)
@@ -477,6 +529,74 @@ foreach ($k in @('Action=Allow', 'Enabled=False', 'Profile=Private', 'Protocol=U
     $global:LGT.Calls = @()
     $r = Invoke-Guard @('-Status', '-ManifestPath', $single)
     Write-Case "T15.$k" "a rule with $k reads as DRIFT" (($r.Code -eq 3) -and ($r.Out -match '(?m)^\s*DRIFT\s')) ("exit=$($r.Code)`n$($r.Out)")
+}
+
+# ---------------------------------------------------------------- T16 every rule field the drift check compares (TF1)
+# A rule that is present but narrowed - to one remote port, one service, one interface, one
+# user, one package, a platform, an owner - blocks (almost) nothing. Each such field must read
+# as DRIFT in -Status and be repaired by -Apply, after which -Status is clean again. A field
+# the read cannot find at all must read as DRIFT too, never as the expected value.
+$narrow = [ordered]@{
+    'RemotePort'         = '1'
+    'DynamicTarget'      = 'ProximityApps'
+    'Program'            = 'C:\x.exe'
+    'Package'            = 'S-1-15-2-1'
+    'Service'            = 'wuauserv'
+    'InterfaceType'      = 'Wireless'
+    'InterfaceAlias'     = 'Wi-Fi'
+    'LocalUser'          = 'D:(A;;CC;;;S-1-5-18)'
+    'RemoteUser'         = 'D:(A;;CC;;;S-1-5-21-1)'
+    'RemoteMachine'      = 'D:(A;;CC;;;S-1-5-21-2)'
+    'Authentication'     = 'Required'
+    'Encryption'         = 'Required'
+    'OverrideBlockRules' = $true
+    'Owner'              = 'S-1-5-21-1-1-1-1001'
+    'Platform'           = @('10.0')
+    'Direction'          = 'Outbound'
+    'Action'             = 'Allow'
+    'Enabled'            = 'False'
+    'Profile'            = 'Private'
+    'Protocol'           = 'UDP'
+    'LocalAddress'       = @('192.0.2.69')
+    'RemotePort-missing' = $null
+    'Service-missing'    = $null
+}
+foreach ($k in $narrow.Keys) {
+    $field = $k -replace '-missing$', ''
+    Reset-Fake; $global:LGT.Admin = $true
+    $null = Invoke-Guard @('-Apply', '-ManifestPath', $single)
+    $n = $PREFIX + 'openwebui-3000'
+    $expected = ((@($global:LGT.Rules[$n][$field]) | ForEach-Object { [string]$_ }) -join ',')
+    if ($k -like '*-missing') { $global:LGT.Rules[$n].Remove($field) } else { $global:LGT.Rules[$n][$field] = $narrow[$k] }
+    $global:LGT.Admin = $false; $global:LGT.Calls = @()
+    $s = Invoke-Guard @('-Status', '-ManifestPath', $single)
+    $sawDrift = ($s.Code -eq 3) -and ($s.Out -match '(?m)^\s*DRIFT\s') -and ($s.Out -match ('(?i)drift:.*' + [regex]::Escape($field))) -and ((Get-Mutations).Count -eq 0)
+    $global:LGT.Admin = $true; $global:LGT.Calls = @()
+    $a = Invoke-Guard @('-Apply', '-ManifestPath', $single)
+    $after = if ($global:LGT.Rules.Contains($n) -and $global:LGT.Rules[$n].ContainsKey($field)) { ((@($global:LGT.Rules[$n][$field]) | ForEach-Object { [string]$_ }) -join ',') } else { '<gone>' }
+    $repaired = ($a.Code -eq 0) -and ($a.Out -match '(?m)^\s*REPLACE\s') -and ($after -eq $expected)
+    $global:LGT.Admin = $false; $global:LGT.Calls = @()
+    $s2 = Invoke-Guard @('-Status', '-ManifestPath', $single)
+    Write-Case "T16.$k" "a guard rule with $field narrowed/unreadable reads DRIFT, -Apply repairs it, -Status is clean after" ($sawDrift -and $repaired -and $s2.Code -eq 0) ("expected=$expected after=$after`nstatus exit=$($s.Code)`n$($s.Out)`napply exit=$($a.Code)`n$($a.Out)`nstatus-after exit=$($s2.Code)`n$($s2.Out)")
+}
+
+# ---------------------------------------------------------------- T17 the ends of the IPv4 space (TF4)
+$ends = [ordered]@{
+    'last-node'  = @('["255.255.255.254"]', @('255.255.255.255', '255.255.255.253', '0.0.0.0'), @('255.255.255.254'))
+    'first-node' = @('["0.0.0.1"]', @('0.0.0.0', '0.0.0.2', '255.255.255.255'), @('0.0.0.1'))
+    'both-ends'  = @('["0.0.0.0", "255.255.255.255"]', @('0.0.0.1', '255.255.255.254', '192.0.2.10'), @('0.0.0.0', '255.255.255.255'))
+}
+foreach ($k in $ends.Keys) {
+    $f = New-Fixture ('ends-' + $k) $GoodIngress ("[lan_ingress]`nhost_ip = `"192.0.2.69`"`nallowed_remote = " + $ends[$k][0])
+    Reset-Fake; $global:LGT.Admin = $true
+    $r = Invoke-Guard @('-Apply', '-ManifestPath', $f)
+    $n = @($global:LGT.Calls | Where-Object { $_.Op -eq 'New' })
+    $ok = ($r.Code -eq 0) -and ($n.Count -eq 2)
+    foreach ($x in $n) {
+        foreach ($ip in $ends[$k][1]) { if (-not (Test-V4Covered $ip @($x.RemoteAddress))) { $ok = $false } }
+        foreach ($ip in $ends[$k][2]) { if (Test-V4Covered $ip @($x.RemoteAddress)) { $ok = $false } }
+    }
+    Write-Case "T17.$k" "nodes $($ends[$k][0]): the neighbours at the ends of IPv4 are blocked, the nodes are not" $ok ("exit=$($r.Code) remote=$(if ($n) { $n[0].RemoteAddress -join ',' })`n$($r.Out)")
 }
 
 Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
