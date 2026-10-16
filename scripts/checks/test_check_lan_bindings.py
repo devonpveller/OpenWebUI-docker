@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import check_lan_bindings as c  # noqa: E402
@@ -117,6 +120,65 @@ class LiveValue(unittest.TestCase):
         for bad in ("0.0.0.0", "::", "127.0.0.1", "127.0.0.2", "host.lan", "192.0.2.10:3000",
                     "224.0.0.1", "255.255.255.255", "", " "):
             self.assertIsNotNone(c.validate_lan_ip(bad), bad)
+
+
+class EnvValueLikeCompose(unittest.TestCase):
+    """Expectations measured against `docker compose config` v5.3.0 on 2026-10-16."""
+
+    def test_values_compose_accepts(self):
+        for raw, want in (("1.2.3.4", "1.2.3.4"), ('"1.2.3.4"', "1.2.3.4"), ("'1.2.3.4'", "1.2.3.4"),
+                          (" 1.2.3.4", "1.2.3.4"), ("1.2.3.4   ", "1.2.3.4"),
+                          ("1.2.3.4 # c", "1.2.3.4"), ('"1.2.3.4" # c', "1.2.3.4"), ("", "")):
+            self.assertEqual(c.parse_env_value(raw), want, raw)
+
+    def test_quoted_whitespace_is_kept_and_refused(self):
+        for raw in ('" 192.0.2.10"', '"192.0.2.10 "', "' 192.0.2.10'"):
+            self.assertIsNotNone(c.validate_lan_ip(c.parse_env_value(raw)), raw)
+
+    def test_hash_without_space_is_part_of_the_value(self):
+        self.assertIsNotNone(c.validate_lan_ip(c.parse_env_value("192.0.2.10#c")))
+
+    def test_unterminated_quote_is_an_error(self):
+        with self.assertRaises(ValueError):
+            c.parse_env_value('"192.0.2.10')
+
+    def test_validate_does_not_strip(self):
+        self.assertIsNotNone(c.validate_lan_ip(" 192.0.2.10"))
+        self.assertIsNotNone(c.validate_lan_ip("192.0.2.10 "))
+
+    def test_file_read_last_wins_and_export(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / ".env"
+            f.write_text("OWUI_LAN_IP=10.0.0.1\n# x\nexport OWUI_LAN_IP = \"192.0.2.10\" # c\n", encoding="utf-8")
+            self.assertEqual(c.read_env_value(f, "OWUI_LAN_IP"), "192.0.2.10")
+            self.assertIsNone(c.read_env_value(f, "OTHER"))
+            f.write_text('OWUI_LAN_IP="1.2.3.4\n', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                c.read_env_value(f, "OWUI_LAN_IP")
+
+
+class RenderWithoutLiveEnv(unittest.TestCase):
+    def _cmd(self, env_present):
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = list(cmd)
+            if "--project-directory" in cmd:
+                scratch = Path(cmd[cmd.index("--project-directory") + 1])
+                seen["scratch_env"] = (scratch / ".env").is_file()
+            return mock.Mock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch.object(c.Path, "is_file", return_value=env_present),              mock.patch.object(c.shutil, "copyfile"), mock.patch.object(c.subprocess, "run", fake_run):
+            c.render("agent-org", (), None)
+        return seen
+
+    def test_absent_env_uses_scratch_project_directory(self):
+        seen = self._cmd(False)
+        self.assertIn("--project-directory", seen["cmd"])
+
+    def test_present_env_renders_in_place(self):
+        seen = self._cmd(True)
+        self.assertNotIn("--project-directory", seen["cmd"])
 
 
 if __name__ == "__main__":

@@ -31,7 +31,16 @@ LAN address - and refuses when:
 
 `--live-env` additionally reads each plane's real `.env` (when present) and refuses a
 LAN variable whose value is not one specific IPv4 unicast address - 0.0.0.0 above all.
-It prints the verdict only, never the value.
+It reads the value the way compose's dotenv reader does (measured on compose v5.3.0,
+2026-10-16): unquoted values lose surrounding whitespace and a trailing ` #` comment,
+quoted values keep their inner whitespace (so `" 192.0.2.10"` is a value compose
+rejects, and so does this check), an unterminated quote is a read error. It prints the
+verdict only, never the value.
+
+A tree without a plane's `.env` (fresh clone, CI) still renders: compose needs
+agent-org/docker/.env to exist for that service's `env_file:`, so when the plane's own
+`.env` is absent the render runs with `--project-directory` on a scratch directory holding
+a copy of the plane's `.env.example` as `.env`. Nothing is written inside the repo.
 
 WHY --env-file. Each render passes `--env-file <plane>/.env.example` (the committed
 example, the same file check-project-configs.ps1 renders against). Passing --env-file
@@ -53,8 +62,10 @@ import copy
 import ipaddress
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -78,6 +89,10 @@ LAN = {
         "bindings": {("llm-gateway-ui", "8445", "8080")},
     },
 }
+# Planes whose compose file has a live `env_file: .env`, which compose refuses to render without.
+# (inference/frontend must NOT get a scratch project directory: their includes and paths are
+# relative to the real one.)
+NEEDS_ENV_FILE = {"agent-org"}
 ALL_VARS = sorted(spec["var"] for spec in LAN.values())
 
 COMPOSE = {
@@ -116,6 +131,17 @@ def _binding(service: str, port: dict) -> tuple:
             str(port.get("target") or ""))
 
 
+_SCRATCH = {}
+
+
+def _scratch_project(plane: str, example: str) -> str:
+    if plane not in _SCRATCH:
+        d = tempfile.TemporaryDirectory(prefix="lanbind-")
+        shutil.copyfile(REPO / example, Path(d.name) / ".env")
+        _SCRATCH[plane] = d  # kept alive (and cleaned up) with the process
+    return _SCRATCH[plane].name
+
+
 def render(plane: str, profiles, lan_value) -> dict:
     """`docker compose config --format json` for one plane; lan_value None = unset."""
     compose, example = COMPOSE[plane]
@@ -127,6 +153,11 @@ def render(plane: str, profiles, lan_value) -> dict:
     for profile in profiles:
         cmd += ["--profile", profile]
     cmd += ["config", "--format", "json"]
+    if plane in NEEDS_ENV_FILE and not (REPO / Path(compose).parent / ".env").is_file():
+        # fresh clone / CI: the plane's own .env is absent and `env_file: .env` needs it. ONE
+        # scratch directory for the whole run: the project directory is baked into some
+        # rendered paths, so a fresh one per render would make unset/set renders differ.
+        cmd[2:2] = ["--project-directory", _scratch_project(plane, example)]
     proc = subprocess.run(cmd, cwd=str(REPO), env=env, capture_output=True, text=True,
                           encoding="utf-8", errors="replace")
     if proc.returncode != 0:
@@ -202,7 +233,7 @@ def compare_unset_set(label: str, unset: dict, setd: dict, plane: str, lan_ip: s
 def validate_lan_ip(value: str):
     """None when acceptable, else the reason. Only one specific IPv4 unicast address."""
     try:
-        ip = ipaddress.IPv4Address(value.strip())
+        ip = ipaddress.IPv4Address(value)  # no strip: compose would not strip a quoted value
     except ValueError:
         return "not an IPv4 address (a hostname, IPv6, or a typo)"
     if ip.is_unspecified:
@@ -214,8 +245,38 @@ def validate_lan_ip(value: str):
     return None
 
 
+def parse_env_value(raw: str):
+    """The value of one `KEY=<raw>` line as compose's dotenv reader sees it.
+
+    Raises ValueError for what compose refuses to read (an unterminated quote).
+    """
+    raw = raw.lstrip()
+    if raw[:1] in ("'", '"'):
+        quote = raw[0]
+        out, i = [], 1
+        while i < len(raw):
+            ch = raw[i]
+            if quote == '"' and ch == "\\" and i + 1 < len(raw):
+                out.append(raw[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                return "".join(out)  # anything after the closing quote is ignored
+            out.append(ch)
+            i += 1
+        raise ValueError("unterminated quoted value")
+    for n, ch in enumerate(raw):
+        if ch == "#" and n > 0 and raw[n - 1] in " \t":
+            raw = raw[:n]
+            break
+    return raw.rstrip()
+
+
 def read_env_value(path: Path, key: str):
-    """The last assignment of key in an env file, or None. The value is never printed."""
+    """The last assignment of key in an env file, or None. The value is never printed.
+
+    Raises ValueError when compose could not read the assignment.
+    """
     value = None
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         s = line.strip()
@@ -226,8 +287,7 @@ def read_env_value(path: Path, key: str):
         if k.startswith("export "):
             k = k[len("export "):].strip()
         if k == key:
-            v = v.split(" #", 1)[0].strip().strip('"').strip("'")
-            value = v
+            value = parse_env_value(v)
     return value
 
 
@@ -239,7 +299,11 @@ def live_env_problems() -> list:
         if not env_path.is_file():
             print(f"  live-env {plane}: NOT VERIFIED ({env_path.relative_to(REPO).as_posix()} absent)")
             continue
-        value = read_env_value(env_path, var)
+        try:
+            value = read_env_value(env_path, var)
+        except ValueError as exc:
+            problems.append(f"live-env {plane}: {var} cannot be read the way compose reads it: {exc}")
+            continue
         if not value:
             print(f"  live-env {plane}: {var} unset - inert")
             continue
@@ -248,6 +312,40 @@ def live_env_problems() -> list:
             problems.append(f"live-env {plane}: {var} is set to a value that is refused: {why}")
         else:
             print(f"  live-env {plane}: {var} set to a specific IPv4 unicast address - ok")
+    return problems
+
+
+def override_fail_closed_problems(ip: str) -> list:
+    """The ON override, hand-passed with its variable unset or empty, must fail to render.
+
+    inference/docker-compose.yml only includes compose/gateway-lan-on.yml when the variable is
+    non-empty, but `docker compose -f ... -f inference/compose/gateway-lan-on.yml` bypasses
+    that gate; with a plain ${VAR} the port rendered with no host_ip (every interface). The
+    file now uses ${VAR:?}; a render that succeeds unset/empty is the regression (T-F1).
+    """
+    compose, example = COMPOSE["inference"]
+    override = "inference/compose/gateway-lan-on.yml"
+    problems = []
+    for label, value in (("unset", None), ("empty", ""), ("set", ip)):
+        env = {k: v for k, v in os.environ.items() if k not in ALL_VARS and k != "COMPOSE_PROFILES"}
+        if value is not None:
+            env["LITELLM_UI_LAN_IP"] = value
+        cmd = ["docker", "compose", "-f", compose, "-f", override, "--env-file", example,
+               "config", "--format", "json"]
+        proc = subprocess.run(cmd, cwd=str(REPO), env=env, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
+        if label == "set":
+            if proc.returncode != 0:
+                problems.append("gateway-lan-on.yml hand-passed with the variable set did not render: "
+                                + (proc.stderr.strip().splitlines() or ["(no stderr)"])[-1])
+                continue
+            ports = [b for name, spec in (json.loads(proc.stdout).get("services") or {}).items()
+                     for b in (_binding(name, p) for p in (spec or {}).get("ports") or [])]
+            if ports != [("llm-gateway-ui", ip, "8445", "8080")]:
+                problems.append(f"gateway-lan-on.yml hand-passed with the variable set binds {ports}")
+        elif proc.returncode == 0:
+            problems.append(f"gateway-lan-on.yml hand-passed with the variable {label} RENDERS "
+                            "(fails open: the port would bind every interface)")
     return problems
 
 
@@ -283,6 +381,8 @@ def main(argv=None) -> int:
                      for b in (_binding(name, p) for p in (spec or {}).get("ports") or [] if p.get("published"))
                      if b[1] != LOOPBACK)
         print(f"  {label}: loopback {len(baseline)} unchanged; LAN when set: {', '.join(lan) or 'none'}")
+    problems += override_fail_closed_problems(args.ip)
+    print("  gateway-lan-on.yml hand-passed: checked (unset/empty must refuse to render, set must bind the one address)")
     for plane, spec in LAN.items():
         missing = {svc for (svc, _p, _t) in spec["bindings"]} - lan_seen[plane]
         if missing:
