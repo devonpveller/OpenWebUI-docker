@@ -193,6 +193,20 @@ services:
       - LITELLM_MASTER_KEY=${LITELLM_UI_MASTER_KEY}
       - UI_USERNAME=${LITELLM_UI_USERNAME}
       - UI_PASSWORD=${LITELLM_UI_PASSWORD}
+      # Authentik SSO for this Admin UI (edge-litellm-sso). Listed BY NAME on purpose:
+      # compose fills each from inference/.env when set and leaves it ABSENT when unset.
+      # LiteLLM tests these with `is not None`, so an empty value (a `${X:-}` default)
+      # would switch SSO on and break the UI_USERNAME/UI_PASSWORD login.
+      - GENERIC_CLIENT_ID
+      - GENERIC_CLIENT_SECRET
+      - GENERIC_AUTHORIZATION_ENDPOINT
+      - GENERIC_TOKEN_ENDPOINT
+      - GENERIC_USERINFO_ENDPOINT
+      - GENERIC_SCOPE
+      - GENERIC_ROLE_MAPPINGS_ROLES
+      - GENERIC_ROLE_MAPPINGS_GROUP_CLAIM
+      - GENERIC_ROLE_MAPPINGS_DEFAULT_ROLE
+      - PROXY_BASE_URL
     depends_on:
       llm-gateway-db:
         condition: service_healthy
