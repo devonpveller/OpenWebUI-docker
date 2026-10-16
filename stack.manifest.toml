@@ -193,7 +193,7 @@ description = "llama.cpp upstreams + llm-queue + the model-store backup, i.e. lo
 # --------------------------------------------------------------------------
 [planes.frontend]
 # Open WebUI + the tailscale netns companion. NEVER restart openwebui alone.
-# requires anchor: frontend/docker-compose.yml:515-523 (ai-stack_default,
+# requires anchor: frontend/docker-compose.yml:522-530 (ai-stack_default,
 # ai-stack_llm-net, ai-stack_app-net, all external: true). NOTE it is the `gpu`
 # profile that attaches to them; under `stock` the plane uses only its own
 # frontend_owui-net (:526) and needs no anchor network at all.
@@ -206,22 +206,22 @@ requires = ["anchor"]
 # OTHER planes, and every one of the toggles defaults TRUE, so a default boot
 # reaches into four planes besides this one. The route table is
 # frontend/entrypoint.sh:93-105; the variables are :54-77, overridden for
-# the two that differ by frontend/docker-compose.yml:357-382.
-# inference: frontend/docker-compose.yml:357,360 (LLAMA_CPP_HOST /
+# the two that differ by frontend/docker-compose.yml:364-389.
+# inference: frontend/docker-compose.yml:364,367 (LLAMA_CPP_HOST /
 #   LLAMA_CPP_EMBED_HOST default to the gateway aliases) behind the
 #   LLAMA_CPP_ENABLED toggle at :359 - OWUI serves without it. Also
 #   frontend/entrypoint.sh:70,72 (LITELLM_UI_HOST defaults to llm-gateway-ui, enabled
 #   true) -> the serve route at frontend/entrypoint.sh:103.
-# search: frontend/docker-compose.yml:299 (SEARXNG_QUERY_URL defaults to
+# search: frontend/docker-compose.yml:306 (SEARXNG_QUERY_URL defaults to
 #   http://gateway:8080/search) - web search is off without it, chat is not.
-# ob1: frontend/docker-compose.yml:363 (OPEN_NOTEBOOK_HOST defaults to
+# ob1: frontend/docker-compose.yml:370 (OPEN_NOTEBOOK_HOST defaults to
 #   open_notebook, an ob1-plane service) with :365 OPEN_NOTEBOOK_ENABLED
 #   defaulting TRUE; ports at :364,:366-367. Consumed by frontend/entrypoint.sh:97 and :99
 #   (the open-notebook and open-notebook-api serve routes). The image's own
 #   fallback for the wiki route also points at ob1 (frontend/entrypoint.sh:66,
 #   QUARTZ_HOST=${QUARTZ_HOST:-openbrain-wiki-viewer}) before the compose file
 #   overrides it - see the portal edge below.
-# portal: frontend/docker-compose.yml:379 (QUARTZ_HOST defaults to `caddy`, a
+# portal: frontend/docker-compose.yml:386 (QUARTZ_HOST defaults to `caddy`, a
 #   PORTAL-plane service) with :381 QUARTZ_ENABLED defaulting TRUE; the comment
 #   at :369-378 explains the route (Tailnet > Caddy > wiki app on caddy:8446,
 #   which resolves because caddy and openwebui share ai-stack_app-net).
@@ -237,8 +237,8 @@ requires = ["anchor"]
 #   not see this edge.
 optional = ["inference", "search", "ob1", "portal", "agent-org"]
 host = [
-  "Under the `gpu` profile only: image openwebui:local, a LOCAL CUDA build (frontend/docker-compose.yml:200-207, frontend/Dockerfile.openwebui-gpu), plus an NVIDIA container runtime for the device reservation at :310-316. The DEFAULT `stock` profile needs neither: it pulls ghcr.io/open-webui/open-webui:v0.11.0 and runs on any host with Docker",
-  "Under the `tailscale` profile only: a Tailscale auth key (TAILSCALE_AUTH_KEY). That profile requires `gpu`, because the pair is hard-wired (frontend/docker-compose.yml:336, network_mode: service:openwebui names the gpu definition)",
+  "Under the `gpu` profile only: image openwebui:local, a LOCAL CUDA build (frontend/docker-compose.yml:203-210, frontend/Dockerfile.openwebui-gpu), plus an NVIDIA container runtime for the device reservation at :317-323. The DEFAULT `stock` profile needs neither: it pulls ghcr.io/open-webui/open-webui:v0.11.0 and runs on any host with Docker",
+  "Under the `tailscale` profile only: a Tailscale auth key (TAILSCALE_AUTH_KEY). That profile requires `gpu`, because the pair is hard-wired (frontend/docker-compose.yml:343, network_mode: service:openwebui names the gpu definition)",
   "OPT-IN, off by default: OWUI_LAN_IP in frontend/.env publishes openwebui (stock and gpu) on <that LAN address>:3000 beside 127.0.0.1:3000, for the Proxmox Traefik (edge-b2-pub). One specific IP, never 0.0.0.0; apply the B1 LAN firewall guard first; recreate openwebui, wait healthy, then tailscale",
   "OPT-IN, off by default: OWUI_OAUTH_PERSISTENT_CONFIG=true in frontend/.env sets ENABLE_OAUTH_PERSISTENT_CONFIG on openwebui (stock and gpu) so SSO settings entered in the admin UI are kept in webui.db (edge-b3-oauth). Preconditions (Authentik roles mapping, a second local admin) are in frontend/.env.example; recreate openwebui, wait healthy, then tailscale",
 ]
@@ -268,16 +268,16 @@ keys = ["WEBUI_SECRET_KEY"]
 # runs (without it only openwebui-backup starts). stack.py validates the name.
 opt_in      = true
 stands_in_for = ["gpu"]
-description = "Open WebUI alone on the pinned upstream image - no GPU, no local build, no tailscale, no anchor network (frontend/docker-compose.yml:162-195). The fresh-clone deployment; mutually exclusive with `gpu`, whose container_name it shares"
+description = "Open WebUI alone on the pinned upstream image - no GPU, no local build, no tailscale, no anchor network (frontend/docker-compose.yml:162-198). The fresh-clone deployment; mutually exclusive with `gpu`, whose container_name it shares"
 
 [planes.frontend.profiles.gpu]
 opt_in      = true
-description = "the CUDA local build + the NVIDIA device reservation (frontend/docker-compose.yml:200-207, 310-316), the llm-net/app-net seams and the status-pipe mount"
+description = "the CUDA local build + the NVIDIA device reservation (frontend/docker-compose.yml:203-210, 317-323), the llm-net/app-net seams and the status-pipe mount"
 
 [planes.frontend.profiles.tailscale]
 # `requires gpu` is the MACHINE-READABLE form of what this description already
 # says twice: the companion's network_mode names the `gpu` definition of
-# openwebui (frontend/docker-compose.yml:336), so `--profile tailscale` alone is
+# openwebui (frontend/docker-compose.yml:343), so `--profile tailscale` alone is
 # not a deployment - compose refuses it outright with
 #   service "tailscale" depends on undefined service "openwebui"
 # Added by sl-driver-parity using the `requires` key sl-ob1-profiles introduced,
@@ -286,7 +286,7 @@ description = "the CUDA local build + the NVIDIA device reservation (frontend/do
 # profile is `default`, so nothing passes these flags today.
 requires    = ["gpu"]
 opt_in      = true
-description = "the tailscale netns companion and its state backup; usable ONLY with `gpu`, whose service its network_mode names (frontend/docker-compose.yml:336)"
+description = "the tailscale netns companion and its state backup; usable ONLY with `gpu`, whose service its network_mode names (frontend/docker-compose.yml:343)"
 
 # --------------------------------------------------------------------------
 [planes.search]
