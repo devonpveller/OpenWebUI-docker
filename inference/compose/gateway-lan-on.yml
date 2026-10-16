@@ -1,0 +1,18 @@
+# inference/compose/gateway-lan-on.yml - the ON state of the LiteLLM Admin UI's
+# opt-in LAN port (edge-b2-pub, cluster-transition PLAN 5.1 item B2).
+# inference/docker-compose.yml includes this file as an override of
+# compose/gateway.yml only while LITELLM_UI_LAN_IP (inference/.env) is non-empty.
+#
+# It adds ONE binding to ONE service: <LITELLM_UI_LAN_IP>:8445 -> the Admin UI's
+# 8080, for the Proxmox Traefik (gated by Authentik there). The variable must be
+# the host's specific LAN address - never 0.0.0.0 - and B1's firewall guard is
+# applied first. llm-gateway, the inference gateway itself, is NOT touched: it
+# stays port-less on internal networks only. The port is reachable because
+# llm-gateway-ui is also on ai-stack_app-net (a normal bridge); a publish on a
+# container with only internal networks would never bind.
+# The port list must match B1's LAN-ingress table; scripts/checks/
+# check_lan_bindings.py renders both states and refuses any other difference.
+services:
+  llm-gateway-ui:
+    ports:
+      - "${LITELLM_UI_LAN_IP}:8445:8080"

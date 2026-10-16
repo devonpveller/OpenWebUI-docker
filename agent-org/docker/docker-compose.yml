@@ -130,9 +130,17 @@ services:
       # openwebui's netns, on ai-stack_llm-net) can reach it by name for `tailscale serve`
       # (P7.4). llm-net is internal (no internet) — this is NOT public exposure.
       - llm-net
-    # Loopback publish only; tailnet exposure is a `tailscale serve` operator step (P7.4).
+    # Loopback publish; tailnet exposure is a `tailscale serve` operator step (P7.4).
     ports:
       - "127.0.0.1:8065:8065"
+      # OPT-IN LAN BINDING (edge-b2-pub, cluster-transition 5.1 B2), SHIPPED INERT.
+      # MATTERMOST_LAN_IP in agent-org/docker/.env (one specific LAN address, never
+      # 0.0.0.0) adds <ip>:8065 for the Proxmox Traefik beside the loopback line.
+      # Unset/empty it repeats the loopback line, which compose collapses to one
+      # binding (frontend/docker-compose.yml's openwebui carries the measured
+      # account; scripts/checks/check_lan_bindings.py guards it). B1's firewall
+      # guard first. Not MM_*: Mattermost reads MM_* as its own config.
+      - "${MATTERMOST_LAN_IP:-127.0.0.1}:8065:8065"
     restart: unless-stopped
     <<: *hardening
     healthcheck:

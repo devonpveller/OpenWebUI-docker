@@ -329,8 +329,15 @@ runs this quickstart on a clean daemon (`scripts/stack/rehearse-fresh-clone.sh`)
 
 Secrets live only in `.env` files and `secrets/` directories, both gitignored.
 Every published port binds to `127.0.0.1`; the only ways in from outside are
-the portal and the frontend's optional `tailscale` profile, and only once you
-turn them on. `docker compose config` prints secrets in plain text, so grep
+the portal, the frontend's optional `tailscale` profile and an opt-in LAN
+ingress, and only once you turn them on. The LAN ingress is one variable per
+plane (`OWUI_LAN_IP`, `MATTERMOST_LAN_IP`, `LITELLM_UI_LAN_IP`, each in its
+plane's `.env`, blank as shipped) that adds a binding on ONE named host address
+beside the loopback one, for Open WebUI `:3000`, Mattermost `:8065` and the
+LiteLLM Admin UI `:8445` - never the gateway itself. It is meant for a reverse
+proxy on the LAN: scope it with the LAN firewall guard first, and put
+authentication (Authentik) in front of it there.
+`scripts/checks/check_lan_bindings.py` proves it inert while unset. `docker compose config` prints secrets in plain text, so grep
 the part you need. Details: [SECURITY.md](SECURITY.md).
 
 The stack is **local-first and cloud-capable**. No component sends a prompt, a
