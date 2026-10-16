@@ -9,8 +9,12 @@ fire. No docker.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import check_lan_bindings as c  # noqa: E402
@@ -117,6 +121,142 @@ class LiveValue(unittest.TestCase):
         for bad in ("0.0.0.0", "::", "127.0.0.1", "127.0.0.2", "host.lan", "192.0.2.10:3000",
                     "224.0.0.1", "255.255.255.255", "", " "):
             self.assertIsNotNone(c.validate_lan_ip(bad), bad)
+
+
+class LiveVerdictFromRender(unittest.TestCase):
+    def verdict(self, *ports):
+        return c.judge_live_ports("inference", ui_render(*ports))
+
+    def test_loopback_only_is_inert(self):
+        self.assertEqual(self.verdict(), ([], "inert (loopback only)"))
+
+    def test_specific_address_is_ok(self):
+        probs, v = self.verdict(port(IP, 8445, 8080))
+        self.assertEqual(probs, [])
+        self.assertIn("ok", v)
+
+    def test_wildcards_are_refused(self):
+        for host in ("", "0.0.0.0", "::"):
+            probs, v = self.verdict(port(host, 8445, 8080))
+            self.assertTrue(probs and v == "REFUSED", host)
+
+    def test_unlisted_non_loopback_port_is_refused(self):
+        self.assertTrue(self.verdict(port(IP, 4000, 4000))[0])
+
+    def test_loopback_address_on_lan_port_is_inert(self):
+        self.assertEqual(self.verdict(port("127.0.0.1", 8445, 8080))[1], "inert (loopback only)")
+
+    def test_multicast_address_is_refused(self):
+        self.assertTrue(self.verdict(port("224.0.0.1", 8445, 8080))[0])
+
+
+@unittest.skipUnless(shutil.which("docker"), "needs docker compose (render only)")
+class LiveVerdictIntegration(unittest.TestCase):
+    """The tester's two failing cases, through compose's real native render of a scratch project."""
+
+    COMPOSE = ("services:\n  llm-gateway-ui:\n    image: x\n    ports:\n"
+               "      - '${LITELLM_UI_LAN_IP:-127.0.0.1}:8445:8080'\n")
+
+    def run_env(self, text):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "docker-compose.yml").write_text(self.COMPOSE, encoding="utf-8")
+            (Path(d) / ".env").write_bytes(text.encode("utf-8"))
+            return c.native_render_verdict("inference", "docker-compose.yml", Path(d))
+
+    def test_multiline_quoted_value_hides_nothing(self):
+        # compose treats the last two lines as ONE value of X, so the first assignment wins
+        probs, v = self.run_env('LITELLM_UI_LAN_IP=0.0.0.0\nX="\nLITELLM_UI_LAN_IP=192.0.2.10 #"\n')
+        self.assertEqual(v, "REFUSED", probs)
+
+    def test_lowercase_key_is_seen(self):
+        probs, v = self.run_env("litellm_ui_lan_ip=0.0.0.0\n")
+        self.assertEqual(v, "REFUSED", probs)
+
+    def test_good_value_ok_and_unset_inert(self):
+        self.assertEqual(self.run_env("LITELLM_UI_LAN_IP=192.0.2.10 # c\n")[0], [])
+        self.assertEqual(self.run_env("OTHER=1\n")[1], "inert (loopback only)")
+
+    def test_value_compose_rejects_is_fail_closed(self):
+        self.assertEqual(self.run_env('LITELLM_UI_LAN_IP=" 192.0.2.10"\n')[1], "REFUSED")
+        self.assertEqual(self.run_env('LITELLM_UI_LAN_IP="192.0.2.10\n')[1], "REFUSED")
+
+
+@unittest.skipUnless(shutil.which("docker"), "needs docker compose (render only)")
+class LiveProfilesAndScrub(unittest.TestCase):
+    """Profile-gated services and the process-env scrub, through a real compose render."""
+
+    COMPOSE = ("services:\n  llm-gateway-ui:\n    image: x\n    profiles: [gpu]\n    ports:\n"
+               "      - '${LITELLM_UI_LAN_IP:-127.0.0.1}:8445:8080'\n  other:\n    image: y\n")
+
+    def project(self, env_text):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        (Path(d.name) / "docker-compose.yml").write_text(self.COMPOSE, encoding="utf-8")
+        (Path(d.name) / ".env").write_bytes(env_text.encode("utf-8"))
+        return Path(d.name)
+
+    def test_profile_gated_wildcard_is_invisible_without_the_profile_and_seen_with_it(self):
+        d = self.project("LITELLM_UI_LAN_IP=0.0.0.0\n")
+        self.assertEqual(c.native_render_verdict("inference", "docker-compose.yml", d)[1],
+                         "inert (loopback only)")  # why the profile rows exist
+        self.assertEqual(c.native_render_verdict("inference", "docker-compose.yml", d, ("gpu",))[1], "REFUSED")
+
+    def test_live_rows_cover_every_renders_profile_set(self):
+        for plane in c.LAN:
+            want = {tuple(pr) for (pl, pr, _b) in c.RENDERS if pl == plane and pr}
+            self.assertTrue(want <= set(c.live_rows(plane)), plane)
+        self.assertIn(("gpu",), c.live_rows("frontend"))
+        self.assertIn(("stock",), c.live_rows("frontend"))
+
+    def test_partial_env_profile_set_is_a_note_not_a_refusal(self):
+        d = self.project("COMPOSE_PROFILES=nope\nLITELLM_UI_LAN_IP=192.0.2.10\n")
+        with mock.patch.object(c, "live_rows", return_value=[None, ("gpu",)]):
+            probs, label, notes = c.live_plane_verdicts("inference", "docker-compose.yml", d)
+        # an unknown profile in the .env still renders (nothing selected) - and the gpu row sees the port
+        self.assertEqual(probs, [], probs)
+        self.assertIn("ok", label)
+
+    def test_process_env_cannot_change_the_verdict(self):
+        d = self.project("OTHER=1\n")
+        hostile = {"LITELLM_UI_LAN_IP": "0.0.0.0", "litellm_ui_lan_ip": "0.0.0.0",
+                   "COMPOSE_PROJECT_NAME": "zzz", "COMPOSE_FILE": "does-not-exist.yml",
+                   "COMPOSE_ENV_FILES": str(d / "nope.env"), "COMPOSE_PROFILES": "gpu"}
+        with mock.patch.dict(os.environ, hostile):
+            probs, v = c.native_render_verdict("inference", "docker-compose.yml", d)
+        self.assertEqual((probs, v), ([], "inert (loopback only)"))
+
+    def test_compose_env_files_pointing_at_a_bad_file_is_ignored(self):
+        d = self.project("LITELLM_UI_LAN_IP=192.0.2.10\n")
+        bad = d / "bad.env"
+        bad.write_text("LITELLM_UI_LAN_IP=0.0.0.0\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"COMPOSE_ENV_FILES": str(bad)}):
+            probs, v = c.native_render_verdict("inference", "docker-compose.yml", d, ("gpu",))
+        self.assertEqual(probs, [])
+        self.assertIn("ok", v)
+
+
+class RenderWithoutLiveEnv(unittest.TestCase):
+    def _cmd(self, env_present):
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = list(cmd)
+            if "--project-directory" in cmd:
+                scratch = Path(cmd[cmd.index("--project-directory") + 1])
+                seen["scratch_env"] = (scratch / ".env").is_file()
+            return mock.Mock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch.object(c.Path, "is_file", return_value=env_present),              mock.patch.object(c.shutil, "copyfile"), mock.patch.object(c.subprocess, "run", fake_run):
+            c.render("agent-org", (), None)
+        return seen
+
+    def test_absent_env_uses_scratch_project_directory(self):
+        seen = self._cmd(False)
+        self.assertIn("--project-directory", seen["cmd"])
+
+    def test_present_env_renders_in_place(self):
+        seen = self._cmd(True)
+        self.assertNotIn("--project-directory", seen["cmd"])
 
 
 if __name__ == "__main__":

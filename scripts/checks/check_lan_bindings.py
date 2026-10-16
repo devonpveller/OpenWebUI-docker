@@ -29,9 +29,18 @@ LAN address - and refuses when:
     That is what proves llm-gateway (the inference gateway itself) is untouched - it is
     also asserted to publish nothing.
 
-`--live-env` additionally reads each plane's real `.env` (when present) and refuses a
-LAN variable whose value is not one specific IPv4 unicast address - 0.0.0.0 above all.
-It prints the verdict only, never the value.
+`--live-env` additionally judges each plane's real `.env` (when present): 0.0.0.0 and every
+other value that is not one specific IPv4 unicast address is refused.
+The verdict comes from compose itself, never from a parser of ours: each plane is rendered
+the shipped way (`docker compose -f <compose> config --format json`, compose loading the plane's
+own .env natively, no --env-file) and every rendered published port is judged - loopback = inert,
+a wildcard host_ip = refused, one listed LAN port on one specific address = ok, a render compose
+refuses = refused (fail-closed). It prints verdicts only, never a value.
+
+A tree without a plane's `.env` (fresh clone, CI) still renders: compose needs
+agent-org/docker/.env to exist for that service's `env_file:`, so when the plane's own
+`.env` is absent the render runs with `--project-directory` on a scratch directory holding
+a copy of the plane's `.env.example` as `.env`. Nothing is written inside the repo.
 
 WHY --env-file. Each render passes `--env-file <plane>/.env.example` (the committed
 example, the same file check-project-configs.ps1 renders against). Passing --env-file
@@ -53,8 +62,10 @@ import copy
 import ipaddress
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -78,6 +89,10 @@ LAN = {
         "bindings": {("llm-gateway-ui", "8445", "8080")},
     },
 }
+# Planes whose compose file has a live `env_file: .env`, which compose refuses to render without.
+# (inference/frontend must NOT get a scratch project directory: their includes and paths are
+# relative to the real one.)
+NEEDS_ENV_FILE = {"agent-org"}
 ALL_VARS = sorted(spec["var"] for spec in LAN.values())
 
 COMPOSE = {
@@ -116,6 +131,17 @@ def _binding(service: str, port: dict) -> tuple:
             str(port.get("target") or ""))
 
 
+_SCRATCH = {}
+
+
+def _scratch_project(plane: str, example: str) -> str:
+    if plane not in _SCRATCH:
+        d = tempfile.TemporaryDirectory(prefix="lanbind-")
+        shutil.copyfile(REPO / example, Path(d.name) / ".env")
+        _SCRATCH[plane] = d  # kept alive (and cleaned up) with the process
+    return _SCRATCH[plane].name
+
+
 def render(plane: str, profiles, lan_value) -> dict:
     """`docker compose config --format json` for one plane; lan_value None = unset."""
     compose, example = COMPOSE[plane]
@@ -127,6 +153,11 @@ def render(plane: str, profiles, lan_value) -> dict:
     for profile in profiles:
         cmd += ["--profile", profile]
     cmd += ["config", "--format", "json"]
+    if plane in NEEDS_ENV_FILE and not (REPO / Path(compose).parent / ".env").is_file():
+        # fresh clone / CI: the plane's own .env is absent and `env_file: .env` needs it. ONE
+        # scratch directory for the whole run: the project directory is baked into some
+        # rendered paths, so a fresh one per render would make unset/set renders differ.
+        cmd[2:2] = ["--project-directory", _scratch_project(plane, example)]
     proc = subprocess.run(cmd, cwd=str(REPO), env=env, capture_output=True, text=True,
                           encoding="utf-8", errors="replace")
     if proc.returncode != 0:
@@ -202,7 +233,7 @@ def compare_unset_set(label: str, unset: dict, setd: dict, plane: str, lan_ip: s
 def validate_lan_ip(value: str):
     """None when acceptable, else the reason. Only one specific IPv4 unicast address."""
     try:
-        ip = ipaddress.IPv4Address(value.strip())
+        ip = ipaddress.IPv4Address(value)  # no strip: compose would not strip a quoted value
     except ValueError:
         return "not an IPv4 address (a hostname, IPv6, or a typo)"
     if ip.is_unspecified:
@@ -214,40 +245,150 @@ def validate_lan_ip(value: str):
     return None
 
 
-def read_env_value(path: Path, key: str):
-    """The last assignment of key in an env file, or None. The value is never printed."""
-    value = None
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        s = line.strip()
-        if not s or s.startswith("#") or "=" not in s:
+def judge_live_ports(plane: str, data: dict) -> tuple:
+    """(problems, verdict) for one plane's NATIVE render. Every published port is judged.
+
+    Loopback = inert. A non-loopback binding must be exactly one of the plane's listed
+    (service, published, target) on one specific IPv4 unicast address; a wildcard host_ip (0.0.0.0, ::,
+    or none on a published port) or anything else non-loopback is refused. Values are never returned.
+    """
+    allowed = LAN[plane]["bindings"]
+    problems, lan = [], []
+    for name, spec in (data.get("services") or {}).items():
+        for p in (spec or {}).get("ports") or []:
+            if not p.get("published"):
+                continue
+            b = _binding(name, p)
+            if b[1] == LOOPBACK:
+                continue
+            if b[1] in WILDCARDS:
+                problems.append(f"live-env {plane}: {name} publishes :{b[2]} on EVERY interface (wildcard host)")
+            elif (b[0], b[2], b[3]) not in allowed:
+                problems.append(f"live-env {plane}: {name} publishes :{b[2]} on a non-loopback address - not a listed LAN port")
+            else:
+                why = validate_lan_ip(b[1])
+                if why:
+                    problems.append(f"live-env {plane}: {name} :{b[2]} bound to a refused address: {why}")
+                else:
+                    lan.append(b)
+    if problems:
+        return problems, "REFUSED"
+    return [], ("set to one specific IPv4 unicast address - ok" if lan else "inert (loopback only)")
+
+
+# Process-environment names that change what compose renders. Scrubbed (case-insensitively) so
+# the verdict reflects the plane's own .env and the profile rows below, nothing inherited.
+SCRUB = {n.upper() for n in ALL_VARS} | {"COMPOSE_PROFILES", "COMPOSE_ENV_FILES", "COMPOSE_FILE",
+                                          "COMPOSE_PROJECT_NAME", "COMPOSE_PATH_SEPARATOR"}
+
+
+def native_render_verdict(plane: str, compose: str, cwd: Path, profiles=None) -> tuple:
+    """(problems, verdict) from compose's own render of `compose` under `cwd` (its .env loaded natively).
+
+    profiles None = no --profile flag (what the plane's own .env alone selects); a tuple = those
+    --profile flags explicitly (the driver passes them from .stack/state.json, not from the .env).
+    """
+    env = {k: v for k, v in os.environ.items() if k.upper() not in SCRUB}
+    cmd = ["docker", "compose", "-f", compose]
+    for profile in profiles or ():
+        cmd += ["--profile", profile]
+    cmd += ["config", "--format", "json"]
+    row = "[" + (",".join(profiles) if profiles else ("no profile" if profiles is not None else ".env profiles")) + "]"
+    proc = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+    if proc.returncode != 0:
+        # stderr may quote the value: never printed
+        return ([f"live-env {plane} {row}: compose cannot render the plane with its .env "
+                 "(fail-closed - a value compose rejects is not OK)"], "REFUSED")
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        return ([f"live-env {plane} {row}: compose output unreadable (fail-closed)"], "REFUSED")
+    probs, verdict = judge_live_ports(plane, data)
+    return [p.replace(f"live-env {plane}:", f"live-env {plane} {row}:", 1) for p in probs], verdict
+
+
+def live_rows(plane: str) -> list:
+    """The profile rows to judge for a plane: the .env's own selection (None), then every RENDERS
+    row that names profiles. Services without a profile appear in every row, so the empty row adds
+    nothing."""
+    return [None] + [tuple(profiles) for (pl, profiles, _b) in RENDERS if pl == plane and profiles]
+
+
+def live_plane_verdicts(plane: str, compose: str, cwd: Path) -> tuple:
+    """(problems, label, notes) for one plane judged under every live profile row."""
+    problems, verdicts, notes = [], [], []
+    rows = live_rows(plane)
+    for profiles in rows:
+        found, verdict = native_render_verdict(plane, compose, cwd, profiles)
+        if profiles is None and found and "cannot render" in found[0]:
+            # the .env's own COMPOSE_PROFILES alone may be an incomplete set (e.g. only
+            # `tailscale`, which needs openwebui): the explicit rows decide
+            notes.append(f"  live-env {plane}: note - the .env's own profile selection does not render alone")
             continue
-        k, v = s.split("=", 1)
-        k = k.strip()
-        if k.startswith("export "):
-            k = k[len("export "):].strip()
-        if k == key:
-            v = v.split(" #", 1)[0].strip().strip('"').strip("'")
-            value = v
-    return value
+        problems += found
+        verdicts.append("REFUSED" if found else verdict)
+    label = "REFUSED in some profile row" if "REFUSED" in verdicts else (
+        "set to one specific IPv4 unicast address - ok" if any("ok" in v for v in verdicts)
+        else "inert (loopback only)")
+    return problems, f"{label} ({len(rows)} profile rows judged)", notes
 
 
 def live_env_problems() -> list:
+    """Verdicts from compose's OWN render of each plane with its real .env loaded natively.
+
+    No hand-written .env parser: quoting, multi-line values, duplicate keys, case-insensitive
+    names, interpolation and everything else is compose's. Each plane is judged under the .env's
+    own profile selection AND every profile row the RENDERS table uses, each with --profile
+    explicit, because the driver passes profiles from .stack/state.json and the .env need not list
+    them. An explicit row compose rejects is reported (fail-closed), never skipped; the .env-only
+    row is a note when it does not render alone (its COMPOSE_PROFILES may be a partial set).
+    """
     problems = []
     for plane, (compose, _example) in COMPOSE.items():
-        var = LAN[plane]["var"]
         env_path = REPO / Path(compose).parent / ".env"
         if not env_path.is_file():
             print(f"  live-env {plane}: NOT VERIFIED ({env_path.relative_to(REPO).as_posix()} absent)")
             continue
-        value = read_env_value(env_path, var)
-        if not value:
-            print(f"  live-env {plane}: {var} unset - inert")
-            continue
-        why = validate_lan_ip(value)
-        if why:
-            problems.append(f"live-env {plane}: {var} is set to a value that is refused: {why}")
-        else:
-            print(f"  live-env {plane}: {var} set to a specific IPv4 unicast address - ok")
+        found, label, notes = live_plane_verdicts(plane, compose, REPO)
+        problems += found
+        for n in notes:
+            print(n)
+        print(f"  live-env {plane}: {label}")
+    return problems
+
+
+def override_fail_closed_problems(ip: str) -> list:
+    """The ON override, hand-passed with its variable unset or empty, must fail to render.
+
+    inference/docker-compose.yml only includes compose/gateway-lan-on.yml when the variable is
+    non-empty, but `docker compose -f ... -f inference/compose/gateway-lan-on.yml` bypasses
+    that gate; with a plain ${VAR} the port rendered with no host_ip (every interface). The
+    file now uses ${VAR:?}; a render that succeeds unset/empty is the regression (T-F1).
+    """
+    compose, example = COMPOSE["inference"]
+    override = "inference/compose/gateway-lan-on.yml"
+    problems = []
+    for label, value in (("unset", None), ("empty", ""), ("set", ip)):
+        env = {k: v for k, v in os.environ.items() if k not in ALL_VARS and k != "COMPOSE_PROFILES"}
+        if value is not None:
+            env["LITELLM_UI_LAN_IP"] = value
+        cmd = ["docker", "compose", "-f", compose, "-f", override, "--env-file", example,
+               "config", "--format", "json"]
+        proc = subprocess.run(cmd, cwd=str(REPO), env=env, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
+        if label == "set":
+            if proc.returncode != 0:
+                problems.append("gateway-lan-on.yml hand-passed with the variable set did not render: "
+                                + (proc.stderr.strip().splitlines() or ["(no stderr)"])[-1])
+                continue
+            ports = [b for name, spec in (json.loads(proc.stdout).get("services") or {}).items()
+                     for b in (_binding(name, p) for p in (spec or {}).get("ports") or [])]
+            if ports != [("llm-gateway-ui", ip, "8445", "8080")]:
+                problems.append(f"gateway-lan-on.yml hand-passed with the variable set binds {ports}")
+        elif proc.returncode == 0:
+            problems.append(f"gateway-lan-on.yml hand-passed with the variable {label} RENDERS "
+                            "(fails open: the port would bind every interface)")
     return problems
 
 
@@ -283,6 +424,8 @@ def main(argv=None) -> int:
                      for b in (_binding(name, p) for p in (spec or {}).get("ports") or [] if p.get("published"))
                      if b[1] != LOOPBACK)
         print(f"  {label}: loopback {len(baseline)} unchanged; LAN when set: {', '.join(lan) or 'none'}")
+    problems += override_fail_closed_problems(args.ip)
+    print("  gateway-lan-on.yml hand-passed: checked (unset/empty must refuse to render, set must bind the one address)")
     for plane, spec in LAN.items():
         missing = {svc for (svc, _p, _t) in spec["bindings"]} - lan_seen[plane]
         if missing:

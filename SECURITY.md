@@ -101,7 +101,7 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
 
 ### Port Exposure (production mode)
 - **Zero** host port bindings on portal services — Cloudflare Tunnel is the only ingress
-- Backend services (`openwebui`, `llama-cpp`, `surrealdb`, etc.) all bound to `127.0.0.1` only
+- Backend services (`llama-cpp`, `surrealdb`, etc.) are bound to `127.0.0.1` only. The one exception is the opt-in LAN ingress (shipped off): with `OWUI_LAN_IP`, `MATTERMOST_LAN_IP` or `LITELLM_UI_LAN_IP` set, Open WebUI (`:3000`), Mattermost (`:8065`) and the LiteLLM Admin UI (`:8445`) also listen on that one LAN address, to be firewall-scoped to the Proxmox Traefik nodes before it is set (the cluster-transition B1 guard), with Authentik in front; `scripts/checks/check_lan_bindings.py` refuses any other binding
 - Pre-flight §6.1/§6.2 verified: `open_notebook` and `surrealdb` are LAN-unreachable
 
 ### Port Exposure (local-test mode)

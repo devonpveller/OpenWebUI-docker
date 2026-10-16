@@ -15,4 +15,4 @@
 services:
   llm-gateway-ui:
     ports:
-      - "${LITELLM_UI_LAN_IP}:8445:8080"
+      - "${LITELLM_UI_LAN_IP:?set LITELLM_UI_LAN_IP to the host LAN address - unset would bind every interface}:8445:8080"
