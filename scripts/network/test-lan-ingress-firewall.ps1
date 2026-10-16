@@ -44,13 +44,97 @@ New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 # ---------------------------------------------------------------- the fake firewall
 $global:LGT = @{ Rules = [ordered]@{}; Calls = @(); Violations = @(); Admin = $false; Listen = @() }
 
-# The fields an unrestricted rule reports through the real cmdlets (shapes measured read-only
-# on this host 2026-10-16): 'Any' for every unrestricted filter, $null package, '' owner,
-# an empty platform list. Every rule in the fake store carries all of them.
+# THE FAKE REPORTS THE REAL PROPERTY SET. Every object it returns carries every property the
+# real cmdlet returned for Docker's rule on this host. The full read-only dump is in
+# journal/evidence/edge-b1-fw/dev-attempt3/live-props-dump.txt.
+#
+# A stored rule is a hashtable:
+#   - flat keys hold the meaningful fields (Action, RemotePort, Owner, ...); Get-FakeKindOf
+#     maps each one to its object. Removing a flat key removes that property from the object,
+#     the way an unreadable field would look.
+#   - a key '<kind>:<Prop>' sets (or ADDS, if the real cmdlet has no such property) <Prop>
+#     on that object. A flat key that maps to no object is added to the rule object. That is
+#     how a test models a property Windows might add in a future build.
+# Default values are those of a freshly created, unrestricted guard rule.
 function Get-FakeDefaults {
-    return @{ RemotePort = 'Any'; DynamicTarget = 'Any'; Program = 'Any'; Package = $null; Service = 'Any'; InterfaceType = 'Any';
+    return @{ RemotePort = 'Any'; DynamicTarget = 'Any'; IcmpType = 'Any'; Program = 'Any'; Package = $null; Service = 'Any'; InterfaceType = 'Any';
         InterfaceAlias = 'Any'; LocalUser = 'Any'; RemoteUser = 'Any'; RemoteMachine = 'Any'; Authentication = 'NotRequired';
-        Encryption = 'NotRequired'; OverrideBlockRules = $false; Owner = ''; Platform = @() }
+        Encryption = 'NotRequired'; OverrideBlockRules = $false; Owner = ''; Platform = @(); PolicyAppId = $null; PackageFamilyName = $null;
+        RemoteDynamicKeywordAddresses = @(); EdgeTraversalPolicy = 'Block'; LooseSourceMapping = $false; LocalOnlyMapping = $false }
+}
+function Get-FakeKindOf([string]$Key) {
+    $map = @{
+        rule        = @('Name', 'DisplayName', 'Group', 'Direction', 'Action', 'Enabled', 'Profile', 'Owner', 'Platform', 'PolicyAppId', 'PackageFamilyName',
+            'RemoteDynamicKeywordAddresses', 'EdgeTraversalPolicy', 'LooseSourceMapping', 'LocalOnlyMapping')
+        port        = @('Protocol', 'LocalPort', 'RemotePort', 'IcmpType', 'DynamicTarget')
+        address     = @('LocalAddress', 'RemoteAddress')
+        application = @('Program', 'Package')
+        service     = @('Service')
+        interfacetype = @('InterfaceType')
+        interface   = @('InterfaceAlias')
+        security    = @('LocalUser', 'RemoteUser', 'RemoteMachine', 'Authentication', 'Encryption', 'OverrideBlockRules')
+    }
+    foreach ($k in $map.Keys) { if ($map[$k] -ccontains $Key) { return $k } }
+    return $null
+}
+function New-FakeObject($r, [string]$Kind) {
+    $o = [ordered]@{}
+    $name = [string]$r['Name']
+    # semantic: from the stored rule's flat key, or absent when the key was removed
+    $sem = { param($p) if ($r.ContainsKey($p)) { $o[$p] = $r[$p] } }
+    # fixed: real housekeeping value unless the test overrides it with '<kind>:<Prop>'
+    $fix = { param($p, $v) if ($r.ContainsKey($Kind + ':' + $p)) { $o[$p] = $r[$Kind + ':' + $p] } else { $o[$p] = $v } }
+    $common = {
+        & $fix 'Caption' $null; & $fix 'Description' $null; & $fix 'ElementName' ''; & $fix 'InstanceID' $name
+        & $fix 'CommunicationStatus' $null; & $fix 'DetailedStatus' $null; & $fix 'HealthState' $null; & $fix 'InstallDate' $null
+        & $fix 'Name' ''; & $fix 'OperatingStatus' $null; & $fix 'OperationalStatus' $null; & $fix 'PrimaryStatus' $null; & $fix 'Status' $null
+        & $fix 'StatusDescriptions' $null; & $fix 'CreationClassName' ('MSFT|FW|FirewallRule|' + $name); & $fix 'IsNegated' $null
+        & $fix 'SystemCreationClassName' ''; & $fix 'SystemName' ''
+    }
+    $cim = { param($cls) & $fix 'PSComputerName' $null; & $fix 'CimClass' ('root/standardcimv2:' + $cls); & $fix 'CimInstanceProperties' 'fake'; & $fix 'CimSystemProperties' 'fake' }
+    switch ($Kind) {
+        'rule' {
+            & $sem 'Name'; & $fix 'ID' $name; & $sem 'DisplayName'; & $sem 'Group'; & $sem 'Enabled'; & $sem 'Profile'; & $sem 'Platform'
+            & $sem 'Direction'; & $sem 'Action'; & $sem 'EdgeTraversalPolicy'; & $fix 'LSM' $r['LooseSourceMapping']
+            & $fix 'PrimaryStatus' 'OK'; & $fix 'Status' 'The rule was parsed successfully from the store. (65536)'; & $fix 'EnforcementStatus' 'NotApplicable'
+            & $fix 'PolicyStoreSourceType' 'Local'; & $fix 'Caption' $null; & $fix 'Description' $r['DisplayName']; & $fix 'ElementName' $r['DisplayName']
+            & $fix 'InstanceID' $name; & $fix 'CommonName' $null; & $fix 'PolicyKeywords' $null; & $fix 'PolicyDecisionStrategy' ([uint16]2)
+            & $fix 'PolicyRoles' $null; & $fix 'ConditionListType' ([uint16]3); & $fix 'CreationClassName' ('MSFT|FW|FirewallRule|' + $name)
+            & $fix 'ExecutionStrategy' ([uint16]2); & $fix 'Mandatory' $null; & $fix 'PolicyRuleName' ''; & $fix 'Priority' $null; & $fix 'RuleUsage' $null
+            & $fix 'SequencedActions' ([uint16]3); & $fix 'SystemCreationClassName' ''; & $fix 'SystemName' ''; & $fix 'DisplayGroup' $null
+            & $sem 'LocalOnlyMapping'; & $sem 'LooseSourceMapping'; & $sem 'Owner'; & $sem 'PackageFamilyName'; & $fix 'Platforms' $r['Platform']
+            & $sem 'PolicyAppId'; & $fix 'PolicyStoreSource' 'PersistentStore'; & $fix 'Profiles' ([uint16]0); & $sem 'RemoteDynamicKeywordAddresses'
+            & $fix 'RuleGroup' $null; & $fix 'StatusCode' ([uint32]65536)
+            & $cim 'MSFT_NetFirewallRule'
+        }
+        'port' {
+            & $sem 'Protocol'; & $sem 'LocalPort'; & $sem 'RemotePort'; & $sem 'IcmpType'; & $sem 'DynamicTarget'; & $fix 'DynamicTransport' $r['DynamicTarget']
+            & $common; & $cim 'MSFT_NetProtocolPortFilter'
+        }
+        'address' {
+            & $sem 'LocalAddress'; & $fix 'LocalIP' $r['LocalAddress']; & $sem 'RemoteAddress'; & $fix 'RemoteIP' $r['RemoteAddress']
+            & $common; & $cim 'MSFT_NetAddressFilter'
+        }
+        'application' {
+            & $sem 'Program'; & $common; & $fix 'AppPath' $(if ($r['Program'] -eq 'Any') { $null } else { $r['Program'] }); & $sem 'Package'
+            & $cim 'MSFT_NetApplicationFilter'
+        }
+        'service' { & $sem 'Service'; & $common; & $fix 'ServiceName' $(if ($r['Service'] -eq 'Any') { $null } else { $r['Service'] }); & $cim 'MSFT_NetServiceFilter' }
+        'interfacetype' { & $sem 'InterfaceType'; & $common; & $cim 'MSFT_NetInterfaceTypeFilter' }
+        'interface' { & $sem 'InterfaceAlias'; & $common; & $cim 'MSFT_NetInterfaceFilter' }
+        'security' {
+            & $sem 'Authentication'; & $sem 'Encryption'; & $sem 'LocalUser'; & $sem 'RemoteUser'; & $sem 'RemoteMachine'; & $common
+            & $fix 'LocalUsers' $null; & $sem 'OverrideBlockRules'; & $fix 'RemoteMachines' $null; & $fix 'RemoteUsers' $null
+            & $cim 'MSFT_NetNetworkLayerSecurityFilter'
+        }
+    }
+    # additions: '<kind>:<Prop>' keys the real cmdlet has no property for; for the rule
+    # object, also flat keys that belong to no object.
+    foreach ($k in @($r.Keys)) {
+        if ($k -like ($Kind + ':*')) { $p = $k.Substring($Kind.Length + 1); if (-not $o.Contains($p)) { $o[$p] = $r[$k] } }
+        elseif ($Kind -eq 'rule' -and $k -notlike '*:*' -and $null -eq (Get-FakeKindOf $k) -and -not $o.Contains($k)) { $o[$k] = $r[$k] }
+    }
+    return [pscustomobject]$o
 }
 function New-FakeRule([string]$Name, [string]$Port, [string[]]$Remote, [hashtable]$Over) {
     $r = Get-FakeDefaults
@@ -63,7 +147,7 @@ function Reset-Fake {
     $global:LGT.Rules = [ordered]@{}; $global:LGT.Calls = @(); $global:LGT.Violations = @(); $global:LGT.Admin = $false; $global:LGT.Listen = @()
     # Docker Desktop's own allow rules and an unrelated rule: never to be touched.
     $global:LGT.Rules['TCP Query User{B6095153}C:\program files\docker\docker\resources\com.docker.backend.exe'] =
-        (New-FakeRule 'TCP Query User{B6095153}C:\program files\docker\docker\resources\com.docker.backend.exe' 'Any' @('Any') @{ DisplayName = 'com.docker.backend'; Action = 'Allow'; Protocol = 'TCP'; Program = 'C:\program files\docker\docker\resources\com.docker.backend.exe' })
+        (New-FakeRule 'TCP Query User{B6095153}C:\program files\docker\docker\resources\com.docker.backend.exe' 'Any' @('Any') @{ DisplayName = 'com.docker.backend'; Action = 'Allow'; Protocol = 'TCP'; Program = 'C:\program files\docker\docker\resources\com.docker.backend.exe'; Profile = 'Public'; EdgeTraversalPolicy = 'DeferToUser' })
     $global:LGT.Rules['ai-stack-lan-guardian'] = (New-FakeRule 'ai-stack-lan-guardian' '3000' @('Any') @{ Action = 'Allow' })
     $global:LGT.Rules['other-ai-stack-lan-guard-x'] = (New-FakeRule 'other-ai-stack-lan-guard-x' '3000' @('Any') @{ Action = 'Allow' })
 }
@@ -79,13 +163,10 @@ function Get-Mutations { @($global:LGT.Calls | Where-Object { $_.Op -ne 'Get' })
 function Get-NetFirewallRule {
     [CmdletBinding()] param([string[]]$Name, [string[]]$DisplayName, [string[]]$Group)
     $global:LGT.Calls += @{ Op = 'Get' }
-    foreach ($k in @($global:LGT.Rules.Keys)) {
-        $r = $global:LGT.Rules[$k]
-        New-FakeFilter $r @('Name', 'DisplayName', 'Group', 'Direction', 'Action', 'Enabled', 'Profile', 'Owner', 'Platform')
-    }
+    foreach ($k in @($global:LGT.Rules.Keys)) { New-FakeObject $global:LGT.Rules[$k] 'rule' }
 }
-# A filter object carrying only the fields the stored rule HAS: a field removed from a stored
-# rule comes back as a property the object lacks, the way an unreadable field would.
+# A filter object carrying only the named fields the stored rule HAS (kept for the tester's
+# scripts, which build reduced objects with it).
 function New-FakeFilter($r, [string[]]$Fields) {
     $o = [ordered]@{}
     foreach ($f in $Fields) { if ($r.ContainsKey($f)) { $o[$f] = $r[$f] } }
@@ -98,31 +179,31 @@ function Get-FakeRuleFor($AssociatedNetFirewallRule) {
 }
 function Get-NetFirewallPortFilter {
     [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule)
-    process { New-FakeFilter (Get-FakeRuleFor $AssociatedNetFirewallRule) @('Protocol', 'LocalPort', 'RemotePort', 'DynamicTarget') }
+    process { New-FakeObject (Get-FakeRuleFor $AssociatedNetFirewallRule) 'port' }
 }
 function Get-NetFirewallAddressFilter {
     [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule)
-    process { New-FakeFilter (Get-FakeRuleFor $AssociatedNetFirewallRule) @('LocalAddress', 'RemoteAddress') }
+    process { New-FakeObject (Get-FakeRuleFor $AssociatedNetFirewallRule) 'address' }
 }
 function Get-NetFirewallApplicationFilter {
     [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule)
-    process { New-FakeFilter (Get-FakeRuleFor $AssociatedNetFirewallRule) @('Program', 'Package') }
+    process { New-FakeObject (Get-FakeRuleFor $AssociatedNetFirewallRule) 'application' }
 }
 function Get-NetFirewallServiceFilter {
     [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule)
-    process { New-FakeFilter (Get-FakeRuleFor $AssociatedNetFirewallRule) @('Service') }
+    process { New-FakeObject (Get-FakeRuleFor $AssociatedNetFirewallRule) 'service' }
 }
 function Get-NetFirewallInterfaceTypeFilter {
     [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule)
-    process { New-FakeFilter (Get-FakeRuleFor $AssociatedNetFirewallRule) @('InterfaceType') }
+    process { New-FakeObject (Get-FakeRuleFor $AssociatedNetFirewallRule) 'interfacetype' }
 }
 function Get-NetFirewallInterfaceFilter {
     [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule)
-    process { New-FakeFilter (Get-FakeRuleFor $AssociatedNetFirewallRule) @('InterfaceAlias') }
+    process { New-FakeObject (Get-FakeRuleFor $AssociatedNetFirewallRule) 'interface' }
 }
 function Get-NetFirewallSecurityFilter {
     [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule)
-    process { New-FakeFilter (Get-FakeRuleFor $AssociatedNetFirewallRule) @('LocalUser', 'RemoteUser', 'RemoteMachine', 'Authentication', 'Encryption', 'OverrideBlockRules') }
+    process { New-FakeObject (Get-FakeRuleFor $AssociatedNetFirewallRule) 'security' }
 }
 function New-NetFirewallRule {
     [CmdletBinding()] param([string]$Name, [string]$DisplayName, [string]$Group, [string]$Description, [string]$Direction,
@@ -560,12 +641,35 @@ $narrow = [ordered]@{
     'LocalAddress'       = @('192.0.2.69')
     'RemotePort-missing' = $null
     'Service-missing'    = $null
+    # attempt 3 (TA2-1): rule-level fields that narrow where a rule applies
+    'PolicyAppId'                   = 'tester-tag'
+    'PackageFamilyName'             = 'Contoso.App_8wekyb3d8bbwe'
+    'RemoteDynamicKeywordAddresses' = @('{01234567-89ab-cdef-0123-456789abcdef}')
+    'EdgeTraversalPolicy'           = 'Allow'
+    'LooseSourceMapping'            = $true
+    'LocalOnlyMapping'              = $true
+    'IcmpType'                      = @('8')
+    'PolicyAppId-missing'                   = $null
+    'PackageFamilyName-missing'             = $null
+    'RemoteDynamicKeywordAddresses-missing' = $null
+    # attempt 3 (TA2-2): gaps three mutants slipped through
+    'Owner-missing'          = $null
+    'Platform-missing'       = $null
+    'Package-missing'        = $null
+    'LocalPort~3001'         = @('3001')
+    'LocalPort~two'          = @('3000', '1')
+    'RemotePort~any+1'       = @('Any', '1')
+    'InterfaceAlias~any+eth' = @('Any', 'Ethernet')
+    # a real shape seen on this host (TA2-3): two profiles is not Any
+    'Profile~private-public' = 'Private, Public'
 }
 foreach ($k in $narrow.Keys) {
-    $field = $k -replace '-missing$', ''
+    $field = $k -replace '(-missing|~.*)$', ''
     Reset-Fake; $global:LGT.Admin = $true
     $null = Invoke-Guard @('-Apply', '-ManifestPath', $single)
     $n = $PREFIX + 'openwebui-3000'
+    # RED-safe: with no guard (or a broken one) there is no rule to narrow; fail the case, do not crash.
+    if (-not $global:LGT.Rules.Contains($n)) { Write-Case "T16.$k" "$k (setup)" $false 'the initial -Apply created no guard rule to work on'; continue }
     $expected = ((@($global:LGT.Rules[$n][$field]) | ForEach-Object { [string]$_ }) -join ',')
     if ($k -like '*-missing') { $global:LGT.Rules[$n].Remove($field) } else { $global:LGT.Rules[$n][$field] = $narrow[$k] }
     $global:LGT.Admin = $false; $global:LGT.Calls = @()
@@ -598,6 +702,146 @@ foreach ($k in $ends.Keys) {
     }
     Write-Case "T17.$k" "nodes $($ends[$k][0]): the neighbours at the ends of IPv4 are blocked, the nodes are not" $ok ("exit=$($r.Code) remote=$(if ($n) { $n[0].RemoteAddress -join ',' })`n$($r.Out)")
 }
+
+# ---------------------------------------------------------------- T18 the drift check is structural (attempt 3)
+# A property the guard has never heard of, on any object, is DRIFT - not OK - and -Apply
+# replaces the rule (the replacement does not carry it). A changed value of a property the
+# guard compares (IsNegated, the CIM constants, PrimaryStatus) is DRIFT too.
+$unknown = [ordered]@{
+    'FutureNarrowingField'               = 'x'
+    'port:FutureNarrowingField'          = 'x'
+    'address:FutureNarrowingField'       = 'x'
+    'application:FutureNarrowingField'   = 'x'
+    'service:FutureNarrowingField'       = 'x'
+    'interfacetype:FutureNarrowingField' = 'x'
+    'interface:FutureNarrowingField'     = 'x'
+    'security:FutureNarrowingField'      = 'x'
+    'port:IsNegated'                     = $true
+    'address:IsNegated'                  = $true
+    'security:IsNegated'                 = $true
+    'rule:Priority'                      = 5
+    'rule:Mandatory'                     = $true
+    'rule:PrimaryStatus'                 = 'Error'
+    'rule:PolicyDecisionStrategy'        = [uint16]1
+    'rule:SequencedActions'              = [uint16]1
+}
+foreach ($k in $unknown.Keys) {
+    $prop = ($k -split ':')[-1]
+    Reset-Fake; $global:LGT.Admin = $true
+    $null = Invoke-Guard @('-Apply', '-ManifestPath', $single)
+    $n = $PREFIX + 'openwebui-3000'
+    # RED-safe: with no guard (or a broken one) there is no rule to narrow; fail the case, do not crash.
+    if (-not $global:LGT.Rules.Contains($n)) { Write-Case "T18.$k" "$k (setup)" $false 'the initial -Apply created no guard rule to work on'; continue }
+    $global:LGT.Rules[$n][$k] = $unknown[$k]
+    $global:LGT.Admin = $false; $global:LGT.Calls = @()
+    $s = Invoke-Guard @('-Status', '-ManifestPath', $single)
+    $sawDrift = ($s.Code -eq 3) -and ($s.Out -match '(?m)^\s*DRIFT\s') -and ($s.Out -match ('(?i)drift:.*' + [regex]::Escape($prop))) -and ((Get-Mutations).Count -eq 0)
+    $global:LGT.Admin = $true; $global:LGT.Calls = @()
+    $a = Invoke-Guard @('-Apply', '-ManifestPath', $single)
+    $repaired = ($a.Code -eq 0) -and ($a.Out -match '(?m)^\s*REPLACE\s') -and $global:LGT.Rules.Contains($n) -and -not $global:LGT.Rules[$n].ContainsKey($k)
+    $global:LGT.Admin = $false; $global:LGT.Calls = @()
+    $s2 = Invoke-Guard @('-Status', '-ManifestPath', $single)
+    Write-Case "T18.$k" "a property $k = $($unknown[$k]) reads DRIFT (not OK), -Apply replaces the rule, -Status is clean after" ($sawDrift -and $repaired -and $s2.Code -eq 0) ("status exit=$($s.Code)`n$($s.Out)`napply exit=$($a.Code)`n$($a.Out)`nstatus-after exit=$($s2.Code)`n$($s2.Out)")
+}
+
+# ---------------------------------------------------------------- T19 no false drift (attempt 3)
+# A freshly created guard rule, in the full real property set, reads in sync. So does one
+# whose identity/label/status/housekeeping properties (the allow-list) or derived duplicates
+# differ, and one with a real shape this host showed for an unrestricted value
+# (DynamicTarget empty).
+$benign = [ordered]@{
+    'fresh'                        = $null
+    'DynamicTarget~empty'          = @('DynamicTarget', '')
+    'rule:Status'                  = @('rule:Status', 'something else')
+    'rule:StatusCode'              = @('rule:StatusCode', [uint32]1)
+    'rule:EnforcementStatus'       = @('rule:EnforcementStatus', 'Enforced')
+    'rule:Description'             = @('rule:Description', 'edited by hand')
+    'rule:DisplayGroup'            = @('rule:DisplayGroup', 'a group')
+    'rule:PolicyStoreSourceType'   = @('rule:PolicyStoreSourceType', 'GroupPolicy')
+    'port:Caption'                 = @('port:Caption', 'x')
+    'security:HealthState'         = @('security:HealthState', [uint16]5)
+    'application:AppPath'          = @('application:AppPath', 'C:\derived.exe')
+}
+foreach ($k in $benign.Keys) {
+    Reset-Fake; $global:LGT.Admin = $true
+    $null = Invoke-Guard @('-Apply', '-ManifestPath', $single)
+    $n = $PREFIX + 'openwebui-3000'
+    # RED-safe: with no guard (or a broken one) there is no rule to narrow; fail the case, do not crash.
+    if (-not $global:LGT.Rules.Contains($n)) { Write-Case "T19.$k" "$k (setup)" $false 'the initial -Apply created no guard rule to work on'; continue }
+    if ($benign[$k]) { $global:LGT.Rules[$n][$benign[$k][0]] = $benign[$k][1] }
+    $global:LGT.Admin = $false; $global:LGT.Calls = @()
+    $s = Invoke-Guard @('-Status', '-ManifestPath', $single)
+    $global:LGT.Admin = $true; $global:LGT.Calls = @()
+    $a = Invoke-Guard @('-Apply', '-ManifestPath', $single)
+    $ok = ($s.Code -eq 0) -and ($s.Out -match '(?m)^\s*OK\s') -and ($a.Code -eq 0) -and ((Get-Mutations).Count -eq 0)
+    Write-Case "T19.$k" "no false drift: $k reads OK and -Apply changes nothing" $ok ("status exit=$($s.Code)`n$($s.Out)`napply exit=$($a.Code)`n$($a.Out)")
+}
+
+# ---------------------------------------------------------------- T20 the operator's live rule shape (attempt 3)
+# The first guard rule on the host was made by hand: Name is a GUID, DisplayName is
+# 'ai-stack-lan-guard-openwebui-3000', and it allows ONE node (Traefik moved to a single
+# edge host). Its real RemoteAddress, read live 2026-10-16, was
+# '0.0.0.0-<lan>.19, <lan>.21-255.255.255.255, ::-ffff:...:ffff'. Here 192.0.2.20 stands in for the edge host.
+$node20 = New-Fixture 'node20' "[lan_ingress.ports]`nopenwebui = { plane = `"frontend`", port = 3000 }" "[lan_ingress]`nhost_ip = `"192.0.2.69`"`nallowed_remote = [`"192.0.2.20`"]"
+$handId = '{cb6370bd-a29e-4a3a-8200-0c11ebb17e42}'
+$liveShape = @('0.0.0.0-192.0.2.19', '192.0.2.21-255.255.255.255', '::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')
+function Add-HandRule([string]$Display, [string]$Port, [string[]]$Remote, [string]$Id = $handId) {
+    $global:LGT.Rules[$Id] = (New-FakeRule $Id $Port $Remote @{ DisplayName = $Display; Group = $null })
+}
+# T20.whatif: one node computes exactly the live rule's ranges
+Reset-Fake; $global:LGT.Admin = $false
+$r = Invoke-Guard @('-Apply', '-WhatIf', '-ManifestPath', $node20)
+$ok = ($r.Code -eq 0) -and ($r.Out -match [regex]::Escape('blocked remote (IPv4): 0.0.0.0-192.0.2.19, 192.0.2.21-255.255.255.255')) -and
+    ($r.Out -match [regex]::Escape('blocked remote (IPv6): ::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')) -and ((Get-Mutations).Count -eq 0)
+Write-Case 'T20.whatif' 'one allowed node (.20): -WhatIf computes exactly the live rule''s ranges' $ok ("exit=$($r.Code)`n$($r.Out)")
+# T20.hand-in-sync: the hand-made rule (GUID name, prefixed DisplayName) reads OK; -Apply keeps it
+Reset-Fake; Add-HandRule 'ai-stack-lan-guard-openwebui-3000' '3000' $liveShape
+$before = Get-Snapshot
+$s = Invoke-Guard @('-Status', '-ManifestPath', $node20)
+$global:LGT.Admin = $true; $global:LGT.Calls = @()
+$a = Invoke-Guard @('-Apply', '-ManifestPath', $node20)
+$ok = ($s.Code -eq 0) -and ($s.Out -match '(?m)^\s*OK\s+ai-stack-lan-guard-openwebui-3000') -and ($s.Out -match [regex]::Escape($handId)) -and
+    ($a.Code -eq 0) -and ((Get-Mutations).Count -eq 0) -and ((Get-Snapshot) -eq $before)
+Write-Case 'T20.hand-in-sync' 'the hand-made live rule (GUID name) with the .20 shape reads OK and -Apply changes nothing' $ok ("status exit=$($s.Code)`n$($s.Out)`napply exit=$($a.Code)`n$($a.Out)")
+# T20.hand-drift: the same hand rule still allowing the OLD three nodes reads DRIFT; -Apply
+# creates the managed rule FIRST, then removes the hand rule by its GUID (no unguarded moment)
+Reset-Fake; Add-HandRule 'ai-stack-lan-guard-openwebui-3000' '3000' @('0.0.0.0-192.0.2.10', '192.0.2.14-255.255.255.255', '::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')
+$s = Invoke-Guard @('-Status', '-ManifestPath', $node20)
+$global:LGT.Admin = $true; $global:LGT.Calls = @()
+$a = Invoke-Guard @('-Apply', '-ManifestPath', $node20)
+$ops = @($global:LGT.Calls | Where-Object { $_.Op -ne 'Get' } | ForEach-Object { $_.Op + ':' + $_.Name })
+$ok = ($s.Code -eq 3) -and ($s.Out -match '(?m)^\s*DRIFT\s+ai-stack-lan-guard-openwebui-3000') -and ($a.Code -eq 0) -and
+    (($ops -join ' ') -eq ('New:' + $PREFIX + 'openwebui-3000 Remove:' + $handId)) -and -not $global:LGT.Rules.Contains($handId)
+Write-Case 'T20.hand-drift' 'a drifted hand-made rule: -Apply creates the managed rule first, then removes the hand rule by GUID' $ok ("ops=$($ops -join ' ')`nstatus exit=$($s.Code)`n$($s.Out)`napply exit=$($a.Code)`n$($a.Out)")
+# T20.duplicate: a managed rule AND a hand-made rule for the same port: keep one, remove the other
+Reset-Fake; $global:LGT.Admin = $true
+$null = Invoke-Guard @('-Apply', '-ManifestPath', $node20)
+Add-HandRule 'ai-stack-lan-guard-openwebui-3000' '3000' $liveShape
+$global:LGT.Admin = $false
+$s = Invoke-Guard @('-Status', '-ManifestPath', $node20)
+$global:LGT.Admin = $true; $global:LGT.Calls = @()
+$a = Invoke-Guard @('-Apply', '-ManifestPath', $node20)
+$left = @($global:LGT.Rules.Keys | Where-Object { $_ -eq $handId -or $_ -eq ($PREFIX + 'openwebui-3000') })
+$ok = ($s.Code -eq 3) -and ($s.Out -match '(?m)^\s*STALE\s.*duplicate') -and ($a.Code -eq 0) -and ($left.Count -eq 1)
+Write-Case 'T20.duplicate' 'a managed and a hand-made rule for one port: -Status flags the duplicate, -Apply leaves exactly one' $ok ("left=$($left -join ',')`nstatus exit=$($s.Code)`n$($s.Out)`napply exit=$($a.Code)`n$($a.Out)")
+# T20.hand-stale + T20.remove: a hand-made rule for a port no longer listed is STALE and removed
+# by GUID; -Remove removes hand-made rules too; a GUID rule whose DisplayName merely LOOKS
+# like the prefix ('ai-stack-lan-guardian') is never touched.
+Reset-Fake; Add-HandRule 'ai-stack-lan-guard-zzz-9999' '9999' $liveShape
+Add-HandRule 'ai-stack-lan-guardian' '3000' @('Any') '{00000000-0000-0000-0000-000000000001}'
+$global:LGT.Admin = $true
+$a = Invoke-Guard @('-Apply', '-ManifestPath', $node20)
+$ok = ($a.Code -eq 0) -and ($a.Out -match '(?m)^\s*REMOVE\s+ai-stack-lan-guard-zzz-9999') -and -not $global:LGT.Rules.Contains($handId) -and
+    $global:LGT.Rules.Contains('{00000000-0000-0000-0000-000000000001}')
+Write-Case 'T20.hand-stale' 'a hand-made rule for an unlisted port is STALE and removed by GUID; a look-alike DisplayName is untouched' $ok ("apply exit=$($a.Code)`n$($a.Out)")
+Reset-Fake; Add-HandRule 'ai-stack-lan-guard-openwebui-3000' '3000' $liveShape
+Add-HandRule 'ai-stack-lan-guardian' '3000' @('Any') '{00000000-0000-0000-0000-000000000001}'
+$global:LGT.Admin = $true; $global:LGT.Calls = @()
+$a = Invoke-Guard @('-Remove')
+$removed = @($global:LGT.Calls | Where-Object { $_.Op -eq 'Remove' } | ForEach-Object { $_.Name })
+$ok = ($a.Code -eq 0) -and (($removed -join ',') -eq $handId) -and $global:LGT.Rules.Contains('{00000000-0000-0000-0000-000000000001}') -and
+    (@($global:LGT.Rules.Keys | Where-Object { $_ -match 'docker' }).Count -eq 1)
+Write-Case 'T20.remove' '-Remove removes the hand-made rule by its GUID and nothing else' $ok ("removed=$($removed -join ',')`n$($a.Out)")
 
 Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 Write-Host ''

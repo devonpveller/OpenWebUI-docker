@@ -690,7 +690,7 @@ profiles    = { portal = ["internet"] }
 #           unpublish, delete the line, -Apply again (the stale rule goes).
 #
 # THE ADDRESSES ARE NOT HERE. host_ip (the workstation's LAN IPv4) and
-# allowed_remote (the Proxmox Traefik nodes, plain IPv4 addresses only) name
+# allowed_remote (the Traefik host or hosts, plain IPv4 addresses only) name
 # the operator's LAN, which this public repo keeps out of tracked files
 # (scripts/checks/check_identity.py refuses RFC 1918 literals). They live in
 # the per-host, gitignored .stack/lan-ingress.toml beside this file; template:

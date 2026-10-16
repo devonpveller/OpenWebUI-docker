@@ -5,8 +5,9 @@
 # RFC 5737 documentation addresses and will not match any real LAN.
 #
 #   host_ip        - the workstation's LAN IPv4 (the address B2 publishes the ports on).
-#   allowed_remote - the ONLY LAN hosts that may reach the listed ports: the Proxmox
-#                    Traefik nodes. Plain dotted-quad IPv4 addresses, one per node. CIDR,
+#   allowed_remote - the ONLY LAN hosts that may reach the listed ports: the Traefik
+#                    host(s). Today that is ONE edge host; list each host if Traefik is
+#                    ever spread over several. Plain dotted-quad IPv4 addresses. CIDR,
 #                    ranges, wildcards, keywords, IPv6 and leading zeros are refused (the
 #                    guard aborts with no change) so a typo can never widen the allow set.
 #
@@ -16,4 +17,4 @@
 
 [lan_ingress]
 host_ip        = "192.0.2.69"
-allowed_remote = ["192.0.2.11", "192.0.2.12", "192.0.2.13"]
+allowed_remote = ["192.0.2.20"]

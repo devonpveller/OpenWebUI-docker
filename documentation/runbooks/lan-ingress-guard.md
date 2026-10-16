@@ -6,15 +6,15 @@
 
 ## What it protects
 
-Every ai-stack web port publishes on `127.0.0.1` today. For the Proxmox nodes'
-Traefik to front a service, its compose file has to publish it on the
+Every ai-stack web port used to publish on `127.0.0.1` only. For Traefik (today ONE edge
+host, earlier planned as three Proxmox nodes) to front a service, its compose file has to publish it on the
 workstation's LAN address too (Track B item B2). **Docker Desktop's own inbound
 firewall rule (`com.docker.backend`: Allow, any remote address, any port) then
 opens that port to the whole LAN.** Some of those services have no login of
 their own, so a LAN host could reach them without going through Authentik.
 
 The guard is one inbound Windows Firewall **BLOCK** rule per listed port. Its
-remote addresses are everything EXCEPT the Traefik nodes: every other IPv4
+remote addresses are everything EXCEPT the allowed Traefik host(s): every other IPv4
 address and the whole IPv6 space. A block beats an allow in Windows Firewall,
 so Docker's rule is left alone and simply loses. Each rule covers the port on
 every local address (not only the LAN IP), so a port that ends up published on
@@ -25,27 +25,58 @@ connection is Public today (read 2026-10-16). If the LAN is ever switched to
 Private, Docker's rule stops matching it, and the guard is then belt and
 braces. The guard's rules apply to all profiles, so either way they hold.
 
-`-Status` treats a rule as in sync only when EVERY one of its filters matches.
-The direction must be Inbound and the action Block. The rule must be enabled,
-cover all profiles and be TCP on the listed port. Its remote addresses must be
-exactly the complement of the nodes. Every other filter must be Any: local
-address, remote port, dynamic target, program, service, interface type,
-interface, local user, remote user, remote machine. Package, owner and platform
-must be empty. Authentication and encryption must be NotRequired, and
-OverrideBlockRules must be False. A rule narrowed in any of these ways (for
-example, to one remote port) blocks almost nothing. `-Status` shows it as DRIFT,
-naming the field, and `-Apply` replaces it.
+`-Status` checks the rule STRUCTURALLY. It reads every property Windows reports on
+the rule and on each of its seven filters (port, address, application, service,
+interface type, interface, security). Every property must be one of three kinds:
+
+- a property it compares, at its unrestricted value: Inbound, Block, enabled,
+  all profiles, TCP on the listed port, remote addresses exactly the complement of
+  the nodes, Any for every other filter, NotRequired authentication and
+  encryption, and empty package, package family, owner, platform, policy app id
+  and dynamic keywords;
+- identity, label, status or housekeeping on an explicit allow-list, each with
+  a reason in `Get-Drift` in the script;
+- an alias of a compared property.
+
+Any other property, including one a future Windows build adds, is DRIFT until
+someone decides what it means. So is a compared property at any other value,
+or a required one that cannot be read. A rule narrowed in any such way (for
+example, to one remote port, one app id or one package) blocks almost nothing.
+`-Status` shows it as DRIFT, naming the property, and `-Apply` replaces it. If a
+Windows update adds a property, `-Status` reports DRIFT on every guard rule and
+`-Apply` cannot clear it (it exits 1 after replacing the rules). The rules stay
+in place. Look up what the new property does, then add it to `Get-Drift`'s
+compared set (with its unrestricted value) or to its allow-list (with a reason).
 
 | | |
 |---|---|
 | Port list (tracked) | `stack.manifest.toml` `[lan_ingress.ports]`: one line per service |
-| Addresses (per host, gitignored) | `.stack/lan-ingress.toml` beside the manifest: `host_ip` (the workstation's LAN IPv4) and `allowed_remote` (the Traefik nodes). Template: `scripts/network/lan-ingress.host.example.toml` |
+| Addresses (per host, gitignored) | `.stack/lan-ingress.toml` beside the manifest: `host_ip` (the workstation's LAN IPv4) and `allowed_remote` (the Traefik host(s); one edge host today). Template: `scripts/network/lan-ingress.host.example.toml` |
 | Script | `scripts/network/lan-ingress-firewall.ps1` (PowerShell 5.1) |
 | Rules it owns | names starting `ai-stack-lan-guard-` (one per port: `ai-stack-lan-guard-<service>-<port>`), group `ai-stack LAN ingress guard` |
 | Test | `powershell -NoProfile -File scripts\network\test-lan-ingress-firewall.ps1` (firewall faked; refuses to run elevated) |
 
-Today's ports: Open WebUI 3000, Mattermost 8065, LiteLLM UI 8445, wiki-viewer
-8812, workbench 8814.
+Today's ports:
+
+- **Published, or going live:** Open WebUI 3000 (live), Mattermost 8065 and LiteLLM UI
+  8445.
+- **Listed but not published:** wiki-viewer 8812 and workbench 8814. They are guarded
+  ahead of time, and a block rule on a port that only listens on loopback changes
+  nothing.
+
+**Rules the guard owns.** A rule is the guard's if its Name OR its DisplayName starts
+with `ai-stack-lan-guard-`. The script names its own rules that way. A rule made by
+hand (the Windows Firewall UI, or `New-NetFirewallRule` without `-Name`) gets a GUID
+Name. If its DisplayName is `ai-stack-lan-guard-<service>-<port>`, it is judged like any
+other guard rule:
+
+- `-Status` shows its GUID as `(rule id {...})`, and it is OK when it matches.
+- `-Apply` keeps it if it is in sync. If it drifted, `-Apply` replaces it by creating the
+  managed rule FIRST, then removing the hand-made one by its GUID.
+- `-Remove` removes it.
+
+A second rule for the same port is shown as a duplicate and removed. Nothing whose Name
+and DisplayName both lack the prefix is ever touched.
 
 **Why the addresses are in a separate file.** This repository is public, and
 `scripts/checks/check_identity.py` keeps LAN (RFC 1918) addresses out of
@@ -93,9 +124,9 @@ the LAN for that time. To take a port away again: unpublish it first, then
 remove its line from `[lan_ingress.ports]` and `-Apply` (the stale rule is
 removed).
 
-## Verify from a host that is NOT a Traefik node
+## Verify from a host that is NOT the Traefik host
 
-From any LAN machine that is not one of the `allowed_remote` nodes (a laptop
+From any LAN machine that is not in `allowed_remote` (a laptop
 or a phone on the same Wi-Fi):
 
 ```powershell
@@ -109,7 +140,7 @@ curl -m 5 -sS -o /dev/null -w '%{http_code}\n' http://<host_ip>:3000/   # expect
 nc -vz -w 5 <host_ip> 8065                                               # expect a timeout
 ```
 
-Repeat for 8065, 8445, 8812 and 8814. Then from a Traefik node (`<node>`), which must
+Repeat for 8065, 8445, 8812 and 8814. Then from the Traefik host (`<node>`), which must
 connect:
 
 ```sh
@@ -120,7 +151,7 @@ And on the workstation itself, `http://127.0.0.1:3000/` must still work. Windows
 Firewall does not filter loopback traffic, so the guard does not apply to it.
 If localhost breaks, roll back and report it.
 
-If the LAN has IPv6, also try the workstation's IPv6 address from the non-node
+If the LAN has IPv6, also try the workstation's IPv6 address from the non-Traefik
 host (`ipconfig` shows it). It must fail too.
 
 ## Roll back

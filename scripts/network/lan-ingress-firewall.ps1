@@ -329,111 +329,276 @@ function Get-DesiredRules($cfg) {
 function Test-OwnName([string]$Name) { return ($Name -and $Name.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase)) }
 
 function Get-GuardRules {
-    # A property's value as one comparable string: $null when the object lacks it (StrictMode-safe),
-    # arrays joined with ','. A missing property can therefore never read as the expected value.
-    function Get-FieldText($o, [string]$Name) {
-        if ($null -eq $o) { return $null }
-        $p = $o.PSObject.Properties[$Name]
-        if ($null -eq $p) { return $null }
-        if ($null -eq $p.Value) { return '' }
-        return ((@($p.Value) | ForEach-Object { [string]$_ }) -join ',')
+    # Every property Windows reports on the rule object and on each of its seven filter
+    # objects goes into .Props as (Kind, Name, Text), unfiltered. Get-Drift judges them all.
+    # The flat fields beside .Props are for display and for older readers only. No drift
+    # decision is made from them.
+    function Get-PropRecords([string]$Kind, $o) {
+        $recs = @()
+        if ($null -eq $o) { return , $recs }
+        foreach ($p in $o.PSObject.Properties) {
+            $text = $null
+            try {
+                $v = $p.Value
+                $text = if ($null -eq $v) { '' } else { (@($v) | ForEach-Object { [string]$_ }) -join ',' }
+            }
+            catch { $text = '<unreadable: getter threw>' }
+            $recs += [pscustomobject]@{ Kind = $Kind; Name = [string]$p.Name; Text = $text }
+        }
+        return , $recs
     }
-    # (nested, so Get-GuardRules is self-contained)
-    try { $all = @(Get-NetFirewallRule -Name ($Prefix + '*') -ErrorAction Stop) }
+    function Get-FieldText([object[]]$Recs, [string]$Kind, [string]$Name) {
+        foreach ($x in $Recs) { if ($x.Kind -ceq $Kind -and $x.Name -ceq $Name) { return $x.Text } }
+        return $null
+    }
+    # OWN RULES: Name OR DisplayName starts with the prefix. The script names its rules
+    # ai-stack-lan-guard-<service>-<port>. A rule made by hand in the Windows Firewall UI
+    # (or by a script that sets no -Name) gets a GUID Name and carries the
+    # prefix only in its DisplayName; the operator's first live rule is one of these. Such
+    # a rule is recognised by its DisplayName, judged like any other, and removed by its
+    # real Name. A rule with the prefix in NEITHER field is never touched.
+    # ONE unfiltered read of every rule, then the prefix test here. A server-side -Name or
+    # -DisplayName wildcard would need two queries, and each could fail differently.
+    $all = @()
+    try { $all = @(Get-NetFirewallRule -ErrorAction Stop) }
     catch {
-        if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { $all = @() }
-        else { Stop-Abort ("could not read the firewall rules: " + $_.Exception.Message) }
+        if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { Stop-Abort ("could not read the firewall rules: " + $_.Exception.Message) }
     }
     $out = @()
+    $done = @{}
     foreach ($r in $all) {
-        if (-not (Test-OwnName ([string]$r.Name))) { continue }
-        # EVERY filter a rule has, because each one can narrow where a BLOCK applies: a block
-        # rule limited to remote port 1, one service, one interface, one user or one package
-        # blocks (almost) nothing while still looking present (tester finding TF1).
+        $rid = [string]$r.Name
+        if ($done.ContainsKey($rid)) { continue }
+        $done[$rid] = $true
+        $dn = ''
+        $dp = $r.PSObject.Properties['DisplayName']
+        if ($null -ne $dp -and $null -ne $dp.Value) { $dn = [string]$dp.Value }
+        if (Test-OwnName $rid) { $key = $rid }
+        elseif (Test-OwnName $dn) { $key = $dn }
+        else { continue }
+        $recs = @()
         try {
-            $pf = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r -ErrorAction Stop
-            $af = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r -ErrorAction Stop
-            $ap = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $r -ErrorAction Stop
-            $sv = Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $r -ErrorAction Stop
-            $it = Get-NetFirewallInterfaceTypeFilter -AssociatedNetFirewallRule $r -ErrorAction Stop
-            $if = Get-NetFirewallInterfaceFilter -AssociatedNetFirewallRule $r -ErrorAction Stop
-            $sf = Get-NetFirewallSecurityFilter -AssociatedNetFirewallRule $r -ErrorAction Stop
+            $recs += Get-PropRecords 'rule' $r
+            $recs += Get-PropRecords 'port' (Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r -ErrorAction Stop)
+            $recs += Get-PropRecords 'address' (Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r -ErrorAction Stop)
+            $recs += Get-PropRecords 'application' (Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $r -ErrorAction Stop)
+            $recs += Get-PropRecords 'service' (Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $r -ErrorAction Stop)
+            $recs += Get-PropRecords 'interfacetype' (Get-NetFirewallInterfaceTypeFilter -AssociatedNetFirewallRule $r -ErrorAction Stop)
+            $recs += Get-PropRecords 'interface' (Get-NetFirewallInterfaceFilter -AssociatedNetFirewallRule $r -ErrorAction Stop)
+            $recs += Get-PropRecords 'security' (Get-NetFirewallSecurityFilter -AssociatedNetFirewallRule $r -ErrorAction Stop)
         }
         catch { Stop-Abort ("could not read the filters of rule $($r.Name): " + $_.Exception.Message) }
+        $lp = Get-FieldText $recs 'port' 'LocalPort'
+        $ra = Get-FieldText $recs 'address' 'RemoteAddress'
         $out += [pscustomobject]@{
-            Name               = [string]$r.Name
-            Direction          = Get-FieldText $r 'Direction'
-            Action             = Get-FieldText $r 'Action'
-            Enabled            = Get-FieldText $r 'Enabled'
-            Profile            = Get-FieldText $r 'Profile'
-            Owner              = Get-FieldText $r 'Owner'
-            Platform           = Get-FieldText $r 'Platform'
-            Protocol           = Get-FieldText $pf 'Protocol'
-            LocalPort          = @(@($pf.LocalPort) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
-            RemotePort         = Get-FieldText $pf 'RemotePort'
-            DynamicTarget      = Get-FieldText $pf 'DynamicTarget'
-            LocalAddress       = Get-FieldText $af 'LocalAddress'
-            RemoteAddress      = @(@($af.RemoteAddress) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
-            Program            = Get-FieldText $ap 'Program'
-            Package            = Get-FieldText $ap 'Package'
-            Service            = Get-FieldText $sv 'Service'
-            InterfaceType      = Get-FieldText $it 'InterfaceType'
-            InterfaceAlias     = Get-FieldText $if 'InterfaceAlias'
-            LocalUser          = Get-FieldText $sf 'LocalUser'
-            RemoteUser         = Get-FieldText $sf 'RemoteUser'
-            RemoteMachine      = Get-FieldText $sf 'RemoteMachine'
-            Authentication     = Get-FieldText $sf 'Authentication'
-            Encryption         = Get-FieldText $sf 'Encryption'
-            OverrideBlockRules = Get-FieldText $sf 'OverrideBlockRules'
+            Key                = $key
+            Name               = $rid
+            DisplayName        = $dn
+            Direction          = Get-FieldText $recs 'rule' 'Direction'
+            Action             = Get-FieldText $recs 'rule' 'Action'
+            Enabled            = Get-FieldText $recs 'rule' 'Enabled'
+            Profile            = Get-FieldText $recs 'rule' 'Profile'
+            Owner              = Get-FieldText $recs 'rule' 'Owner'
+            Platform           = Get-FieldText $recs 'rule' 'Platform'
+            PolicyAppId        = Get-FieldText $recs 'rule' 'PolicyAppId'
+            PackageFamilyName  = Get-FieldText $recs 'rule' 'PackageFamilyName'
+            Protocol           = Get-FieldText $recs 'port' 'Protocol'
+            LocalPort          = @($(if ($null -ne $lp -and $lp -ne '') { $lp.Split(',') }))
+            RemotePort         = Get-FieldText $recs 'port' 'RemotePort'
+            DynamicTarget      = Get-FieldText $recs 'port' 'DynamicTarget'
+            LocalAddress       = Get-FieldText $recs 'address' 'LocalAddress'
+            RemoteAddress      = @($(if ($null -ne $ra -and $ra -ne '') { $ra.Split(',') }))
+            Program            = Get-FieldText $recs 'application' 'Program'
+            Package            = Get-FieldText $recs 'application' 'Package'
+            Service            = Get-FieldText $recs 'service' 'Service'
+            InterfaceType      = Get-FieldText $recs 'interfacetype' 'InterfaceType'
+            InterfaceAlias     = Get-FieldText $recs 'interface' 'InterfaceAlias'
+            LocalUser          = Get-FieldText $recs 'security' 'LocalUser'
+            RemoteUser         = Get-FieldText $recs 'security' 'RemoteUser'
+            RemoteMachine      = Get-FieldText $recs 'security' 'RemoteMachine'
+            Authentication     = Get-FieldText $recs 'security' 'Authentication'
+            Encryption         = Get-FieldText $recs 'security' 'Encryption'
+            OverrideBlockRules = Get-FieldText $recs 'security' 'OverrideBlockRules'
+            Props              = $recs
         }
     }
     return $out
 }
 
-# The drift check. EVERY field below must hold exactly this value (shapes measured read-only
-# on this host's rules, 2026-10-16: an unrestricted filter reads 'Any', no package/owner/
-# platform reads empty). Anything else - including a field the read could not find - is
-# drift, and -Apply replaces the rule. LocalPort and RemoteAddress are compared separately.
+# THE DRIFT CHECK IS STRUCTURAL (tester findings TF1, TA2-1). It does not keep a list of
+# "fields worth checking". Every property Windows reports, on the rule and on each of its
+# seven filters, must be one of three things:
+#   1. in $expect, at one of its unrestricted values;
+#   2. in $metadata: identity, label, status or CIM housekeeping, which cannot narrow where
+#      a rule applies (each entry gives its reason);
+#   3. in $derived: another form of a property that IS compared in $expect.
+# A property in none of the three is DRIFT. So is a property on the wrong object, or one
+# at any other value. A property Windows adds in a future build is therefore drift until
+# someone decides what it means, never silently "in sync". The $required properties must
+# also be PRESENT: a missing one is drift, not "as expected".
+#
+# Values were measured read-only on this host 2026-10-16 (Windows 10.0.26200): every
+# property of Docker's rule and its filters, and the distinct values of every property
+# across all 933 rules (rule level) and a 150-rule sample (filters). The constants below
+# took exactly one value on every rule read.
 function Get-Drift($have, $want) {
-    $expect = [ordered]@{
-        Direction = 'Inbound'; Action = 'Block'; Enabled = 'True'; Profile = 'Any'
-        Owner = ''; Platform = ''
-        Protocol = 'TCP'; RemotePort = 'Any'; DynamicTarget = 'Any'
-        LocalAddress = 'Any'
-        Program = 'Any'; Package = ''
-        Service = 'Any'; InterfaceType = 'Any'; InterfaceAlias = 'Any'
-        LocalUser = 'Any'; RemoteUser = 'Any'; RemoteMachine = 'Any'
-        Authentication = 'NotRequired'; Encryption = 'NotRequired'; OverrideBlockRules = 'False'
+    $metadata = @{
+        'Name'                    = 'the rule id; matching is by name already'
+        'ID'                      = 'alias of Name'
+        'DisplayName'             = 'a label'
+        'Description'             = 'a label'
+        'Caption'                 = 'a CIM label'
+        'ElementName'             = 'a CIM label (mirrors DisplayName)'
+        'InstanceID'              = 'the CIM key (the rule id)'
+        'CommonName'              = 'a CIM label'
+        'Group'                   = 'a grouping label for the UI; does not change matching'
+        'DisplayGroup'            = 'a grouping label for the UI'
+        'RuleGroup'               = 'a grouping label for the UI'
+        'PolicyKeywords'          = 'descriptive CIM metadata'
+        'PolicyRoles'             = 'descriptive CIM metadata'
+        'CreationClassName'       = 'the CIM key (class + rule id)'
+        'SystemCreationClassName' = 'a CIM key part, empty for firewall rules'
+        'SystemName'              = 'a CIM key part, empty for firewall rules'
+        'PolicyRuleName'          = 'a CIM key part, empty for firewall rules'
+        'Status'                  = 'the store parse message (rule.PrimaryStatus is compared)'
+        'StatusCode'              = 'the numeric form of Status (rule.PrimaryStatus is compared)'
+        'EnforcementStatus'       = 'reported by the store; NotApplicable on every rule read'
+        'PolicyStoreSource'       = 'which store holds the rule; does not change matching'
+        'PolicyStoreSourceType'   = 'which store type holds the rule; does not change matching'
+        'PrimaryStatus'           = 'filter objects: always empty (rule.PrimaryStatus is compared)'
+        'StatusDescriptions'      = 'CIM health metadata'
+        'OperationalStatus'       = 'CIM health metadata'
+        'OperatingStatus'         = 'CIM health metadata'
+        'DetailedStatus'          = 'CIM health metadata'
+        'HealthState'             = 'CIM health metadata'
+        'CommunicationStatus'     = 'CIM health metadata'
+        'InstallDate'             = 'CIM metadata'
+        'PSComputerName'          = 'PowerShell remoting housekeeping'
+        'CimClass'                = 'PowerShell CIM housekeeping (the class)'
+        'CimInstanceProperties'   = 'PowerShell CIM housekeeping (the raw bag; every member is also a property judged here)'
+        'CimSystemProperties'     = 'PowerShell CIM housekeeping'
     }
+    $derived = @{
+        'rule.Profiles'              = 'raw form of rule.Profile'
+        'rule.Platforms'             = 'raw form of rule.Platform'
+        'rule.LSM'                   = 'alias of rule.LooseSourceMapping'
+        'port.DynamicTransport'      = 'alias of port.DynamicTarget'
+        'address.LocalIP'            = 'alias of address.LocalAddress'
+        'address.RemoteIP'           = 'alias of address.RemoteAddress'
+        'application.AppPath'        = 'raw form of application.Program'
+        'service.ServiceName'        = 'raw form of service.Service'
+        'security.LocalUsers'        = 'raw form of security.LocalUser'
+        'security.RemoteUsers'       = 'raw form of security.RemoteUser'
+        'security.RemoteMachines'    = 'raw form of security.RemoteMachine'
+    }
+    $expect = @{
+        'rule.Direction'                     = @('Inbound')
+        'rule.Action'                        = @('Block')
+        'rule.Enabled'                       = @('True')
+        'rule.Profile'                       = @('Any')
+        'rule.Platform'                      = @('')
+        'rule.Owner'                         = @('')
+        'rule.PackageFamilyName'             = @('')
+        'rule.PolicyAppId'                   = @('')
+        'rule.RemoteDynamicKeywordAddresses' = @('')
+        'rule.EdgeTraversalPolicy'           = @('Block')
+        'rule.LooseSourceMapping'            = @('False')
+        'rule.LocalOnlyMapping'              = @('False')
+        'rule.PrimaryStatus'                 = @('OK')
+        'rule.Mandatory'                     = @('')
+        'rule.Priority'                      = @('')
+        'rule.RuleUsage'                     = @('')
+        'rule.PolicyDecisionStrategy'        = @('2')
+        'rule.ConditionListType'             = @('3')
+        'rule.ExecutionStrategy'             = @('2')
+        'rule.SequencedActions'              = @('3')
+        'port.Protocol'                      = @('TCP')
+        'port.LocalPort'                     = '<the listed port>'
+        'port.RemotePort'                    = @('Any')
+        'port.IcmpType'                      = @('Any')
+        'port.DynamicTarget'                 = @('Any', '')
+        'port.IsNegated'                     = @('')
+        'address.LocalAddress'               = @('Any')
+        'address.RemoteAddress'              = '<the complement of the nodes>'
+        'address.IsNegated'                  = @('')
+        'application.Program'                = @('Any')
+        'application.Package'                = @('')
+        'application.IsNegated'              = @('')
+        'service.Service'                    = @('Any')
+        'service.IsNegated'                  = @('')
+        'interfacetype.InterfaceType'        = @('Any')
+        'interfacetype.IsNegated'            = @('')
+        'interface.InterfaceAlias'           = @('Any')
+        'interface.IsNegated'                = @('')
+        'security.LocalUser'                 = @('Any')
+        'security.RemoteUser'                = @('Any')
+        'security.RemoteMachine'             = @('Any')
+        'security.Authentication'            = @('NotRequired')
+        'security.Encryption'                = @('NotRequired')
+        'security.OverrideBlockRules'        = @('False')
+        'security.IsNegated'                 = @('')
+    }
+    $required = @(
+        'rule.Direction', 'rule.Action', 'rule.Enabled', 'rule.Profile', 'rule.Platform', 'rule.Owner',
+        'rule.PackageFamilyName', 'rule.PolicyAppId', 'rule.RemoteDynamicKeywordAddresses',
+        'port.Protocol', 'port.LocalPort', 'port.RemotePort', 'port.DynamicTarget',
+        'address.LocalAddress', 'address.RemoteAddress', 'application.Program', 'application.Package',
+        'service.Service', 'interfacetype.InterfaceType', 'interface.InterfaceAlias',
+        'security.LocalUser', 'security.RemoteUser', 'security.RemoteMachine',
+        'security.Authentication', 'security.Encryption', 'security.OverrideBlockRules')
     $why = @()
-    foreach ($f in $expect.Keys) {
-        $p = $have.PSObject.Properties[$f]
-        $v = if ($null -eq $p) { $null } else { $p.Value }
-        if ($null -eq $v -or [string]$v -ne $expect[$f]) {
-            $shown = if ($null -eq $v) { '<unreadable>' } elseif ([string]$v -eq '') { '<empty>' } else { [string]$v }
-            $why += ("{0} {1}" -f $f.ToLowerInvariant(), $shown)
+    $seen = @{}
+    $props = @()
+    $pp = $have.PSObject.Properties['Props']
+    if ($null -ne $pp -and $null -ne $pp.Value) { $props = @($pp.Value) }
+    foreach ($x in $props) {
+        $key = $x.Kind + '.' + $x.Name
+        $label = $x.Name.ToLowerInvariant()
+        $shown = if ($x.Text -eq '') { '<empty>' } else { $x.Text }
+        if ($seen.ContainsKey($key)) { $why += ("{0} reported twice ({1})" -f $label, $key); continue }
+        $seen[$key] = $true
+        if ($expect.ContainsKey($key)) {
+            if ($key -eq 'port.LocalPort') {
+                if ($x.Text -ne [string]$want.Port) { $why += "localport $shown" }
+            }
+            elseif ($key -eq 'address.RemoteAddress') {
+                $k = if ($x.Text -eq '') { $null } else { Get-AddressKey @($x.Text.Split(',')) }
+                if ($null -eq $k -or $k -ne $want.RemoteKey) { $why += "remoteaddress $shown" }
+            }
+            elseif ($expect[$key] -notcontains $x.Text) { $why += ("{0} {1}" -f $label, $shown) }
+            continue
         }
+        if ($derived.ContainsKey($key)) { continue }
+        if ($metadata.ContainsKey($x.Name)) { continue }
+        $why += ("unknown property {0} = {1} ({2})" -f $label, $shown, $key)
     }
-    if ((@($have.LocalPort) -join ',') -ne [string]$want.Port) { $why += "localport $(@($have.LocalPort) -join ',')" }
-    $k = Get-AddressKey @($have.RemoteAddress)
-    if ($null -eq $k -or $k -ne $want.RemoteKey) { $why += "remoteaddress $(@($have.RemoteAddress) -join ',')" }
+    foreach ($k in $required) {
+        if (-not $seen.ContainsKey($k)) { $why += ("{0} <unreadable> ({1} missing)" -f $k.Split('.')[1].ToLowerInvariant(), $k) }
+    }
     return $why
 }
 
+# A plan entry's Name is the rule's KEY (its prefixed Name, or its prefixed DisplayName for
+# a hand-made rule). Rule is the rule as read, so a removal uses its real Name.
+function Get-IdNote($h) { if ($null -ne $h -and $h.Name -ne $h.Key) { return " (rule id $($h.Name))" } return '' }
 function Get-Plan($desired, $current) {
     $plan = @()
     foreach ($w in $desired) {
-        $h = @($current | Where-Object { $_.Name -eq $w.Name })
-        if ($h.Count -eq 0) { $plan += [pscustomobject]@{ Op = 'CREATE'; Name = $w.Name; Want = $w; Why = '' } }
+        $h = @($current | Where-Object { $_.Key -eq $w.Name })
+        if ($h.Count -eq 0) { $plan += [pscustomobject]@{ Op = 'CREATE'; Name = $w.Name; Want = $w; Rule = $null; Why = '' } }
         else {
             $d = @(Get-Drift $h[0] $w)
-            if ($d.Count -eq 0) { $plan += [pscustomobject]@{ Op = 'KEEP'; Name = $w.Name; Want = $w; Why = '' } }
-            else { $plan += [pscustomobject]@{ Op = 'REPLACE'; Name = $w.Name; Want = $w; Why = ('drift: ' + ($d -join '; ')) } }
+            if ($d.Count -eq 0) { $plan += [pscustomobject]@{ Op = 'KEEP'; Name = $w.Name; Want = $w; Rule = $h[0]; Why = (Get-IdNote $h[0]).Trim() } }
+            else { $plan += [pscustomobject]@{ Op = 'REPLACE'; Name = $w.Name; Want = $w; Rule = $h[0]; Why = ('drift: ' + ($d -join '; ') + (Get-IdNote $h[0])) } }
+            # a second rule with the same key (say, a hand-made one beside a managed one)
+            foreach ($x in @($h | Select-Object -Skip 1)) {
+                $plan += [pscustomobject]@{ Op = 'REMOVE'; Name = $x.Key; Want = $null; Rule = $x; Why = ('duplicate of the rule kept for tcp/' + $w.Port + (Get-IdNote $x)) }
+            }
         }
     }
     foreach ($h in $current) {
-        if (-not ($desired | Where-Object { $_.Name -eq $h.Name })) {
-            $plan += [pscustomobject]@{ Op = 'REMOVE'; Name = $h.Name; Want = $null; Why = ('stale: not in the source; tcp/' + (@($h.LocalPort) -join ',')) }
+        if (-not ($desired | Where-Object { $_.Name -eq $h.Key })) {
+            $plan += [pscustomobject]@{ Op = 'REMOVE'; Name = $h.Key; Want = $null; Rule = $h; Why = ('stale: not in the source; tcp/' + (@($h.LocalPort) -join ',') + (Get-IdNote $h)) }
         }
     }
     return $plan
@@ -446,20 +611,27 @@ function Invoke-New($w) {
         -Direction Inbound -Action Block -Protocol TCP -LocalPort ([string]$w.Port) -LocalAddress Any `
         -RemoteAddress $w.RemoteAddress -Profile Any -Enabled True -ErrorAction Stop | Out-Null
 }
-function Invoke-Remove([string]$Name) {
-    if (-not (Test-OwnName $Name)) { Stop-Abort "internal: refusing to remove '$Name', which is outside the $Prefix prefix" }
-    Remove-NetFirewallRule -Name $Name -ErrorAction Stop | Out-Null
+function Invoke-Remove($Rule) {
+    if ($null -eq $Rule -or -not ((Test-OwnName $Rule.Name) -or (Test-OwnName $Rule.DisplayName))) {
+        Stop-Abort "internal: refusing to remove a rule whose Name and DisplayName are both outside the $Prefix prefix"
+    }
+    Remove-NetFirewallRule -Name $Rule.Name -ErrorAction Stop | Out-Null
 }
 
 function Invoke-Plan($plan) {
     $done = @()
     $steps = @()
     foreach ($p in ($plan | Where-Object { $_.Op -eq 'CREATE' })) { $steps += , @('new', $p) }
-    foreach ($p in ($plan | Where-Object { $_.Op -eq 'REPLACE' })) { $steps += , @('remove', $p); $steps += , @('new', $p) }
+    # A replaced rule under the SAME name must go first (names are unique). A hand-made rule
+    # (GUID name) is replaced create-first, so the port is never unguarded.
+    foreach ($p in ($plan | Where-Object { $_.Op -eq 'REPLACE' })) {
+        if ($p.Rule.Name -eq $p.Want.Name) { $steps += , @('remove', $p); $steps += , @('new', $p) }
+        else { $steps += , @('new', $p); $steps += , @('remove', $p) }
+    }
     foreach ($p in ($plan | Where-Object { $_.Op -eq 'REMOVE' })) { $steps += , @('remove', $p) }
     foreach ($s in $steps) {
         try {
-            if ($s[0] -eq 'new') { Invoke-New $s[1].Want } else { Invoke-Remove $s[1].Name }
+            if ($s[0] -eq 'new') { Invoke-New $s[1].Want } else { Invoke-Remove $s[1].Rule }
             $done += ($s[0] + ' ' + $s[1].Name)
         }
         catch {
@@ -511,14 +683,14 @@ $mode = Get-Mode
 if ($mode -eq 'Remove') {
     Say ('LAN ingress guard -Remove' + $(if ($Dry) { ' (DRY RUN)' } else { '' }))
     $current = @(Get-GuardRules)
-    $plan = @($current | ForEach-Object { [pscustomobject]@{ Op = 'REMOVE'; Name = $_.Name; Want = $null; Why = ('tcp/' + (@($_.LocalPort) -join ',')) } })
+    $plan = @($current | ForEach-Object { [pscustomobject]@{ Op = 'REMOVE'; Name = $_.Key; Want = $null; Rule = $_; Why = ('tcp/' + (@($_.LocalPort) -join ',') + (Get-IdNote $_)) } })
     Show-Plan $plan
     if ($Dry) { Say 'DRY RUN: no change made.'; exit 0 }
     Assert-Elevated 'Remove'
     if ($plan.Count -eq 0) { Say 'Nothing to remove; no change made.'; exit 0 }
     $null = Invoke-Plan $plan
     $left = @(Get-GuardRules)
-    if ($left.Count -ne 0) { Write-Host ("ERROR: rules still present after -Remove: " + (($left | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Red; exit 1 }
+    if ($left.Count -ne 0) { Write-Host ("ERROR: rules still present after -Remove: " + (($left | ForEach-Object { $_.Key }) -join ', ')) -ForegroundColor Red; exit 1 }
     Say ("Removed {0} rule(s). The listed ports are now governed by the other rules on this host (Docker Desktop's allow-any)." -f $plan.Count)
     exit 0
 }
