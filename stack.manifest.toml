@@ -240,6 +240,7 @@ host = [
   "Under the `gpu` profile only: image openwebui:local, a LOCAL CUDA build (frontend/docker-compose.yml:200-207, frontend/Dockerfile.openwebui-gpu), plus an NVIDIA container runtime for the device reservation at :310-316. The DEFAULT `stock` profile needs neither: it pulls ghcr.io/open-webui/open-webui:v0.11.0 and runs on any host with Docker",
   "Under the `tailscale` profile only: a Tailscale auth key (TAILSCALE_AUTH_KEY). That profile requires `gpu`, because the pair is hard-wired (frontend/docker-compose.yml:336, network_mode: service:openwebui names the gpu definition)",
   "OPT-IN, off by default: OWUI_LAN_IP in frontend/.env publishes openwebui (stock and gpu) on <that LAN address>:3000 beside 127.0.0.1:3000, for the Proxmox Traefik (edge-b2-pub). One specific IP, never 0.0.0.0; apply the B1 LAN firewall guard first; recreate openwebui, wait healthy, then tailscale",
+  "OPT-IN, off by default: OWUI_OAUTH_PERSISTENT_CONFIG=true in frontend/.env sets ENABLE_OAUTH_PERSISTENT_CONFIG on openwebui (stock and gpu) so SSO settings entered in the admin UI are kept in webui.db (edge-b3-oauth). Preconditions (Authentik roles mapping, a second local admin) are in frontend/.env.example; recreate openwebui, wait healthy, then tailscale",
 ]
 keys = ["WEBUI_SECRET_KEY"]
 
