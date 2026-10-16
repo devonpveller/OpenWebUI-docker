@@ -9,6 +9,7 @@ fire. No docker.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -122,39 +123,62 @@ class LiveValue(unittest.TestCase):
             self.assertIsNotNone(c.validate_lan_ip(bad), bad)
 
 
-class EnvValueLikeCompose(unittest.TestCase):
-    """Expectations measured against `docker compose config` v5.3.0 on 2026-10-16."""
+class LiveVerdictFromRender(unittest.TestCase):
+    def verdict(self, *ports):
+        return c.judge_live_ports("inference", ui_render(*ports))
 
-    def test_values_compose_accepts(self):
-        for raw, want in (("1.2.3.4", "1.2.3.4"), ('"1.2.3.4"', "1.2.3.4"), ("'1.2.3.4'", "1.2.3.4"),
-                          (" 1.2.3.4", "1.2.3.4"), ("1.2.3.4   ", "1.2.3.4"),
-                          ("1.2.3.4 # c", "1.2.3.4"), ('"1.2.3.4" # c', "1.2.3.4"), ("", "")):
-            self.assertEqual(c.parse_env_value(raw), want, raw)
+    def test_loopback_only_is_inert(self):
+        self.assertEqual(self.verdict(), ([], "inert (loopback only)"))
 
-    def test_quoted_whitespace_is_kept_and_refused(self):
-        for raw in ('" 192.0.2.10"', '"192.0.2.10 "', "' 192.0.2.10'"):
-            self.assertIsNotNone(c.validate_lan_ip(c.parse_env_value(raw)), raw)
+    def test_specific_address_is_ok(self):
+        probs, v = self.verdict(port(IP, 8445, 8080))
+        self.assertEqual(probs, [])
+        self.assertIn("ok", v)
 
-    def test_hash_without_space_is_part_of_the_value(self):
-        self.assertIsNotNone(c.validate_lan_ip(c.parse_env_value("192.0.2.10#c")))
+    def test_wildcards_are_refused(self):
+        for host in ("", "0.0.0.0", "::"):
+            probs, v = self.verdict(port(host, 8445, 8080))
+            self.assertTrue(probs and v == "REFUSED", host)
 
-    def test_unterminated_quote_is_an_error(self):
-        with self.assertRaises(ValueError):
-            c.parse_env_value('"192.0.2.10')
+    def test_unlisted_non_loopback_port_is_refused(self):
+        self.assertTrue(self.verdict(port(IP, 4000, 4000))[0])
 
-    def test_validate_does_not_strip(self):
-        self.assertIsNotNone(c.validate_lan_ip(" 192.0.2.10"))
-        self.assertIsNotNone(c.validate_lan_ip("192.0.2.10 "))
+    def test_loopback_address_on_lan_port_is_inert(self):
+        self.assertEqual(self.verdict(port("127.0.0.1", 8445, 8080))[1], "inert (loopback only)")
 
-    def test_file_read_last_wins_and_export(self):
+    def test_multicast_address_is_refused(self):
+        self.assertTrue(self.verdict(port("224.0.0.1", 8445, 8080))[0])
+
+
+@unittest.skipUnless(shutil.which("docker"), "needs docker compose (render only)")
+class LiveVerdictIntegration(unittest.TestCase):
+    """The tester's two failing cases, through compose's real native render of a scratch project."""
+
+    COMPOSE = ("services:\n  llm-gateway-ui:\n    image: x\n    ports:\n"
+               "      - '${LITELLM_UI_LAN_IP:-127.0.0.1}:8445:8080'\n")
+
+    def run_env(self, text):
         with tempfile.TemporaryDirectory() as d:
-            f = Path(d) / ".env"
-            f.write_text("OWUI_LAN_IP=10.0.0.1\n# x\nexport OWUI_LAN_IP = \"192.0.2.10\" # c\n", encoding="utf-8")
-            self.assertEqual(c.read_env_value(f, "OWUI_LAN_IP"), "192.0.2.10")
-            self.assertIsNone(c.read_env_value(f, "OTHER"))
-            f.write_text('OWUI_LAN_IP="1.2.3.4\n', encoding="utf-8")
-            with self.assertRaises(ValueError):
-                c.read_env_value(f, "OWUI_LAN_IP")
+            (Path(d) / "docker-compose.yml").write_text(self.COMPOSE, encoding="utf-8")
+            (Path(d) / ".env").write_bytes(text.encode("utf-8"))
+            return c.native_render_verdict("inference", "docker-compose.yml", Path(d))
+
+    def test_multiline_quoted_value_hides_nothing(self):
+        # compose treats the last two lines as ONE value of X, so the first assignment wins
+        probs, v = self.run_env('LITELLM_UI_LAN_IP=0.0.0.0\nX="\nLITELLM_UI_LAN_IP=192.0.2.10 #"\n')
+        self.assertEqual(v, "REFUSED", probs)
+
+    def test_lowercase_key_is_seen(self):
+        probs, v = self.run_env("litellm_ui_lan_ip=0.0.0.0\n")
+        self.assertEqual(v, "REFUSED", probs)
+
+    def test_good_value_ok_and_unset_inert(self):
+        self.assertEqual(self.run_env("LITELLM_UI_LAN_IP=192.0.2.10 # c\n")[0], [])
+        self.assertEqual(self.run_env("OTHER=1\n")[1], "inert (loopback only)")
+
+    def test_value_compose_rejects_is_fail_closed(self):
+        self.assertEqual(self.run_env('LITELLM_UI_LAN_IP=" 192.0.2.10"\n')[1], "REFUSED")
+        self.assertEqual(self.run_env('LITELLM_UI_LAN_IP="192.0.2.10\n')[1], "REFUSED")
 
 
 class RenderWithoutLiveEnv(unittest.TestCase):

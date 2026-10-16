@@ -29,13 +29,13 @@ LAN address - and refuses when:
     That is what proves llm-gateway (the inference gateway itself) is untouched - it is
     also asserted to publish nothing.
 
-`--live-env` additionally reads each plane's real `.env` (when present) and refuses a
-LAN variable whose value is not one specific IPv4 unicast address - 0.0.0.0 above all.
-It reads the value the way compose's dotenv reader does (measured on compose v5.3.0,
-2026-10-16): unquoted values lose surrounding whitespace and a trailing ` #` comment,
-quoted values keep their inner whitespace (so `" 192.0.2.10"` is a value compose
-rejects, and so does this check), an unterminated quote is a read error. It prints the
-verdict only, never the value.
+`--live-env` additionally judges each plane's real `.env` (when present): 0.0.0.0 and every
+other value that is not one specific IPv4 unicast address is refused.
+The verdict comes from compose itself, never from a parser of ours: each plane is rendered
+the shipped way (`docker compose -f <compose> config --format json`, compose loading the plane's
+own .env natively, no --env-file) and every rendered published port is judged - loopback = inert,
+a wildcard host_ip = refused, one listed LAN port on one specific address = ok, a render compose
+refuses = refused (fail-closed). It prints verdicts only, never a value.
 
 A tree without a plane's `.env` (fresh clone, CI) still renders: compose needs
 agent-org/docker/.env to exist for that service's `env_file:`, so when the plane's own
@@ -245,73 +245,71 @@ def validate_lan_ip(value: str):
     return None
 
 
-def parse_env_value(raw: str):
-    """The value of one `KEY=<raw>` line as compose's dotenv reader sees it.
+def judge_live_ports(plane: str, data: dict) -> tuple:
+    """(problems, verdict) for one plane's NATIVE render. Every published port is judged.
 
-    Raises ValueError for what compose refuses to read (an unterminated quote).
+    Loopback = inert. A non-loopback binding must be exactly one of the plane's listed
+    (service, published, target) on one specific IPv4 unicast address; a wildcard host_ip (0.0.0.0, ::,
+    or none on a published port) or anything else non-loopback is refused. Values are never returned.
     """
-    raw = raw.lstrip()
-    if raw[:1] in ("'", '"'):
-        quote = raw[0]
-        out, i = [], 1
-        while i < len(raw):
-            ch = raw[i]
-            if quote == '"' and ch == "\\" and i + 1 < len(raw):
-                out.append(raw[i + 1])
-                i += 2
+    allowed = LAN[plane]["bindings"]
+    problems, lan = [], []
+    for name, spec in (data.get("services") or {}).items():
+        for p in (spec or {}).get("ports") or []:
+            if not p.get("published"):
                 continue
-            if ch == quote:
-                return "".join(out)  # anything after the closing quote is ignored
-            out.append(ch)
-            i += 1
-        raise ValueError("unterminated quoted value")
-    for n, ch in enumerate(raw):
-        if ch == "#" and n > 0 and raw[n - 1] in " \t":
-            raw = raw[:n]
-            break
-    return raw.rstrip()
+            b = _binding(name, p)
+            if b[1] == LOOPBACK:
+                continue
+            if b[1] in WILDCARDS:
+                problems.append(f"live-env {plane}: {name} publishes :{b[2]} on EVERY interface (wildcard host)")
+            elif (b[0], b[2], b[3]) not in allowed:
+                problems.append(f"live-env {plane}: {name} publishes :{b[2]} on a non-loopback address - not a listed LAN port")
+            else:
+                why = validate_lan_ip(b[1])
+                if why:
+                    problems.append(f"live-env {plane}: {name} :{b[2]} bound to a refused address: {why}")
+                else:
+                    lan.append(b)
+    if problems:
+        return problems, "REFUSED"
+    return [], ("set to one specific IPv4 unicast address - ok" if lan else "inert (loopback only)")
 
 
-def read_env_value(path: Path, key: str):
-    """The last assignment of key in an env file, or None. The value is never printed.
-
-    Raises ValueError when compose could not read the assignment.
-    """
-    value = None
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        s = line.strip()
-        if not s or s.startswith("#") or "=" not in s:
-            continue
-        k, v = s.split("=", 1)
-        k = k.strip()
-        if k.startswith("export "):
-            k = k[len("export "):].strip()
-        if k == key:
-            value = parse_env_value(v)
-    return value
+def native_render_verdict(plane: str, compose: str, cwd: Path) -> tuple:
+    """(problems, verdict) from compose's own render of `compose` under `cwd` (its .env loaded natively)."""
+    env = {k: v for k, v in os.environ.items()
+           if k.upper() not in {n.upper() for n in ALL_VARS} and k != "COMPOSE_PROFILES"}
+    cmd = ["docker", "compose", "-f", compose, "config", "--format", "json"]
+    proc = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+    if proc.returncode != 0:
+        # stderr may quote the value: never printed
+        return ([f"live-env {plane}: compose cannot render the plane with its .env "
+                 "(fail-closed - a value compose rejects is not OK)"], "REFUSED")
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        return ([f"live-env {plane}: compose output unreadable (fail-closed)"], "REFUSED")
+    return judge_live_ports(plane, data)
 
 
 def live_env_problems() -> list:
+    """Verdicts from compose's OWN render of each plane with its real .env loaded natively.
+
+    No hand-written .env parser: quoting, multi-line values, duplicate keys, case-insensitive
+    names, interpolation and everything else is compose's. A render that fails is fail-closed.
+    """
     problems = []
     for plane, (compose, _example) in COMPOSE.items():
-        var = LAN[plane]["var"]
         env_path = REPO / Path(compose).parent / ".env"
         if not env_path.is_file():
             print(f"  live-env {plane}: NOT VERIFIED ({env_path.relative_to(REPO).as_posix()} absent)")
             continue
-        try:
-            value = read_env_value(env_path, var)
-        except ValueError as exc:
-            problems.append(f"live-env {plane}: {var} cannot be read the way compose reads it: {exc}")
-            continue
-        if not value:
-            print(f"  live-env {plane}: {var} unset - inert")
-            continue
-        why = validate_lan_ip(value)
-        if why:
-            problems.append(f"live-env {plane}: {var} is set to a value that is refused: {why}")
-        else:
-            print(f"  live-env {plane}: {var} set to a specific IPv4 unicast address - ok")
+        found, verdict = native_render_verdict(plane, compose, REPO)
+        problems += found
+        if not found:
+            print(f"  live-env {plane}: {verdict}")
     return problems
 
 
