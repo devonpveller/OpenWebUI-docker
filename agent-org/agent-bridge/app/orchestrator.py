@@ -379,6 +379,34 @@ _FLAIL_MARKER = "FLAIL-GUARD:"
 # P8 #3 — the worker's honest-stop marker when its checkout fails the base assertion below.
 _STALE_MARKER = "WORKSPACE STALE:"
 
+# ao-abandoncarry - why a coding turn stopped before it committed, as the WIP commit body names it
+# (never the turn's own output: model text would reach the remote unscrubbed, ao-preflight2 R2).
+_CARRY_CAUSE_TEXT = {
+    "flail": "flail guard",
+    "loop": "loop guard",
+    "task_timeout": "worker's task time limit",
+    "worker_shutdown": "worker's shutdown",
+    "poll_timeout": "bridge's wait limit",
+    "cancelled": "cancel of the task",
+    "rejected": "worker's refusal",
+    "error": "worker's error",
+    "backpressure": "inference backpressure",
+    "hung": "stall watchdog (the turn hung)",
+    "stall": "stall watchdog (the effort went quiet)",
+    "bridge_restart": "bridge's restart (the turn was orphaned)",
+}
+# The stops after which the effort is re-dispatched AT ONCE with the carried work (C7f: the
+# 3,600-s task timeout left the effort idle 1,049 s until the stall watchdog re-engaged it).
+_REDISPATCH_CAUSES = frozenset({"task_timeout", "worker_shutdown", "poll_timeout"})
+
+
+def _carry_body(cause: str) -> str:
+    """The WIP commit's body for a stopped turn: what stopped it, nothing the model wrote."""
+    what = _CARRY_CAUSE_TEXT.get(cause, "worker's error")
+    return (f"The {what} stopped this coding turn before it committed. The bridge committed its "
+            "working tree as it stood (git add -A) so the next turn starts from it on any "
+            "worker. Unreviewed work in progress.")
+
 # P8 #3 — PROVENANCE clause injected into the FIRST coding step when the org knows the expected
 # base (2026-07-16 gym: both workers ran days-old checkouts rooted on dead history — every branch
 # they pushed had no common ancestor with the live main, so nothing could ever be delivered, and
@@ -1118,6 +1146,15 @@ class Orchestrator:
         # (per effort). A branch still sitting at one of these after a run is carried work in
         # progress, never that run's delivery. Re-read from the audit log at every dispatch.
         self._carried_heads: dict[str, set[str]] = {}
+        # ao-abandoncarry - daemon tasks the stall watchdog cancelled itself (it carries their work
+        # before re-engaging; the delegate that sees them come back `cancelled` must not carry
+        # again), abandoned tasks already re-dispatched (once per task; the audit event is the
+        # restart-safe record), the carried-work note for the next coding step, and how long the
+        # watchdog's carry waits between tries for the hung turn's slot to free.
+        self._watchdog_cancelled: set[str] = set()
+        self._abandon_redispatched: set[str] = set()
+        self._carry_note: dict[str, str] = {}
+        self._carry_slot_pause: float = 1.0
         # P8 #3 — PROVENANCE: the expected BASE per effort, read from the remote at dispatch
         # ({effort_id: {"branch": default_branch, "sha": head_sha}}). Handed to the worker in the
         # brief to ASSERT against (it can't discover it — proxied git), keys workspace reuse in the
@@ -1393,7 +1430,8 @@ class Orchestrator:
                 select(WorkerInstance).where(WorkerInstance.retired.is_(False)))).scalars().all()
         return [{"id": r.id, "base_url": r.base_url, "effort_id": r.effort_id} for r in rows]
 
-    async def _cancel_worker_turns(self, *, effort_id: str | None, reason: str) -> int:
+    async def _cancel_worker_turns(self, *, effort_id: str | None, reason: str,
+                                   cancelled: list | None = None) -> int:
         """F31.3 — force-cancel in-flight worker DAEMON turns. Returns the count cancelled.
 
         The bridge's paths that free a worker SLOT are bookkeeping-only — abort (`set_lifecycle`),
@@ -1431,6 +1469,8 @@ class Orchestrator:
                                  payload={"worker": url, "task": task_id, "reason": reason, "ok": ok})
             if ok:
                 n += 1
+                if cancelled is not None:   # ao-abandoncarry: (worker id, its effort) per cancel
+                    cancelled.append((w["id"], effort_id or w.get("effort_id")))
         return n
 
     async def _last_event(self, effort_id: str) -> tuple[str, str] | None:
@@ -2423,6 +2463,9 @@ class Orchestrator:
     async def _recover_hung_worker(self, url: str, task_id: str, eid: str | None, why: dict,
                                    parked: set, mgmt) -> None:
         await self.harness.cancel_task(url, task_id)   # free the daemon (orphaned turn) …
+        # ao-abandoncarry - this cancel's turn is carried below, by the watchdog; the delegate that
+        # sees it come back `cancelled` must not carry it a second time.
+        self._watchdog_cancelled.add(task_id)
         self._worker_progress.pop(url, None)
         self._command_watch.pop(url, None)
         if not eid or eid in parked or self._waiting_on(eid) is not None:
@@ -2456,15 +2499,24 @@ class Orchestrator:
         # Uncommitted work from a turn that DIED is not work — it is wreckage the next
         # worker cannot distinguish from intent. Discard it. Anything committed survives,
         # which is the line that matters.
-        discarded = await self._discard_uncommitted(url, eid)
+        #
+        # ao-abandoncarry (operator D42(a), 2026-10-16) - with the delivery-branch sync on, the
+        # wreckage is CARRIED instead: committed as a labelled WIP commit on `agent/<effort>` from
+        # the hung worker, before the re-engage, so the next turn starts from a known commit it
+        # can inspect (and the WIP-only hold keeps it from ever being delivered as is). Nothing is
+        # discarded; a carry that fails leaves the tree where it is. With the sync off, P16 stands.
+        carry = await self._stall_carry(eid, worker_url=url, cause="hung")
+        if carry is None:
+            discarded = await self._discard_uncommitted(url, eid)
+            work = ("Anything already committed is untouched"
+                    + ("; its half-finished uncommitted edits were discarded so the next turn "
+                       "starts from a clean, known state." if discarded else "."))
+        else:
+            work = self._carry_sentence(carry)
         await self._reengage(
             [eid], mgmt_channel=mgmt, mgmt_thread=self._mgmt_thread_of(eid),
             reply_prefix=(f"🔧 **{eid}**'s worker " + self._silence_reason_text(why)
-                          + " — I stopped the hung "
-                          "turn and re-engaged it. Committed work is intact"
-                          + ("; its half-finished uncommitted edits were discarded so the "
-                             "next turn starts from a clean, known state."
-                             if discarded else ".")))
+                          + " — I stopped the hung turn and re-engaged it. " + work))
 
     async def _sweep_stalled_efforts(self) -> None:
         from datetime import datetime, timezone
@@ -2620,14 +2672,22 @@ class Orchestrator:
             # half-finished tree is what cost gym-014 three turns. No worker url is in scope here
             # (this path fires on idleness, not on a specific hung daemon), so the discard runs
             # against the effort's current workspace.
-            discarded = await self._discard_uncommitted("", eid)
+            # ao-abandoncarry - with the delivery-branch sync on, CARRY from the worker of the
+            # effort's last coding turn instead (C7f ev 19: the pool discard ran on worker-2, a
+            # free worker, while the work sat on worker-1); unknown worker = touch nothing.
+            carry = await self._stall_carry(eid, cause="stall")
+            if carry is None:
+                discarded = await self._discard_uncommitted("", eid)
+                work = ("Anything already committed is untouched"
+                        + ("; half-finished uncommitted edits were discarded so it restarts "
+                           "from a clean, known state." if discarded else "."))
+            else:
+                work = self._carry_sentence(carry)
             await self._reengage(
                 [eid], mgmt_channel=mgmt, mgmt_thread=self._mgmt_thread_of(eid),
                 reply_prefix=(f"🔧 **{eid}** went quiet for ~{mins} min with no progress after a "
                               f"dispatch — a focus or step stalled without reporting. "
-                              f"Auto-re-engaging it now. Committed work is intact"
-                              + ("; half-finished uncommitted edits were discarded so it restarts "
-                                 "from a clean, known state." if discarded else ".")))
+                              f"Auto-re-engaging it now. " + work))
 
     async def _maybe_auto_recover_infra_freeze(self, eid: str, mgmt: str | None) -> None:
         """A FROZEN effort whose concern is an ENVIRONMENT/WORKSPACE symptom (not a real code
@@ -2954,12 +3014,19 @@ class Orchestrator:
         # turn grinds to its deadline and 409s the next dispatch; this session every recreate re-orphaned
         # BOTH workers until a manual `docker restart`. Cancel each running daemon turn now — post-restart
         # they are ALL orphaned by definition. Best-effort; runs before reset_stale clears the DB state.
-        orphaned = await self._cancel_worker_turns(effort_id=None, reason="boot-orphan")
+        boot_cancelled: list = []
+        orphaned = await self._cancel_worker_turns(effort_id=None, reason="boot-orphan",
+                                                   cancelled=boot_cancelled)
         if orphaned:
             log.info("F31.3 — cancelled %d orphaned worker turn(s) on startup", orphaned)
         stale = await self.scheduler.reset_stale()  # clear any wedged 'computing' from a crash
         if stale:
             log.info("reset %d stale worker(s) to idle on startup", stale)
+        # ao-abandoncarry - an orphaned turn's uncommitted work is carried to its effort branch
+        # (after reset_stale freed the slots), or the next focus - a fresh clone, since the
+        # restart lost every focus record - would drop it. In the background: never delays boot.
+        if boot_cancelled and self.s.sync_delivery_branch:
+            self._spawn(self._carry_boot_orphans(boot_cancelled))
         self._bot_name = getattr(self.chat, "username", None)
         # #mgmt is where the Human Operator <-> PO <-> PM converse (§7); track it for events.
         mgmt = await self.mgmt_channel_id()
@@ -7332,6 +7399,10 @@ class Orchestrator:
             _proj = await self._effort_project(effort_id)
             instruction += (await self.orientation.get(
                 _proj or "", repo, eb.get("sha", ""), effort_id=effort_id)).block()
+        # ao-abandoncarry - the turn re-dispatched after an abandon is told what it starts from
+        # (the carried WIP commit), once.
+        if i == 1 and effort_id in self._carry_note:
+            instruction += self._carry_note.pop(effort_id)
         result = await self.router.wake(
             effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
             session_id=await self._session_for(effort_id), instruction=instruction, repo=repo, repo_token=repo_token,
@@ -7386,11 +7457,36 @@ class Orchestrator:
             if result.status == "clone_failed":
                 await self._handle_clone_failure(effort_id, result)
                 return None
+            # ao-abandoncarry - a coding turn that ended without success and without a flail/loop
+            # stop (C7f: the daemon's 3,600-s task timeout) keeps its work: the same carry as a
+            # guard stop, from the turn's own worker. A turn the stall watchdog cancelled is left
+            # to the watchdog, which carries it before it re-engages.
+            cause = self._stopped_turn_cause(result)
+            carried = None
+            if cause == "poll_timeout":
+                # the router cancelled it: an abandoned turn, whose session rots the same way
+                # (P21 F1) - this event is what makes the next dispatch start a fresh session
+                await self.audit.log("worker_turn_abandoned", effort_id=effort_id,
+                                     actor=getattr(result, "instance_id", None),
+                                     payload={"role": "worker-default", "cause": cause})
+            if cause and repo and self.s.sync_delivery_branch:
+                task = getattr(result, "task_id", "") or ""
+                if cause == "cancelled" and task in self._watchdog_cancelled:
+                    self._watchdog_cancelled.discard(task)
+                else:
+                    carried = await self._carry_outcome(effort_id, result, repo, cause=cause,
+                                                        next_turn="the next turn")
+            # A timed-out / shut-down turn is re-dispatched at once with that work, not after the
+            # 15-min stall watchdog (bounded; once per abandoned task).
+            if cause in _REDISPATCH_CAUSES and await self._redispatch_abandoned(
+                    effort_id, result, cause, carried):
+                return None
             # If the worker's OWN inference was shed by the saturated GPU, that's backpressure — PARK
             # + auto-resume (raise so delegate parks this step), NOT a worker failure to escalate.
             if is_backpressure_text(getattr(result, "output", None)):
                 raise ModelBackpressureError(f"worker inference shed: {(result.output or '')[:160]}")
-            await self._escalate_worker_failure(effort_id, result)
+            await self._escalate_worker_failure(effort_id, result,
+                                                note=self._carry_sentence(carried))
             return None
         # Cross-effort DEBUG HANDOFF (operator 2026-07-14): the worker is BLOCKED by a bug in
         # ANOTHER project's code — this turn is a bug report, not a deliverable. Route the debug
@@ -13208,11 +13304,14 @@ class Orchestrator:
             tainted=tainted,
         )
 
-    async def _escalate_worker_failure(self, effort_id: str, result) -> None:
+    async def _escalate_worker_failure(self, effort_id: str, result, *, note: str = "") -> None:
         """A worker that ended non-`done` climbs the escalation ladder (CM.3). A refusal/rejection
         is a hard-gate trigger reaching the human (F3 — never routed around); other non-`done`
-        ends are raised up the ladder but don't hard-freeze (no gate thrash on ordinary failure)."""
+        ends are raised up the ladder but don't hard-freeze (no gate thrash on ordinary failure).
+        `note` (ao-abandoncarry) says what happened to the turn's uncommitted work."""
         head = (result.output or "").strip()[:200] or result.status
+        if note:
+            head = f"{head} | {note}"
         if result.status == "rejected":
             concern = Concern(
                 intent_thread=f"effort {effort_id}",
@@ -13607,10 +13706,20 @@ class Orchestrator:
             return True
         return self.exec_gate.dry_run_required(await self._effort_risk_str(effort_id))
 
-    async def _carry_stopped_turn_work(self, effort_id: str, result, repo: str) -> bool:
+    async def _carry_stopped_turn_work(self, effort_id: str, result, repo: str, *,
+                                       cause: str | None = None, next_turn: str | None = None,
+                                       slot_wait_s: float = 0.0) -> bool:
+        """ao-replancarry - True when the stopped turn's work was carried (committed, or unpushed
+        commits pushed). See `_carry_outcome`, which this wraps for the flail/loop path."""
+        out = await self._carry_outcome(effort_id, result, repo, cause=cause,
+                                        next_turn=next_turn, slot_wait_s=slot_wait_s)
+        return out["status"] == "carried"
+
+    async def _carry_outcome(self, effort_id: str, result, repo: str, *,
+                             cause: str | None = None, next_turn: str | None = None,
+                             slot_wait_s: float = 0.0, pin_focus: bool = True) -> dict:
         """ao-replancarry — commit what a stopped coding turn left uncommitted as a WIP commit on
-        the effort branch and push it there, from the worker that ran the turn. Returns True when
-        work was carried (committed, or unpushed commits pushed).
+        the effort branch and push it there, from the worker that ran the turn.
 
         C7e 0.3 ao-queue r1 (2026-10-15): the flail guard stopped the coding turn on worker-1 after
         it wrote its repro test; the forced plan turn and then the execution turn ran on worker-2
@@ -13620,63 +13729,88 @@ class Orchestrator:
         through the F33 delivery-branch sync, survives a /project wipe, and is how a normal turn's
         work travels. See `modules/replan_carry.py` for what the command does and refuses.
 
+        ao-abandoncarry: the same carry for every other way a coding turn ends without success
+        (`cause`: task_timeout, worker_shutdown, poll_timeout, cancelled, rejected, error,
+        backpressure) and for the stall watchdog's recoveries (hung, stall) - C7f's abandoned turn
+        was never carried. `slot_wait_s` lets the watchdog wait for the hung turn's slot (its
+        delegate releases it once its poll sees the cancel). `pin_focus=False` only at boot, for a
+        turn the restart orphaned: the bridge's focus records died with it, and the worker's DB
+        row (bound to this effort while the turn ran) is the record that the workspace is its.
+
         Runs pinned to `result.instance_id` and only while that worker is still focused for this
         effort (`expect_effort`). Re-focuses with the effort's current token first (a NOOP for the
         same repo: the tree is kept, origin's credential re-baked, as `_publish_effort` does), so a
         long turn's expired clone token cannot fail the push. Never raises: a failed carry is
-        recorded (`stopped_turn_carry_failed`) and the re-plan proceeds as before."""
+        recorded (`stopped_turn_carry_failed`) and the caller proceeds as before. Returns
+        {"status": carried|clean|failed, "worker", "branch", "commit", "pushed", "n_files",
+        "reason", "cause"} - what the caller may truthfully say."""
         from .modules.replan_carry import carry_command, parse_carry
         from .modules.router import WorkspaceMoved
 
         inst_id = getattr(result, "instance_id", None)
         branch = self._effort_branch(effort_id)
+        if cause is None:
+            cause = "loop" if getattr(result, "loop_trip", None) is not None else "flail"
+        next_turn = next_turn or "the re-planned turn"
+        out: dict = {"status": "failed", "worker": inst_id, "branch": branch, "commit": "",
+                     "pushed": False, "n_files": 0, "reason": "", "cause": cause}
         if not inst_id:
+            out["reason"] = "the stopped turn's worker is unknown"
             await self.audit.log("stopped_turn_carry_failed", effort_id=effort_id, payload={
-                "worker": None, "branch": branch, "reason": "the stopped turn's worker is unknown"})
-            return False
-        # ao-preflight2 (review R1/R2): the body names the guard, never the stopped turn's own
-        # output - model text would be pushed to the remote unscrubbed, and reading its first
-        # line raised outside the try on a whitespace-only output.
-        guard = ("loop guard" if getattr(result, "loop_trip", None) is not None
-                 else "flail guard")
+                "worker": None, "branch": branch, "reason": out["reason"], "cause": cause})
+            return out
+        # ao-preflight2 (review R1/R2): the body names what stopped the turn, never the stopped
+        # turn's own output - model text would be pushed to the remote unscrubbed, and reading
+        # its first line raised outside the try on a whitespace-only output.
+        subject = (f"wip: {effort_id} - work of a stopped turn, carried to the re-plan"
+                   if cause in ("flail", "loop") else
+                   f"wip: {effort_id} - work of a stopped turn, carried to the next turn")
         try:
-            command = carry_command(
-                branch, subject=f"wip: {effort_id} - work of a stopped turn, carried to the re-plan",
-                body=(f"The {guard} stopped this coding turn before it committed. The bridge "
-                      "committed its working tree as it stood (git add -A) so the next turn "
-                      "starts from it on any worker. Unreviewed work in progress."),
-                author=self._agent_identity("worker-default"))
+            command = carry_command(branch, subject=subject, body=_carry_body(cause),
+                                    author=self._agent_identity("worker-default"))
             token = await self._project_token(effort_id)
-            _exit, out, _timed = await self.router.exec_check(
-                effort_id, command=command, session_id=f"{effort_id}~carry", repo=repo,
-                repo_token=token, timeout=300, instance_id=inst_id, expect_effort=effort_id,
-                wait_quiet=True)
+            waited = 0.0
+            while True:
+                try:
+                    _exit, raw, _timed = await self.router.exec_check(
+                        effort_id, command=command, session_id=f"{effort_id}~carry", repo=repo,
+                        repo_token=token, timeout=300, instance_id=inst_id,
+                        expect_effort=effort_id if pin_focus else None, wait_quiet=True)
+                    break
+                except NoCapacityError:
+                    # the hung turn's delegate still holds the slot until its poll sees the cancel
+                    if waited >= slot_wait_s:
+                        raise
+                    await asyncio.sleep(self._carry_slot_pause)
+                    waited += self._carry_slot_pause
         except (NoCapacityError, WorkspaceMoved) as exc:
             reason = f"the stopped turn's workspace is unavailable: {exc}"
             report = None
-        except Exception as exc:  # noqa: BLE001 — best-effort; never blocks the re-plan
+        except Exception as exc:  # noqa: BLE001 — best-effort; never blocks the caller
             log.debug("carry of the stopped turn for %s failed: %s", effort_id, exc)
             reason = f"carry failed: {exc}"
             report = None
         else:
-            report = parse_carry(out)
+            report = parse_carry(raw)
             reason = (report or {}).get("why") or "no report from the carry"
         status = (report or {}).get("status")
         if status == "clean":
             await self.audit.log("stopped_turn_carry_clean", effort_id=effort_id, payload={
                 "worker": inst_id, "branch": branch,
-                "head": (report.get("head_before") or "")[:40]})
-            return False
+                "head": (report.get("head_before") or "")[:40], "cause": cause})
+            out["status"] = "clean"
+            return out
         if status != "ok":
+            out["reason"] = str(reason)[:300]
             await self.audit.log("stopped_turn_carry_failed", effort_id=effort_id, payload={
-                "worker": inst_id, "branch": branch, "reason": str(reason)[:300]})
+                "worker": inst_id, "branch": branch, "reason": out["reason"], "cause": cause})
             await self.comms.post(
                 Intent.worker_activity,
                 f"⚠️ I could not save the stopped turn's uncommitted work to `{branch}` "
-                f"({str(reason)[:200]}). It is still only on `{inst_id}`; the re-planned turn may "
+                f"({str(reason)[:200]}). It is still only on `{inst_id}`; {next_turn} may "
                 f"not start from it.",
                 effort_id=effort_id)
-            return False
+            return out
         files = [str(f) for f in (report.get("files") or [])]
         payload = {
             "worker": inst_id, "branch": branch, "from_branch": report.get("from_branch") or "",
@@ -13685,24 +13819,192 @@ class Orchestrator:
             "n_files": int(report.get("n_files") or 0),
             "unpushed_before": report.get("unpushed_before"),
             "pushed": bool(report.get("pushed")), "push_detail": report.get("push_detail") or "",
-            "left_dirty": report.get("left_dirty"),
+            "left_dirty": report.get("left_dirty"), "cause": cause,
         }
         await self.audit.log("stopped_turn_work_carried", effort_id=effort_id, payload=payload)
         if payload["pushed"]:
             # the branch now sits at a commit nobody delivered: never count it as delivery
             self._carried_heads.setdefault(effort_id, set()).update(
                 h for h in (payload["head"], payload["commit"]) if h)
+        out.update(status="carried", commit=payload["commit"] or payload["head"],
+                   pushed=payload["pushed"], n_files=payload["n_files"])
         what = (f"{payload['n_files']} file(s) as WIP commit `{payload['commit'][:12]}`"
                 if payload["commit"] else "its unpushed commits")
         if payload["pushed"]:
-            msg = (f"📦 Saved the stopped turn's work — {what} — to `{branch}`, so the re-planned "
-                   f"turn starts from it on any worker.")
+            msg = (f"📦 Saved the stopped turn's work — {what} — to `{branch}`, so {next_turn} "
+                   f"starts from it on any worker.")
         else:
             msg = (f"⚠️ Committed the stopped turn's work ({what}) on `{inst_id}`, but pushing "
                    f"`{branch}` failed ({payload['push_detail'][:160] or 'no detail'}); only a "
                    f"turn on `{inst_id}` will start from it.")
         await self.comms.post(Intent.worker_activity, msg, effort_id=effort_id)
+        return out
+
+    @staticmethod
+    def _stopped_turn_cause(result) -> str | None:
+        """ao-abandoncarry - how a coding turn ended when it did not succeed and no flail/loop
+        guard stopped it, from the daemon's status and `detail` (little-coder: "abandoned: exceeded
+        <n>s" = its per-task timeout, "cancelled by the operator" = any cancel, "abandoned: drain
+        deadline exceeded" / "abandoned: shutting down" = the worker stopping). An abandon without
+        a detail (an older daemon) is read as the task timeout. None = it succeeded."""
+        status = getattr(result, "status", "") or ""
+        if status == "done":
+            return None
+        detail = (getattr(result, "detail", "") or "").lower()
+        output = getattr(result, "output", "") or ""
+        if status == "abandoned":
+            if "cancel" in detail:
+                return "cancelled"
+            if "drain" in detail or "shutting down" in detail:
+                return "worker_shutdown"
+            return "task_timeout"
+        if status == "rejected":
+            return "rejected"
+        if status == "error" and "poll timeout" in output:
+            return "poll_timeout"
+        if is_backpressure_text(output):
+            return "backpressure"
+        return "error"
+
+    @staticmethod
+    def _carry_sentence(out: dict | None) -> str:
+        """What may truthfully be said about a stopped turn's uncommitted work after the carry.
+        Never "committed work is intact": nothing says anything was committed (C7f's stall post
+        said it when nothing had been)."""
+        if not out:
+            return ""
+        branch = out.get("branch") or "the effort branch"
+        if out.get("status") == "carried":
+            sha = (out.get("commit") or "")[:12]
+            if out.get("pushed"):
+                return (f"Its uncommitted work was saved as WIP commit `{sha}` on `{branch}`; the "
+                        f"next turn starts from it on any worker.")
+            return (f"Its uncommitted work was committed as `{sha}` on `{out.get('worker')}`, but "
+                    f"the push to `{branch}` failed, so only a turn there starts from it.")
+        if out.get("status") == "clean":
+            return (f"It left nothing uncommitted on `{out.get('worker')}`; whatever is already "
+                    f"on `{branch}` is untouched.")
+        if out.get("status") == "skipped":
+            return ("I could not tell which worker held its last turn, so nothing was saved or "
+                    "discarded there.")
+        return (f"I could not save its uncommitted work ({(out.get('reason') or '')[:160]}); it "
+                f"was NOT discarded and is still only on `{out.get('worker')}`.")
+
+    async def _redispatch_abandoned(self, effort_id: str, result, cause: str,
+                                    carried: dict | None) -> bool:
+        """ao-abandoncarry - re-engage an effort AT ONCE after its coding turn was abandoned by a
+        timeout or a worker shutdown, instead of waiting for the stall watchdog (C7f: 1,049 s idle
+        after the 3,600-s task timeout). The carry has already put the turn's work on
+        `agent/<effort>`; the next dispatch syncs to it (F33) in a fresh session (`_session_for`
+        counts `worker_turn_abandoned`) and is told what it starts from.
+
+        Once per abandoned task (in memory and by the `abandoned_turn_redispatched` event, so a
+        restart cannot re-dispatch it again) and at most `stall_max_recoveries` times per effort,
+        like the watchdog's own recoveries. Never for an aborted or frozen effort. Returns True
+        when the abandon is handled (queued now, or already queued for this task); False = the
+        caller escalates as before."""
+        key = getattr(result, "task_id", "") or ""
+        if key and key in self._abandon_redispatched:
+            return True
+        if await self._is_aborted(effort_id) or await self.gate.state_of(effort_id) == "frozen":
+            return False
+        prior = await self._redispatch_payloads(effort_id)
+        if key and any(p.get("task") == key for p in prior):
+            self._abandon_redispatched.add(key)
+            return True
+        if len(prior) >= max(0, self.s.stall_max_recoveries):
+            return False
+        try:
+            _v, goal, _s = await self.charters.current_goal(effort_id)
+        except Exception:  # noqa: BLE001
+            goal = ""
+        if not goal:
+            return False
+        if key:
+            self._abandon_redispatched.add(key)
+        carried = carried or {}
+        worker = getattr(result, "instance_id", None)
+        detail = (getattr(result, "detail", "") or "").strip()
+        await self.audit.log("abandoned_turn_redispatched", effort_id=effort_id, payload={
+            "task": key, "cause": cause, "worker": worker, "detail": detail[:160],
+            "n": len(prior) + 1, "carry": carried.get("status") or "none",
+            "commit": carried.get("commit") or "", "pushed": bool(carried.get("pushed"))})
+        if carried.get("status") == "carried" and carried.get("pushed"):
+            self._carry_note[effort_id] = (
+                f"\n\nCARRIED WORK: the previous coding turn on this effort was stopped by the "
+                f"{_CARRY_CAUSE_TEXT.get(cause, 'worker')} before it committed. Its working tree "
+                f"was saved as WIP commit `{carried['commit'][:12]}` on `{carried['branch']}`, "
+                f"and your checkout starts from it. It is unreviewed: read what it changed "
+                f"(`git show --stat HEAD`), check it, and continue from it rather than starting "
+                f"over.")
+        else:
+            self._carry_note.pop(effort_id, None)
+        why = {"task_timeout": "hit its task time limit",
+               "worker_shutdown": "was stopped by its worker shutting down",
+               "poll_timeout": "outlasted the bridge's wait limit"}.get(cause, "was abandoned")
+        said = self._carry_sentence(carried) or "Whether it left uncommitted work is unknown."
+        msg = (f"⏱️ The coding turn on `{worker or 'its worker'}` {why}"
+               f"{f' ({detail})' if detail else ''} and was stopped. {said} Re-engaging the "
+               f"effort now ({len(prior) + 1} of {self.s.stall_max_recoveries}), in a fresh "
+               f"session.")
+        await self.comms.post(Intent.worker_activity, msg, effort_id=effort_id)
+        await self.comms.post(Intent.operator_reply, f"**{effort_id}**: {msg}",
+                              thread_id=self._mgmt_thread_of(effort_id))
+        await self.router.update_effort_card(effort_id, "active")
+        # Queued (not spawned) - delegate's finally launches it after this run fully closes,
+        # exactly like the flail re-plan, so the single-flight guard cannot collide.
+        self._iterate_after[effort_id] = goal
         return True
+
+    async def _redispatch_payloads(self, effort_id: str) -> list[dict]:
+        async with self.db.session_factory() as s:
+            rows = (await s.execute(select(Event.payload).where(
+                Event.effort_id == effort_id, Event.kind == "abandoned_turn_redispatched")
+            )).all()
+        return [r[0] or {} for r in rows]
+
+    async def _carry_boot_orphans(self, pairs: list) -> None:
+        """ao-abandoncarry - carry each turn the boot cancelled (see `setup`). Best-effort."""
+        from types import SimpleNamespace
+
+        for inst_id, eid in pairs:
+            try:
+                repo = await self._effort_repo(eid) if eid else None
+                if not repo:
+                    continue
+                await self._carry_outcome(
+                    eid, SimpleNamespace(instance_id=inst_id, loop_trip=None), repo,
+                    cause="bridge_restart", next_turn="the next turn", pin_focus=False)
+            except Exception as exc:  # noqa: BLE001 - boot must never fail on a carry
+                log.warning("boot carry for %s on %s failed: %s", eid, inst_id, exc)
+
+    async def _stall_carry(self, eid: str, *, worker_url: str = "", cause: str) -> dict | None:
+        """ao-abandoncarry - the stall watchdog's recoveries carry the effort's uncommitted work
+        instead of discarding it (P16's discard ran on whichever pool worker was free: C7f ev 19
+        ran it on worker-2 while the work sat on worker-1). Pinned to the worker that ran the
+        turn: the hung worker's url, else the worker of the effort's last coding turn; when the
+        bridge does not know it (after a restart) nothing is carried or discarded anywhere.
+        None = no repo, or the delivery-branch sync is off (the caller keeps P16's discard)."""
+        from types import SimpleNamespace
+
+        if not self.s.sync_delivery_branch:
+            return None
+        repo = await self._effort_repo(eid)
+        if not repo:
+            return None
+        inst_id = None
+        if worker_url:
+            for w in await self._worker_urls():
+                if w["base_url"] == worker_url:
+                    inst_id = w["id"]
+        inst_id = inst_id or self.router._coding_ws.get(eid)
+        if not inst_id:
+            await self.audit.log("stall_carry_skipped", effort_id=eid, payload={
+                "cause": cause, "reason": "the worker of the effort's last turn is unknown"})
+            return {"status": "skipped", "branch": self._effort_branch(eid)}
+        return await self._carry_outcome(
+            eid, SimpleNamespace(instance_id=inst_id, loop_trip=None), repo, cause=cause,
+            next_turn="the re-engaged turn", slot_wait_s=30.0 if worker_url else 0.0)
 
     async def _flail_replan(self, effort_id: str, result) -> None:
         """The daemon's FLAIL GUARD killed a coding turn that kept READING without one edit

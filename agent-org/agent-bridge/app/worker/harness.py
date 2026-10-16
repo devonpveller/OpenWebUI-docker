@@ -56,6 +56,10 @@ class WorkResult:
         self.instance_id: str | None = None
         self.pre_turn_output: str | None = None
         self.pre_turn_note: str = ""      # why no baseline was taken, when none was
+        # ao-abandoncarry - the daemon's own `detail` for a terminal task ("abandoned: exceeded
+        # 3600s", "cancelled by the operator", "abandoned: drain deadline exceeded"): it is what
+        # tells a task-timeout abandon from a cancel or a worker shutdown. "" = not reported.
+        self.detail: str = ""
 
     @property
     def ok(self) -> bool:
@@ -522,8 +526,10 @@ class LittleCoderHarness:
                             await on_update("answer", {"status": status, "answer": answer})
                         except Exception:  # noqa: BLE001
                             pass
-                    return WorkResult(status, task_id, answer,
-                                      commands=_command_texts(activity), model=_ran_model(s))
+                    res = WorkResult(status, task_id, answer,
+                                     commands=_command_texts(activity), model=_ran_model(s))
+                    res.detail = str(s.get("detail") or "")[:300]
+                    return res
             return WorkResult("error", task_id, "poll timeout", model=ran)
 
     async def set_project(
@@ -800,8 +806,10 @@ class FakeHarness:
                                        "answer": self.answer_text or "ok"})
         # Like a daemon that runs what it is sent: reports the sent model, or None (agent.model,
         # which a fake does not know) when none was sent.
-        return WorkResult(self.result_status, task_id=f"fake-{len(self.wakes)}", output=out,
-                          commands=cmds, model=model)
+        res = WorkResult(self.result_status, task_id=f"fake-{len(self.wakes)}", output=out,
+                         commands=cmds, model=model)
+        res.detail = getattr(self, "result_detail", "")
+        return res
 
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
