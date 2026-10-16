@@ -27,6 +27,10 @@ agent:
     local-large: llamacpp/local-large
     local-small: llamacpp/local-small
   prompt_mode: arg
+  # Per-call sampling temperature override (ao-temp06). null = pi's own profile value (0.3, from
+  # little-coder's benchmark-profiles default_model_profile). The agent-org worker configs set 0.6
+  # (operator D22); this interactive config stays null.
+  temperature: null
   # --mode json streams structured events (thinking / tool calls / answer
   # deltas) so the OWUI surface can show the process live.
   # --append-system-prompt seeds founding knowledge: the operating

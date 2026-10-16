@@ -151,8 +151,10 @@ whenever `little-coder/config/` changes):
 python agent-org/scripts/gen-worker-configs.py
 ```
 
-The generated configs differ from the source in two lines: the executor URL, and a 900-s
-per-command bound (`workspace.exec_timeout_seconds`; the interactive little-coder keeps 1,800 s).
+The generated configs differ from the source in three lines: the executor URL, a 900-s
+per-command bound (`workspace.exec_timeout_seconds`; the interactive little-coder keeps 1,800 s),
+and the per-call sampling temperature 0.6 (`agent.temperature`, operator D22; without it pi sends
+its own 0.3, and the interactive little-coder keeps that).
 A worker command that runs past it is killed with its whole process tree and the worker is told
 how to proceed ([`little-coder/pi-extension/README.md`](../little-coder/pi-extension/README.md)).
 A running worker reads its config at start: regenerate, then recreate the pool.

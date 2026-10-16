@@ -55,6 +55,35 @@ if d.action == "deny":
 """
 
 
+# c7f-int: ao-plancheck's plan-turn check (on every plan wake since the merge) ships a python3 script
+# base64-encoded in `python3 -c`, larger than the 32K command line Windows allows, with the worker's
+# paths in it (`WS = '/workspace'`, `GIT = ["git"]`). The worker runs it as is (Linux, 128 KB argv).
+# On this host a `python3` wrapper takes the code from a file instead and points WS / GIT at this
+# workspace and at the same real-classify git shim - test plumbing only, as in test_ao_plancheck.
+_PYEXEC = """import base64, re, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"b64decode[(]'([A-Za-z0-9+/=]+)'[)]", src)
+if m and "ao-plancheck" in src:
+    src = base64.b64decode(m.group(1)).decode("utf-8")
+    src = src.replace("WS = '/workspace'", "WS = " + repr({root!r}))
+    src = src.replace('GIT = ["git"]', "GIT = " + repr([sys.executable, {gitshim!r}]))
+sys.argv = [sys.argv[0]] + sys.argv[2:]
+exec(compile(src, "ao-plancheck", "exec"))
+"""
+
+_GITSHIM_PY = """import subprocess, sys
+sys.path.insert(0, {proxy_dir!r})
+import json, git_proxy
+d = git_proxy.classify(sys.argv[1:])
+with open({log!r}, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({{"argv": sys.argv[1:], "action": d.action, "rule": d.rule}}) + "\\n")
+if d.action == "deny":
+    sys.stderr.write("git-proxy: DENIED (%s) - %s\\n" % (d.rule, d.reason))
+    raise SystemExit(git_proxy.EXIT_DENIED)
+raise SystemExit(subprocess.run([{git!r}, *sys.argv[1:]]).returncode)
+"""
+
+
 def daemon_frame(stdout: str, stderr: str, rng: random.Random) -> str:
     """What /check hands the bridge for this stdout/stderr (see the module docstring)."""
     pty = stdout.replace("\r\n", "\n").replace("\n", "\r\n")
@@ -87,6 +116,15 @@ class LocalWS:
         (shim / "git").write_text(
             '#!/bin/bash\n"%s" "%s" "$@" || exit $?\nexec "%s" "$@"\n'
             % (Path(sys.executable).as_posix(), (shim / "classify.py").as_posix(), real))
+        py = Path(sys.executable).as_posix()
+        (shim / "gitshim.py").write_text(_GITSHIM_PY.format(
+            proxy_dir=str(PROXY.parent), log=str(self.log), git=str(GIT)))
+        (shim / "pyexec.py").write_text(_PYEXEC.format(
+            root=self.root.as_posix(), gitshim=(shim / "gitshim.py").as_posix()))
+        (shim / "python3").write_text(
+            '#!/bin/bash\nif [ "$1" = "-c" ]; then f="$(mktemp)"; printf "%%s" "$2" > "$f"; '
+            'shift 2; "%s" "%s" "$f" "$@"; rc=$?; rm -f "$f"; exit $rc; fi\nexec "%s" "$@"\n'
+            % (py, (shim / "pyexec.py").as_posix(), py))
         self.env = dict(os.environ, PATH=str(shim) + os.pathsep + os.environ.get("PATH", ""),
                         GIT_CEILING_DIRECTORIES=str(tmp), GIT_AUTHOR_NAME="t",
                         GIT_AUTHOR_EMAIL="t@example.invalid", GIT_COMMITTER_NAME="t",
@@ -98,7 +136,12 @@ class LocalWS:
     # -- the bridge's channel ---------------------------------------------------------------
     def bridge(self, command: str) -> tuple[int, str, bool]:
         sh = command.replace("/workspace", self.root.as_posix())
-        p = subprocess.run([BASH, "-c", sh], capture_output=True, env=self.env)
+        # c7f-int: the command goes to bash as a FILE, not `bash -c` argv - ao-plancheck's plan-turn
+        # check commands are base64 `python3 -c` scripts larger than the 32K command line Windows
+        # allows (Linux workers take 128 KB), so an argv was truncated mid-quote on this host
+        script = self.root.parent / "bridge-cmd.sh"
+        script.write_bytes(sh.encode("utf-8"))
+        p = subprocess.run([BASH, script.as_posix()], capture_output=True, env=self.env)
         out = p.stdout.decode("utf-8", "replace")
         err = p.stderr.decode("utf-8", "replace")
         return p.returncode, daemon_frame(out, err, self.rng), False

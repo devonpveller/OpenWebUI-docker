@@ -255,6 +255,9 @@ async def test_r3_f5_the_focus_is_checked_again_after_the_acquire(db_url, monkey
     """The tester's TOCTOU: w1 is free and focused on E; while acquire awaits the gate, w1's focus
     moves to F. The attempt command must be refused (0 /checks) - round 4's post-acquire check,
     restored next to round 2's pre-acquire one."""
+    # c7f-int: the exact refusals (a wrong kwarg must not pass as 'refused')
+    from app.modules.router import WorkspaceMoved
+    from app.modules.scheduler import NoCapacityError
     orch, db = await _orch(db_url)
     try:
         await orch.projects.add("gym", REPO)
@@ -274,9 +277,9 @@ async def test_r3_f5_the_focus_is_checked_again_after_the_acquire(db_url, monkey
             return await orig(effort_id)
 
         monkeypatch.setattr(gate, "can_dispatch", moving)
-        with pytest.raises(Exception):
+        with pytest.raises((NoCapacityError, WorkspaceMoved)):
             await orch.router.exec_check(e, command="echo x", session_id="sess-e",
-                                         require_instance=wid, label="ao-attempt")
+                                         instance_id=wid, expect_effort=e, label="ao-attempt")
         assert orch.harness.checks == []
     finally:
         await _shutdown(orch, db)

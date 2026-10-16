@@ -51,6 +51,20 @@
           "title": "Session Dir",
           "type": "string"
         },
+        "temperature": {
+          "anyOf": [
+            {
+              "maximum": 2.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Temperature"
+        },
         "use_session": {
           "default": true,
           "title": "Use Session",

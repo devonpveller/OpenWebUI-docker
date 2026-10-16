@@ -1114,6 +1114,10 @@ class Orchestrator:
         # equals this is a PRE-EXISTING branch resurrected, not a delivery (live 2026-07-07: an
         # empty-workspace run "delivered" yesterday's stale branch and wired an OLD commit).
         self._pre_dispatch_head: dict[str, str] = {}
+        # ao-replancarry - effort-branch heads that are ONLY a stopped turn's carried WIP commit
+        # (per effort). A branch still sitting at one of these after a run is carried work in
+        # progress, never that run's delivery. Re-read from the audit log at every dispatch.
+        self._carried_heads: dict[str, set[str]] = {}
         # P8 #3 — PROVENANCE: the expected BASE per effort, read from the remote at dispatch
         # ({effort_id: {"branch": default_branch, "sha": head_sha}}). Handed to the worker in the
         # brief to ASSERT against (it can't discover it — proxied git), keys workspace reuse in the
@@ -2744,6 +2748,14 @@ class Orchestrator:
                 elif b == newest:
                     continue                                   # the current work — keep
                 elif dates.get(b, "") and dates[b] < stale_cutoff:
+                    # ao-preflight2: a branch the bridge carried a stopped turn's WIP to holds work
+                    # that exists nowhere else once the worker is re-focused - never reap it
+                    eid_b = b[len("agent/"):]
+                    await self._load_carried_heads(eid_b)
+                    if self._carried_heads.get(eid_b):
+                        await self.audit.log("branch_reap_skipped", effort_id=eid_b, payload={
+                            "repo": repo, "branch": b, "reason": "holds carried WIP work"})
+                        continue
                     targets.append((b, "superseded"))          # older + abandoned → reap (+ close PR)
                 # else: a RECENT superseded branch — keep (may be parallel live work)
             for b, reason in targets:
@@ -5256,7 +5268,10 @@ class Orchestrator:
         # 2) verify the submodule branch landed → its exact commit (the bump target). No commit = no bump.
         s_repo = await self._effort_repo(eid)
         delivery = await self._verify_delivery(eid, s_repo) if s_repo else BranchDelivery(branch="")
-        if not (delivery.landed and delivery.head_sha):
+        # ao-preflight2: a submodule branch that holds only a carried WIP commit is not a landed
+        # edit - never bump the engine to it or open the paired PRs
+        await self._load_carried_heads(eid)
+        if not (delivery.landed and delivery.head_sha) or self._wip_only(eid, delivery):
             await self.comms.post(
                 Intent.operator_reply,
                 f"⚠️ **{eid}** — composition halted: the `{worker_step.target}` edit didn't land a "
@@ -7081,6 +7096,8 @@ class Orchestrator:
             if repo and self.github is not None and self.s.github_app_enabled:
                 pre = await self._verify_delivery(effort_id, repo)
                 self._pre_dispatch_head[effort_id] = pre.head_sha or ""
+            # ao-replancarry - which heads of this effort's branch are carried WIP (restart-safe)
+            await self._load_carried_heads(effort_id)
             # P8 #3 — PROVENANCE: read the CURRENT default-branch head — the expected BASE this
             # run is planned against. Refreshed every dispatch (never carried stale); unreadable
             # ⇒ absent, and nothing downstream claims a base it can't prove.
@@ -7344,6 +7361,11 @@ class Orchestrator:
         if result is not None and (_FLAIL_MARKER in (result.output or "")
                                    or getattr(result, "loop_trip", None) is not None):
             # ao-loopguard — the bridge's loop guard stopping a coding turn is the same signal.
+            # ao-replancarry — first save what the stopped turn left uncommitted on ITS worker to
+            # the effort branch, so the re-planned turns (any worker; F33 syncs them to the
+            # branch) start from it instead of from base.
+            if repo and self.s.sync_delivery_branch:
+                await self._carry_stopped_turn_work(effort_id, result, repo)
             await self._flail_replan(effort_id, result)
             return None
         # P8 #3 — the worker asserted its checkout is NOT rooted on the expected base and honestly
@@ -7538,6 +7560,11 @@ class Orchestrator:
             # them apart, and its failure output is the burn-down's work list, not a dead end).
             d0 = await self._verify_delivery(effort_id, repo)
             verdict, out, _n = await self._org_build_check(effort_id, on_branch=d0.landed)
+            if verdict == "pass" and d0.landed and self._wip_only(effort_id, d0):
+                # ao-replancarry: the branch holds only the stopped turn's carried WIP - a green
+                # build of it is not this run delivering anything. Same path as a branch that did
+                # not move: re-engage, then state check / escalation.
+                return await self._recover_stale_delivery(effort_id, channel_id, root, repo, d0)
             if verdict == "pass":
                 await self.comms.post(
                     Intent.worker_activity,
@@ -9322,7 +9349,79 @@ class Orchestrator:
         i.e. the branch pre-existed and this run contributed nothing (no pre-head recorded, or a
         changed head, is never stale — fail-open)."""
         pre = self._pre_dispatch_head.get(effort_id, "")
-        return bool(pre) and bool(delivery.head_sha) and delivery.head_sha == pre
+        # ao-replancarry: a head that is only a stopped turn's carried WIP commit is not new
+        # delivered work either, whether or not a pre-dispatch head could be read.
+        return (bool(pre) and bool(delivery.head_sha) and delivery.head_sha == pre) \
+            or self._wip_only(effort_id, delivery)
+
+    def _wip_only(self, effort_id: str, delivery: BranchDelivery) -> bool:
+        """ao-replancarry: the branch head is exactly a commit the bridge CARRIED from a stopped
+        turn (`stopped_turn_work_carried`) - unreviewed work in progress nobody delivered."""
+        return bool(delivery.head_sha) and \
+            delivery.head_sha in self._carried_heads.get(effort_id, set())
+
+    async def _load_carried_heads(self, effort_id: str) -> None:
+        """The carried WIP heads of this effort, from the audit log (survives a bridge restart)."""
+        heads: set[str] = set()
+        try:
+            async with self.db.session_factory() as s:
+                rows = (await s.execute(select(Event.payload).where(
+                    Event.effort_id == effort_id,
+                    Event.kind == "stopped_turn_work_carried"))).all()
+            for (p,) in rows:
+                if isinstance(p, dict) and p.get("pushed"):
+                    heads.update(h for h in (p.get("head"), p.get("commit")) if h)
+        except Exception as exc:  # noqa: BLE001 - keep what is in memory
+            log.debug("carried-heads read for %s failed: %s", effort_id, exc)
+            return
+        self._carried_heads[effort_id] = heads | self._carried_heads.get(effort_id, set())
+
+    async def _hold_wip_only(self, effort_id: str, delivery: BranchDelivery, *,
+                             unconfirmed: bool = False) -> None:
+        """ao-preflight2: a no-op close reached while the effort branch holds ONLY a carried WIP
+        commit. Neither delivered (no PR) nor done: the WIP is unreviewed work a stopped turn left,
+        and the no-op was judged on a checkout that contained it. Needs a human (or a re-run that
+        pushes real work on top). `unconfirmed`: a WIP was carried and the remote branch could not
+        be read (or is gone), so it cannot be shown NOT to be WIP-only - same hold."""
+        branch = delivery.branch or self._effort_branch(effort_id)
+        sha = (delivery.head_sha or "")[:10]
+        await self.audit.log("delivery_wip_only_held", effort_id=effort_id, payload={
+            "branch": branch, "head": delivery.head_sha or "",
+            "files_changed": delivery.files_changed, "unconfirmed": unconfirmed,
+            "verifiable": delivery.verifiable, "exists": delivery.exists})
+        if unconfirmed:
+            msg = (f"\u26a0\ufe0f **{effort_id}** \u2014 a turn of this effort was stopped and "
+                   f"the bridge saved its unfinished work to `{branch}` as a WIP commit, and I "
+                   f"could not confirm on the remote that anything was delivered on top of it "
+                   f"({'the branch could not be read' if not delivery.verifiable else 'the branch has no delivery'}"
+                   f"). I did **not** mark it done and opened no PR. Say **\u201cre-run "
+                   f"it\u201d**, or tell me to close it.")
+            await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
+            await self.comms.post(Intent.operator_reply, msg,
+                                  thread_id=self._mgmt_thread_of(effort_id))
+            await self.router.update_effort_card(effort_id, "needs-attention")
+            return
+        msg = (f"⚠️ **{effort_id}** — the worker reported nothing (more) to change, "
+               f"but `{branch}` holds only the WIP commit `{sha}` the bridge saved from a turn "
+               f"that was stopped before it finished — unreviewed work in progress, not a "
+               f"delivery. I did **not** open a PR and did **not** mark it done. Say "
+               f"**“re-run it”** to have it finished and pushed, or tell me to close it.")
+        await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
+        await self.comms.post(Intent.operator_reply, msg,
+                              thread_id=self._mgmt_thread_of(effort_id))
+        await self.router.update_effort_card(effort_id, "needs-attention")
+
+    async def _carried_unconfirmed(self, effort_id: str, delivery: BranchDelivery | None) -> bool:
+        """ao-preflight2 (tester finding a): a closure that cannot SEE the branch head (the remote
+        read failed, or no branch landed) must not close an effort done whose branch was given a
+        carried WIP commit - it may hold nothing else. Holds it and returns True in that case."""
+        await self._load_carried_heads(effort_id)
+        if not self._carried_heads.get(effort_id):
+            return False
+        await self._hold_wip_only(
+            effort_id, delivery or BranchDelivery(branch=self._effort_branch(effort_id)),
+            unconfirmed=True)
+        return True
 
     async def _recover_stale_delivery(
         self, effort_id: str, channel_id: str, root: str, repo: str,
@@ -9338,7 +9437,10 @@ class Orchestrator:
         # a stale head whose branch ALREADY DIFFERS from base is PRIOR DELIVERED WORK, not an
         # empty run. Say that, then let the ORG verify it by building, instead of re-engaging
         # the worker to re-do finished work (or worse, mislabelling success as failure).
-        if (delivery.files_changed and delivery.files_changed > 0
+        # ao-replancarry: EXCEPT when the head is only a stopped turn's carried WIP commit - that
+        # is unreviewed work in progress the bridge saved, not a delivery from an earlier round.
+        wip = self._wip_only(effort_id, delivery)
+        if (not wip and delivery.files_changed and delivery.files_changed > 0
                 and await self._machine_verified_effort(effort_id)):
             await self.comms.post(
                 Intent.worker_activity,
@@ -9391,15 +9493,26 @@ class Orchestrator:
             return None
         await self.comms.post(
             Intent.worker_activity,
-            f"🔍 `{branch}` exists on the remote but its head (`{delivery.head_sha[:10]}`) is "
-            f"UNCHANGED from before this run — nothing new was delivered (a stale branch from an "
-            f"earlier attempt). Re-dispatching with that context (PM monitor, §4.2).",
+            (f"🔍 `{branch}` holds only the stopped turn's carried WIP commit "
+             f"(`{delivery.head_sha[:10]}`) — unreviewed work in progress, not a delivery; this "
+             f"run added nothing on top. Re-dispatching with that context (PM monitor, §4.2)."
+             if wip else
+             f"🔍 `{branch}` exists on the remote but its head (`{delivery.head_sha[:10]}`) is "
+             f"UNCHANGED from before this run — nothing new was delivered (a stale branch from an "
+             f"earlier attempt). Re-dispatching with that context (PM monitor, §4.2)."),
             effort_id=effort_id,
         )
         instruction = (
-            f"NOTHING NEW WAS DELIVERED: `{branch}` already existed on the remote and its head "
-            f"(`{delivery.head_sha[:10]}`) is unchanged from before this run started — your turn "
-            f"produced no pushed commits. Do the task now: implement the goal in the workspace, "
+            (f"NOTHING NEW WAS DELIVERED: `{branch}` holds only a WIP commit "
+             f"(`{delivery.head_sha[:10]}`) the bridge saved from an earlier turn that was stopped "
+             f"before it finished — it is unreviewed and incomplete, and your turn pushed nothing "
+             f"on top of it. Check it against the goal, finish the work, commit, and push NEW "
+             f"commits to `{branch}`. "
+             if wip else
+             f"NOTHING NEW WAS DELIVERED: `{branch}` already existed on the remote and its head "
+             f"(`{delivery.head_sha[:10]}`) is unchanged from before this run started — your turn "
+             f"produced no pushed commits. ")
+            + f"Do the task now: implement the goal in the workspace, "
             f"commit, and push NEW commits to `{branch}`. If the workspace looks empty or wrong, "
             f"SAY SO explicitly. If there is genuinely nothing to change, reply exactly "
             f"`NO CHANGES: <why>`."
@@ -9430,9 +9543,13 @@ class Orchestrator:
                 return await self._recover_empty_delivery(
                     effort_id, channel_id, root, repo, delivery)
             return delivery
-        state = await self._verify_goal_state(effort_id, channel_id, root, repo)
-        if state is not None:
-            return state
+        # ao-preflight2: no read-only state check on a branch that still holds only the carried
+        # WIP - the worker would judge the goal on a checkout containing that unreviewed WIP, and
+        # its STATE HOLDS would close the effort done on it. Escalate instead (below).
+        if not (delivery.landed and self._wip_only(effort_id, delivery)):
+            state = await self._verify_goal_state(effort_id, channel_id, root, repo)
+            if state is not None:
+                return state
         await self.audit.log("delivery_stale_head", effort_id=effort_id,
                              payload={"branch": branch, "head": delivery.head_sha})
         await self.comms.post(
@@ -12506,6 +12623,18 @@ class Orchestrator:
             _rv_repo = await self._effort_repo(effort_id)
             if _rv_repo:
                 _rv = await self._verify_delivery(effort_id, _rv_repo)
+                # ao-preflight2: a branch that holds ONLY a stopped turn's carried WIP commit is
+                # neither a delivery nor a read-only completion - the no-op was judged against a
+                # checkout that contained that unreviewed WIP. No PR, not done: held for a human.
+                if _rv.landed and _rv.files_changed != 0:
+                    await self._load_carried_heads(effort_id)
+                    if self._wip_only(effort_id, _rv):
+                        await self._hold_wip_only(effort_id, _rv)
+                        return
+                # ...and when the remote cannot be read (or the branch is gone), a carried WIP
+                # cannot be ruled out: never a read-only done on it (ao-preflight2 finding a)
+                if not _rv.landed and await self._carried_unconfirmed(effort_id, _rv):
+                    return
                 # only a branch with REAL changes overrides the no-op close — an empty-diff branch
                 # (a commit that touches nothing) is a legitimate NO CHANGES read-only completion.
                 if _rv.landed and _rv.files_changed != 0:
@@ -12557,6 +12686,14 @@ class Orchestrator:
             where = ("**no changes** — the worker confirmed this was a read-only task; its answer "
                      "above in the thread is the deliverable (nothing to publish)")
         elif delivery is not None and delivery.landed:
+            # ao-preflight2 — the landed chokepoint: every path that hands a LANDED delivery here
+            # (publish/verify, burn-down green, host-context run, drain re-entry) reaches the PR,
+            # wiring, D2 and develop integration below. A head that is only a carried WIP commit
+            # never goes on to any of them.
+            await self._load_carried_heads(effort_id)
+            if self._wip_only(effort_id, delivery):
+                await self._hold_wip_only(effort_id, delivery)
+                return
             sha = f" @ `{delivery.head_sha[:10]}`" if delivery.head_sha else ""
             # STALE RE-VERIFY (operator 2026-07-12: "the 18:24 activity looked like new work but the
             # branch hadn't moved in 6h — I couldn't tell what was real"). When the head is EXACTLY
@@ -12732,12 +12869,18 @@ class Orchestrator:
             # remote; dispatch the next one instead of closing (§10.4 — a non-empty queue isn't done).
             if await self._drain_next_pending(effort_id):
                 return   # the next queued task dispatched; the effort re-enters when it delivers
+            # ao-preflight2: an unreadable branch after a carry may hold only the WIP - never done
+            if await self._carried_unconfirmed(effort_id, delivery):
+                return
             # Queue drained (or drain off): we couldn't independently check (App can't read this repo),
             # so report the worker's word, labelled honestly as unverified rather than asserting it as
             # fact (§4.2 unverified).
             where = (f"the worker reports it pushed **`{self_reported}`**, which I could **not "
                      f"independently verify** (this repo isn't on the App's account)")
         elif await self._effort_repo(effort_id):
+            # ao-preflight2: no landed branch to look at, but a WIP was carried to it - not done
+            if await self._carried_unconfirmed(effort_id, delivery):
+                return
             # The project HAS a repo but no branch landed — say so honestly, don't imply "no repo".
             where = ("the worker pushed **no branch** — nothing was committed/published. If it should "
                      "have, re-run it and tell it to commit + push its changes")
@@ -13464,6 +13607,103 @@ class Orchestrator:
             return True
         return self.exec_gate.dry_run_required(await self._effort_risk_str(effort_id))
 
+    async def _carry_stopped_turn_work(self, effort_id: str, result, repo: str) -> bool:
+        """ao-replancarry — commit what a stopped coding turn left uncommitted as a WIP commit on
+        the effort branch and push it there, from the worker that ran the turn. Returns True when
+        work was carried (committed, or unpushed commits pushed).
+
+        C7e 0.3 ao-queue r1 (2026-10-15): the flail guard stopped the coding turn on worker-1 after
+        it wrote its repro test; the forced plan turn and then the execution turn ran on worker-2
+        in fresh clones at base, so the work never reached them. Pinning the next turns to worker-1
+        was the alternative, but it fails whenever that worker is busy, quarantined or re-focused
+        and still strands the work on one disk; a commit on `agent/<effort>` reaches every worker
+        through the F33 delivery-branch sync, survives a /project wipe, and is how a normal turn's
+        work travels. See `modules/replan_carry.py` for what the command does and refuses.
+
+        Runs pinned to `result.instance_id` and only while that worker is still focused for this
+        effort (`expect_effort`). Re-focuses with the effort's current token first (a NOOP for the
+        same repo: the tree is kept, origin's credential re-baked, as `_publish_effort` does), so a
+        long turn's expired clone token cannot fail the push. Never raises: a failed carry is
+        recorded (`stopped_turn_carry_failed`) and the re-plan proceeds as before."""
+        from .modules.replan_carry import carry_command, parse_carry
+        from .modules.router import WorkspaceMoved
+
+        inst_id = getattr(result, "instance_id", None)
+        branch = self._effort_branch(effort_id)
+        if not inst_id:
+            await self.audit.log("stopped_turn_carry_failed", effort_id=effort_id, payload={
+                "worker": None, "branch": branch, "reason": "the stopped turn's worker is unknown"})
+            return False
+        # ao-preflight2 (review R1/R2): the body names the guard, never the stopped turn's own
+        # output - model text would be pushed to the remote unscrubbed, and reading its first
+        # line raised outside the try on a whitespace-only output.
+        guard = ("loop guard" if getattr(result, "loop_trip", None) is not None
+                 else "flail guard")
+        try:
+            command = carry_command(
+                branch, subject=f"wip: {effort_id} - work of a stopped turn, carried to the re-plan",
+                body=(f"The {guard} stopped this coding turn before it committed. The bridge "
+                      "committed its working tree as it stood (git add -A) so the next turn "
+                      "starts from it on any worker. Unreviewed work in progress."),
+                author=self._agent_identity("worker-default"))
+            token = await self._project_token(effort_id)
+            _exit, out, _timed = await self.router.exec_check(
+                effort_id, command=command, session_id=f"{effort_id}~carry", repo=repo,
+                repo_token=token, timeout=300, instance_id=inst_id, expect_effort=effort_id,
+                wait_quiet=True)
+        except (NoCapacityError, WorkspaceMoved) as exc:
+            reason = f"the stopped turn's workspace is unavailable: {exc}"
+            report = None
+        except Exception as exc:  # noqa: BLE001 — best-effort; never blocks the re-plan
+            log.debug("carry of the stopped turn for %s failed: %s", effort_id, exc)
+            reason = f"carry failed: {exc}"
+            report = None
+        else:
+            report = parse_carry(out)
+            reason = (report or {}).get("why") or "no report from the carry"
+        status = (report or {}).get("status")
+        if status == "clean":
+            await self.audit.log("stopped_turn_carry_clean", effort_id=effort_id, payload={
+                "worker": inst_id, "branch": branch,
+                "head": (report.get("head_before") or "")[:40]})
+            return False
+        if status != "ok":
+            await self.audit.log("stopped_turn_carry_failed", effort_id=effort_id, payload={
+                "worker": inst_id, "branch": branch, "reason": str(reason)[:300]})
+            await self.comms.post(
+                Intent.worker_activity,
+                f"⚠️ I could not save the stopped turn's uncommitted work to `{branch}` "
+                f"({str(reason)[:200]}). It is still only on `{inst_id}`; the re-planned turn may "
+                f"not start from it.",
+                effort_id=effort_id)
+            return False
+        files = [str(f) for f in (report.get("files") or [])]
+        payload = {
+            "worker": inst_id, "branch": branch, "from_branch": report.get("from_branch") or "",
+            "head_before": report.get("head_before") or "", "commit": report.get("commit") or "",
+            "head": report.get("head") or "", "files": files[:60],
+            "n_files": int(report.get("n_files") or 0),
+            "unpushed_before": report.get("unpushed_before"),
+            "pushed": bool(report.get("pushed")), "push_detail": report.get("push_detail") or "",
+            "left_dirty": report.get("left_dirty"),
+        }
+        await self.audit.log("stopped_turn_work_carried", effort_id=effort_id, payload=payload)
+        if payload["pushed"]:
+            # the branch now sits at a commit nobody delivered: never count it as delivery
+            self._carried_heads.setdefault(effort_id, set()).update(
+                h for h in (payload["head"], payload["commit"]) if h)
+        what = (f"{payload['n_files']} file(s) as WIP commit `{payload['commit'][:12]}`"
+                if payload["commit"] else "its unpushed commits")
+        if payload["pushed"]:
+            msg = (f"📦 Saved the stopped turn's work — {what} — to `{branch}`, so the re-planned "
+                   f"turn starts from it on any worker.")
+        else:
+            msg = (f"⚠️ Committed the stopped turn's work ({what}) on `{inst_id}`, but pushing "
+                   f"`{branch}` failed ({payload['push_detail'][:160] or 'no detail'}); only a "
+                   f"turn on `{inst_id}` will start from it.")
+        await self.comms.post(Intent.worker_activity, msg, effort_id=effort_id)
+        return True
+
     async def _flail_replan(self, effort_id: str, result) -> None:
         """The daemon's FLAIL GUARD killed a coding turn that kept READING without one edit
         (operator 2026-07-14: the signal to "stop, fork from original user prompt and re-ask in
@@ -13471,7 +13711,8 @@ class Orchestrator:
         `flail_replanned` event bumps the session generation (a fresh session, seeded only by the
         re-dispatch goal) and forces the next dispatch through the plan gate. Bounded to ONCE per
         effort; a second flail is a real can't-converge signal for the human."""
-        head = (result.output or "").strip().splitlines()[0][:200]
+        # ao-preflight2 (review R1): a whitespace-only output has no first line
+        head = next(iter((result.output or "").strip().splitlines()), "")[:200]
         n = await self._event_count(effort_id, "flail_replanned")
         if n >= 1:
             msg = (f"⛔ **{effort_id}** — the worker flailed again after a fresh plan-first "
@@ -13591,16 +13832,18 @@ class Orchestrator:
     # completed plan steps or DISCARDED as a failed attempt - never left as clutter, never
     # silently wiped. C7a: `_revert_plan_turn_writes` wiped the coding turn's uncommitted edits in
     # 3 of 10 editing turns because the re-plan ran in the still-dirty tree. Parking the attempt
-    # (a commit + a per-effort ref) BEFORE the plan turn makes the tree clean, so that unchanged
-    # check is correct again, and nothing the plan turn can reach is trusted as evidence.
+    # (a commit + a per-effort ref) BEFORE the plan turn gives the planner a judged unit, and
+    # nothing the plan turn can reach is trusted as evidence. (c7f-int: the plan-turn write check
+    # itself is ao-plancheck's baseline check, which reverts only the plan turn's own writes -
+    # including a commit, a stage or a branch switch - so the attempt line no longer undoes those.)
     # Commands and parsers: app/modules/attempts.py (proxy-legal git, open-terminal framing).
 
     async def _attempt_exec(self, effort_id: str, command: str, *, timeout: int = 120,
                             label: str = "ao-attempt") -> str | None:
         """One deterministic /check in the worker's EXISTING workspace (repo=None: no focus, no
         clone), on the ONE worker that holds the effort's attempt (`router.focus_target`: its last
-        coding wake's worker, else the only worker focused on it; `require_instance` refuses any
-        other). None when there is no such worker, on any failure or a timeout. The audit records
+        coding wake's worker, else the only worker focused on it; pinned with ao-plancheck's
+        `instance_id` + `expect_effort`, which refuse any other worker or a moved workspace). None when there is no such worker, on any failure or a timeout. The audit records
         `label`, never the command (it can carry a worker's check command)."""
         try:
             ft = getattr(self.router, "focus_target", None)
@@ -13610,7 +13853,7 @@ class Orchestrator:
             wid, sid = target
             _rc, out, timed = await self.router.exec_check(
                 effort_id, command=command, session_id=sid, repo=None, repo_token=None,
-                timeout=timeout, label=label, require_instance=wid)
+                timeout=timeout, label=label, instance_id=wid, expect_effort=effort_id)
         except Exception as exc:  # noqa: BLE001 — best-effort; callers treat None as untrusted
             log.debug("attempt exec failed for %s: %s", effort_id, exc)
             return None
@@ -13966,30 +14209,6 @@ class Orchestrator:
         except Exception as exc:  # noqa: BLE001
             log.debug("attempt ref verification failed for %s: %s", effort_id, exc)
 
-    async def _restore_head_after_plan_turn(self, effort_id: str, expected: str,
-                                            branch: str = "") -> None:
-        """A plan turn that COMMITS, STAGES or SWITCHES BRANCH is still a plan-turn write. On the
-        same branch: move it (and the index) back to where the turn started - `reset` without
-        --hard keeps the work tree - so the unchanged write check sees the files dirty and
-        reverts them (its `checkout -- .` restores from the INDEX, so a staged change would
-        otherwise survive it). On another branch: put the workspace back on the branch, at the
-        tip, clean."""
-        probe = _att.parse_probe(await self._attempt_exec(effort_id, _att.probe_cmd()))
-        if probe is None:
-            return
-        same_branch = not branch or probe.branch == branch
-        if probe.head == expected and same_branch and probe.dirty == 0:
-            return
-        if same_branch:
-            await self._attempt_exec(effort_id, _att.reset_mixed_cmd(expected))
-        else:
-            await self._attempt_exec(effort_id, _att.restore_cmd(branch, expected),
-                                     label="ao-attempt:restore")
-        if probe.head != expected or not same_branch:
-            await self.audit.log("plan_turn_moved_head", effort_id=effort_id, payload={
-                "expected": expected[:12], "found": probe.head[:12],
-                "branch_changed": not same_branch})
-
     def _attempt_notes_block(self, notes: list[str]) -> str:
         if not notes:
             return ""
@@ -14268,53 +14487,139 @@ class Orchestrator:
         except Exception as exc:  # noqa: BLE001 — bookkeeping never blocks a delivery
             log.debug("attempt expiry failed for %s: %s", effort_id, exc)
 
-    async def _revert_plan_turn_writes(self, effort_id: str) -> bool:
-        """P17 F1/F15 — undo anything a supposedly read-only plan turn wrote. Returns True when it
-        had in fact written something.
+    async def _revert_plan_turn_writes(self, effort_id: str, result, token: str) -> bool:
+        """P17 F1/F15 + ao-plancheck — undo what a supposedly read-only plan turn wrote, and ONLY
+        that. Returns True when the turn had in fact written something.
 
         `plan_only` excludes the daemon's edit/write TOOLS; it does not restrict the shell. gym-015
         proved a deny-list cannot close that: round 3 wrote with `sed -i` and committed `33eae95`;
-        round 5 used a `python3 -c` read-modify-write and committed `1b04400`. Any interpreter with
-        file access is another route, so the durable fix is a read-only workspace for the duration
-        of the turn (a worker-image change).
+        round 5 used a `python3 -c` read-modify-write and committed `1b04400`. The durable fix is a
+        read-only workspace for the turn (a worker-image change); until then the bridge checks
+        the workspace after the turn, so the gate judges a PLAN and not a fait accompli.
 
-        This is the interim guard, and it targets the property that matters rather than the
-        mechanism: after a plan turn the workspace must look exactly as it did before, so the gate
-        judges a PLAN and not a fait accompli. It also removes the way `33eae95` was lost — a plan
-        turn committed, reported the commit as delivered, and the post-gate re-clone destroyed it
-        24 seconds later, leaving the org's record pointing at a commit that existed nowhere.
+        ATTRIBUTION (ao-plancheck). The first version reverted everything dirty after the turn,
+        from a session that could land on ANY free worker. C7e 0.3 ao-queue r1 (2026-10-15): the
+        flail guard stopped the coding turn on worker-1 after it wrote its repro test; the plan
+        turn ran in a fresh clone on worker-2; the check probed worker-1, blamed the coding turn's
+        file on the plan turn and deleted it, and the run ended with an empty workspace. Now
+        the router takes a BASELINE on the plan turn's own worker right before the turn
+        (`result.pre_turn_output`, see `plan_turn_guard`), and this check runs pinned to that same
+        worker, refuses a workspace another effort has re-focused since, and reverts only the
+        paths that changed DURING the turn — a pre-existing edit is kept, or put back to its
+        pre-turn content if the plan turn touched it. A commit the turn made is undone with
+        `reset --soft` (proxy-legal; `--hard` is not). No baseline = no attribution = nothing
+        reverted, recorded as `plan_turn_check_unattributed`. Never raises: the check must not
+        block the gate."""
+        from .modules.plan_turn_guard import (check_command, new_token, parse_check, parse_page,
+                                              parse_snapshot, report_command, stage_commands)
+        from .modules.router import WorkspaceMoved
 
-        Reverts uncommitted edits AND resets a commit the plan turn made (`reset --soft` is
-        proxy-legal where `--hard` is not; the working tree is then cleaned separately). Never
-        raises: a failed revert must not block the gate."""
-        probe = ("cd /workspace && "
-                 "echo BEFORE-HEAD=$(git rev-parse HEAD 2>/dev/null) && "
-                 "git status --porcelain | head -20 && echo PROBE-DONE")
-        try:
+        # ao-plancheck round 2 — the baseline is the BRIDGE's (paged back before the turn when
+        # large, never re-read from the workspace the turn could forge); git calls are batched;
+        # the check journals every revert so a run cut off by its timeout is resumed once and,
+        # failing that, reported from its journal as `partial` — never as "unattributed" after
+        # files were already reverted.
+        inst_id = getattr(result, "instance_id", None)
+        baseline = parse_snapshot(getattr(result, "pre_turn_output", None))
+        if not inst_id or baseline is None or baseline.get("token") != token \
+                or not isinstance(baseline.get("manifest"), dict):
+            note = getattr(result, "pre_turn_note", "") or ""
+            await self.audit.log("plan_turn_check_unattributed", effort_id=effort_id, payload={
+                "worker": inst_id,
+                "reason": ("no pre-turn baseline from the plan turn's worker"
+                           + (f": {note}" if note else ""))[:200]})
+            return False
+
+        async def _run(command: str, timeout: int) -> str | None:
             _exit, out, _timed = await self.router.exec_check(
-                effort_id, command=probe, session_id=f"{effort_id}~planclean",
-                repo=None, repo_token=None, timeout=120)
-        except Exception as exc:  # noqa: BLE001 — best-effort; never a gate blocker
-            log.debug("plan-turn write probe failed for %s: %s", effort_id, exc)
-            return False
-        dirty = bool(out and re.search(r"^[ ?MADRUC][ ?MADRUC]\s+\S", out, re.M))
-        if not dirty:
-            return False
-        await self.audit.log("plan_turn_wrote_files", effort_id=effort_id,
-                             payload={"status": (out or "")[:400]})
+                effort_id, command=command, session_id=f"{effort_id}~planclean", repo=None,
+                repo_token=None, timeout=timeout, instance_id=inst_id, expect_effort=effort_id)
+            return out
+
+        report = None
         try:
-            await self.router.exec_check(
-                effort_id,
-                command=("cd /workspace && git checkout -- . 2>/dev/null; "
-                         "git clean -fd 2>/dev/null; echo REVERT-DONE"),
-                session_id=f"{effort_id}~planclean", repo=None, repo_token=None, timeout=120)
-        except Exception as exc:  # noqa: BLE001
-            log.debug("plan-turn revert failed for %s: %s", effort_id, exc)
-            return True
+            for cmd in stage_commands(token, baseline):
+                staged = parse_page(await _run(cmd, 120))
+                if not staged or staged.get("status") != "ok":
+                    raise RuntimeError("could not stage the baseline on the worker")
+            # ao-preflight2: the journal is named by a nonce made now, after the turn - a journal
+            # the turn planted is never read back as reverts
+            nonce = new_token()
+            check = check_command(token, baseline, nonce)
+            for _attempt in range(2):          # a timed-out check resumes from its journal
+                report = parse_check(await _run(check, 300))
+                if report is not None:
+                    break
+            if report is None:
+                report = parse_check(await _run(report_command(token, nonce), 120))
+        except (NoCapacityError, WorkspaceMoved) as exc:
+            await self.audit.log("plan_turn_check_unattributed", effort_id=effort_id, payload={
+                "worker": inst_id, "reason": f"plan turn's workspace unavailable: {exc}"[:200]})
+            return False
+        except Exception as exc:  # noqa: BLE001 — best-effort; never a gate blocker
+            log.debug("plan-turn write check failed for %s: %s", effort_id, exc)
+            await self.audit.log("plan_turn_check_unattributed", effort_id=effort_id, payload={
+                "worker": inst_id, "reason": f"check failed: {exc}"[:200]})
+            return False
+        if report is None or report.get("status") not in ("ok", "partial"):
+            await self.audit.log("plan_turn_check_unattributed", effort_id=effort_id, payload={
+                "worker": inst_id,
+                "reason": ((report or {}).get("why") or "no report from the check")[:200]})
+            return False
+        reverted = list(report.get("reverted") or [])
+        unrestored = list(report.get("unrestored") or [])
+        refs_left = list(report.get("refs_left") or [])
+        n_rev = int(report.get("reverted_count") or len(reverted))
+        n_unr = int(report.get("unrestored_count") or len(unrestored))
+        unstaged = [str(p) for p in (report.get("unstaged") or [])]
+        n_uns = int(report.get("unstaged_count") or len(unstaged))
+        complete = report.get("status") == "ok"
+        if not n_rev and not n_unr and not n_uns and not refs_left and complete \
+                and not report.get("snapshot_kept"):
+            return False
+        await self.audit.log("plan_turn_wrote_files", effort_id=effort_id, payload={
+            "worker": inst_id,
+            "complete": complete,
+            "reverted": reverted[:60],
+            "reverted_count": n_rev,
+            "unrestored": unrestored[:30],
+            "unrestored_count": n_unr,
+            "head_reset": report.get("head_reset") or "",
+            "refs_left": refs_left[:30],
+            "kept_before_turn": list(report.get("kept") or [])[:50],
+            "kept_before_turn_count": int(report.get("kept_count") or 0),
+            # earlier work the turn `git add`ed: unstaged again, files kept (ao-preflight2)
+            "unstaged": unstaged[:30],
+            "unstaged_count": n_uns,
+            # the snapshot is kept (renamed) while it holds earlier work not back on disk
+            "snapshot_kept": report.get("snapshot_kept") or "",
+            "ignored_not_snapshotted": int(report.get("ignored_skipped") or 0),
+            **({} if complete else {"dirty_after": report.get("dirty_after")}),
+        })
+        shown = ", ".join(f"`{r['path']}`" for r in reverted[:8])
+        more = f" (+{n_rev - 8} more)" if n_rev > 8 else ""
+        kept_n = int(report.get("kept_count") or 0)
+        kept_line = (f" {kept_n} file(s) already changed by an earlier turn were left as they "
+                     f"were." if kept_n else "")
+        if n_uns:
+            kept_line += (f" {n_uns} earlier untracked file(s) it had staged were unstaged "
+                          f"(kept on disk).")
+        bad_paths = ", ".join("`" + str(u.get("path")) + "`" for u in unrestored[:5])
+        bad_line = f" Could not restore ({n_unr}): {bad_paths}." if n_unr else ""
+        refs_line = (" Refs it created or moved (the proxy cannot delete refs; left in place): "
+                     + ", ".join(f"`{r.get('ref')}` ({r.get('change')})" for r in refs_left[:5])
+                     + "." if refs_left else "")
+        partial_line = ("" if complete else " ⚠️ The check did not finish: this is what its "
+                        "journal shows was reverted; some of the plan turn's changes may remain.")
+        if report.get("snapshot_kept"):
+            partial_line += (f" The earlier turn's files that are not back on disk are kept on "
+                             f"the worker in `{report.get('snapshot_kept')}`.")
         await self.comms.post(
             Intent.worker_activity,
-            "🧹 The plan turn modified files even though it was a read-only turn — reverted them "
-            "so the plan is reviewed on its merits, not on work already done.",
+            f"🧹 The plan turn changed files even though it was a read-only turn — reverted only "
+            f"what it changed: {shown or 'nothing restorable'}{more}, so the plan is reviewed "
+            f"on its merits, not on work already done.{kept_line}{bad_line}{refs_line}"
+            f"{partial_line}",
             effort_id=effort_id,
         )
         return True
@@ -14356,9 +14661,9 @@ class Orchestrator:
             "it against the goal before any code changes.",
             effort_id=effort_id,
         )
-        # ao-attempt — PARK the previous attempt before the plan turn (commit + per-effort ref),
-        # so the plan turn starts clean and the write check below stays exactly right; the parked
-        # attempt and its FACTS go to the planner for a KEEP / DISCARD verdict.
+        # ao-attempt — PARK the previous attempt before the plan turn (commit + per-effort ref);
+        # the parked attempt and its FACTS go to the planner for a KEEP / DISCARD verdict. The
+        # write check below (ao-plancheck) is baseline-based and does not depend on the park.
         on = self._attempts_on()      # ao-attempt2 F1: OFF = the base gate, exactly
         try:
             pre = await self._park_attempt(effort_id, goal) if (repo and on) else None
@@ -14437,7 +14742,11 @@ class Orchestrator:
                        goal or "", re.S)
         if _m:
             scope_goal = _m.group(2).strip()
+        from .modules.plan_turn_guard import new_token, take_baseline
         while misaligned < 2:
+            # ao-plancheck — the baseline for this turn's write check is taken on the worker that
+            # runs the turn, after its focus and right before the turn (see the check below).
+            plan_token = new_token()
             # P17 F16 — `~plan` keeps this OFF the builder's session so the plan is observed, not
             # recalled. Derived from `_session_for` (not a fixed id) so the `worker_plan_empty`
             # generation bump still rotates it: an overflowing session must stay self-healable.
@@ -14446,6 +14755,15 @@ class Orchestrator:
                 session_id=f"{await self._session_for(effort_id)}~plan", instruction=instr,
                 repo=repo, repo_token=repo_token, upstream=upstream,
                 upstream_token=upstream_token, plan_only=True,
+                # ao-replancarry — the plan turn observes the SAME tree the execution turn will
+                # start from: the effort branch (F33), which after a flail stop carries the
+                # stopped turn's work. Before, it planned from base on a fresh worker and could not
+                # see that work. The router runs the baseline below after this sync, so the carried
+                # commit is part of the plan turn's baseline, never one of its writes.
+                checkout_branch=(self._effort_branch(effort_id)
+                                 if (repo and self.s.sync_delivery_branch) else None),
+                pre_turn_check=((lambda run, _t=plan_token: take_baseline(run, _t))
+                                if repo else None),
             )
             # P17 F1/F15 — A PLAN TURN MUST LEAVE NOTHING ON DISK. `plan_only` gates the daemon's
             # edit/write TOOLS, not the shell, and gym-015 broke it twice by different routes:
@@ -14459,15 +14777,15 @@ class Orchestrator:
             # to silently destroy work (which is how 33eae95 was lost — reported as delivered,
             # then wiped 24 seconds later). Reverting here makes the violation visible and the
             # workspace honest, whichever mechanism the worker used.
-            if repo:
-                # ao-attempt — a plan turn that COMMITTED is undone first (branch back to where the
-                # turn began, files left dirty), so the unchanged check below reverts its files.
-                # (`pre` is None when ao-attempt is OFF: the base write check alone.)
+            #
+            # ao-plancheck — and ONLY what the plan turn wrote: the check compares against the
+            # baseline taken on the same worker before the turn, so an earlier coding turn's
+            # uncommitted work (C7e r1: the flail-stopped turn's repro test) is never blamed on it.
+            if repo and result is not None:
+                await self._revert_plan_turn_writes(effort_id, result, plan_token)
                 if pre and pre.get("head"):
-                    await self._restore_head_after_plan_turn(effort_id, pre["head"],
-                                                             pre.get("branch") or "")
-                await self._revert_plan_turn_writes(effort_id)
-                if pre and pre.get("head"):
+                    # ao-attempt — the salvage refs of parked attempts must still point at their
+                    # parked commits after the plan turn (ao-plancheck only reports refs it left)
                     await self._verify_attempt_refs(effort_id, pre.get("branch") or "", pre["head"])
             if result is None:
                 await self._report_completion(effort_id, None)

@@ -59,7 +59,10 @@ running inside open-terminal (journaled as a `bash` tool_call sourced from the
   (`LC_EXEC_BACKSTOP_GRACE`) after it started is stopped (SIGTERM, SIGKILL
   30 s later) and the call fails with a fixed message. agent-org workers run
   with a 900-s bound (`agent-org/scripts/gen-worker-configs.py`); the
-  interactive little-coder keeps 1,800 s. Real-path test:
+  interactive little-coder keeps 1,800 s. Also (ao-temp06): when `LC_TEMPERATURE` is set
+  (config `agent.temperature` -> agent.py; the worker configs set 0.6) the extension's
+  `before_provider_request` hook replaces the 0.3 pi's benchmark-profiles stamped on the request;
+  unset (the coder plane) it does nothing. Test: `tests/node/e2e_temp06/`. Real-path test:
   `tests/node/e2e_exechang/` (a real open-terminal container, the real ot-exec,
   pi and this extension).
 - `docker/entrypoint-agent.sh` installs it into little-coder's own

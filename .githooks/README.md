@@ -75,7 +75,7 @@ A skip is never silent. The hook prints each `SKIPPED` line as it happens, ends 
 summary such as
 
 ```text
-Pre-commit gates (host: python3) - RAN: hook-modes exec-bits-modes exec-bits-drift secrets identity line-endings doc-placement gateway-routing docs-blocks | SKIPPED: corpus-exposure project-configs env-file-scope ob1-recipe-tests ob1-deno-recipes ob1-integration-images
+Pre-commit gates (host: python3) - RAN: hook-modes exec-bits-modes exec-bits-drift secrets identity line-endings doc-placement gateway-routing docs-blocks | SKIPPED: corpus-exposure project-configs env-file-scope ob1-recipe-tests ob1-deno-recipes ob1-integration-images ob1-fork-owned
 ```
 
 and adds a fifth column to the attestation line (below), `skipped=<gate>,<gate>,...`.
@@ -108,6 +108,7 @@ of OB1 at any commit is scanned exactly as before, and CI checks OB1 out and rea
 | 5b | OB1 recipe tests | `scripts/checks/check-ob1-recipe-tests.ps1` | a staged OB1 gitlink bump whose tree fails any `*.test.mjs` under `OB1/recipes` — or whose tree the gate cannot honestly prove (staged≠disk SHA, dirty tracked OB1 files, missing node, zero tests, or fewer test **files or cases** than the pin it replaces; the case count is what catches a revert that removes a fix together with its own catching test) |
 | 5c | OB1 Deno recipe type-check | `scripts/checks/check-ob1-deno-recipes.ps1` | a staged OB1 gitlink bump whose `OB1/recipes/daily-digest` does not `deno check` — the Deno recipe 5b's `*.test.mjs` glob cannot see. Type check only, not the test suite; skips instantly with no gitlink staged; **refuses** rather than skipping when `deno` is missing |
 | 5d | OB1 integration images | `scripts/checks/check-ob1-integration-images.ps1` | a staged OB1 gitlink bump whose pin diff touches an `integrations/<svc>/` that carries a Dockerfile, when a relative import reachable from the entrypoint is not COPYed into the image (static, seconds, no docker) or the image does not `docker build` / `deno check` (built under a throwaway `ob1-gate/<svc>:<sha7>` tag, `--network none`, removed after). Green = "builds and resolves", not "the service works"; skips instantly with no gitlink or no image-bearing change; **refuses** when Docker is unreachable |
+| 5e | OB1 fork-owned surface | `scripts/checks/check-ob1-fork-owned.ps1` | a staged OB1 gitlink bump in which a merge commit's upstream parent changes a path, column, schema or role listed in `OB1/integrations/intake/FORK-OWNED.md` (`check_fork_owned.py --range <old pin>..<new pin>`, after the checker's own unit tests), or a new pin that dropped the list the old pin had. A reviewed upstream merge is accepted by committing its sha as `reviewed-upstream:` in that file; skips instantly with no gitlink or a pin from before intake I1; **refuses** when Python is missing |
 | 6 | Attestation | (inline in the hook) | nothing — records the checked tree **and the hash of the hook file that checked it** in `<git-common-dir>/hook-attest.log`, so `--no-verify` leaves an absence that `check-hook-attestation.ps1` can read back, and a passing gate can be traced to the hook that ran it (see [Which hook gated this tree?](#which-hook-gated-this-tree)) |
 
 ## Which hook gated this tree?

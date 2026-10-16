@@ -288,6 +288,24 @@ def _norm(text: str, eid: str) -> str:
     return (text or "").replace(eid, "<EFFORT>")
 
 
+_PLANCHECK_CMD = re.compile(
+    r"""^python3 -c "import base64;exec\(compile\(base64\.b64decode\('([A-Za-z0-9+/=]+)'\)""")
+
+
+def _norm_check(command: str, eid: str) -> str:
+    """c7f-int: ao-plancheck's plan-turn check ships a base64 python3 script that embeds a fresh
+    per-turn token / journal nonce (and the baseline blob keyed by it). Compare its SOURCE with
+    those values masked (sha256), so the golden pins the script, not the random token."""
+    import base64
+    import hashlib
+    m = _PLANCHECK_CMD.match(command or "")
+    if not m:
+        return _norm(command, eid)
+    src = base64.b64decode(m.group(1)).decode("utf-8").replace(eid, "<EFFORT>")
+    src = re.sub(r"^(TOKEN|NONCE|INLINE|BLOB_SHA) = '[^'\n]*'$", r"\1 = '<v>'", src, flags=re.M)
+    return "ao-plancheck-script sha256:" + hashlib.sha256(src.encode("utf-8")).hexdigest()
+
+
 async def _off_c7a(db_url, ws, run) -> dict:
     """The C7a replay with ao-attempt OFF (the coding turn leaves edits; the plan turn writes
     nothing). Base-compatible: runs unchanged against 6ae15f2c."""
@@ -318,7 +336,7 @@ async def _off_c7a(db_url, ws, run) -> dict:
             "kinds": [k for k, _ in await _events(orch, eid)],
             "prompts": [_norm(w["prompt"], eid) for w in orch.harness.wakes],
             "plan_only": [bool(w["plan_only"]) for w in orch.harness.wakes],
-            "checks": [_norm(c["command"], eid) for c in orch.harness.checks],
+            "checks": [_norm_check(c["command"], eid) for c in orch.harness.checks],
             "files": {p: (ws.read(p) if (ws.root / p).exists() else None)
                       for p in modified + added} if hasattr(ws, "root") else {},
             "posts": [_norm(m["message"], eid) for m in orch.chat.posted],
@@ -381,8 +399,11 @@ async def _off_scenarios(db_url_base: str, tmp_path) -> dict:
 async def test_f1_off_is_the_base_gate_exactly(db_url, tmp_path):
     """AO_ATTEMPTS_ENABLED=false on the C7a replays, two real intakes and a lens revision: the
     events, every prompt the worker got, every /check sent, every post and the final tree equal
-    what 6ae15f2c produced on the same scenarios (the golden). With AO_WRITE_BASE_GOLDEN set the
-    scenarios are RECORDED instead (run that against the base code only)."""
+    what the gate WITHOUT ao-attempt produced on the same scenarios (the golden). With
+    AO_WRITE_BASE_GOLDEN set the scenarios are RECORDED instead (run that against the base code
+    only). c7f-int (adapted): the base is now development 1956d88c (ao-plancheck's plan-turn check
+    replaced the full revert the 6ae15f2c golden recorded), re-recorded twice, identical; plan-turn
+    check commands are compared by their script with the per-turn token masked (`_norm_check`)."""
     got = await _off_scenarios(db_url, tmp_path)
     dest = os.environ.get("AO_WRITE_BASE_GOLDEN")
     if dest:
@@ -396,10 +417,11 @@ async def test_f1_off_is_the_base_gate_exactly(db_url, tmp_path):
     # and nothing of ao-attempt ran
     for key, sc in got.items():
         assert not [k for k in sc["kinds"] if _AO_KINDS.match(k)], key
-    # the base outcome of the C7a replay: the plan turn's write check wipes the coding edits
+    # the base outcome of the C7a replay since ao-plancheck: the plan turn wrote nothing, so the
+    # check reverts nothing and the coding turn's edits survive (6ae15f2c wiped them)
     c7a = got["c7a:ao-queue-r2"]
-    assert c7a["kinds"].count("plan_turn_wrote_files") == 1
-    assert all(v is None or v.startswith("original") for v in c7a["files"].values())
+    assert c7a["kinds"].count("plan_turn_wrote_files") == 0
+    assert all(v is not None and v.startswith("coding turn") for v in c7a["files"].values())
 
 
 async def test_f1_off_by_default_and_on_by_env(monkeypatch):
@@ -586,7 +608,10 @@ def test_f4_the_memory_note_is_an_allow_list():
 # ── F5: a refused workspace command never rebinds another worker ─────────────────────────────
 async def test_f5_exec_check_refuses_before_acquire_can_rebind(db_url):
     """w1 holds effort E's workspace but is busy; w2 is free and parked on effort F's session.
-    An attempt command for E (require_instance=w1) is refused and w2 keeps F's binding."""
+    An attempt command for E (pinned to w1: instance_id + expect_effort, c7f-int) is refused and w2 keeps F's binding."""
+    # c7f-int: the exact refusals (a wrong kwarg must not pass as 'refused')
+    from app.modules.router import WorkspaceMoved
+    from app.modules.scheduler import NoCapacityError
     orch, db = await _orch(db_url, urls="http://w1:8090,http://w2:8090", workers=2)
     try:
         await orch.projects.add("gym", REPO)
@@ -602,17 +627,17 @@ async def test_f5_exec_check_refuses_before_acquire_can_rebind(db_url):
         orch.router._ws_focus[w1_id] = (e, REPO, "")
         orch.router._ws_focus[w2_id] = (f, REPO, "")
         orch.harness.check_queue.append((0, "ok", False))
-        with pytest.raises(Exception):
+        with pytest.raises((NoCapacityError, WorkspaceMoved)):
             await orch.router.exec_check(e, command="echo x", session_id="sess-e",
-                                         require_instance=w1_id, label="ao-attempt")
+                                         instance_id=w1_id, expect_effort=e, label="ao-attempt")
         async with orch.db.session_factory() as s:
             w2r = await s.get(WorkerInstance, w2_id)
             assert (w2r.effort_id, w2r.session_id, w2r.sched_state) == (f, "sess-f", "suspended")
         assert orch.harness.checks == []                          # nothing ran anywhere
         # a worker focused on ANOTHER effort is refused before any acquire, too
-        with pytest.raises(Exception):
+        with pytest.raises((NoCapacityError, WorkspaceMoved)):
             await orch.router.exec_check(e, command="echo x", session_id="sess-f",
-                                         require_instance=w2_id, label="ao-attempt")
+                                         instance_id=w2_id, expect_effort=e, label="ao-attempt")
         async with orch.db.session_factory() as s:
             w2r = await s.get(WorkerInstance, w2_id)
             assert (w2r.effort_id, w2r.session_id, w2r.sched_state) == (f, "sess-f", "suspended")

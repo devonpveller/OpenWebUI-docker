@@ -314,7 +314,11 @@ async def scenario_plan_writes(orch, ws):
     orch._plan_actions.append(plan_commits)
     await _gate(orch, eid, chan, root, _plan_next(""))
     assert ws.read("d.py") is None and ws.git("rev-parse", "HEAD").strip() == head
-    assert await orch._event_count(eid, "plan_turn_moved_head") == 1
+    # c7f-int (adapted): the commit is undone by ao-plancheck's check (`reset --soft` to the
+    # baseline HEAD, recorded as `head_reset` on `plan_turn_wrote_files`); ao-attempt's own
+    # `_restore_head_after_plan_turn` / `plan_turn_moved_head` was the duplicate and is gone
+    evs = [e["payload"] for e in await _events(orch, eid, "plan_turn_wrote_files")]
+    assert evs and evs[-1].get("head_reset")
 
     # (d) the plan turn only STAGES
     def plan_stages(w):
@@ -956,7 +960,11 @@ def _shape(att, argv):
 
 async def test_case9_the_argvs_the_bridge_sent_are_exactly_the_declared_table(db_url, tmp_path):
     """Every git argv the shim logged in a scenario WITHOUT worker checks (those run the
-    worker's own commands) has a declared shape, or is the unchanged check's."""
+    worker's own commands) has a declared shape, or is the plan-turn write check's.
+    c7f-int (adapted): the plan-turn write check is ao-plancheck's baseline check now, not the
+    old `status --porcelain` / `checkout -- .` / `clean -fd`; its argvs are not ao-attempt's to
+    declare (test_ao_plancheck pins its own table), so here each must pass the REAL proxy, and the
+    old full revert must never be sent."""
     import git_proxy
     att = _a()
     ws = LocalWS(tmp_path)
@@ -971,13 +979,13 @@ async def test_case9_the_argvs_the_bridge_sent_are_exactly_the_declared_table(db
 
     await _run(db_url, ws, no_checks)
     shapes = {tuple(a) for a in att.GIT_ARGVS}
-    legacy = {("status", "--porcelain"), ("checkout", "--", "."), ("clean", "-fd")}
     sent = [c["argv"] for c in ws.calls()]
     assert sent
-    unknown = sorted({_shape(att, a) for a in sent} - shapes - legacy)
-    assert unknown == []
-    for argv in legacy:
-        assert git_proxy.classify(list(argv)).action == "allow"
+    other = [a for a in sent if _shape(att, a) not in shapes]
+    assert other, "the plan-turn write check sent no git call"
+    for argv in other:
+        assert git_proxy.classify(list(argv)).action == "allow", argv
+    assert ["checkout", "--", "."] not in sent and ["clean", "-fd"] not in sent
 
 
 async def test_case9_the_audit_records_a_label_not_the_command(db_url, tmp_path):

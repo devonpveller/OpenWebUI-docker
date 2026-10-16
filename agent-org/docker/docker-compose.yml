@@ -212,6 +212,11 @@ services:
       AO_GROUNDING_ENABLED: ${AO_GROUNDING_ENABLED:-false}
       AO_RESEARCH_URL: ${AO_RESEARCH_URL:-http://openbrain-research:8000}
       AO_RESEARCH_KEY: ${AO_RESEARCH_KEY:-}
+      # Agent knowledge package (kp-questions / kp-research): OFF by default, no live call site
+      # yet. An empty AO_KNOWLEDGE_SOURCE_HOSTS keeps the built-in documentation allow-list.
+      AO_KNOWLEDGE_QUESTIONS_ENABLED: ${AO_KNOWLEDGE_QUESTIONS_ENABLED:-false}
+      AO_KNOWLEDGE_PACKAGE_ENABLED: ${AO_KNOWLEDGE_PACKAGE_ENABLED:-false}
+      AO_KNOWLEDGE_SOURCE_HOSTS: ${AO_KNOWLEDGE_SOURCE_HOSTS:-}
       # Project orientation map (ao-orient): a deterministic map of the project's repo, read by the
       # bridge through the GitHub App (no worker slot, no model); anchors the readiness gate and the
       # first coding wake. Only with a repo on the App's account.

@@ -6,7 +6,7 @@
   },
   {
    "question": "What JSON shape does the research engine's `GET /research/jobs/{id}` return for a crashed run versus a finished-but-not-filed run, and is `result` null or absent on a crash?",
-   "tag": "external"
+   "tag": "api"
   },
   {
    "question": "What does a test need to fake to make an unfiled job visible (an `httpx.MockTransport` serving a job with `status: \"error\"` and a full `result`)?",
@@ -14,11 +14,11 @@
   },
   {
    "question": "What does `docker compose config --format json` emit for `ports` entries without a `published` value and for a healthcheck with `disable: true`?",
-   "tag": "external"
+   "tag": "api"
   },
   {
    "question": "How does Docker resolve the last `HEALTHCHECK` instruction in a Dockerfile, including backslash-continued lines and `HEALTHCHECK NONE`?",
-   "tag": "external"
+   "tag": "concept"
   },
   {
    "question": "Which existing services in this checkout's compose files publish a host port without a healthcheck, and so belong in the shipped allow-list?",

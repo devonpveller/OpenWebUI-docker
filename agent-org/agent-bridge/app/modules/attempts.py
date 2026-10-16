@@ -557,13 +557,6 @@ def parse_check(out: str | None, nonce: str | None = None) -> CheckRun | None:
                     limit=_int(first(recs, "TO")), missing_at_start=_int(first(recs, "NMISS")) or 0)
 
 
-def reset_mixed_cmd(sha: str) -> str:
-    """Move the current branch to `sha`, keeping the work tree (a plan-turn COMMIT becomes dirty
-    files the unchanged plan-turn write check then reverts). `reset` without --hard: proxy-legal."""
-    return _wrap([f"git reset -q {sha} >/dev/null 2>&1; " + _rec("RC", '"$?"'),
-                  _rec("HEAD", '"$(git rev-parse HEAD 2>/dev/null)"')])
-
-
 def keep_cmd(effort_id: str, parked_from: str | None, park_sha: str,
              commits: list[dict]) -> str:
     """Turn the parked attempt into one commit per completed step.

@@ -8,7 +8,7 @@ LC_OPEN_TERMINAL_URL env from the config value). So each pooled worker needs its
 pointing at its OWN open-terminal, or it would route exec to the MAIN stack's open-terminal
 (breaking per-instance isolation).
 
-This copies the canonical config (single source of truth) and rewrites just two lines per
+This copies the canonical config (single source of truth) and rewrites just three lines per
 instance — targeted line replaces so all comments/tuning are preserved verbatim:
   - `workspace.open_terminal_url` -> the instance's own open-terminal (above);
   - `workspace.exec_timeout_seconds` 1800 -> 900 (ao-exechang, 2026-10-14). A worker's command
@@ -17,6 +17,11 @@ instance — targeted line replaces so all comments/tuning are preserved verbati
     `-n 4` those took 604-690 s (and 645-661 s on the host), so 900 lets the one full suite the
     worker knowledge prescribes (after editing, `-n 4`) finish, and still halves a hang. The
     interactive little-coder keeps the canonical 1,800 s. Evidence: the ao-exechang findings.
+  - `agent.temperature` null -> 0.6 (ao-temp06, operator D22 2026-10-15). Without it every worker
+    model call carried temperature 0.3: pi's benchmark-profiles extension (little-coder's
+    .pi/settings.json default_model_profile) stamps it on each request. The C7e sweep (bake-off
+    PAPER Part 7) showed 0.6 no worse. The open-terminal-exec extension applies the value
+    (config -> agent.py LC_TEMPERATURE -> request body). The interactive coder config keeps null.
 
 Usage (from the workspace root):  python agent-org/scripts/gen-worker-configs.py [--count N]
                                    [--out-dir DIR]   (default: agent-org/agent-bridge/worker-configs)
@@ -36,6 +41,8 @@ OUT_DIR = ROOT / "agent-org" / "agent-bridge" / "worker-configs"
 _ORIG = "open_terminal_url: http://open-terminal:8000"
 _EXEC_TIMEOUT_ORIG = "exec_timeout_seconds: 1800"
 WORKER_EXEC_TIMEOUT_S = 900
+_TEMPERATURE_ORIG = "  temperature: null"
+WORKER_TEMPERATURE = 0.6
 
 
 def main() -> int:
@@ -48,7 +55,7 @@ def main() -> int:
     if not src_yaml.exists():
         raise SystemExit(f"canonical config not found: {src_yaml}")
     content = src_yaml.read_text(encoding="utf-8")
-    for expected in (_ORIG, _EXEC_TIMEOUT_ORIG):
+    for expected in (_ORIG, _EXEC_TIMEOUT_ORIG, _TEMPERATURE_ORIG):
         if content.count(expected) != 1:
             raise SystemExit(
                 f"expected exactly one line {expected!r} in {src_yaml} — the canonical config "
@@ -61,13 +68,17 @@ def main() -> int:
         patched = content.replace(_ORIG, f"open_terminal_url: http://ao-ot-{n}:8000").replace(
             _EXEC_TIMEOUT_ORIG,
             f"exec_timeout_seconds: {WORKER_EXEC_TIMEOUT_S}  # agent-org worker bound (generator)",
+        ).replace(
+            _TEMPERATURE_ORIG,
+            f"  temperature: {WORKER_TEMPERATURE}  # agent-org worker temperature (generator)",
         )
         header = (
             f"# GENERATED for agent-org pool instance ao-worker-{n} by "
             f"agent-org/scripts/gen-worker-configs.py.\n"
             f"# Source of truth: little-coder/config/little-coder.config.yaml — DO NOT edit here;\n"
             f"# edit the source + regenerate. Only workspace.open_terminal_url and\n"
-            f"# workspace.exec_timeout_seconds ({WORKER_EXEC_TIMEOUT_S}) differ.\n"
+            f"# workspace.exec_timeout_seconds ({WORKER_EXEC_TIMEOUT_S}) and agent.temperature "
+            f"({WORKER_TEMPERATURE}) differ.\n"
         )
         (dst / "little-coder.config.yaml").write_text(header + patched, encoding="utf-8")
         # models.json + schema.json are needed alongside the yaml (LC_CONFIG dir).
@@ -75,7 +86,7 @@ def main() -> int:
             if (SRC_DIR / extra).exists():
                 shutil.copy2(SRC_DIR / extra, dst / extra)
         print(f"generated {dst} (open_terminal_url -> http://ao-ot-{n}:8000, "
-              f"exec_timeout_seconds -> {WORKER_EXEC_TIMEOUT_S})")
+              f"exec_timeout_seconds -> {WORKER_EXEC_TIMEOUT_S}, temperature -> {WORKER_TEMPERATURE})")
     return 0
 
 

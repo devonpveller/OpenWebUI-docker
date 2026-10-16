@@ -65,6 +65,24 @@ def _is_worker_unavailable(exc: Exception) -> bool:
     return isinstance(exc, httpx.TransportError)
 
 
+
+def delivery_sync_command(branch: str) -> str:
+    """F33's sync of a worker to the effort's delivery-branch head. `checkout -f -B` DELETES a file
+    that is staged as new but not in the target tree (git treats it as tracked), so a file an
+    earlier turn `git add`ed and never committed would be lost. ao-preflight2: those files are
+    unstaged first (`rm --cached -f` keeps them on disk, untracked), so they survive the switch
+    and the next publish (`add -A`) picks them up again. Only proxy-legal git; best-effort - a
+    failed unstage never blocks the sync."""
+    return (f"cd /workspace && git fetch origin {branch} && "
+            f"{{ git diff --cached --name-only --diff-filter=A -z | "
+            f"xargs -0 -r git --literal-pathspecs rm -q --cached -f --ignore-unmatch -- ; true; }} "
+            f"&& git checkout -f -B {branch} FETCH_HEAD")
+
+class WorkspaceMoved(RuntimeError):
+    """ao-plancheck - a pinned `exec_check` found its worker's workspace re-focused for another
+    effort since the turn it was meant to inspect; nothing was run."""
+
+
 class WorkerModelRefused(httpx.HTTPStatusError):
     """A worker's daemon refused the turn's model (422 `model refused: ...`). The router has
     already audited it and posted the actionable message in the effort thread; callers use the
@@ -458,7 +476,7 @@ class Router:
         withhold_goal: bool = False,
         loop_guard: LoopGuard | None = None,
         turn_label: str | None = None,
-        pre_turn_check: str | None = None,
+        pre_turn_check: str | Callable[..., Awaitable[str | None]] | None = None,
     ) -> WorkResult | None:
         """Wake a worker on an effort and post its reply in-thread. Returns None if the
         effort is frozen (the composition rule refuses to dispatch) or no capacity. If `repo`
@@ -476,7 +494,16 @@ class Router:
         `loop_guard` (ao-loopguard): the turn's loop/no-progress policy. None = the default WORK guard
         (window rules, edit-aware) when `loop_guard_work` is on and the caller did not arm F31.4's
         `max_repeat`. `turn_label` names the turn in the one-line stop message (default: derived
-        from the session suffix)."""
+        from the session suffix).
+        `pre_turn_check` (ao-plancheck): a deterministic command run on THE SAME worker after the
+        focus and right before the turn - or an async callable given a `run(command)` that
+        executes on that worker, for a multi-step baseline; its output comes back as
+        `result.pre_turn_output` (None if it failed) beside `result.instance_id`, so the caller can
+        compare the workspace before and after this turn on the worker that ran it. Before it runs,
+        any task still running on that worker (a stopped turn the daemon has not wound down yet)
+        is cancelled and waited out; if it will not die, no baseline is taken
+        (`result.pre_turn_note` says why) - a baseline taken while it still writes would blame
+        its writes on this turn."""
         session_id = session_id or thread_id
         if loop_guard is None and not max_repeat:
             loop_guard = self.default_loop_guard(session_id, plan_only=plan_only)
@@ -633,11 +660,7 @@ class Router:
                 if repo and checkout_branch:
                     try:
                         code, out, _timed = await self.harness.run_check(
-                            inst.base_url,
-                            f"cd /workspace && git fetch origin {checkout_branch} "
-                            f"&& git checkout -f -B {checkout_branch} FETCH_HEAD",
-                            timeout=120,
-                        )
+                            inst.base_url, delivery_sync_command(checkout_branch), timeout=120)
                         await self.audit.log(
                             "worker_synced_to_delivery", effort_id=effort_id, actor=inst.id,
                             payload={"branch": checkout_branch, "synced": code == 0,
@@ -645,15 +668,31 @@ class Router:
                         )
                     except Exception as exc:  # noqa: BLE001 — best-effort; first delivery has no branch
                         log.debug("delivery-branch sync for %s failed: %s", effort_id, exc)
-                # ao-attempt: a deterministic probe of the workspace AFTER focus/sync and BEFORE the
-                # turn - the exact tree this attempt starts from. Best-effort; never blocks a turn.
-                pre_turn_out: str | None = None
+                # ao-plancheck - the caller's baseline of THIS workspace, taken on THIS worker after
+                # the focus and before the turn, so whatever the turn changes can be told apart from
+                # what an earlier turn left on disk. Best-effort: a failure leaves it None and the
+                # caller attributes nothing.
+                pre_turn_output: str | None = None
+                pre_turn_note = ""
                 if pre_turn_check:
                     try:
-                        pre_turn_out = await self.harness.pre_turn_probe(
-                            inst.base_url, pre_turn_check)
-                    except Exception as exc:  # noqa: BLE001
-                        log.debug("pre-turn probe for %s failed: %s", effort_id, exc)
+                        pre_turn_note = await self._wait_worker_quiet(inst.base_url)
+                        if not pre_turn_note:
+                            base_url = inst.base_url
+
+                            async def _run_here(command: str, timeout: int = 120) -> str | None:
+                                _c, out, _t = await self.harness.run_check(
+                                    base_url, command, timeout=timeout)
+                                return out
+
+                            if callable(pre_turn_check):
+                                pre_turn_output = await pre_turn_check(_run_here)
+                            else:
+                                pre_turn_output = await _run_here(pre_turn_check)
+                    except Exception as exc:  # noqa: BLE001 - never blocks the turn
+                        log.debug("pre-turn check for %s failed: %s", effort_id, exc)
+                        pre_turn_output = None
+                        pre_turn_note = pre_turn_note or f"pre-turn check failed: {exc}"[:200]
                 # Stream the worker's activity to the effort THREAD as it happens (observability =
                 # safety, governance §5/§7). Notification discipline (CM.6): coalesce rapid *successful*
                 # commands into one post; failures/denials always post immediately + in context so a
@@ -737,8 +776,14 @@ class Router:
                     inst.base_url, session_id, prompt, on_update=_stream, **extra,
                 )
                 await _flush()  # defensive: surface any tail commands if no answer callback fired
-                result.pre_turn_output = pre_turn_out
-                result.instance_id = inst.id
+                try:   # ao-plancheck - which worker ran it, and its pre-turn baseline
+                    result.instance_id = inst.id
+                    result.pre_turn_output = pre_turn_output
+                    result.pre_turn_note = pre_turn_note
+                except AttributeError:  # a duck-typed result that refuses attributes
+                    pass
+                # ao-attempt - the worker of the effort's last CODING wake holds its attempt
+                # (`focus_target`); kept beside ao-plancheck's `instance_id`.
                 if repo and not plan_only:
                     self._coding_ws[effort_id] = inst.id
                 # POLL TIMEOUT = the bridge stopped waiting, but the daemon is STILL running the
@@ -870,10 +915,38 @@ class Router:
             await self.scheduler.release(inst.id)
 
     # ── deterministic verification exec (2026-07-08) ─────────────────────────
+    async def _wait_worker_quiet(self, base_url: str, *, attempts: int = 30,
+                                 pause: float = 1.0) -> str:
+        """ao-plancheck - make sure no earlier task is still running on this worker before a
+        baseline is taken (a flail-stopped turn is cancelled best-effort and may still be writing).
+        Cancels a running task, then waits for the daemon to report none. Returns "" when quiet,
+        else why not."""
+        import asyncio
+
+        cancelled = False
+        for _ in range(max(1, attempts)):
+            try:
+                running = await self.harness.has_running_task(base_url)
+            except Exception:  # noqa: BLE001 - an unanswerable daemon is not "quiet"
+                return "could not confirm the worker's previous task had stopped"
+            if not running:
+                return ""
+            if not cancelled:
+                try:
+                    prog = await self.harness.running_task_progress(base_url)
+                    if prog:
+                        await self.harness.cancel_task(base_url, prog[0])
+                except Exception:  # noqa: BLE001 - cancel is best-effort; we keep waiting
+                    pass
+                cancelled = True
+            await asyncio.sleep(pause)
+        return "the worker's previous task was still running"
+
     async def exec_check(
         self, effort_id: str, *, command: str, session_id: str, repo: str | None = None,
         repo_token: str | None = None, recurse_submodules: bool = False, timeout: int = 900,
-        fresh: bool = False, label: str | None = None, require_instance: str | None = None,
+        fresh: bool = False, instance_id: str | None = None, expect_effort: str | None = None,
+        wait_quiet: bool = False, label: str | None = None,
     ) -> tuple[int | None, str, bool]:
         """Run ONE verification command on a pooled worker DETERMINISTICALLY (the daemon's
         `/check` — real exit code + output, no model in the loop). Build verification is a
@@ -881,25 +954,36 @@ class Router:
         (live 2026-07-08). Acquires a slot, optionally focuses `repo` (privileged recursive
         clone for compositions), runs, releases. `fresh` FORCES a clean re-clone of the focus
         (self-heals a partial/parked workspace — e.g. a composition whose nested submodules didn't
-        populate). Exceptions propagate — the orchestrator falls back to the LLM verifier."""
-        # ao-attempt: a command that changes the EXISTING workspace (repo=None) runs only on the ONE
-        # worker that holds the effort's attempt - never on another pool worker, even one focused
-        # on the same effort (a plan wake can land there). ao-attempt2 F5: checked BEFORE the
-        # acquire, and the acquire may take ONLY that worker - a refused command never rebinds
-        # another worker's session/effort (acquire's fallback writes them onto any free worker).
-        if require_instance and (self._ws_focus.get(require_instance) or ("",))[0] != effort_id:
-            raise RuntimeError("not the worker that holds this effort's workspace")
-        if require_instance:
-            inst = await self.scheduler.acquire(effort_id, "verifier", session_id,
-                                                only_instance=require_instance)
-        else:
-            inst = await self.scheduler.acquire(effort_id, "verifier", session_id)
+        populate). Exceptions propagate — the orchestrator falls back to the LLM verifier.
+        `instance_id` (ao-plancheck) pins the run to ONE worker (NoCapacityError if it is busy or
+        gone, never another worker); `expect_effort` then refuses to run (WorkspaceMoved) unless
+        that worker's workspace is still focused for that effort - its checkout is the one the
+        caller means, not one another effort re-cloned in between.
+        `wait_quiet` (ao-replancarry) first cancels/waits out a task still running on that worker
+        (a flail-stopped turn may still be writing), as the plan-turn baseline does; if it will
+        not stop, the command still runs and `check_worker_not_quiet` records why.
+        With both `instance_id` and `expect_effort` the focus is checked BEFORE the acquire as well
+        (ao-attempt2 F5): a refused command never binds that worker's session to this effort.
+        `label` (ao-attempt) is audited instead of the command text when the command carries
+        text that must not reach the audit (a worker's check command, paths in a commit)."""
+        if instance_id is not None and expect_effort is not None:
+            rec = self._ws_focus.get(instance_id)
+            if rec is None or rec[0] != expect_effort:
+                raise WorkspaceMoved(
+                    f"{instance_id}'s workspace is no longer focused for {expect_effort}")
+        inst = await self.scheduler.acquire(effort_id, "verifier", session_id,
+                                            instance_id=instance_id)
         try:
-            # and AGAIN after the acquire (round 4's check, kept): the focus can move while acquire
-            # awaits the gate/DB - the worker must still hold THIS effort's workspace now
-            if require_instance and (inst.id != require_instance
-                                     or (self._ws_focus.get(inst.id) or ("",))[0] != effort_id):
-                raise RuntimeError("not the worker that holds this effort's workspace")
+            if expect_effort is not None:
+                rec = self._ws_focus.get(inst.id)
+                if rec is None or rec[0] != expect_effort:
+                    raise WorkspaceMoved(
+                        f"{inst.id}'s workspace is no longer focused for {expect_effort}")
+            if wait_quiet:
+                note = await self._wait_worker_quiet(inst.base_url)
+                if note:
+                    await self.audit.log("check_worker_not_quiet", effort_id=effort_id,
+                                         actor=inst.id, payload={"reason": note})
             if repo:
                 ok, detail, _ = await self.harness.set_project(
                     inst.base_url, repo, token=repo_token,

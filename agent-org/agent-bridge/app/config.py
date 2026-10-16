@@ -9,8 +9,20 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The knowledge package's built-in documentation allow-list (see `knowledge_source_hosts`).
+DEFAULT_KNOWLEDGE_SOURCE_HOSTS = (
+    "docs.python.org,peps.python.org,docs.pytest.org,www.python-httpx.org,"
+    "docs.pydantic.dev,fastapi.tiangolo.com,www.starlette.io,docs.sqlalchemy.org,"
+    "docs.aiohttp.org,docs.djangoproject.com,flask.palletsprojects.com,numpy.org/doc,"
+    "pandas.pydata.org/docs,developer.mozilla.org/en-US/docs,nodejs.org/api,docs.deno.com,"
+    "www.typescriptlang.org/docs,doc.rust-lang.org,go.dev/doc,go.dev/ref,"
+    "learn.microsoft.com/en-us/dotnet/api,learn.microsoft.com/en-us/dotnet/csharp,"
+    "learn.microsoft.com/en-us/dotnet/standard,learn.microsoft.com/en-us/dotnet/core,"
+    "docs.docker.com,git-scm.com/docs,www.postgresql.org/docs"
+)
 
 
 class Settings(BaseSettings):
@@ -482,6 +494,30 @@ class Settings(BaseSettings):
     repo_sync_enabled: bool = True
     grounding_timeout_s: float = 300.0      # bound the poll; on timeout grounding is skipped
     grounding_poll_interval_s: float = 5.0
+    # Knowledge package (agent-knowledge-package D2, kp-research): before assignment, answer the
+    # effort's knowledge questions (codebase + research engine) into a compact, sourced package.
+    # OFF by default and wired into nothing live yet (the hand-off seam is kp-inject). The time box
+    # bounds the WHOLE step (both research rounds + extraction + the codebase answers).
+    knowledge_package_enabled: bool = False
+    knowledge_package_time_box_s: float = 900.0
+    # The knowledge package's research scope, sent WITH each job as its options.contract
+    # (knowledge_package.research_scope; the engine enforces it, OB1 research-service contract.ts).
+    # The default list IS the engine's `software-docs` class (a test pins the two equal) and is
+    # sent as that class; a different list (comma-separated `host`, `*.suffix` or
+    # `host/path/prefix`, paths case-sensitive) is sent as the allow list instead, so it can only
+    # narrow the job. A list with no usable entry sends NO job (never the class). Per-task entries
+    # are added by the caller (build_knowledge_package source_hosts=..., e.g.
+    # `anyio.readthedocs.io/en/stable`, `docs.rs/tokio`, GitHub ONLY as a pinned tag:
+    # `github.com/agronholm/anyio@4.4.0`). NEVER an entry: hosts where anyone can publish
+    # (readthedocs.io / pages.dev / gitlab.io as platforms, *.github.io, gist.github.com, any
+    # *.github.com / *.githubusercontent.com host) - dropped with a recorded reason, never sent.
+    knowledge_source_hosts: str = DEFAULT_KNOWLEDGE_SOURCE_HOSTS
+
+    @field_validator("knowledge_source_hosts", mode="before")
+    @classmethod
+    def _blank_source_hosts_is_the_default(cls, v: object) -> object:
+        # compose passes AO_KNOWLEDGE_SOURCE_HOSTS="" when unset (kp-harden Q4): blank = built-in.
+        return DEFAULT_KNOWLEDGE_SOURCE_HOSTS if v is None or (isinstance(v, str) and not v.strip()) else v
 
     # ── Knowledge questions (agent-knowledge-package D1) ─────────────────────
     # Before assignment, ask the LOCAL model role for <= 8 tagged knowledge questions from a fixed

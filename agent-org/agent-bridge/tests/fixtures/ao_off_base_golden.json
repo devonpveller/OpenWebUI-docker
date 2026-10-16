@@ -2,16 +2,16 @@
  "c7a:ao-queue-r2": {
   "approved": true,
   "checks": [
-   "cd /workspace && echo BEFORE-HEAD=$(git rev-parse HEAD 2>/dev/null) && git status --porcelain | head -20 && echo PROBE-DONE",
-   "cd /workspace && git checkout -- . 2>/dev/null; git clean -fd 2>/dev/null; echo REVERT-DONE"
+   "ao-plancheck-script sha256:a666d8c367e6a5c24c2b0784253e249c4b0f4b067ca09b7ca078e05195c3d85c",
+   "ao-plancheck-script sha256:cb5041aefd47a48eddd28605456ae7eece846633232040f373329fad20f7fac6"
   ],
   "files": {
-   "inference/llm-queue/src/llm_queue/app_state.py": "original inference/llm-queue/src/llm_queue/app_state.py\n",
-   "inference/llm-queue/src/llm_queue/config.py": "original inference/llm-queue/src/llm_queue/config.py\n",
-   "inference/llm-queue/src/llm_queue/routes/data.py": "original inference/llm-queue/src/llm_queue/routes/data.py\n",
-   "inference/llm-queue/src/llm_queue/routes/health.py": "original inference/llm-queue/src/llm_queue/routes/health.py\n",
-   "inference/llm-queue/src/llm_queue/scheduler.py": "original inference/llm-queue/src/llm_queue/scheduler.py\n",
-   "inference/llm-queue/src/llm_queue/shedding.py": null
+   "inference/llm-queue/src/llm_queue/app_state.py": "coding turn edit inference/llm-queue/src/llm_queue/app_state.py\n",
+   "inference/llm-queue/src/llm_queue/config.py": "coding turn edit inference/llm-queue/src/llm_queue/config.py\n",
+   "inference/llm-queue/src/llm_queue/routes/data.py": "coding turn edit inference/llm-queue/src/llm_queue/routes/data.py\n",
+   "inference/llm-queue/src/llm_queue/routes/health.py": "coding turn edit inference/llm-queue/src/llm_queue/routes/health.py\n",
+   "inference/llm-queue/src/llm_queue/scheduler.py": "coding turn edit inference/llm-queue/src/llm_queue/scheduler.py\n",
+   "inference/llm-queue/src/llm_queue/shedding.py": "coding turn new file inference/llm-queue/src/llm_queue/shedding.py\n"
   },
   "kinds": [
    "goal_change",
@@ -21,9 +21,6 @@
    "worker_acquire",
    "worker_project_set",
    "wake_done",
-   "worker_acquire",
-   "check_exec",
-   "plan_turn_wrote_files",
    "worker_acquire",
    "check_exec",
    "worker_plan_approved"
@@ -38,7 +35,6 @@
    "\ud83d\udcac **worker-default@worker-1:** ok",
    "\ud83d\udcd0 **Plan first** \u2014 the worker maps its approach in a read-only turn, and I check it against the goal before any code changes.",
    "\ud83d\udcac **worker-default@worker-1:** ok",
-   "\ud83e\uddf9 The plan turn modified files even though it was a read-only turn \u2014 reverted them so the plan is reviewed on its merits, not on work already done.",
    "\u2705 Plan reviewed \u2014 aligned with the goal. Executing it now."
   ],
   "prompts": [
@@ -49,17 +45,17 @@
  "c7a:ao-queue-r3": {
   "approved": true,
   "checks": [
-   "cd /workspace && echo BEFORE-HEAD=$(git rev-parse HEAD 2>/dev/null) && git status --porcelain | head -20 && echo PROBE-DONE",
-   "cd /workspace && git checkout -- . 2>/dev/null; git clean -fd 2>/dev/null; echo REVERT-DONE"
+   "ao-plancheck-script sha256:a666d8c367e6a5c24c2b0784253e249c4b0f4b067ca09b7ca078e05195c3d85c",
+   "ao-plancheck-script sha256:cb5041aefd47a48eddd28605456ae7eece846633232040f373329fad20f7fac6"
   ],
   "files": {
-   "inference/llm-queue/src/llm_queue/app_state.py": "original inference/llm-queue/src/llm_queue/app_state.py\n",
-   "inference/llm-queue/src/llm_queue/config.py": "original inference/llm-queue/src/llm_queue/config.py\n",
-   "inference/llm-queue/src/llm_queue/routes/data.py": "original inference/llm-queue/src/llm_queue/routes/data.py\n",
-   "inference/llm-queue/src/llm_queue/routes/health.py": "original inference/llm-queue/src/llm_queue/routes/health.py\n",
-   "inference/llm-queue/src/llm_queue/scheduler.py": "original inference/llm-queue/src/llm_queue/scheduler.py\n",
-   "inference/llm-queue/src/llm_queue/shedding.py": null,
-   "inference/llm-queue/tests/test_leak.py": null
+   "inference/llm-queue/src/llm_queue/app_state.py": "coding turn edit inference/llm-queue/src/llm_queue/app_state.py\n",
+   "inference/llm-queue/src/llm_queue/config.py": "coding turn edit inference/llm-queue/src/llm_queue/config.py\n",
+   "inference/llm-queue/src/llm_queue/routes/data.py": "coding turn edit inference/llm-queue/src/llm_queue/routes/data.py\n",
+   "inference/llm-queue/src/llm_queue/routes/health.py": "coding turn edit inference/llm-queue/src/llm_queue/routes/health.py\n",
+   "inference/llm-queue/src/llm_queue/scheduler.py": "coding turn edit inference/llm-queue/src/llm_queue/scheduler.py\n",
+   "inference/llm-queue/src/llm_queue/shedding.py": "coding turn new file inference/llm-queue/src/llm_queue/shedding.py\n",
+   "inference/llm-queue/tests/test_leak.py": "coding turn new file inference/llm-queue/tests/test_leak.py\n"
   },
   "kinds": [
    "goal_change",
@@ -69,9 +65,6 @@
    "worker_acquire",
    "worker_project_set",
    "wake_done",
-   "worker_acquire",
-   "check_exec",
-   "plan_turn_wrote_files",
    "worker_acquire",
    "check_exec",
    "worker_plan_approved"
@@ -86,7 +79,6 @@
    "\ud83d\udcac **worker-default@worker-1:** ok",
    "\ud83d\udcd0 **Plan first** \u2014 the worker maps its approach in a read-only turn, and I check it against the goal before any code changes.",
    "\ud83d\udcac **worker-default@worker-1:** ok",
-   "\ud83e\uddf9 The plan turn modified files even though it was a read-only turn \u2014 reverted them so the plan is reviewed on its merits, not on work already done.",
    "\u2705 Plan reviewed \u2014 aligned with the goal. Executing it now."
   ],
   "prompts": [
@@ -97,15 +89,15 @@
  "c7a:ao-wd-offset-r2": {
   "approved": true,
   "checks": [
-   "cd /workspace && echo BEFORE-HEAD=$(git rev-parse HEAD 2>/dev/null) && git status --porcelain | head -20 && echo PROBE-DONE",
-   "cd /workspace && git checkout -- . 2>/dev/null; git clean -fd 2>/dev/null; echo REVERT-DONE"
+   "ao-plancheck-script sha256:a666d8c367e6a5c24c2b0784253e249c4b0f4b067ca09b7ca078e05195c3d85c",
+   "ao-plancheck-script sha256:cb5041aefd47a48eddd28605456ae7eece846633232040f373329fad20f7fac6"
   ],
   "files": {
-   "agent-org/agent-bridge/app/orchestrator.py": "original agent-org/agent-bridge/app/orchestrator.py\n",
-   "agent-org/agent-bridge/app/worker/harness.py": "original agent-org/agent-bridge/app/worker/harness.py\n",
-   "agent-org/agent-bridge/tests/test_stall_watchdog_task_switch.py": null,
-   "little-coder/src/littlecoder/daemon.py": "original little-coder/src/littlecoder/daemon.py\n",
-   "little-coder/tests/test_event_lines.py": null
+   "agent-org/agent-bridge/app/orchestrator.py": "coding turn edit agent-org/agent-bridge/app/orchestrator.py\n",
+   "agent-org/agent-bridge/app/worker/harness.py": "coding turn edit agent-org/agent-bridge/app/worker/harness.py\n",
+   "agent-org/agent-bridge/tests/test_stall_watchdog_task_switch.py": "coding turn new file agent-org/agent-bridge/tests/test_stall_watchdog_task_switch.py\n",
+   "little-coder/src/littlecoder/daemon.py": "coding turn edit little-coder/src/littlecoder/daemon.py\n",
+   "little-coder/tests/test_event_lines.py": "coding turn new file little-coder/tests/test_event_lines.py\n"
   },
   "kinds": [
    "goal_change",
@@ -115,9 +107,6 @@
    "worker_acquire",
    "worker_project_set",
    "wake_done",
-   "worker_acquire",
-   "check_exec",
-   "plan_turn_wrote_files",
    "worker_acquire",
    "check_exec",
    "worker_plan_approved"
@@ -132,7 +121,6 @@
    "\ud83d\udcac **worker-default@worker-1:** ok",
    "\ud83d\udcd0 **Plan first** \u2014 the worker maps its approach in a read-only turn, and I check it against the goal before any code changes.",
    "\ud83d\udcac **worker-default@worker-1:** ok",
-   "\ud83e\uddf9 The plan turn modified files even though it was a read-only turn \u2014 reverted them so the plan is reviewed on its merits, not on work already done.",
    "\u2705 Plan reviewed \u2014 aligned with the goal. Executing it now."
   ],
   "prompts": [
@@ -168,12 +156,12 @@
    "worker_acquire",
    "worker_project_set",
    "wake_done",
-   "worker_acquire",
+   "plan_turn_check_unattributed",
    "worker_plan_stub",
    "worker_acquire",
    "worker_project_set",
    "wake_done",
-   "worker_acquire",
+   "plan_turn_check_unattributed",
    "worker_plan_approved",
    "worker_acquire",
    "worker_project_set",
@@ -202,12 +190,12 @@
    "worker_acquire",
    "worker_project_set",
    "wake_done",
-   "worker_acquire",
+   "plan_turn_check_unattributed",
    "worker_plan_stub",
    "worker_acquire",
    "worker_project_set",
    "wake_done",
-   "worker_acquire",
+   "plan_turn_check_unattributed",
    "worker_plan_approved",
    "worker_acquire",
    "worker_project_set",

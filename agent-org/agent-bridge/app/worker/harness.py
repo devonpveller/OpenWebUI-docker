@@ -50,10 +50,12 @@ class WorkResult:
         self.model: str | None = model
         # ao-loopguard — set when the bridge's loop guard stopped this turn (status "flail").
         self.loop_trip: LoopTrip | None = None
-        # ao-attempt — the router's pre-turn workspace probe (raw /check output) and the worker
-        # instance that ran the turn.
-        self.pre_turn_output: str | None = None
+        # ao-plancheck — which pool worker ran the turn, and the output of the pre-turn check the
+        # caller asked the router to run on that worker (`wake(pre_turn_check=...)`). None = not
+        # requested, or it failed: the caller must not attribute anything to the turn.
         self.instance_id: str | None = None
+        self.pre_turn_output: str | None = None
+        self.pre_turn_note: str = ""      # why no baseline was taken, when none was
 
     @property
     def ok(self) -> bool:
@@ -362,11 +364,6 @@ class WorkerHarness(Protocol):
         Raises on transport errors / a daemon without the route — the caller falls back."""
         ...
 
-    async def pre_turn_probe(self, base_url: str, command: str) -> str | None:
-        """ao-attempt: one deterministic /check run right before a coding turn (the attempt's
-        start). Returns the raw output, or None. Best-effort."""
-        ...
-
     async def cancel_task(self, base_url: str, task_id: str) -> bool:
         """Abandon a task the bridge stopped waiting for (poll timeout), so the daemon doesn't
         stay busy on an orphaned turn and 409 the next dispatch. Best-effort."""
@@ -602,10 +599,6 @@ class LittleCoderHarness:
             r.raise_for_status()   # 404 = an old daemon without /check → the caller falls back
             d = r.json()
             return d.get("exit_code"), d.get("output") or "", bool(d.get("timed_out"))
-
-    async def pre_turn_probe(self, base_url: str, command: str) -> str | None:
-        _code, out, timed = await self.run_check(base_url, command, timeout=60)
-        return None if timed else out
 
     async def cancel_task(self, base_url: str, task_id: str) -> bool:
         """Abandon a task the bridge stopped waiting for (poll timeout) — otherwise the daemon
@@ -859,14 +852,6 @@ class FakeHarness:
             # like a daemon without the /check route — callers fall back to the LLM verifier
             raise RuntimeError("no /check on this daemon (fake: queue check_queue results)")
         return self.check_queue.pop(0)
-
-    async def pre_turn_probe(self, base_url: str, command: str) -> str | None:
-        # never consumes `check_queue` (tests queue those for their own checks); only a test that
-        # wires a fake daemon (`check_fn`) gets a probe
-        if self.check_fn is None:
-            return None
-        _code, out, _timed = await self.check_fn(base_url, command)
-        return out
 
     async def cancel_task(self, base_url: str, task_id: str) -> bool:
         self.cancelled.append((base_url, task_id))

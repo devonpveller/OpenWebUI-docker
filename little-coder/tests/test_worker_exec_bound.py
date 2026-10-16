@@ -56,7 +56,7 @@ def test_interactive_little_coder_keeps_its_1800(worker_configs):
     assert load_config(CANONICAL).workspace.exec_timeout_seconds == 1800
 
 
-def test_worker_config_differs_from_canonical_only_in_the_two_generated_lines(worker_configs):
+def test_worker_config_differs_from_canonical_only_in_the_generated_lines(worker_configs):
     canon = CANONICAL.read_text(encoding="utf-8").splitlines()
     gen = (worker_configs / "worker-1" / "little-coder.config.yaml").read_text(encoding="utf-8").splitlines()
     assert all(ln.startswith("# ") for ln in gen[:4])   # the GENERATED header
@@ -64,6 +64,7 @@ def test_worker_config_differs_from_canonical_only_in_the_two_generated_lines(wo
     changed = [(a, b) for a, b in zip(canon, gen) if a != b]
     assert len(canon) == len(gen)
     assert [b.strip() for _, b in changed] == [
+        "temperature: 0.6  # agent-org worker temperature (generator)",   # ao-temp06 (agent: is first)
         "open_terminal_url: http://ao-ot-1:8000",
         "exec_timeout_seconds: 900  # agent-org worker bound (generator)",
     ]
