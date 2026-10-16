@@ -191,6 +191,14 @@ services:
       # SSO entered in the admin UI is kept only when this is true (edge-b3-oauth);
       # off as shipped. Same line on the gpu definition below; see frontend/.env.example.
       - ENABLE_OAUTH_PERSISTENT_CONFIG=${OWUI_OAUTH_PERSISTENT_CONFIG:-false}
+      # OIDC login provider (edge-b3-oidc): OWUI 0.11 registers it at startup ONLY from
+      # these env vars (admin-UI values are not used for that). Set in frontend/.env;
+      # unset = OWUI's own defaults, no provider.
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}
+      - OPENID_PROVIDER_URL=${OPENID_PROVIDER_URL:-}
+      - OAUTH_PROVIDER_NAME=${OAUTH_PROVIDER_NAME:-SSO}
+      - OAUTH_SCOPES=${OAUTH_SCOPES:-openid email profile}
     restart: unless-stopped
     <<: *hardening-owui
     healthcheck:
@@ -259,6 +267,14 @@ services:
       # this is true (edge-b3-oauth); off as shipped. OWUI_OAUTH_PERSISTENT_CONFIG in
       # frontend/.env; preconditions and recreate order are documented there.
       - ENABLE_OAUTH_PERSISTENT_CONFIG=${OWUI_OAUTH_PERSISTENT_CONFIG:-false}
+      # OIDC login provider (edge-b3-oidc): OWUI 0.11 registers it at startup ONLY from
+      # these env vars (admin-UI values are not used for that). Set in frontend/.env;
+      # unset = OWUI's own defaults, no provider.
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}
+      - OPENID_PROVIDER_URL=${OPENID_PROVIDER_URL:-}
+      - OAUTH_PROVIDER_NAME=${OAUTH_PROVIDER_NAME:-SSO}
+      - OAUTH_SCOPES=${OAUTH_SCOPES:-openid email profile}
       # OWUI's own LOW-PRIVILEGE virtual key (the same one its chat connection
       # holds in webui.db) — the status-pipe llm-traffic module uses it for the
       # gateway's read-only /observe/* queue board, which 401s unauthenticated
