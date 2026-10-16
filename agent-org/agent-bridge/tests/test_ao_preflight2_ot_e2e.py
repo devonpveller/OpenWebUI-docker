@@ -300,3 +300,62 @@ def test_e2e_sabotaged_snapshot_dir_and_forged_journal(pool, sabotage):
     assert _cat(w, "coding.py") == "coding\n"
     assert w.operator("test -e /workspace/.git/ao-plan-snapshot && echo y || echo n").strip() == "n"
     assert len(w.denials().splitlines()) == st["n0"]
+
+
+# -- round 2 -----------------------------------------------------------------------------------
+def test_e2e_the_delivery_sync_keeps_a_staged_new_file(pool):
+    """(e) the REAL sync command in the image's shell: a file an earlier turn staged as new and
+    never committed survives `checkout -f -B` (unstaged first, kept untracked)."""
+    from app.modules.router import delivery_sync_command
+
+    w = pool[1]
+    assert "REPO-OK" in w.operator(_REPO)
+    w.operator("cd /workspace && G=/usr/bin/git.real && $G init -q --bare /tmp/so.git && "
+               "$G remote add origin /tmp/so.git 2>/dev/null; $G remote set-url origin /tmp/so.git"
+               " && $G push -q origin HEAD:refs/heads/agent/e2")
+    w.turn("cd /workspace && printf 'STAGED NEW\n' > staged_new.py && git add staged_new.py")
+    n0 = len(w.denials().splitlines())
+    code, out, _t = w.check(delivery_sync_command("agent/e2"), timeout=120)
+    assert code == 0, out
+    assert _cat(w, "staged_new.py") == "STAGED NEW\n"
+    st = w.operator("cd /workspace && /usr/bin/git.real status --porcelain -uall")
+    assert "?? staged_new.py" in st.splitlines(), st
+    assert len(w.denials().splitlines()) == n0
+
+
+@pytest.mark.parametrize("plan", ["drop-earlier-excludesfile", "own-excludesfile-hides"])
+def test_e2e_config_keys_are_restored_first(pool, plan):
+    """(a) core.excludesFile: the plan turn removes the one the earlier turn relied on, or adds
+    its own to hide its files. Both undone before status is read."""
+    w = pool[1]
+    assert "REPO-OK" in w.operator(_REPO)
+    w.operator("cd /workspace && printf 'notes/\n' > .git/my-ign && "
+               "printf '[core]\n\texcludesFile = /workspace/.git/my-ign\n' >> .git/config && "
+               "mkdir -p notes && printf 'CODING NOTES\n' > notes/n.txt")
+    st = _setup_existing(w)
+    if plan == "drop-earlier-excludesfile":
+        w.turn("cd /workspace && sed -i '/my-ign/d' .git/config && printf 'p\n' > PLAN.md")
+    else:
+        w.turn("cd /workspace && printf '*.plan\n' > /tmp/pl-ign && "
+               "printf '[core]\n\texcludesFile = /tmp/pl-ign\n' >> .git/config && "
+               "for i in 0 1 2; do printf p > x$i.plan; done && printf 'p\n' > PLAN.md")
+    rep = _check(w, st)
+    assert rep is not None and rep["status"] == "ok", rep
+    assert _cat(w, "notes/n.txt") == "CODING NOTES\n"
+    assert _cat(w, "PLAN.md") is None
+    assert all(_cat(w, f"x{i}.plan") is None for i in range(3))
+    cfg = w.operator("cat /workspace/.git/config")
+    assert "my-ign" in cfg and "pl-ign" not in cfg
+    assert len(w.denials().splitlines()) == st["n0"]
+
+
+def _setup_existing(w) -> dict:
+    """take_baseline on the workspace as it is (no re-clone)."""
+    tok = ptg.new_token()
+
+    async def run(cmd):
+        return w.check(cmd, timeout=120)[1]
+    raw = asyncio.run(ptg.take_baseline(run, tok))
+    snap = ptg.parse_snapshot(raw)
+    assert snap is not None and isinstance(snap["manifest"], dict)
+    return {"tok": tok, "snap": snap, "raw": raw, "n0": len(w.denials().splitlines())}

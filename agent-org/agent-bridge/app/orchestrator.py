@@ -2746,6 +2746,14 @@ class Orchestrator:
                 elif b == newest:
                     continue                                   # the current work — keep
                 elif dates.get(b, "") and dates[b] < stale_cutoff:
+                    # ao-preflight2: a branch the bridge carried a stopped turn's WIP to holds work
+                    # that exists nowhere else once the worker is re-focused - never reap it
+                    eid_b = b[len("agent/"):]
+                    await self._load_carried_heads(eid_b)
+                    if self._carried_heads.get(eid_b):
+                        await self.audit.log("branch_reap_skipped", effort_id=eid_b, payload={
+                            "repo": repo, "branch": b, "reason": "holds carried WIP work"})
+                        continue
                     targets.append((b, "superseded"))          # older + abandoned → reap (+ close PR)
                 # else: a RECENT superseded branch — keep (may be parallel live work)
             for b, reason in targets:
@@ -9349,16 +9357,31 @@ class Orchestrator:
             return
         self._carried_heads[effort_id] = heads | self._carried_heads.get(effort_id, set())
 
-    async def _hold_wip_only(self, effort_id: str, delivery: BranchDelivery) -> None:
+    async def _hold_wip_only(self, effort_id: str, delivery: BranchDelivery, *,
+                             unconfirmed: bool = False) -> None:
         """ao-preflight2: a no-op close reached while the effort branch holds ONLY a carried WIP
         commit. Neither delivered (no PR) nor done: the WIP is unreviewed work a stopped turn left,
         and the no-op was judged on a checkout that contained it. Needs a human (or a re-run that
-        pushes real work on top)."""
+        pushes real work on top). `unconfirmed`: a WIP was carried and the remote branch could not
+        be read (or is gone), so it cannot be shown NOT to be WIP-only - same hold."""
         branch = delivery.branch or self._effort_branch(effort_id)
         sha = (delivery.head_sha or "")[:10]
         await self.audit.log("delivery_wip_only_held", effort_id=effort_id, payload={
             "branch": branch, "head": delivery.head_sha or "",
-            "files_changed": delivery.files_changed})
+            "files_changed": delivery.files_changed, "unconfirmed": unconfirmed,
+            "verifiable": delivery.verifiable, "exists": delivery.exists})
+        if unconfirmed:
+            msg = (f"\u26a0\ufe0f **{effort_id}** \u2014 a turn of this effort was stopped and "
+                   f"the bridge saved its unfinished work to `{branch}` as a WIP commit, and I "
+                   f"could not confirm on the remote that anything was delivered on top of it "
+                   f"({'the branch could not be read' if not delivery.verifiable else 'the branch has no delivery'}"
+                   f"). I did **not** mark it done and opened no PR. Say **\u201cre-run "
+                   f"it\u201d**, or tell me to close it.")
+            await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
+            await self.comms.post(Intent.operator_reply, msg,
+                                  thread_id=self._mgmt_thread_of(effort_id))
+            await self.router.update_effort_card(effort_id, "needs-attention")
+            return
         msg = (f"⚠️ **{effort_id}** — the worker reported nothing (more) to change, "
                f"but `{branch}` holds only the WIP commit `{sha}` the bridge saved from a turn "
                f"that was stopped before it finished — unreviewed work in progress, not a "
@@ -9368,6 +9391,18 @@ class Orchestrator:
         await self.comms.post(Intent.operator_reply, msg,
                               thread_id=self._mgmt_thread_of(effort_id))
         await self.router.update_effort_card(effort_id, "needs-attention")
+
+    async def _carried_unconfirmed(self, effort_id: str, delivery: BranchDelivery | None) -> bool:
+        """ao-preflight2 (tester finding a): a closure that cannot SEE the branch head (the remote
+        read failed, or no branch landed) must not close an effort done whose branch was given a
+        carried WIP commit - it may hold nothing else. Holds it and returns True in that case."""
+        await self._load_carried_heads(effort_id)
+        if not self._carried_heads.get(effort_id):
+            return False
+        await self._hold_wip_only(
+            effort_id, delivery or BranchDelivery(branch=self._effort_branch(effort_id)),
+            unconfirmed=True)
+        return True
 
     async def _recover_stale_delivery(
         self, effort_id: str, channel_id: str, root: str, repo: str,
@@ -12577,6 +12612,10 @@ class Orchestrator:
                     if self._wip_only(effort_id, _rv):
                         await self._hold_wip_only(effort_id, _rv)
                         return
+                # ...and when the remote cannot be read (or the branch is gone), a carried WIP
+                # cannot be ruled out: never a read-only done on it (ao-preflight2 finding a)
+                if not _rv.landed and await self._carried_unconfirmed(effort_id, _rv):
+                    return
                 # only a branch with REAL changes overrides the no-op close — an empty-diff branch
                 # (a commit that touches nothing) is a legitimate NO CHANGES read-only completion.
                 if _rv.landed and _rv.files_changed != 0:
@@ -12811,12 +12850,18 @@ class Orchestrator:
             # remote; dispatch the next one instead of closing (§10.4 — a non-empty queue isn't done).
             if await self._drain_next_pending(effort_id):
                 return   # the next queued task dispatched; the effort re-enters when it delivers
+            # ao-preflight2: an unreadable branch after a carry may hold only the WIP - never done
+            if await self._carried_unconfirmed(effort_id, delivery):
+                return
             # Queue drained (or drain off): we couldn't independently check (App can't read this repo),
             # so report the worker's word, labelled honestly as unverified rather than asserting it as
             # fact (§4.2 unverified).
             where = (f"the worker reports it pushed **`{self_reported}`**, which I could **not "
                      f"independently verify** (this repo isn't on the App's account)")
         elif await self._effort_repo(effort_id):
+            # ao-preflight2: no landed branch to look at, but a WIP was carried to it - not done
+            if await self._carried_unconfirmed(effort_id, delivery):
+                return
             # The project HAS a repo but no branch landed — say so honestly, don't imply "no repo".
             where = ("the worker pushed **no branch** — nothing was committed/published. If it should "
                      "have, re-run it and tell it to commit + push its changes")
@@ -13849,7 +13894,8 @@ class Orchestrator:
         unstaged = [str(p) for p in (report.get("unstaged") or [])]
         n_uns = int(report.get("unstaged_count") or len(unstaged))
         complete = report.get("status") == "ok"
-        if not n_rev and not n_unr and not n_uns and not refs_left and complete:
+        if not n_rev and not n_unr and not n_uns and not refs_left and complete \
+                and not report.get("snapshot_kept"):
             return False
         await self.audit.log("plan_turn_wrote_files", effort_id=effort_id, payload={
             "worker": inst_id,
@@ -13865,6 +13911,9 @@ class Orchestrator:
             # earlier work the turn `git add`ed: unstaged again, files kept (ao-preflight2)
             "unstaged": unstaged[:30],
             "unstaged_count": n_uns,
+            # the snapshot is kept (renamed) while it holds earlier work not back on disk
+            "snapshot_kept": report.get("snapshot_kept") or "",
+            "ignored_not_snapshotted": int(report.get("ignored_skipped") or 0),
             **({} if complete else {"dirty_after": report.get("dirty_after")}),
         })
         shown = ", ".join(f"`{r['path']}`" for r in reverted[:8])
@@ -13882,6 +13931,9 @@ class Orchestrator:
                      + "." if refs_left else "")
         partial_line = ("" if complete else " ⚠️ The check did not finish: this is what its "
                         "journal shows was reverted; some of the plan turn's changes may remain.")
+        if report.get("snapshot_kept"):
+            partial_line += (f" The earlier turn's files that are not back on disk are kept on "
+                             f"the worker in `{report.get('snapshot_kept')}`.")
         await self.comms.post(
             Intent.worker_activity,
             f"🧹 The plan turn changed files even though it was a read-only turn — reverted only "

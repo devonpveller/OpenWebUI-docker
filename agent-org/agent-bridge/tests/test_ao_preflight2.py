@@ -203,10 +203,13 @@ async def test_finish_effort_holds_a_wip_only_head_from_any_caller(db_url, tmp_p
         assert landed.landed and landed.head_sha == wip
         delivery = landed if kind == "landed" else BranchDelivery(no_changes=True,
                                                                   branch=landed.branch)
+        # (round 2: run 1 itself already ended held - the rig has no App, so its own closure
+        # could not see the head and a WIP was carried)
+        n0 = await orch._event_count(eid, "delivery_wip_only_held")
         await orch._finish_effort(eid, SimpleNamespace(status="done", output="all green"),
                                   delivery=delivery)
         assert rec["prs"] == [] and rec["cards"] == ["needs-attention"], rec
-        assert await orch._event_count(eid, "delivery_wip_only_held") == 1
+        assert await orch._event_count(eid, "delivery_wip_only_held") == n0 + 1
         assert any("did **not** open a PR" in p for p in rec["posts"])
     finally:
         await _shutdown(orch, db)

@@ -82,23 +82,28 @@ def _pgit(ws: Path, *args: str) -> subprocess.CompletedProcess:
                           text=True)
 
 
-_SYNC = re.compile(r"^cd /workspace && git fetch origin (\S+) && git checkout -f -B (\S+) "
-                   r"FETCH_HEAD$")
-
-
 def _run_sync(ws: Path, command: str) -> tuple[int, str, bool]:
-    """F33's delivery-branch sync (`router.wake(checkout_branch=)`), step by step through the
-    proxy with the shell's `&&` semantics. The real shell runs it in the open-terminal e2e."""
-    m = _SYNC.match(command)
-    assert m, f"unexpected sync command {command!r}"
-    out = ""
-    for argv in (("fetch", "origin", m.group(1)), ("checkout", "-f", "-B", m.group(2),
-                                                   "FETCH_HEAD")):
-        p = _pgit(ws, *argv)
-        out += p.stdout + p.stderr
-        if p.returncode != 0:
-            return p.returncode, _channel(out, ""), False
-    return 0, _channel(out, ""), False
+    """F33's delivery-branch sync (`router.delivery_sync_command`), step by step through the
+    proxy with the shell's `&&` semantics: fetch, unstage files staged as new (ao-preflight2),
+    checkout -f -B. The real shell runs it in the open-terminal e2e."""
+    from app.modules.router import delivery_sync_command
+
+    m = re.match(r"^cd /workspace && git fetch origin (\S+) && ", command)
+    assert m and command == delivery_sync_command(m.group(1)), \
+        f"unexpected sync command {command!r}"
+    branch = m.group(1)
+    p = _pgit(ws, "fetch", "origin", branch)
+    out = p.stdout + p.stderr
+    if p.returncode != 0:
+        return p.returncode, _channel(out, ""), False
+    added = _pgit(ws, "diff", "--cached", "--name-only", "--diff-filter=A", "-z").stdout
+    names = [x for x in added.split("\0") if x]
+    if names:
+        _pgit(ws, "--literal-pathspecs", "rm", "-q", "--cached", "-f", "--ignore-unmatch", "--",
+              *names)
+    p = _pgit(ws, "checkout", "-f", "-B", branch, "FETCH_HEAD")
+    out += p.stdout + p.stderr
+    return p.returncode, _channel(out, ""), False
 
 
 async def _orch(db_url, tmp: Path, *, coding_edits: bool = True, plan_edits_coding: bool = False,

@@ -68,6 +68,19 @@ def _is_worker_unavailable(exc: Exception) -> bool:
     return isinstance(exc, httpx.TransportError)
 
 
+
+def delivery_sync_command(branch: str) -> str:
+    """F33's sync of a worker to the effort's delivery-branch head. `checkout -f -B` DELETES a file
+    that is staged as new but not in the target tree (git treats it as tracked), so a file an
+    earlier turn `git add`ed and never committed would be lost. ao-preflight2: those files are
+    unstaged first (`rm --cached -f` keeps them on disk, untracked), so they survive the switch
+    and the next publish (`add -A`) picks them up again. Only proxy-legal git; best-effort - a
+    failed unstage never blocks the sync."""
+    return (f"cd /workspace && git fetch origin {branch} && "
+            f"{{ git diff --cached --name-only --diff-filter=A -z | "
+            f"xargs -0 -r git --literal-pathspecs rm -q --cached -f --ignore-unmatch -- ; true; }} "
+            f"&& git checkout -f -B {branch} FETCH_HEAD")
+
 class WorkspaceMoved(RuntimeError):
     """ao-plancheck - a pinned `exec_check` found its worker's workspace re-focused for another
     effort since the turn it was meant to inspect; nothing was run."""
@@ -656,11 +669,7 @@ class Router:
                 if repo and checkout_branch:
                     try:
                         code, out, _timed = await self.harness.run_check(
-                            inst.base_url,
-                            f"cd /workspace && git fetch origin {checkout_branch} "
-                            f"&& git checkout -f -B {checkout_branch} FETCH_HEAD",
-                            timeout=120,
-                        )
+                            inst.base_url, delivery_sync_command(checkout_branch), timeout=120)
                         await self.audit.log(
                             "worker_synced_to_delivery", effort_id=effort_id, actor=inst.id,
                             payload={"branch": checkout_branch, "synced": code == 0,
