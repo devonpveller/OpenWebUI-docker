@@ -23,10 +23,8 @@ no GPU, no network (origin is a local path)."""
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -59,11 +57,13 @@ from test_ao_plancheck import (
     _channel,
     _denials,
     _drain,
+    _drop_short_roots,  # noqa: F401 - autouse fixture for _workspaces
     _git,
     _proxy_log,
     _reverted_paths,
     _run_python_check,
     _shutdown,
+    _workspaces,
 )
 
 _EXEC_OUT = "Implemented the fix; tests pass."
@@ -80,27 +80,6 @@ def _pgit(ws: Path, *args: str) -> subprocess.CompletedProcess:
     """One git call as the worker's shell makes it: through the git-proxy's classify()."""
     return subprocess.run([sys.executable, str(_shim(ws)), *args], cwd=ws, capture_output=True,
                           text=True)
-
-
-_SHORT_ROOTS: list[Path] = []
-
-
-@pytest.fixture(autouse=True)
-def _drop_short_roots():
-    yield
-    while _SHORT_ROOTS:
-        shutil.rmtree(_SHORT_ROOTS.pop(), onerror=lambda f, p, _e: (Path(p).chmod(0o700), f(p)))
-
-
-def _workspaces(tmp: Path) -> Workspaces:
-    """`Workspaces` under a SHORT root instead of pytest's tmp dir. On a Windows host a push into
-    the local `origin` unpacks under `objects/` and dies past MAX_PATH with a long --basetemp
-    ("unpack-objects abnormal exit"; seen in a full-suite run: every push failed while isolated
-    runs passed; `core.longpaths` does not help receive-pack). The workers are Linux
-    containers - this is test plumbing only. Removed after each test."""
-    root = Path(tempfile.mkdtemp(prefix="arc-"))
-    _SHORT_ROOTS.append(root)
-    return Workspaces(root)
 
 
 _SYNC = re.compile(r"^cd /workspace && git fetch origin (\S+) && git checkout -f -B (\S+) "

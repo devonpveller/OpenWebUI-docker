@@ -5263,7 +5263,10 @@ class Orchestrator:
         # 2) verify the submodule branch landed → its exact commit (the bump target). No commit = no bump.
         s_repo = await self._effort_repo(eid)
         delivery = await self._verify_delivery(eid, s_repo) if s_repo else BranchDelivery(branch="")
-        if not (delivery.landed and delivery.head_sha):
+        # ao-preflight2: a submodule branch that holds only a carried WIP commit is not a landed
+        # edit - never bump the engine to it or open the paired PRs
+        await self._load_carried_heads(eid)
+        if not (delivery.landed and delivery.head_sha) or self._wip_only(eid, delivery):
             await self.comms.post(
                 Intent.operator_reply,
                 f"⚠️ **{eid}** — composition halted: the `{worker_step.target}` edit didn't land a "
@@ -9346,6 +9349,26 @@ class Orchestrator:
             return
         self._carried_heads[effort_id] = heads | self._carried_heads.get(effort_id, set())
 
+    async def _hold_wip_only(self, effort_id: str, delivery: BranchDelivery) -> None:
+        """ao-preflight2: a no-op close reached while the effort branch holds ONLY a carried WIP
+        commit. Neither delivered (no PR) nor done: the WIP is unreviewed work a stopped turn left,
+        and the no-op was judged on a checkout that contained it. Needs a human (or a re-run that
+        pushes real work on top)."""
+        branch = delivery.branch or self._effort_branch(effort_id)
+        sha = (delivery.head_sha or "")[:10]
+        await self.audit.log("delivery_wip_only_held", effort_id=effort_id, payload={
+            "branch": branch, "head": delivery.head_sha or "",
+            "files_changed": delivery.files_changed})
+        msg = (f"⚠️ **{effort_id}** — the worker reported nothing (more) to change, "
+               f"but `{branch}` holds only the WIP commit `{sha}` the bridge saved from a turn "
+               f"that was stopped before it finished — unreviewed work in progress, not a "
+               f"delivery. I did **not** open a PR and did **not** mark it done. Say "
+               f"**“re-run it”** to have it finished and pushed, or tell me to close it.")
+        await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
+        await self.comms.post(Intent.operator_reply, msg,
+                              thread_id=self._mgmt_thread_of(effort_id))
+        await self.router.update_effort_card(effort_id, "needs-attention")
+
     async def _recover_stale_delivery(
         self, effort_id: str, channel_id: str, root: str, repo: str,
         delivery: BranchDelivery,
@@ -9466,9 +9489,13 @@ class Orchestrator:
                 return await self._recover_empty_delivery(
                     effort_id, channel_id, root, repo, delivery)
             return delivery
-        state = await self._verify_goal_state(effort_id, channel_id, root, repo)
-        if state is not None:
-            return state
+        # ao-preflight2: no read-only state check on a branch that still holds only the carried
+        # WIP - the worker would judge the goal on a checkout containing that unreviewed WIP, and
+        # its STATE HOLDS would close the effort done on it. Escalate instead (below).
+        if not (delivery.landed and self._wip_only(effort_id, delivery)):
+            state = await self._verify_goal_state(effort_id, channel_id, root, repo)
+            if state is not None:
+                return state
         await self.audit.log("delivery_stale_head", effort_id=effort_id,
                              payload={"branch": branch, "head": delivery.head_sha})
         await self.comms.post(
@@ -12542,6 +12569,14 @@ class Orchestrator:
             _rv_repo = await self._effort_repo(effort_id)
             if _rv_repo:
                 _rv = await self._verify_delivery(effort_id, _rv_repo)
+                # ao-preflight2: a branch that holds ONLY a stopped turn's carried WIP commit is
+                # neither a delivery nor a read-only completion - the no-op was judged against a
+                # checkout that contained that unreviewed WIP. No PR, not done: held for a human.
+                if _rv.landed and _rv.files_changed != 0:
+                    await self._load_carried_heads(effort_id)
+                    if self._wip_only(effort_id, _rv):
+                        await self._hold_wip_only(effort_id, _rv)
+                        return
                 # only a branch with REAL changes overrides the no-op close — an empty-diff branch
                 # (a commit that touches nothing) is a legitimate NO CHANGES read-only completion.
                 if _rv.landed and _rv.files_changed != 0:
@@ -12593,6 +12628,14 @@ class Orchestrator:
             where = ("**no changes** — the worker confirmed this was a read-only task; its answer "
                      "above in the thread is the deliverable (nothing to publish)")
         elif delivery is not None and delivery.landed:
+            # ao-preflight2 — the landed chokepoint: every path that hands a LANDED delivery here
+            # (publish/verify, burn-down green, host-context run, drain re-entry) reaches the PR,
+            # wiring, D2 and develop integration below. A head that is only a carried WIP commit
+            # never goes on to any of them.
+            await self._load_carried_heads(effort_id)
+            if self._wip_only(effort_id, delivery):
+                await self._hold_wip_only(effort_id, delivery)
+                return
             sha = f" @ `{delivery.head_sha[:10]}`" if delivery.head_sha else ""
             # STALE RE-VERIFY (operator 2026-07-12: "the 18:24 activity looked like new work but the
             # branch hadn't moved in 6h — I couldn't tell what was real"). When the head is EXACTLY
@@ -13527,13 +13570,17 @@ class Orchestrator:
             await self.audit.log("stopped_turn_carry_failed", effort_id=effort_id, payload={
                 "worker": None, "branch": branch, "reason": "the stopped turn's worker is unknown"})
             return False
-        head = (result.output or "").strip().splitlines()[0][:120] if result.output else ""
+        # ao-preflight2 (review R1/R2): the body names the guard, never the stopped turn's own
+        # output - model text would be pushed to the remote unscrubbed, and reading its first
+        # line raised outside the try on a whitespace-only output.
+        guard = ("loop guard" if getattr(result, "loop_trip", None) is not None
+                 else "flail guard")
         try:
             command = carry_command(
                 branch, subject=f"wip: {effort_id} - work of a stopped turn, carried to the re-plan",
-                body=("The flail/loop guard stopped this coding turn before it committed. The "
-                      "bridge committed its working tree as it stood (git add -A) so the next turn "
-                      f"starts from it on any worker. Unreviewed work in progress. Stop: {head}"),
+                body=(f"The {guard} stopped this coding turn before it committed. The bridge "
+                      "committed its working tree as it stood (git add -A) so the next turn "
+                      "starts from it on any worker. Unreviewed work in progress."),
                 author=self._agent_identity("worker-default"))
             token = await self._project_token(effort_id)
             _exit, out, _timed = await self.router.exec_check(
@@ -13600,7 +13647,8 @@ class Orchestrator:
         `flail_replanned` event bumps the session generation (a fresh session, seeded only by the
         re-dispatch goal) and forces the next dispatch through the plan gate. Bounded to ONCE per
         effort; a second flail is a real can't-converge signal for the human."""
-        head = (result.output or "").strip().splitlines()[0][:200]
+        # ao-preflight2 (review R1): a whitespace-only output has no first line
+        head = next(iter((result.output or "").strip().splitlines()), "")[:200]
         n = await self._event_count(effort_id, "flail_replanned")
         if n >= 1:
             msg = (f"⛔ **{effort_id}** — the worker flailed again after a fresh plan-first "
@@ -13737,7 +13785,7 @@ class Orchestrator:
         `reset --soft` (proxy-legal; `--hard` is not). No baseline = no attribution = nothing
         reverted, recorded as `plan_turn_check_unattributed`. Never raises: the check must not
         block the gate."""
-        from .modules.plan_turn_guard import (check_command, parse_check, parse_page,
+        from .modules.plan_turn_guard import (check_command, new_token, parse_check, parse_page,
                                               parse_snapshot, report_command, stage_commands)
         from .modules.router import WorkspaceMoved
 
@@ -13748,7 +13796,8 @@ class Orchestrator:
         # files were already reverted.
         inst_id = getattr(result, "instance_id", None)
         baseline = parse_snapshot(getattr(result, "pre_turn_output", None))
-        if not inst_id or baseline is None or baseline.get("token") != token                 or not isinstance(baseline.get("manifest"), dict):
+        if not inst_id or baseline is None or baseline.get("token") != token \
+                or not isinstance(baseline.get("manifest"), dict):
             note = getattr(result, "pre_turn_note", "") or ""
             await self.audit.log("plan_turn_check_unattributed", effort_id=effort_id, payload={
                 "worker": inst_id,
@@ -13768,13 +13817,16 @@ class Orchestrator:
                 staged = parse_page(await _run(cmd, 120))
                 if not staged or staged.get("status") != "ok":
                     raise RuntimeError("could not stage the baseline on the worker")
-            check = check_command(token, baseline)
+            # ao-preflight2: the journal is named by a nonce made now, after the turn - a journal
+            # the turn planted is never read back as reverts
+            nonce = new_token()
+            check = check_command(token, baseline, nonce)
             for _attempt in range(2):          # a timed-out check resumes from its journal
                 report = parse_check(await _run(check, 300))
                 if report is not None:
                     break
             if report is None:
-                report = parse_check(await _run(report_command(token), 120))
+                report = parse_check(await _run(report_command(token, nonce), 120))
         except (NoCapacityError, WorkspaceMoved) as exc:
             await self.audit.log("plan_turn_check_unattributed", effort_id=effort_id, payload={
                 "worker": inst_id, "reason": f"plan turn's workspace unavailable: {exc}"[:200]})
@@ -13794,8 +13846,10 @@ class Orchestrator:
         refs_left = list(report.get("refs_left") or [])
         n_rev = int(report.get("reverted_count") or len(reverted))
         n_unr = int(report.get("unrestored_count") or len(unrestored))
+        unstaged = [str(p) for p in (report.get("unstaged") or [])]
+        n_uns = int(report.get("unstaged_count") or len(unstaged))
         complete = report.get("status") == "ok"
-        if not n_rev and not n_unr and not refs_left and complete:
+        if not n_rev and not n_unr and not n_uns and not refs_left and complete:
             return False
         await self.audit.log("plan_turn_wrote_files", effort_id=effort_id, payload={
             "worker": inst_id,
@@ -13808,6 +13862,9 @@ class Orchestrator:
             "refs_left": refs_left[:30],
             "kept_before_turn": list(report.get("kept") or [])[:50],
             "kept_before_turn_count": int(report.get("kept_count") or 0),
+            # earlier work the turn `git add`ed: unstaged again, files kept (ao-preflight2)
+            "unstaged": unstaged[:30],
+            "unstaged_count": n_uns,
             **({} if complete else {"dirty_after": report.get("dirty_after")}),
         })
         shown = ", ".join(f"`{r['path']}`" for r in reverted[:8])
@@ -13815,6 +13872,9 @@ class Orchestrator:
         kept_n = int(report.get("kept_count") or 0)
         kept_line = (f" {kept_n} file(s) already changed by an earlier turn were left as they "
                      f"were." if kept_n else "")
+        if n_uns:
+            kept_line += (f" {n_uns} earlier untracked file(s) it had staged were unstaged "
+                          f"(kept on disk).")
         bad_paths = ", ".join("`" + str(u.get("path")) + "`" for u in unrestored[:5])
         bad_line = f" Could not restore ({n_unr}): {bad_paths}." if n_unr else ""
         refs_line = (" Refs it created or moved (the proxy cannot delete refs; left in place): "
