@@ -93,6 +93,18 @@ were retired by the follow-up item (ac-legacy-recovery) rather than fixed.
 `portal-on.ps1` / `portal-off.ps1` / `portal-status.ps1`,
 `breach-killswitch.ps1`, `access-query.ps1`.
 
+## `network/`
+
+`lan-ingress-firewall.ps1` is the Windows Firewall guard for ai-stack ports
+published on the workstation's LAN IP. It keeps one inbound BLOCK rule per port
+in `stack.manifest.toml` `[lan_ingress.ports]`, for every remote address except
+the Traefik nodes. The addresses come from the per-host, gitignored
+`.stack/lan-ingress.toml` (template `lan-ingress.host.example.toml`). Modes:
+`-Status` (read-only), `-Apply` / `-Remove` (elevated), `-WhatIf`. Its test
+`test-lan-ingress-firewall.ps1` fakes the firewall. Runbook (apply before
+publish, verify, roll back):
+[documentation/runbooks/lan-ingress-guard.md](../documentation/runbooks/lan-ingress-guard.md).
+
 ## `backup/` (host side — NAS mirror + DR; container-side sidecar scripts live in ../backup/)
 
 `backup-to-nas.ps1` (weekly NAS mirror of `../backups/` plus the verified,

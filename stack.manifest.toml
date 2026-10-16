@@ -670,3 +670,40 @@ profiles    = { ob1 = ["research", "notebook"] }
 description = "the internet front-end (started by hand: portal-on.ps1)"
 planes      = ["portal", "frontend"]
 profiles    = { portal = ["internet"] }
+
+
+# ==========================================================================
+# LAN INGRESS - which ai-stack web ports may be published on the workstation's
+# LAN address (cluster-transition PLAN section 5.1, Track B: B1 guard, B2
+# publish). ONE line per service; this is the only place the list lives.
+#
+# Read by scripts/network/lan-ingress-firewall.ps1, which keeps one inbound
+# Windows Firewall BLOCK rule per port below for every remote address EXCEPT
+# the allowed nodes (every other IPv4 address and all of IPv6). Docker
+# Desktop's own com.docker.backend rule allows any remote on any port, so
+# without that block a LAN-published port is open to the whole LAN. The driver
+# (stack.py) ignores this table; nothing here starts or publishes anything.
+#
+#   ports - <service> = { plane = <a [planes.*] name>, port = <int> }.
+#           Adding a service: one line here, then `lan-ingress-firewall.ps1
+#           -Apply` BEFORE its compose file publishes the port. Removing one:
+#           unpublish, delete the line, -Apply again (the stale rule goes).
+#
+# THE ADDRESSES ARE NOT HERE. host_ip (the workstation's LAN IPv4) and
+# allowed_remote (the Proxmox Traefik nodes, plain IPv4 addresses only) name
+# the operator's LAN, which this public repo keeps out of tracked files
+# (scripts/checks/check_identity.py refuses RFC 1918 literals). They live in
+# the per-host, gitignored .stack/lan-ingress.toml beside this file; template:
+# scripts/network/lan-ingress.host.example.toml. The guard aborts with no
+# change if that file is missing or a key is set in both places.
+#
+# ORDER, always: guard -Apply, then publish (B2); unpublish, then -Apply.
+# Runbook: documentation/runbooks/lan-ingress-guard.md.
+# ==========================================================================
+
+[lan_ingress.ports]
+openwebui             = { plane = "frontend",  port = 3000 }
+mattermost            = { plane = "agent-org", port = 8065 }
+llm-gateway-ui        = { plane = "inference", port = 8445 }
+openbrain-wiki-viewer = { plane = "ob1",       port = 8812 }
+openbrain-workbench   = { plane = "ob1",       port = 8814 }

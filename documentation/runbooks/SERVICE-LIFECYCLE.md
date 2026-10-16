@@ -51,7 +51,7 @@ skipped.
 | 10 | **Docs** | Run `python scripts/stack/stack.py docs --write` and commit what it changes: the service lists, profiles, host ports, networks and counts in the plane READMEs, `README.md` (plane table, product menu), this file and the stack-map reference are GENERATED blocks, and pre-commit refuses a stale one. Then the prose: the plane README's role table, the stack-map reference (`/stack-map` checks drift), `documentation/CONTAINER-REGISTRY.md` (purpose + why). CLAUDE.md carries no counts. |
 | 11 | **Deploy door (`build:` services)** | A service built from source (today: the OB1 integrations) is deployed by `scripts/stack/ob1-deploy.ps1 -Service <svc> [-Recreate <dependent,...>]`, never by `docker compose up -d` alone: the door refuses when OB1 on disk is not the gitlink, builds with `--build-arg OB1_SHA=<pin>`, force-recreates the named dependents, waits for healthy and refuses success over a restart loop (runbooks/UPDATE-MANAGEMENT.md "Everything else"). Give the Dockerfile `ARG OB1_SHA=` + `LABEL org.opencontainers.image.revision="$OB1_SHA"` (copy research-curator's) so the label is not empty, and a compose `healthcheck:` - without one the door can only wait for "running". |
 
-## When you EXPOSE a service (portal or tailnet)
+## When you EXPOSE a service (portal, tailnet or LAN)
 
 - **Portal (internet)**: the whole recipe lives at the top of
   `portal/config/caddy/Caddyfile` next to the `(authelia_gate)` snippet — app-net
@@ -63,6 +63,13 @@ skipped.
   (name|enabled|host|port|ts_port|path|local_port|probe|attempts|verify) and
   rebuild/restart the tailscale container. Probe LiteLLM-fronted targets
   with `/health/liveliness`, never `/health` (thrash + 401).
+- **LAN (Traefik on the Proxmox nodes)**: GUARD FIRST, THEN PUBLISH. Add one line
+  to `stack.manifest.toml` `[lan_ingress.ports]`, run
+  `scripts/network/lan-ingress-firewall.ps1 -Apply` from an elevated PowerShell and
+  confirm `-Status` exits 0. Only then publish the port on the LAN IP in the plane's
+  compose file. Docker Desktop's own firewall rule allows any remote on any port, so a
+  port published without its guard rule is open to the whole LAN. Procedure, checks
+  and rollback: [lan-ingress-guard.md](lan-ingress-guard.md).
 
 ## When you REMOVE a service
 
