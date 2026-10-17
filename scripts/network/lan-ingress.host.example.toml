@@ -1,0 +1,20 @@
+# lan-ingress.host.example.toml - template for the PER-HOST half of the LAN ingress guard.
+#
+# Copy to .stack/lan-ingress.toml beside stack.manifest.toml (gitignored, like
+# .stack/state.json) and put this host's real addresses in it. The values below are
+# RFC 5737 documentation addresses and will not match any real LAN.
+#
+#   host_ip        - the workstation's LAN IPv4 (the address B2 publishes the ports on).
+#   allowed_remote - the ONLY LAN hosts that may reach the listed ports: the Traefik
+#                    host(s). Today that is ONE edge host; list each host if Traefik is
+#                    ever spread over several. Plain dotted-quad IPv4 addresses. CIDR,
+#                    ranges, wildcards, keywords, IPv6 and leading zeros are refused (the
+#                    guard aborts with no change) so a typo can never widen the allow set.
+#
+# The PORT list is not here: it is stack.manifest.toml [lan_ingress.ports] (tracked).
+# A key set both here and in the manifest aborts the guard. Nothing else belongs here.
+# Runbook: documentation/runbooks/lan-ingress-guard.md.
+
+[lan_ingress]
+host_ip        = "192.0.2.69"
+allowed_remote = ["192.0.2.20"]
