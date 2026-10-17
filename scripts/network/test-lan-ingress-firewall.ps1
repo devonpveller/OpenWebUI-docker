@@ -131,8 +131,47 @@ function New-FakeObject($r, [string]$Kind) {
     # additions: '<kind>:<Prop>' keys the real cmdlet has no property for; for the rule
     # object, also flat keys that belong to no object.
     foreach ($k in @($r.Keys)) {
+        if ($k -like ($Kind + ':raw:*')) { continue }
         if ($k -like ($Kind + ':*')) { $p = $k.Substring($Kind.Length + 1); if (-not $o.Contains($p)) { $o[$p] = $r[$k] } }
         elseif ($Kind -eq 'rule' -and $k -notlike '*:*' -and $null -eq (Get-FakeKindOf $k) -and -not $o.Contains($k)) { $o[$k] = $r[$k] }
+    }
+    # The RAW CIM bag (CimInstanceProperties): what Windows stores, from which PowerShell
+    # computes the properties above. Enum-cast properties store an integer; the maps are the
+    # NetSecurity enums. A value the map does not know becomes 99, an out-of-range raw.
+    # A test sets a raw value with '<kind>:raw:<Name>', or removes it with '<absent>'.
+    if (-not $r.ContainsKey($Kind + ':CimInstanceProperties')) {
+        $enum = @{
+            Enabled             = @{ 'True' = 1; 'False' = 2 }
+            Direction           = @{ 'Inbound' = 1; 'Outbound' = 2 }
+            Action              = @{ 'NotConfigured' = 0; 'Allow' = 2; 'Block' = 4 }
+            EdgeTraversalPolicy = @{ 'Block' = 0; 'Allow' = 1; 'DeferToUser' = 2; 'DeferToApp' = 3 }
+            PrimaryStatus       = @{ 'OK' = 1; 'Degraded' = 2; 'Error' = 3 }
+            InterfaceType       = @{ 'Any' = 0; 'Wired' = 1; 'Wireless' = 2; 'RemoteAccess' = 4 }
+            Authentication      = @{ 'NotRequired' = 0; 'Required' = 1; 'NoEncap' = 2 }
+            Encryption          = @{ 'NotRequired' = 0; 'Required' = 1; 'Dynamic' = 2 }
+            DynamicTransport    = @{ 'Any' = 0; 'ProximityApps' = 1; 'ProximitySharing' = 2; 'WifiDirectPrinting' = 4; 'WifiDirectDisplay' = 8; 'WifiDirectDevices' = 16 }
+            Profiles            = @{ 'Any' = 0; 'Domain' = 1; 'Private' = 2; 'Public' = 4; 'Private, Public' = 6; 'Domain, Private, Public' = 7 }
+        }
+        $notRaw = @('Name', 'ID', 'Group', 'Platform', 'LSM', 'Profile', 'DynamicTarget', 'LocalIP', 'RemoteIP', 'Program', 'Service',
+            'LocalUser', 'RemoteUser', 'RemoteMachine', 'CimClass', 'CimInstanceProperties', 'CimSystemProperties', 'PSComputerName')
+        $rawVals = [ordered]@{}
+        foreach ($n in @($o.Keys)) { if ($notRaw -notcontains $n) { $rawVals[$n] = $o[$n] } }
+        if ($Kind -eq 'rule' -and $o.Contains('Profile')) { $rawVals['Profiles'] = (@($o['Profile']) | ForEach-Object { [string]$_ }) -join ',' }
+        if ($Kind -eq 'port' -and $o.Contains('DynamicTarget')) { $rawVals['DynamicTransport'] = $o['DynamicTarget'] }
+        if ($Kind -eq 'port' -and -not $o.Contains('DynamicTarget')) { $rawVals.Remove('DynamicTransport') }
+        foreach ($n in @($enum.Keys)) {
+            if (-not $rawVals.Contains($n)) { continue }
+            if ($Kind -ne 'rule' -and @('Enabled', 'Direction', 'Action', 'EdgeTraversalPolicy', 'PrimaryStatus', 'Profiles') -contains $n) { continue }
+            $sv = (@($rawVals[$n]) | ForEach-Object { [string]$_ }) -join ','
+            $rawVals[$n] = if ($enum[$n].ContainsKey($sv)) { [uint32]$enum[$n][$sv] } else { [uint32]99 }
+        }
+        foreach ($k in @($r.Keys)) {
+            if ($k -like ($Kind + ':raw:*')) {
+                $n = $k.Substring($Kind.Length + 5)
+                if ([string]$r[$k] -eq '<absent>') { $rawVals.Remove($n) } else { $rawVals[$n] = $r[$k] }
+            }
+        }
+        $o['CimInstanceProperties'] = @($rawVals.Keys | ForEach-Object { [pscustomobject]@{ Name = $_; Value = $rawVals[$_] } })
     }
     return [pscustomobject]$o
 }
@@ -662,6 +701,10 @@ $narrow = [ordered]@{
     'InterfaceAlias~any+eth' = @('Any', 'Ethernet')
     # a real shape seen on this host (TA2-3): two profiles is not Any
     'Profile~private-public' = 'Private, Public'
+    # attempt 4 (TA3-1): an EMPTY DynamicTarget is what Windows prints for a raw dynamic
+    # transport the enum does not name (32/64/128): narrowing, so DRIFT, not "unrestricted"
+    'DynamicTarget~empty'    = ''
+    'DynamicTarget~null'     = $null
 }
 foreach ($k in $narrow.Keys) {
     $field = $k -replace '(-missing|~.*)$', ''
@@ -724,15 +767,32 @@ $unknown = [ordered]@{
     'rule:PrimaryStatus'                 = 'Error'
     'rule:PolicyDecisionStrategy'        = [uint16]1
     'rule:SequencedActions'              = [uint16]1
+    # attempt 4 (TA3-1): the RAW value behind each enum-cast property. Each of these leaves
+    # the computed property looking unrestricted or empty; the raw value must still be judged.
+    'port:raw:DynamicTransport'          = [uint32]32
+    'port:raw:DynamicTransport~64'       = [uint32]64
+    'port:raw:DynamicTransport~128'      = [uint32]128
+    'rule:raw:Enabled'                   = [uint16]3
+    'rule:raw:Direction'                 = [uint16]3
+    'rule:raw:Action'                    = [uint16]8
+    'rule:raw:EdgeTraversalPolicy'       = [uint16]9
+    'rule:raw:PrimaryStatus'             = [uint16]0
+    'rule:raw:Profiles'                  = [uint16]8
+    'interfacetype:raw:InterfaceType'    = [uint32]64
+    'security:raw:Authentication'        = [uint16]9
+    'security:raw:Encryption'            = [uint16]9
+    'port:raw:FutureRawField'            = 'x'
+    'port:CimInstanceProperties'         = 'not a raw bag'
 }
-foreach ($k in $unknown.Keys) {
+foreach ($kk in $unknown.Keys) {
+    $k = $kk -replace '~.*$', ''
     $prop = ($k -split ':')[-1]
     Reset-Fake; $global:LGT.Admin = $true
     $null = Invoke-Guard @('-Apply', '-ManifestPath', $single)
     $n = $PREFIX + 'openwebui-3000'
     # RED-safe: with no guard (or a broken one) there is no rule to narrow; fail the case, do not crash.
-    if (-not $global:LGT.Rules.Contains($n)) { Write-Case "T18.$k" "$k (setup)" $false 'the initial -Apply created no guard rule to work on'; continue }
-    $global:LGT.Rules[$n][$k] = $unknown[$k]
+    if (-not $global:LGT.Rules.Contains($n)) { Write-Case "T18.$kk" "$kk (setup)" $false 'the initial -Apply created no guard rule to work on'; continue }
+    $global:LGT.Rules[$n][$k] = $unknown[$kk]
     $global:LGT.Admin = $false; $global:LGT.Calls = @()
     $s = Invoke-Guard @('-Status', '-ManifestPath', $single)
     $sawDrift = ($s.Code -eq 3) -and ($s.Out -match '(?m)^\s*DRIFT\s') -and ($s.Out -match ('(?i)drift:.*' + [regex]::Escape($prop))) -and ((Get-Mutations).Count -eq 0)
@@ -741,7 +801,7 @@ foreach ($k in $unknown.Keys) {
     $repaired = ($a.Code -eq 0) -and ($a.Out -match '(?m)^\s*REPLACE\s') -and $global:LGT.Rules.Contains($n) -and -not $global:LGT.Rules[$n].ContainsKey($k)
     $global:LGT.Admin = $false; $global:LGT.Calls = @()
     $s2 = Invoke-Guard @('-Status', '-ManifestPath', $single)
-    Write-Case "T18.$k" "a property $k = $($unknown[$k]) reads DRIFT (not OK), -Apply replaces the rule, -Status is clean after" ($sawDrift -and $repaired -and $s2.Code -eq 0) ("status exit=$($s.Code)`n$($s.Out)`napply exit=$($a.Code)`n$($a.Out)`nstatus-after exit=$($s2.Code)`n$($s2.Out)")
+    Write-Case "T18.$kk" "a property $k = $($unknown[$kk]) reads DRIFT (not OK), -Apply replaces the rule, -Status is clean after" ($sawDrift -and $repaired -and $s2.Code -eq 0) ("status exit=$($s.Code)`n$($s.Out)`napply exit=$($a.Code)`n$($a.Out)`nstatus-after exit=$($s2.Code)`n$($s2.Out)")
 }
 
 # ---------------------------------------------------------------- T19 no false drift (attempt 3)
@@ -751,7 +811,6 @@ foreach ($k in $unknown.Keys) {
 # (DynamicTarget empty).
 $benign = [ordered]@{
     'fresh'                        = $null
-    'DynamicTarget~empty'          = @('DynamicTarget', '')
     'rule:Status'                  = @('rule:Status', 'something else')
     'rule:StatusCode'              = @('rule:StatusCode', [uint32]1)
     'rule:EnforcementStatus'       = @('rule:EnforcementStatus', 'Enforced')
@@ -842,6 +901,118 @@ $removed = @($global:LGT.Calls | Where-Object { $_.Op -eq 'Remove' } | ForEach-O
 $ok = ($a.Code -eq 0) -and (($removed -join ',') -eq $handId) -and $global:LGT.Rules.Contains('{00000000-0000-0000-0000-000000000001}') -and
     (@($global:LGT.Rules.Keys | Where-Object { $_ -match 'docker' }).Count -eq 1)
 Write-Case 'T20.remove' '-Remove removes the hand-made rule by its GUID and nothing else' $ok ("removed=$($removed -join ',')`n$($a.Out)")
+
+# ---------------------------------------------------------------- T21 every REQUIRED property, missing (attempt 4, TA3-F2)
+# Read the guard's own $required and $rawExpect lists, so a property added to either is
+# tested without anyone remembering to add a row. Each one, when the read cannot find it,
+# must read DRIFT, and -Apply must restore it.
+$guardText = if (Test-Path -LiteralPath $Script) { [IO.File]::ReadAllText($Script) } else { '' }   # RED-safe
+$reqBlock = [regex]::Match($guardText, '(?s)\$required = @\((.*?)\)')
+$rawBlock = [regex]::Match($guardText, '(?s)\$rawExpect = @\{(.*?)\n\s*\}')
+$reqKeys = @([regex]::Matches($reqBlock.Groups[1].Value, "'([a-z]+)\.([A-Za-z]+)'") | ForEach-Object { $_.Groups[2].Value })
+$rawKeys = @([regex]::Matches($rawBlock.Groups[1].Value, "'([a-z]+)\.raw:([A-Za-z]+)'") | ForEach-Object { $_.Groups[1].Value + ':raw:' + $_.Groups[2].Value })
+# A FLOOR, written here and not read from the guard: the lists may grow, but none of these may
+# leave them. Otherwise dropping an entry would also silently drop its test row (TA3-F2).
+$reqFloor = @('Direction', 'Action', 'Enabled', 'Profile', 'Platform', 'Owner', 'PackageFamilyName', 'PolicyAppId', 'RemoteDynamicKeywordAddresses',
+    'Protocol', 'LocalPort', 'RemotePort', 'DynamicTarget', 'LocalAddress', 'RemoteAddress', 'Program', 'Package', 'Service', 'InterfaceType',
+    'InterfaceAlias', 'LocalUser', 'RemoteUser', 'RemoteMachine', 'Authentication', 'Encryption', 'OverrideBlockRules')
+$rawFloor = @('rule:raw:Enabled', 'rule:raw:Profiles', 'rule:raw:Direction', 'rule:raw:Action', 'rule:raw:EdgeTraversalPolicy', 'rule:raw:PrimaryStatus',
+    'port:raw:DynamicTransport', 'interfacetype:raw:InterfaceType', 'security:raw:Authentication', 'security:raw:Encryption')
+$missingFloor = @($reqFloor | Where-Object { $reqKeys -cnotcontains $_ }) + @($rawFloor | Where-Object { $rawKeys -cnotcontains $_ })
+Write-Case 'T21.lists' "the guard's `$required ($($reqKeys.Count)) and `$rawExpect ($($rawKeys.Count)) lists hold at least the floor" ($missingFloor.Count -eq 0) ("missing from the guard: $($missingFloor -join ',')`nrequired=$($reqKeys -join ',')`nraw=$($rawKeys -join ',')")
+foreach ($f in $reqKeys) {
+    Reset-Fake; $global:LGT.Admin = $true
+    $null = Invoke-Guard @('-Apply', '-ManifestPath', $single)
+    $n = $PREFIX + 'openwebui-3000'
+    if (-not $global:LGT.Rules.Contains($n)) { Write-Case "T21.$f-missing" "$f (setup)" $false 'the initial -Apply created no guard rule to work on'; continue }
+    $before = ((@($global:LGT.Rules[$n][$f]) | ForEach-Object { [string]$_ }) -join ',')
+    $global:LGT.Rules[$n].Remove($f)
+    $global:LGT.Admin = $false; $global:LGT.Calls = @()
+    $s = Invoke-Guard @('-Status', '-ManifestPath', $single)
+    $global:LGT.Admin = $true; $global:LGT.Calls = @()
+    $a = Invoke-Guard @('-Apply', '-ManifestPath', $single)
+    $after = if ($global:LGT.Rules.Contains($n) -and $global:LGT.Rules[$n].ContainsKey($f)) { ((@($global:LGT.Rules[$n][$f]) | ForEach-Object { [string]$_ }) -join ',') } else { '<gone>' }
+    $global:LGT.Admin = $false
+    $s2 = Invoke-Guard @('-Status', '-ManifestPath', $single)
+    $ok = ($s.Code -eq 3) -and ($s.Out -match ('(?i)drift:.*' + [regex]::Escape($f) + ' <unreadable>')) -and ($a.Code -eq 0) -and ($after -eq $before) -and ($s2.Code -eq 0)
+    Write-Case "T21.$f-missing" "required $f missing reads DRIFT (<unreadable>), -Apply restores it" $ok ("before=$before after=$after`nstatus exit=$($s.Code)`n$($s.Out)`napply exit=$($a.Code)`n$($a.Out)")
+}
+foreach ($k in $rawKeys) {
+    $f = ($k -split ':')[-1]
+    Reset-Fake; $global:LGT.Admin = $true
+    $null = Invoke-Guard @('-Apply', '-ManifestPath', $single)
+    $n = $PREFIX + 'openwebui-3000'
+    if (-not $global:LGT.Rules.Contains($n)) { Write-Case "T21.$k-missing" "$k (setup)" $false 'the initial -Apply created no guard rule to work on'; continue }
+    $global:LGT.Rules[$n][$k] = '<absent>'
+    $global:LGT.Admin = $false; $global:LGT.Calls = @()
+    $s = Invoke-Guard @('-Status', '-ManifestPath', $single)
+    $global:LGT.Admin = $true; $global:LGT.Calls = @()
+    $a = Invoke-Guard @('-Apply', '-ManifestPath', $single)
+    $global:LGT.Admin = $false
+    $s2 = Invoke-Guard @('-Status', '-ManifestPath', $single)
+    $ok = ($s.Code -eq 3) -and ($s.Out -match ('(?i)drift:.*' + [regex]::Escape($f) + ' raw <unreadable>')) -and ($a.Code -eq 0) -and -not $global:LGT.Rules[$n].ContainsKey($k) -and ($s2.Code -eq 0)
+    Write-Case "T21.$k-missing" "raw $k missing reads DRIFT, -Apply replaces the rule" $ok ("status exit=$($s.Code)`n$($s.Out)`napply exit=$($a.Code)`n$($a.Out)")
+}
+
+# ---------------------------------------------------------------- T22 the shape Windows ships (attempt 4, TA3-1)
+# A rule that is a guard in every other respect, with raw DynamicTransport 32 and therefore
+# DynamicTarget printed EMPTY (WiFiDirect-KM-Driver-In-TCP on this host has exactly this).
+# The hand-made path: the live rule's shape plus a narrowing dynamic transport.
+foreach ($raw in @(32, 64, 128)) {
+    Reset-Fake
+    $global:LGT.Rules[$handId] = (New-FakeRule $handId '3000' $liveShape @{ DisplayName = 'ai-stack-lan-guard-openwebui-3000'; Group = $null; DynamicTarget = $null; 'port:raw:DynamicTransport' = [uint32]$raw })
+    $global:LGT.Admin = $false; $global:LGT.Calls = @()
+    $s = Invoke-Guard @('-Status', '-ManifestPath', $node20)
+    $global:LGT.Admin = $true; $global:LGT.Calls = @()
+    $a = Invoke-Guard @('-Apply', '-ManifestPath', $node20)
+    $global:LGT.Admin = $false
+    $s2 = Invoke-Guard @('-Status', '-ManifestPath', $node20)
+    $ok = ($s.Code -eq 3) -and ($s.Out -match '(?m)^\s*DRIFT\s+ai-stack-lan-guard-openwebui-3000') -and ($s.Out -match "dynamictransport raw $raw") -and
+        ($a.Code -eq 0) -and -not $global:LGT.Rules.Contains($handId) -and ($s2.Code -eq 0)
+    Write-Case "T22.raw$raw" "a hand-made guard rule narrowed to raw DynamicTransport $raw (DynamicTarget empty) reads DRIFT and is replaced" $ok ("status exit=$($s.Code)`n$($s.Out)`napply exit=$($a.Code)`n$($a.Out)`nstatus2 exit=$($s2.Code)")
+}
+
+# ---------------------------------------------------------------- T23 duplicates converge (attempt 4, TA3-F1)
+# A drifted hand-made rule listed BEFORE an in-sync managed rule for the same port: -Apply
+# keeps the in-sync one, removes the other, and a second -Apply changes nothing. Also:
+# both drifted - the managed-named one is replaced, the hand one removed, no collision.
+foreach ($c in @('hand-drifted-first', 'both-drifted')) {
+    Reset-Fake
+    $mn = $PREFIX + 'openwebui-3000'
+    $global:LGT.Rules[$handId] = (New-FakeRule $handId '3000' @('Any') @{ DisplayName = 'ai-stack-lan-guard-openwebui-3000'; Group = $null })
+    $mremote = if ($c -eq 'both-drifted') { @('Any') } else { $liveShape }
+    $global:LGT.Rules[$mn] = (New-FakeRule $mn '3000' $mremote @{})
+    $global:LGT.Admin = $true; $global:LGT.Calls = @()
+    $a = Invoke-Guard @('-Apply', '-ManifestPath', $node20)
+    $ops = @($global:LGT.Calls | Where-Object { $_.Op -ne 'Get' } | ForEach-Object { $_.Op + ':' + $_.Name })
+    # an IN-SYNC rule is kept as it is (not removed and recreated); only the other one goes
+    $wantOps = if ($c -eq 'hand-drifted-first') { 'Remove:' + $handId } else { 'Remove:' + $mn + ' New:' + $mn + ' Remove:' + $handId }
+    $global:LGT.Calls = @()
+    $a2 = Invoke-Guard @('-Apply', '-ManifestPath', $node20)
+    $left = @($global:LGT.Rules.Keys | Where-Object { $_ -eq $handId -or $_ -eq $mn })
+    $ok = ($a.Code -eq 0) -and (($ops -join ' ') -eq $wantOps) -and ($a2.Code -eq 0) -and ((Get-Mutations).Count -eq 0) -and (($left -join ',') -eq $mn)
+    Write-Case "T23.$c" "duplicates for one port ($c) converge in one -Apply; the second -Apply changes nothing" $ok ("ops=$($ops -join ' ') want=$wantOps`nleft=$($left -join ',')`napply exit=$($a.Code)`n$($a.Out)`napply2 exit=$($a2.Code)`n$($a2.Out)")
+}
+
+# ---------------------------------------------------------------- T24 Invoke-Remove refuses a foreign rule (defence in depth)
+# No plan path hands Invoke-Remove a foreign rule; this proves the guard inside it holds by
+# itself. The function is lifted out of the script by the parser and called directly.
+$gfns = @()
+if (Test-Path -LiteralPath $Script) { $gast = [Management.Automation.Language.Parser]::ParseFile($Script, [ref]$null, [ref]$null)
+$gfns = @($gast.FindAll({ param($x) $x -is [Management.Automation.Language.FunctionDefinitionAst] }, $false) | Where-Object { @('Test-OwnName', 'Invoke-Remove') -contains $_.Name }) }
+$t24ok = $false; $t24det = ''
+if ($gfns.Count -eq 2) {
+    $Prefix = $PREFIX
+    . ([scriptblock]::Create((($gfns | ForEach-Object { $_.Extent.Text }) -join "`n")))
+    function Stop-Abort([string]$Why) { throw ('ABORT: ' + $Why) }
+    Reset-Fake; $global:LGT.Calls = @()
+    $foreign = [pscustomobject]@{ Name = 'TCP Query User{B6095153}C:\program files\docker\docker\resources\com.docker.backend.exe'; DisplayName = 'com.docker.backend' }
+    try { Invoke-Remove $foreign; $t24det = 'Invoke-Remove returned' } catch { $t24det = $_.Exception.Message }
+    $t24ok = ($t24det -match 'ABORT: .*refusing') -and ((Get-Mutations).Count -eq 0)
+    Remove-Item function:Invoke-Remove, function:Test-OwnName, function:Stop-Abort -ErrorAction SilentlyContinue
+}
+else { $t24det = 'could not lift Invoke-Remove / Test-OwnName out of the script' }
+Write-Case 'T24' 'Invoke-Remove itself refuses a rule whose Name and DisplayName both lack the prefix' $t24ok $t24det
 
 Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 Write-Host ''

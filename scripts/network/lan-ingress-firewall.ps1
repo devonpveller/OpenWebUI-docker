@@ -22,8 +22,9 @@
 # the manifest does not declare.
 #
 # RULES OWNED. Every rule this script creates is named  ai-stack-lan-guard-<service>-<port>.
-# -Apply and -Remove only ever touch rules whose Name starts with that prefix, so Docker's
-# rules and anything else on the machine are out of reach.
+# -Status, -Apply and -Remove only ever touch rules whose Name OR DisplayName starts with
+# that prefix: the DisplayName is how a rule made by hand (which Windows gives a GUID Name)
+# is recognised. Docker's rules and anything else on the machine are out of reach.
 #
 # MODES
 #   -Status            read-only, no elevation: each rule OK / MISSING / DRIFT / STALE, and
@@ -345,6 +346,23 @@ function Get-GuardRules {
             catch { $text = '<unreadable: getter threw>' }
             $recs += [pscustomobject]@{ Kind = $Kind; Name = [string]$p.Name; Text = $text }
         }
+        # The RAW CIM values too, as 'raw:<Name>'. PowerShell COMPUTES many of the properties
+        # above, several through an enum cast, and a raw value the enum does not name reads
+        # back empty (tester finding TA3-1: raw DynamicTransport 32/64/128 printed
+        # DynamicTarget ''). Get-Drift judges the raw value wherever such a cast sits in between.
+        $cp = $o.PSObject.Properties['CimInstanceProperties']
+        if ($null -ne $cp -and $null -ne $cp.Value -and -not ($cp.Value -is [string])) {
+            foreach ($c in @($cp.Value)) {
+                if ($null -eq $c -or $null -eq $c.PSObject.Properties['Name']) { continue }
+                $text = $null
+                try {
+                    $v = $c.Value
+                    $text = if ($null -eq $v) { '' } else { (@($v) | ForEach-Object { [string]$_ }) -join ',' }
+                }
+                catch { $text = '<unreadable: getter threw>' }
+                $recs += [pscustomobject]@{ Kind = $Kind; Name = ('raw:' + [string]$c.Name); Text = $text }
+            }
+        }
         return , $recs
     }
     function Get-FieldText([object[]]$Recs, [string]$Kind, [string]$Name) {
@@ -479,10 +497,8 @@ function Get-Drift($have, $want) {
         'CimSystemProperties'     = 'PowerShell CIM housekeeping'
     }
     $derived = @{
-        'rule.Profiles'              = 'raw form of rule.Profile'
         'rule.Platforms'             = 'raw form of rule.Platform'
         'rule.LSM'                   = 'alias of rule.LooseSourceMapping'
-        'port.DynamicTransport'      = 'alias of port.DynamicTarget'
         'address.LocalIP'            = 'alias of address.LocalAddress'
         'address.RemoteIP'           = 'alias of address.RemoteAddress'
         'application.AppPath'        = 'raw form of application.Program'
@@ -516,7 +532,9 @@ function Get-Drift($have, $want) {
         'port.LocalPort'                     = '<the listed port>'
         'port.RemotePort'                    = @('Any')
         'port.IcmpType'                      = @('Any')
-        'port.DynamicTarget'                 = @('Any', '')
+        'port.DynamicTarget'                 = @('Any')
+        'port.DynamicTransport'              = @('Any')
+        'rule.Profiles'                      = @('0')
         'port.IsNegated'                     = @('')
         'address.LocalAddress'               = @('Any')
         'address.RemoteAddress'              = '<the complement of the nodes>'
@@ -538,6 +556,27 @@ function Get-Drift($have, $want) {
         'security.OverrideBlockRules'        = @('False')
         'security.IsNegated'                 = @('')
     }
+    # RAW values behind every property PowerShell computes through an ENUM cast
+    # (NetSecurity.types.ps1xml: Enabled, Profile <- Profiles, Direction, Action,
+    # EdgeTraversalPolicy, PrimaryStatus, DynamicTarget <- DynamicTransport, InterfaceType,
+    # Authentication, Encryption). A raw value outside the enum makes the computed property
+    # read empty, so for these the RAW value is the one compared. The values are those of a
+    # real guard block rule, read live 2026-10-16. PolicyStoreSourceType is the one other
+    # enum cast, and it is metadata. The Formatter-mapped properties (Program, Service,
+    # LocalUser, ...) print the raw value verbatim, or 'Any' when it is empty, so they are
+    # judged at the computed level.
+    $rawExpect = @{
+        'rule.raw:Enabled'             = @('1')
+        'rule.raw:Profiles'            = @('0')
+        'rule.raw:Direction'           = @('1')
+        'rule.raw:Action'              = @('4')
+        'rule.raw:EdgeTraversalPolicy' = @('0')
+        'rule.raw:PrimaryStatus'       = @('1')
+        'port.raw:DynamicTransport'    = @('0')
+        'interfacetype.raw:InterfaceType' = @('0')
+        'security.raw:Authentication'  = @('0')
+        'security.raw:Encryption'      = @('0')
+    }
     $required = @(
         'rule.Direction', 'rule.Action', 'rule.Enabled', 'rule.Profile', 'rule.Platform', 'rule.Owner',
         'rule.PackageFamilyName', 'rule.PolicyAppId', 'rule.RemoteDynamicKeywordAddresses',
@@ -551,8 +590,27 @@ function Get-Drift($have, $want) {
     $props = @()
     $pp = $have.PSObject.Properties['Props']
     if ($null -ne $pp -and $null -ne $pp.Value) { $props = @($pp.Value) }
+    $psNames = @{}
+    $rawKinds = @{}
+    foreach ($x in $props) {
+        if ($x.Name.StartsWith('raw:')) { $rawKinds[$x.Kind] = $true } else { $psNames[$x.Kind + '.' + $x.Name] = $true }
+    }
     foreach ($x in $props) {
         $key = $x.Kind + '.' + $x.Name
+        if ($x.Name.StartsWith('raw:')) {
+            $rn = $x.Name.Substring(4)
+            $shownRaw = if ($x.Text -eq '') { '<empty>' } else { $x.Text }
+            if ($seen.ContainsKey($key)) { $why += ("raw {0} reported twice ({1})" -f $rn.ToLowerInvariant(), $key); continue }
+            $seen[$key] = $true
+            if ($rawExpect.ContainsKey($key)) {
+                if ($rawExpect[$key] -notcontains $x.Text) { $why += ("{0} raw {1}" -f $rn.ToLowerInvariant(), $shownRaw) }
+            }
+            elseif (-not $psNames.ContainsKey($x.Kind + '.' + $rn)) {
+                # every raw value must also be visible, and judged, at the computed level
+                $why += ("unknown property {0} = {1} ({2}, raw only)" -f $rn.ToLowerInvariant(), $shownRaw, $key)
+            }
+            continue
+        }
         $label = $x.Name.ToLowerInvariant()
         $shown = if ($x.Text -eq '') { '<empty>' } else { $x.Text }
         if ($seen.ContainsKey($key)) { $why += ("{0} reported twice ({1})" -f $label, $key); continue }
@@ -575,6 +633,15 @@ function Get-Drift($have, $want) {
     foreach ($k in $required) {
         if (-not $seen.ContainsKey($k)) { $why += ("{0} <unreadable> ({1} missing)" -f $k.Split('.')[1].ToLowerInvariant(), $k) }
     }
+    # Raw values: required on every object that IS a CIM instance (it carries CimClass);
+    # such an object without readable raw values is drift too.
+    foreach ($kind in @('rule', 'port', 'address', 'application', 'service', 'interfacetype', 'interface', 'security')) {
+        if (-not $seen.ContainsKey($kind + '.CimClass')) { continue }
+        if (-not $rawKinds.ContainsKey($kind)) { $why += ("raw values unreadable ({0}.CimInstanceProperties)" -f $kind); continue }
+        foreach ($k in @($rawExpect.Keys | Where-Object { $_.StartsWith($kind + '.raw:') })) {
+            if (-not $seen.ContainsKey($k)) { $why += ("{0} raw <unreadable> ({1} missing)" -f $k.Split(':')[1].ToLowerInvariant(), $k) }
+        }
+    }
     return $why
 }
 
@@ -587,11 +654,23 @@ function Get-Plan($desired, $current) {
         $h = @($current | Where-Object { $_.Key -eq $w.Name })
         if ($h.Count -eq 0) { $plan += [pscustomobject]@{ Op = 'CREATE'; Name = $w.Name; Want = $w; Rule = $null; Why = '' } }
         else {
-            $d = @(Get-Drift $h[0] $w)
-            if ($d.Count -eq 0) { $plan += [pscustomobject]@{ Op = 'KEEP'; Name = $w.Name; Want = $w; Rule = $h[0]; Why = (Get-IdNote $h[0]).Trim() } }
-            else { $plan += [pscustomobject]@{ Op = 'REPLACE'; Name = $w.Name; Want = $w; Rule = $h[0]; Why = ('drift: ' + ($d -join '; ') + (Get-IdNote $h[0])) } }
-            # a second rule with the same key (say, a hand-made one beside a managed one)
-            foreach ($x in @($h | Select-Object -Skip 1)) {
+            # Several rules for one port (say, a hand-made one beside a managed one): KEEP one
+            # that is in sync if there is one; otherwise REPLACE the one that carries the
+            # managed Name (so its create step cannot collide with it), else the first. Every
+            # other rule for the port is removed. Any mix converges in one -Apply (TA3-F1).
+            $drifts = @{}
+            foreach ($x in $h) { $drifts[$x.Name] = @(Get-Drift $x $w) }
+            $keep = @($h | Where-Object { $drifts[$_.Name].Count -eq 0 } | Select-Object -First 1)
+            if ($keep.Count -eq 1) {
+                $pick = $keep[0]
+                $plan += [pscustomobject]@{ Op = 'KEEP'; Name = $w.Name; Want = $w; Rule = $pick; Why = (Get-IdNote $pick).Trim() }
+            }
+            else {
+                $named = @($h | Where-Object { $_.Name -eq $w.Name } | Select-Object -First 1)
+                $pick = if ($named.Count -eq 1) { $named[0] } else { $h[0] }
+                $plan += [pscustomobject]@{ Op = 'REPLACE'; Name = $w.Name; Want = $w; Rule = $pick; Why = ('drift: ' + ($drifts[$pick.Name] -join '; ') + (Get-IdNote $pick)) }
+            }
+            foreach ($x in @($h | Where-Object { $_.Name -ne $pick.Name })) {
                 $plan += [pscustomobject]@{ Op = 'REMOVE'; Name = $x.Key; Want = $null; Rule = $x; Why = ('duplicate of the rule kept for tcp/' + $w.Port + (Get-IdNote $x)) }
             }
         }

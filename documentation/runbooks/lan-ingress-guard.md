@@ -38,6 +38,13 @@ interface type, interface, security). Every property must be one of three kinds:
   a reason in `Get-Drift` in the script;
 - an alias of a compared property.
 
+Where PowerShell computes a property through an enum cast, the RAW stored value is
+compared as well: Enabled, Profile, Direction, Action, edge traversal, status, dynamic
+transport, interface type, authentication and encryption. A raw value the enum does not
+name makes the computed property read EMPTY. Windows itself ships rules with a dynamic
+transport of 32, 64 or 128, which prints as an empty DynamicTarget. So EMPTY is never
+accepted as unrestricted.
+
 Any other property, including one a future Windows build adds, is DRIFT until
 someone decides what it means. So is a compared property at any other value,
 or a required one that cannot be read. A rule narrowed in any such way (for
@@ -164,8 +171,9 @@ powershell -NoProfile -File scripts\network\lan-ingress-firewall.ps1 -Remove -Wh
 powershell -NoProfile -File scripts\network\lan-ingress-firewall.ps1 -Remove           # elevated
 ```
 
-`-Remove` deletes only rules whose name starts with `ai-stack-lan-guard-`. It
-does not read the manifest or the address file, so it still works if either one
+`-Remove` deletes only rules whose Name OR DisplayName starts with
+`ai-stack-lan-guard-`, which includes rules made by hand (they show a GUID `rule id`
+in the `-WhatIf` list). It does not read the manifest or the address file, so it still works if either one
 is broken.
 
 ## Adding a service later
