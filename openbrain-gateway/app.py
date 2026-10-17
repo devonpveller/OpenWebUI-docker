@@ -88,7 +88,44 @@ def _tool_set(var: str, default: set) -> set:
 # adding a tool on openbrain-mcp does NOT expose it here.
 READ_TOOLS = _tool_set("GATEWAY_READ_TOOLS", {"search", "fetch", "search_thoughts", "list_thoughts"})
 WRITE_TOOLS = _tool_set("GATEWAY_WRITE_TOOLS", {"capture_thought", "ingest_url", "ingest_urls"})
-ALLOWED_TOOLS = READ_TOOLS | WRITE_TOOLS
+
+# The retrieval contract's READ tools (research-workbench P0; D14: reads only, never a write).
+# Policed exactly as READ_TOOLS are: the forced read filter is injected into metadata_filter,
+# and the workbench behind them FAILS CLOSED on it - only records whose metadata contains the
+# filter come back, and record kinds that carry no metadata (pages, sessions, ideas, user
+# documents, jobs, tombstones) return nothing while a filter is present. So the cloud reads its
+# own share=cloud sources through the contract and nothing else. The names mirror
+# OB1/integrations/kubernetes-deployment/contract-tools.json (generated). Kept a separate set
+# so READ_TOOLS keeps its pre-contract default; GATEWAY_CONTRACT_TOOLS="" turns them off (the
+# ops door does).
+CONTRACT_TOOLS = _tool_set("GATEWAY_CONTRACT_TOOLS", {
+    "contract_chunk_context",
+    "contract_claims",
+    "contract_dependence",
+    "contract_diff_check",
+    "contract_documents",
+    "contract_idea",
+    "contract_ideas",
+    "contract_jobs",
+    "contract_neighbours",
+    "contract_podcasts",
+    "contract_presenters",
+    "contract_proposals",
+    "contract_quality",
+    "contract_reference",
+    "contract_registries",
+    "contract_registry",
+    "contract_search",
+    "contract_session",
+    "contract_stance_map",
+    "contract_teams",
+    "contract_timeline",
+    "contract_tombstone",
+    "contract_trail",
+    "contract_watches",
+})
+FILTERED_READ_TOOLS = READ_TOOLS | CONTRACT_TOOLS
+ALLOWED_TOOLS = READ_TOOLS | WRITE_TOOLS | CONTRACT_TOOLS
 
 # The forced read filter and write stamp, as field/value pairs.
 #
@@ -203,7 +240,7 @@ def _apply_policy(msg: dict):
         # anything else is refused (-32602), never forwarded. Policed pairs:
         # every READ_TOOLS tool -> metadata_filter; every WRITE_TOOLS tool ->
         # metadata_extra (see _force_read_filter / _force_write_extra).
-        for tools, key in ((READ_TOOLS, "metadata_filter"), (WRITE_TOOLS, "metadata_extra")):
+        for tools, key in ((FILTERED_READ_TOOLS, "metadata_filter"), (WRITE_TOOLS, "metadata_extra")):
             if name in tools:
                 ok, v = _typed(args.get(key), "object")
                 if not ok:
@@ -211,7 +248,7 @@ def _apply_policy(msg: dict):
                 if key in args:
                     args[key] = v
 
-        if name in READ_TOOLS:
+        if name in FILTERED_READ_TOOLS:
             params["arguments"] = _force_read_filter(args)
         elif name in WRITE_TOOLS:
             params["arguments"] = _force_write_extra(args)
