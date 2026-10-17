@@ -1,0 +1,6 @@
+# inference/compose/gateway-lan.yml - the OFF state of the LiteLLM Admin UI's
+# opt-in LAN port (edge-b2-pub). inference/docker-compose.yml includes this file
+# beside compose/gateway.yml while LITELLM_UI_LAN_IP is unset or empty. It
+# deliberately changes NOTHING: llm-gateway-ui keeps publishing no host port.
+# The ON state is compose/gateway-lan-on.yml.
+services: {}

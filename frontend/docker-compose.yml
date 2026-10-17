@@ -176,6 +176,8 @@ services:
     container_name: openwebui
     ports:
       - "127.0.0.1:3000:8080" # Bind to localhost only
+      # Opt-in LAN binding (edge-b2-pub) - the account is on the gpu definition below.
+      - "${OWUI_LAN_IP:-127.0.0.1}:3000:8080"
     networks:
       - owui-net
     volumes:
@@ -186,6 +188,17 @@ services:
       # Same fail-loud guard as the gpu definition: a recreate WITHOUT this key
       # rotates it and breaks every encrypted-at-rest value in webui.db.
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?set in frontend/.env (copy frontend/.env.example) - a recreate WITHOUT this key rotates it and breaks webui.db encrypted values + all sessions}
+      # SSO entered in the admin UI is kept only when this is true (edge-b3-oauth);
+      # off as shipped. Same line on the gpu definition below; see frontend/.env.example.
+      - ENABLE_OAUTH_PERSISTENT_CONFIG=${OWUI_OAUTH_PERSISTENT_CONFIG:-false}
+      # OIDC login provider (edge-b3-oidc): OWUI 0.11 registers it at startup ONLY from
+      # these env vars (admin-UI values are not used for that). Set in frontend/.env;
+      # unset = OWUI's own defaults, no provider.
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}
+      - OPENID_PROVIDER_URL=${OPENID_PROVIDER_URL:-}
+      - OAUTH_PROVIDER_NAME=${OAUTH_PROVIDER_NAME:-SSO}
+      - OAUTH_SCOPES=${OAUTH_SCOPES:-openid email profile}
     restart: unless-stopped
     <<: *hardening-owui
     healthcheck:
@@ -206,6 +219,17 @@ services:
     container_name: openwebui
     ports:
       - "127.0.0.1:3000:8080" # Bind to localhost only
+      # OPT-IN LAN BINDING (edge-b2-pub, cluster-transition 5.1 B2), SHIPPED INERT.
+      # OWUI_LAN_IP in frontend/.env, set to the ONE host LAN address the Proxmox
+      # Traefik targets (never 0.0.0.0), adds <ip>:3000 BESIDE the loopback line,
+      # which stays for every host-side probe. UNSET (or empty) it renders the
+      # loopback line a second time and compose collapses the identical pair to one
+      # binding before the engine sees it - measured on compose v5.3.0: one
+      # PortBindings entry, no "port is already allocated". scripts/checks/
+      # check_lan_bindings.py refuses a render where that collapse stops happening.
+      # Apply B1's firewall guard first; recreate openwebui, wait healthy, THEN
+      # tailscale (it shares this netns). Same line on openwebui-stock above.
+      - "${OWUI_LAN_IP:-127.0.0.1}:3000:8080"
     networks:
       - default
       - llm-net
@@ -239,6 +263,18 @@ services:
       # (/app/backend/.webui_secret_key, outside the data volume), so a recreate would
       # rotate it and break every encrypted-at-rest value in webui.db + all sessions.
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?set in frontend/.env (copy frontend/.env.example) - a recreate WITHOUT this key rotates it and breaks webui.db encrypted values + all sessions}
+      # SSO entered in the admin UI is kept (saved to / read from webui.db) only when
+      # this is true (edge-b3-oauth); off as shipped. OWUI_OAUTH_PERSISTENT_CONFIG in
+      # frontend/.env; preconditions and recreate order are documented there.
+      - ENABLE_OAUTH_PERSISTENT_CONFIG=${OWUI_OAUTH_PERSISTENT_CONFIG:-false}
+      # OIDC login provider (edge-b3-oidc): OWUI 0.11 registers it at startup ONLY from
+      # these env vars (admin-UI values are not used for that). Set in frontend/.env;
+      # unset = OWUI's own defaults, no provider.
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}
+      - OPENID_PROVIDER_URL=${OPENID_PROVIDER_URL:-}
+      - OAUTH_PROVIDER_NAME=${OAUTH_PROVIDER_NAME:-SSO}
+      - OAUTH_SCOPES=${OAUTH_SCOPES:-openid email profile}
       # OWUI's own LOW-PRIVILEGE virtual key (the same one its chat connection
       # holds in webui.db) — the status-pipe llm-traffic module uses it for the
       # gateway's read-only /observe/* queue board, which 401s unauthenticated
