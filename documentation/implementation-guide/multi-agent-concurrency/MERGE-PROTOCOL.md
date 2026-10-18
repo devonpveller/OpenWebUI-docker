@@ -234,14 +234,23 @@ git -C <your-worktree> add OB1; git -C <your-worktree> commit -F <msg-file>   # 
 ```
 
 The submission records the OB1 gitlink of the submitted commit (`ob1_gitlink`) and the OB1
-branch tip (`ob1_branch`, `ob1_branch_sha`); a branch that moves the gitlink is an OB1 item
-even without `-Ob1Branch`. From then on every verdict row carries the OB1 commit it tested
-(`ob1_sha`: the named OB1 branch's tip, else the gitlink), so the stall detector counts an OB1
-step as moved code and the tier advisory counts the OB1 diff in "lines changed since the last
-verdict". `-Pass` records `tested_ob1_sha`, and `-Merged` accepts only a merge whose OB1 gitlink
-IS that commit (Step 5). Re-submit after each OB1 step (`-Resubmit` re-reads the OB1 tip; re-bump
-the gitlink before the round you expect to pass). An item with no OB1 branch and no gitlink move
-is not an OB1 item and is measured exactly as before.
+branch tip (`ob1_branch`, `ob1_branch_sha`, printed with the clone it was resolved in). The
+developer's worktree OB1 is asked first. A remote-tracking `origin/<branch>` is fetched before
+it is used, and one that cannot be fetched is not used. A branch that moves the gitlink is an OB1
+item even without `-Ob1Branch`, and so is one whose commit under test moves it later (it is
+classified again at `-Claim`, `-Pass` and `-Fail`). Every verdict row carries `ob1_sha` (the
+named OB1 branch's tip, else the gitlink), so the stall detector counts an OB1 step as moved code
+and the tier advisory counts the OB1 diff in "lines changed since the last verdict".
+
+**What the tester tests, and what can land.** `-Claim` prints the OB1 commit to test. It is the
+OB1 that the commit under test PINS (`git -C <wt> submodule update OB1`). The one exception is an
+item whose work branch bumps nothing (the intake-i3 shape), where it is the OB1 branch tip.
+`-Pass` records that commit as `tested_ob1_sha`, never a later tip, and refuses if the OB1 branch
+moved after `-Claim` to a commit the tested commit does not pin. `-Merged` accepts only a merge
+whose OB1 gitlink is `tested_ob1_sha` (Step 5). So re-submit after each OB1 step (`-Resubmit`
+re-reads the tip). A round you expect to pass must have the gitlink bumped to the OB1 you want to
+land: a pass of a commit that pins B lands B, even when the OB1 branch has moved on to D. An item
+with no OB1 branch and no gitlink move is not an OB1 item, and is measured exactly as before.
 
 The plan is written *before* the work is queued, because it is what someone else will
 execute. "I tested it myself" is not a plan, and the tool refuses a submission without one.
@@ -498,10 +507,16 @@ git -C <main-checkout> worktree remove .claude/worktrees/merge-line
 
 **For an OB1 item** `-Merged` also refuses a merge whose OB1 gitlink is not the item's
 `tested_ob1_sha` - whatever else it contains, it does not pin the OB1 code that was tested. One
-shape is accepted that the rule above would refuse: an OB1-only item whose tested ai-stack commit
-was simply the line's tip (intake-i3), landed by a `--no-ff` merge of a branch that carries the
-gitlink bump (the non-first parent descends from the tested commit) and whose FIRST parent did not
-already pin the tested OB1 commit - so the merge is what introduces the item's work. A lone
+shape is accepted that the rule above would refuse, and only under all of these conditions:
+- the item is OB1-only and its tested ai-stack commit bumped nothing, so the tester tested the OB1
+  branch tip (`tested_ob1_from = branch-tip`, the intake-i3 shape);
+- the merge's FIRST parent did not already pin the tested OB1 commit;
+- the merged branch differs from the tested ai-stack commit ONLY by the OB1 gitlink, so cut the land
+  branch FROM the tested commit and commit nothing but the bump;
+- the merge changes nothing but OB1 against its first parent.
+
+An item whose tested commit carries its own pin never gets this exception, even if that commit
+reached the line some other way. A lone
 gitlink-bump commit on the line (intake-i2) is still not a merge and is still refused. The
 documented flow in Step 2 (the developer bumps on `work/<id>`) needs no exception at all.
 

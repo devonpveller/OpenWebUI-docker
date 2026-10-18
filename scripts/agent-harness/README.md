@@ -26,9 +26,9 @@ The wider design (test containers, bridge integration):
 | `anchor.ps1` | The SHAPE of an anchor and whether one is usable. Owns no state; `queue.ps1` asks it whether the anchor it was handed is worth gating on |
 | `common.ps1` | Dot-sourced by the rest: resolves the SHARED coordination state dir, the work line, and stderr-safe git capture. Not run directly |
 | `verify-merge-protocol.ps1` | Executable proof of MERGE-PROTOCOL's two-agent path: 72 checks against a scratch line (never `development`), self-cleaning. Run it after changing any script here or the protocol. It cuts that scratch line FROM `development`, so it inherits that branch's pre-commit hooks: while `scripts/checks/check-corpus-exposure-producers.ps1` is absent there the hook fails and SIX checks go red (`two divergent commits exist` and the five that depend on those commits existing) - a fact about the base, not about the protocol |
-| `verify-ob1-items.ps1` | Executable proof for OB1-only items (harness-ob1, 2026-10-18): the stall detector counts an OB1 step as moved code (intake-i1), the tier advisory counts the OB1 diff (not "0 lines"), `-Merged` records the intake-i3 landing and still refuses a wrong OB1 gitlink, a merge not containing the tested commit, a lone gitlink bump, a cherry-pick, and a first parent that already pinned the tested OB1; and a non-OB1 item's whole transcript is byte-identical to the baseline harness (`-BaselineRef`, default `af210613`). Hermetic: a scratch repo pair (an OB1-like nested clone) and a state dir per case. `-AgainstBaseline` runs it on the pre-fix harness to see it go red |
+| `verify-ob1-items.ps1` | Executable proof for OB1-only items (harness-ob1, 2026-10-18): the stall detector counts an OB1 step as moved code (intake-i1), the tier advisory counts the OB1 diff (not "0 lines"), `-Merged` records the intake-i3 landing and still refuses a wrong OB1 gitlink, a merge not containing the tested commit, a lone gitlink bump, a cherry-pick, and a first parent that already pinned the tested OB1; round 2 adds the tester's probes - the tested OB1 is the commit the tester HAD (X5a/X5b), the intake-i3 exception admits only a bump (X2b, X6f), a late bump is classified (X3d), a stale `origin/` ref is fetched or refused (X4), an unscored round says UNSCORED (X8); and a non-OB1 item's whole transcript is byte-identical to the baseline harness (`-BaselineRef`, default `af210613`). Hermetic: a scratch repo pair (an OB1-like nested clone) and a state dir per case. `-AgainstBaseline` runs it on the pre-fix harness to see it go red |
 | `verify-registry-lock.ps1` | Race test for the shared `worktrees.json`: concurrent provisions, provision + remove, a killed lock holder and a live one, all against a scratch repo under `%TEMP%` (own `.git`, own registry; a fail-closed `docker` stub keeps `reap.ps1` off Docker). `-ToolkitDir <dir>` drives an older copy of the toolkit to see it go red; `-Runs N` sets the race count |
-| `verify-queue-defects.ps1` | Executable proof for the `queue.ps1` defects found by USE: D1-D7 (2026-09-04), D8/D9 (2026-09-06) (the per-case `-Pass` rule replayed against the REAL `curator2` evidence in `scripts/agent-harness/fixtures/passplan/`, and plan-hash drift), D10/D11 (item-file encoding and plan readability), and D12-D17 (2026-09-06: deploy surfaces derived not declared, `-Deployed`'s health evidence, unresolvable commits and OB1 pins, the hand-off flag on terminal states, the attempt bump after an anchor amendment, and the unterminated-fence warning), plus the regression column they must not have broken. 213 checks. Fully hermetic - its own scratch repo and state dir per case, so it can never touch the real queue. `-Script <path>` names WHICH `queue.ps1` to drive: point it at the copy you edited, and at the copy you did not, to see it go red |
+| `verify-queue-defects.ps1` | Executable proof for the `queue.ps1` defects found by USE: D1-D7 (2026-09-04), D8/D9 (2026-09-06) (the per-case `-Pass` rule replayed against the REAL `curator2` evidence in `scripts/agent-harness/fixtures/passplan/`, and plan-hash drift), D10/D11 (item-file encoding and plan readability), and D12-D17 (2026-09-06: deploy surfaces derived not declared, `-Deployed`'s health evidence, unresolvable commits and OB1 pins, the hand-off flag on terminal states, the attempt bump after an anchor amendment, and the unterminated-fence warning), plus the regression column they must not have broken. 242 checks (counted 2026-10-18). Fully hermetic - its own scratch repo and state dir per case, so it can never touch the real queue. `-Script <path>` names WHICH `queue.ps1` to drive: point it at the copy you edited, and at the copy you did not, to see it go red |
 | `queue.ps1` | The work pipeline: `-Propose` / `-ConfirmAnchor` / `-Submit` / `-Claim -Role tester|reviewer` / `-Pass` / `-Fail` / `-Approve` / `-Requeue` / `-Merged` / `-Deployed` / `-Reject` / `-List` / `-Show`. `-Merged` derives from the merge range what the item SHIPS, and `-Deployed -By <person> -Evidence <...> [-Surface <one>]` closes those surfaces with health evidence - see [what a merge SHIPS](#what-a-merge-ships-undeployed-and--deployed). Enforces separation of duties (exit 4), the anchor gate (exit 5) and the stale-pass rule. `-Requeue` is also the DEVELOPER's way back from `test-passed` when the artifact itself must change |
 | `lease.ps1` | Named exclusive leases for the SHARED RUNTIME only (planes): `-Acquire` / `-Refresh` / `-Release` / `-Status` / `-Takeover` (exit 3 = held, wait). Names validate against `lease-names.conf` (`-AdHoc` to escape); multi-name requests are sorted + all-or-nothing, so agents cannot deadlock |
 
@@ -220,12 +220,23 @@ as "the failure changed but the code did not", the tier advisory said "0 lines c
 3. `queue.ps1 -Submit ... -Ob1Branch work/<id>`. The item records `ob1_gitlink`, `ob1_branch`
    and `ob1_branch_sha`; a branch that moves the gitlink is an OB1 item without the flag.
 
-Each verdict row then carries `ob1_sha` (the OB1 commit that round tested: the named branch tip,
-else the gitlink), and the stall detector treats a round as moved when either commit moved; the
-advisory adds the OB1 diff between the last verdict's `ob1_sha` and now. `-Pass` records
-`tested_ob1_sha`, and `-Merged` refuses a merge whose OB1 gitlink is anything else. An item with
-neither a named OB1 branch nor a gitlink move gains no field and no output line. Proof:
-`verify-ob1-items.ps1`; protocol: MERGE-PROTOCOL Step 2 and Step 5.
+Each verdict row then carries `ob1_sha` (the named branch tip, else the gitlink), and the stall
+detector treats a round as moved when either commit moved. The advisory adds the OB1 diff between
+the last verdict's `ob1_sha` and now.
+
+The OB1 branch is resolved in the developer's worktree OB1 first. An `origin/` ref is fetched
+before it is used, never trusted stale. Every answer names the clone it came from.
+
+What landed must be what was tested:
+- `-Claim` prints the OB1 commit to test: the pin of the commit under test, or, when that commit
+  bumps nothing (the intake-i3 shape), the branch tip.
+- `-Pass` records that commit as `tested_ob1_sha`, and refuses if the branch moved under the test.
+- `-Merged` refuses a merge whose OB1 gitlink is anything else. Its intake-i3 exception requires
+  the land branch to differ from the tested commit only by the gitlink.
+
+A bump committed after `-Submit` is caught at `-Claim`/`-Pass`. An item with neither a named OB1
+branch nor a gitlink move gains no field and no output line. Proof: `verify-ob1-items.ps1`;
+protocol: MERGE-PROTOCOL Step 2 and Step 5.
 
 ## Which model each role should run on (model tiers)
 

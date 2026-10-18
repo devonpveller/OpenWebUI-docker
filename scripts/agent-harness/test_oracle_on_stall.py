@@ -557,7 +557,7 @@ def test_ob1_unknown_on_an_unchanged_ai_stack_commit_is_not_scored():
                       RO("A", SHA[2], OB1[1])])
     assert [t["scored"] for t in v["trail"]] == [True, True, False, True]
     assert [t["stall_after"] for t in v["trail"]] == [0, 1, 1, 2]
-    assert "OB1 commit could not be read" in v["trail"][2]["why"]
+    assert "OB1 commit of this round, or of the one before it, is not recorded" in v["trail"][2]["why"]
 
 
 def test_non_ob1_rounds_carry_no_ob1_key_and_score_as_before():
@@ -592,3 +592,14 @@ def test_check_on_an_ob1_item_does_not_fire_when_ob1_moved(ledger):
     assert oos.read_ledger(ledger, item="ob1itm") == []
     out = oos._fmt_check("ob1itm", res)
     assert "ob1=" + OB1[1][:12] in out and "PROGRESS" in out
+
+
+def test_an_unscored_round_is_labelled_unscored_not_no_progress():
+    """harness-ob1 round 2 (X8): "no progress:" on a round the detector did not score read as a
+    verdict it never reached. A scored non-progress round keeps its label (the control)."""
+    v = oos.evaluate([RO("A", SHA[0], OB1[0]), RO("B", SHA[0], ""), RO("B", SHA[0], OB1[0])])
+    out = oos._fmt_check("x", {"verdict": v, "escalation": {}, "recorded": None})
+    r2 = [ln for ln in out.splitlines() if "round 2" in ln][0]
+    r3 = [ln for ln in out.splitlines() if "round 3" in ln][0]
+    assert "UNSCORED:" in r2 and "no progress" not in r2
+    assert "no progress:" in r3

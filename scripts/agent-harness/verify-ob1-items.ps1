@@ -415,6 +415,187 @@ $mgr5 = Merge-NoFf $fr5 "work/qr5-doc"
 Test-Refused $fr5 "qr5" $mgr5 "R5: the first parent already pins the tested OB1 -> 'already behind its FIRST parent' still refuses" "already behind its FIRST parent"
 
 # ======================================================================================
+Step "X  round 2: the tester's attempt-1 probes (X2b X3d X4a X4b X5a X5b X6f X8), with the fixed expectations"
+# ======================================================================================
+# The threat model's first clause: no item is recorded merged unless the OB1 that landed is the
+# OB1 the tester HAD. Attempt 1 recorded tested_ob1_sha from the OB1 branch tip at -Pass time.
+function G($fix, [string[]]$a) { return (Invoke-Git -GitArgs (@("-C", $fix.repo) + $a)) }
+function Get-Pin($fix, [string]$rev) {
+    $row = (Invoke-Git -GitArgs @("-C", $fix.repo, "ls-tree", $rev, "--", "OB1") | Select-Object -First 1)
+    if ("$row" -match "^160000 commit ([0-9a-f]{40})") { return $matches[1] }; return ""
+}
+function New-Ob1On($fix, [string]$fromRef, [int]$n, [string]$tag) {
+    Push-Location $fix.ob1
+    try {
+        Invoke-Git checkout -q -B work/ob1x $fromRef | Out-Null
+        Add-Lines (Join-Path $fix.ob1 ("lib\" + $tag + ".ts")) $n $tag
+        Invoke-Git add -A | Out-Null
+        Set-GitClock; Invoke-Git commit -q -m ("OB1 " + $tag) | Out-Null
+        $s = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+        Invoke-Git checkout -q main | Out-Null
+        return $s
+    } finally { Pop-Location; Clear-GitClock }
+}
+function Add-File($fix, [string]$branch, [string]$from, [string]$file, [string]$text) {
+    Push-Location $fix.repo
+    try {
+        $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        & git.exe rev-parse --verify --quiet "refs/heads/$branch" 2>$null | Out-Null
+        $exists = ($LASTEXITCODE -eq 0); $ErrorActionPreference = $prev
+        if ($exists) { Invoke-Git checkout -q $branch | Out-Null } else { Invoke-Git checkout -q -b $branch $from | Out-Null }
+        Set-Content -Path (Join-Path $fix.repo $file) -Encoding ascii -Value $text
+        Invoke-Git add $file | Out-Null
+        Set-GitClock; Invoke-Git commit -q -m ("add " + $file) | Out-Null
+        Invoke-Git checkout -q base | Out-Null
+    } finally { Pop-Location; Clear-GitClock }
+}
+function Start-Item($fix, [string]$id, [string]$branch, [string]$ob1Branch) {
+    Invoke-Q $fix @("-Propose", "-Id", $id, "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+    Invoke-Q $fix @("-ConfirmAnchor", "-Id", $id, "-By", "qoperator") | Out-Null
+    return (Invoke-Q $fix (Get-SubmitArgs $id $branch $ob1Branch))
+}
+function Get-ToReview($fix, [string]$id) {
+    Invoke-Q $fix @("-Approve", "-Id", $id, "-By", "qoperator") | Out-Null
+    Invoke-Q $fix @("-Claim", "-Id", $id, "-Role", "reviewer", "-By", "qrev") | Out-Null
+}
+function S8([string]$s) { if ($s -and $s.Length -ge 8) { return $s.Substring(0, 8) }; return "(none)" }
+
+# X5a - the documented flow (bump B on work/qd), OB1 D pushed DURING the test.
+$x = New-Ob1Fixture "x5a"
+[void](Set-Gitlink $x "work/qd" "" $x.pinB "bump OB1 to B")
+[void](Start-Item $x "qx5a" "work/qd" "work/ob1x")
+$r = Invoke-Q $x @("-Claim", "-Id", "qx5a", "-Role", "tester", "-By", "qtester")
+Check "X5a: -Claim names the OB1 commit to test - the pin B of the commit under test" ($r.out -match ("test with OB1 at " + (S8 $x.pinB))) (First-Line $r.out)
+$dA = Add-Ob1Commit $x 30 "x5ad"
+$r = Invoke-Q $x @("-Pass", "-Id", "qx5a", "-By", "qtester", "-Evidence", $evPass, "-PlanAdequate")
+$it = Get-QItem $x "qx5a"
+Check "X5a: -Pass is REFUSED when the OB1 branch moved under the test (tip D, pin B) - nothing recorded" `
+    (($r.code -eq 1) -and ($r.out -match "moved under the test") -and ($it.state -eq "testing") -and (@($it.results).Count -eq 0)) ("exit=" + $r.code + " | " + (First-Line $r.out))
+Invoke-Q $x @("-Unclaim", "-Id", "qx5a", "-Role", "tester", "-By", "qtester") | Out-Null
+# the developer re-submits WITHOUT re-bumping; the next round tests what work/qd pins: B
+[void](Invoke-Q $x (Get-SubmitArgs "qx5a" "work/qd" "work/ob1x"))
+Invoke-Q $x @("-Claim", "-Id", "qx5a", "-Role", "tester", "-By", "qtester") | Out-Null
+$r = Invoke-Q $x @("-Pass", "-Id", "qx5a", "-By", "qtester", "-Evidence", $evPass, "-PlanAdequate")
+$it = Get-QItem $x "qx5a"
+Check "X5a: the re-submitted round passes with tested_ob1_sha = B (the pin the tester had), not the tip D" `
+    (($r.code -eq 0) -and ($it.tested_ob1_sha -eq $x.pinB) -and ($it.tested_ob1_from -eq "gitlink")) ("exit=" + $r.code + " tested_ob1_sha=" + (S8 $it.tested_ob1_sha) + " D=" + (S8 $dA))
+Get-ToReview $x "qx5a"
+[void](Set-Gitlink $x "work/qx5a-land" "work/qd" $dA "land at the untested D")
+$m = Merge-NoFf $x "work/qx5a-land"
+Test-Refused $x "qx5a" $m "X5a: a land branch pinning the untested tip D is REFUSED" "pins OB1"
+[void](G $x @("reset", "-q", "--hard", "HEAD~1"))
+$m = Merge-NoFf $x "work/qd"
+$r = Get-Merged $x "qx5a" $m
+Check "X5a: the merge of the tested work/qd (pins B) is ACCEPTED" (($r.code -eq 0) -and ((Get-QItem $x "qx5a").state -eq "merged")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+
+# X5b - re-submit after OB1 step D WITHOUT re-bumping (MERGE-PROTOCOL Step 2's intermediate round).
+$x = New-Ob1Fixture "x5b"
+[void](Set-Gitlink $x "work/qd" "" $x.pinB "bump OB1 to B")
+[void](Start-Item $x "qx5b" "work/qd" "work/ob1x")
+Invoke-Q $x @("-Claim", "-Id", "qx5b", "-Role", "tester", "-By", "qtester") | Out-Null
+Invoke-Q $x @("-Fail", "-Id", "qx5b", "-By", "qtester", "-Evidence", $evFail, "-PlanAdequate", "-Reason", "case 1: missing") | Out-Null
+$dB = Add-Ob1Commit $x 30 "x5bd"
+[void](Invoke-Q $x @("-Resubmit", "-Id", "qx5b", "-By", "qdev"))
+$r = Invoke-Q $x @("-Claim", "-Id", "qx5b", "-Role", "tester", "-By", "qtester")
+Check "X5b: -Claim says test B (the pin) and that the tip D is NOT pinned" `
+    (($r.out -match ("test with OB1 at " + (S8 $x.pinB))) -and ($r.out -match ("does NOT pin"))) (First-Line $r.out)
+$r = Invoke-Q $x @("-Pass", "-Id", "qx5b", "-By", "qtester", "-Evidence", $evPass, "-PlanAdequate")
+$it = Get-QItem $x "qx5b"
+Check "X5b: tested_ob1_sha = B, the OB1 the tested commit pins - not the tip D" (($r.code -eq 0) -and ($it.tested_ob1_sha -eq $x.pinB)) ("tested_ob1_sha=" + (S8 $it.tested_ob1_sha) + " B=" + (S8 $x.pinB) + " D=" + (S8 $dB))
+Get-ToReview $x "qx5b"
+[void](Set-Gitlink $x "work/qx5b-land" "work/qd" $dB "land at the untested D")
+$m = Merge-NoFf $x "work/qx5b-land"
+Test-Refused $x "qx5b" $m "X5b: a land branch pinning the untested D is REFUSED" "pins OB1"
+
+# X5c - the intake-i3 shape with the tip moving under the test: refused too.
+$x = New-Ob1Fixture "x5c"
+[void](G $x @("branch", "work/qd3", "base"))
+[void](Start-Item $x "qx5c" "work/qd3" "work/ob1x")
+$r = Invoke-Q $x @("-Claim", "-Id", "qx5c", "-Role", "tester", "-By", "qtester")
+Check "X5c: intake-i3 shape - -Claim says test the OB1 branch tip B" ($r.out -match ("test with OB1 at " + (S8 $x.pinB) + " - the tip of OB1 branch")) (First-Line $r.out)
+[void](Add-Ob1Commit $x 4 "x5cd")
+$r = Invoke-Q $x @("-Pass", "-Id", "qx5c", "-By", "qtester", "-Evidence", $evPass, "-PlanAdequate")
+Check "X5c: intake-i3 shape - the tip moved under the test -> -Pass REFUSED" (($r.code -eq 1) -and ($r.out -match "moved under the test")) ("exit=" + $r.code)
+
+# X2b - the intake-i3 exception must not carry untested ai-stack content beside the bump.
+$x = New-Ob1Fixture "x2b"
+[void](G $x @("branch", "work/qd3", "base"))
+[void](Initialize-ToReview $x "qx2b" "work/qd3" "work/ob1x")
+Check "X2b setup: intake-i3 shape tested the branch tip (tested_ob1_from = branch-tip)" ((Get-QItem $x "qx2b").tested_ob1_from -eq "branch-tip") ""
+[void](Set-Gitlink $x "work/qx2b-land" "base" $x.pinB "land: pin B")
+Add-File $x "work/qx2b-land" "" "UNTESTED.md" "ai-stack content nobody tested"
+$m = Merge-NoFf $x "work/qx2b-land"
+Test-Refused $x "qx2b" $m "X2b: an intake-i3 land branch with untested ai-stack content beside the bump is REFUSED" "ONLY by the OB1 gitlink"
+
+# X6f - an item whose tested commit carries its own pin never gets the intake-i3 exception.
+$x = New-Ob1Fixture "x6f"
+[void](Set-Gitlink $x "work/qd" "" $x.pinB "bump OB1 to B")
+[void](Initialize-ToReview $x "qx6f" "work/qd" "work/ob1x")
+Push-Location $x.repo; try { Invoke-Git checkout -q base | Out-Null; Invoke-Git merge --ff-only -q work/qd | Out-Null } finally { Pop-Location }
+$c6 = New-Ob1On $x $x.pinB 2 "x6fc"
+Push-Location $x.repo; try { Invoke-Git -GitArgs @("update-index", "--cacheinfo", "160000,$c6,OB1") | Out-Null; Set-GitClock; Invoke-Git commit -q -m "line moves OB1 to C" | Out-Null } finally { Pop-Location; Clear-GitClock }
+[void](Set-Gitlink $x "work/repin" "base" $x.pinB "re-pin B")
+$m = Merge-NoFf $x "work/repin"
+Test-Refused $x "qx6f" $m "X6f: the item's bump was fast-forwarded onto the line; a later re-pin merge is REFUSED" "already behind its FIRST parent"
+
+# X3d - a gitlink bump committed after -Submit, before -Pass: the item becomes an OB1 item at -Pass.
+$x = New-Ob1Fixture "x3d"
+[void](Start-Item $x "qx3d" "work/qd" "")
+Invoke-Q $x @("-Claim", "-Id", "qx3d", "-Role", "tester", "-By", "qtester") | Out-Null
+[void](Set-Gitlink $x "work/qd" "" $x.pinB "bump OB1 after the submission")
+$r = Invoke-Q $x @("-Pass", "-Id", "qx3d", "-By", "qtester", "-Evidence", $evPass, "-PlanAdequate")
+$it = Get-QItem $x "qx3d"
+Check "X3d: a bump after -Submit is classified at -Pass: ob1_gitlink = B, tested_ob1_sha = B" `
+    (($r.code -eq 0) -and ($it.ob1_gitlink -eq $x.pinB) -and ($it.tested_ob1_sha -eq $x.pinB)) ("exit=" + $r.code + " ob1_gitlink=" + (S8 $it.ob1_gitlink) + " tested=" + (S8 $it.tested_ob1_sha))
+Get-ToReview $x "qx3d"
+$c3 = New-Ob1On $x $x.pinB 2 "x3dc"
+[void](Set-Gitlink $x "work/qx3d-land" "work/qd" $c3 "land at untested C")
+$m = Merge-NoFf $x "work/qx3d-land"
+Test-Refused $x "qx3d" $m "X3d: ... and a merge pinning untested C is then REFUSED" "pins OB1"
+
+# X4a / X4b - where the OB1 branch is resolved, and a stale remote-tracking ref.
+$x = New-Ob1Fixture "x4"
+$devwt = Join-Path $Root "x4-devwt"
+New-Item -ItemType Directory -Force -Path $devwt | Out-Null
+Invoke-Git -GitArgs @("clone", "-q", $x.ob1, (Join-Path $devwt "OB1")) | Out-Null
+try { Invoke-Git -GitArgs @("-C", (Join-Path $devwt "OB1"), "branch", "-D", "work/ob1x") | Out-Null } catch { }
+Invoke-Git -GitArgs @("-C", (Join-Path $devwt "OB1"), "update-ref", "-d", "refs/remotes/origin/work/ob1x") | Out-Null
+$reg = @{ worktrees = @{ qdev = @{ id = "qdev"; path = $devwt; branch = "work/qd" } } } | ConvertTo-Json -Depth 5
+[System.IO.File]::WriteAllText((Join-Path $x.state "worktrees.json"), $reg, (New-Object System.Text.UTF8Encoding($false)))
+$r = Start-Item $x "qx4" "work/qd" "work/ob1x"
+Check "X4a: a branch held only by another clone resolves there AND says where (not silently)" `
+    (($r.out -match "resolved in OB1 clone [^)]*x4.OB1 \(local branch\)") -and ((Get-QItem $x "qx4").ob1_branch_sha -eq $x.pinB)) (First-Line $r.out)
+# the developer's clone now carries a STALE origin/work/ob1x at B while the real branch moves to C
+Invoke-Git -GitArgs @("-C", (Join-Path $devwt "OB1"), "update-ref", "refs/remotes/origin/work/ob1x", $x.pinB) | Out-Null
+Invoke-Q $x @("-Claim", "-Id", "qx4", "-Role", "tester", "-By", "qtester") | Out-Null
+Invoke-Q $x @("-Fail", "-Id", "qx4", "-By", "qtester", "-Evidence", $evFail, "-PlanAdequate", "-Reason", "case 1: missing") | Out-Null
+$c4 = Add-Ob1Commit $x 9 "x4c"
+[void](Invoke-Q $x @("-Resubmit", "-Id", "qx4", "-By", "qdev"))
+Invoke-Q $x @("-Claim", "-Id", "qx4", "-Role", "tester", "-By", "qtester") | Out-Null
+$r = Invoke-Q $x @("-Fail", "-Id", "qx4", "-By", "qtester", "-Evidence", $evFail, "-PlanAdequate", "-Reason", "case 1: a different symptom")
+$it = Get-QItem $x "qx4"
+$l2 = @($r.out -split "`n" | Where-Object { $_ -match "round 2" }) | Select-Object -First 1
+Check "X4b: a stale origin/ ref in the developer's clone is FETCHED first - round 2 reads C and is PROGRESS" `
+    (("$(@($it.results)[1].ob1_sha)" -eq $c4) -and ($l2 -match "PROGRESS") -and ($r.out -match "just fetched")) ("row2 ob1_sha=" + (S8 "$(@($it.results)[1].ob1_sha)") + " C=" + (S8 $c4) + " | " + $l2)
+# X4c - a remote-tracking ref that cannot be fetched is not used.
+Invoke-Git -GitArgs @("-C", (Join-Path $devwt "OB1"), "remote", "set-url", "origin", (Join-Path $Root "no-such-remote")) | Out-Null
+Invoke-Git -GitArgs @("-C", (Join-Path $devwt "OB1"), "update-ref", "refs/remotes/origin/work/ob1x", $x.pinB) | Out-Null
+$r = Invoke-Q $x @("-Resubmit", "-Id", "qx4", "-By", "qdev")
+Check "X4c: an origin/ ref that cannot be fetched is refused as stale, and the answer comes from a clone that HAS the branch" `
+    (($r.out -match "could not be fetched") -and ((Get-QItem $x "qx4").ob1_branch_sha -eq $c4)) ("ob1_branch_sha=" + (S8 (Get-QItem $x "qx4").ob1_branch_sha))
+
+# X8 - an unscored round says UNSCORED, not "no progress".
+$x = New-Ob1Fixture "x8"
+[void](Start-Item $x "qx8" "work/qd" "")
+Invoke-Q $x @("-Claim", "-Id", "qx8", "-Role", "tester", "-By", "qtester") | Out-Null
+Invoke-Q $x @("-Fail", "-Id", "qx8", "-By", "qtester", "-Evidence", $evFail, "-PlanAdequate", "-Reason", "case 1: missing") | Out-Null
+[void](Invoke-Q $x @("-Resubmit", "-Id", "qx8", "-By", "qdev", "-Ob1Branch", "work/ob1x"))
+Invoke-Q $x @("-Claim", "-Id", "qx8", "-Role", "tester", "-By", "qtester") | Out-Null
+$r = Invoke-Q $x @("-Fail", "-Id", "qx8", "-By", "qtester", "-Evidence", $evFail, "-PlanAdequate", "-Reason", "case 1: other symptom")
+$l2 = @($r.out -split "`n" | Where-Object { $_ -match "round 2" }) | Select-Object -First 1
+Check "X8: an unscored round is labelled UNSCORED, not 'no progress'" (($l2 -match "UNSCORED:") -and ($l2 -notmatch "no progress")) ("line: " + $l2)
+
+# ======================================================================================
 Step "C1  a non-OB1 item: the whole flow is byte-identical to the baseline harness"
 # ======================================================================================
 if (-not $Baseline -or $AgainstBaseline) {

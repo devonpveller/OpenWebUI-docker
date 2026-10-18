@@ -179,7 +179,7 @@ def evaluate(rounds: List[Dict[str, str]], threshold: int = STALL_THRESHOLD) -> 
         progress = novel and moved
         seen.add(sig)
         if ob1_unread:
-            why = ("the OB1 commit could not be read for this round - not scored either "
+            why = ("the OB1 commit of this round, or of the one before it, is not recorded - not scored either "
                    "way (a failed measurement is not evidence that the code stood still)")
         elif not scored:
             why = ("the branch head could not be read for this round - not scored either "
@@ -538,7 +538,10 @@ def _fmt_check(item_id: str, res: Dict[str, Any]) -> str:
         lines.append("    round " + str(t["round"]) + "  sig=" + t["sig"] +
                      "  sha=" + (t["sha"] or "-") +
                      (("  ob1=" + (t["ob1"] or "-")) if "ob1" in t else "") + "  " +
-                     ("PROGRESS" if t["progress"] else "no progress") + ": " + t["why"])
+                     # An UNSCORED round is neither: "no progress" on a round the detector did
+                     # not score read as a verdict it never reached (harness-ob1 round 2, X8).
+                     ("PROGRESS" if t["progress"] else
+                      ("UNSCORED" if t.get("scored") is False else "no progress")) + ": " + t["why"])
     return "\n".join(lines)
 
 
