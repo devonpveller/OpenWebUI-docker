@@ -147,8 +147,10 @@ def check_defaults():
               "READ_TOOLS default unchanged", str(sorted(app.READ_TOOLS)))
         check(app.WRITE_TOOLS == {"capture_thought", "ingest_url", "ingest_urls"},
               "WRITE_TOOLS default unchanged", str(sorted(app.WRITE_TOOLS)))
-        check(app.ALLOWED_TOOLS == app.READ_TOOLS | app.WRITE_TOOLS,
-              "ALLOWED_TOOLS is still the union")
+        check(app.ALLOWED_TOOLS == app.READ_TOOLS | app.WRITE_TOOLS | app.CONTRACT_TOOLS,
+              "ALLOWED_TOOLS is the union of reads, writes and the contract reads (rw-p0-contract)")
+        check(app.FILTERED_READ_TOOLS == app.READ_TOOLS | app.CONTRACT_TOOLS,
+              "every contract tool is policed as a read (forced share filter)")
         check(app.READ_FILTER_FIELD == "share" and app.READ_FILTER_VALUE == "cloud",
               "forced read filter is still share=cloud",
               f"{app.READ_FILTER_FIELD}={app.READ_FILTER_VALUE}")
@@ -392,9 +394,13 @@ def main():
         msg = parse_response(r)
         tools = (msg or {}).get("result", {}).get("tools", []) or []
         names = sorted(t.get("name") for t in tools)
+        # rw-p0-contract: plus the retrieval contract's read tools, which the gateway's own
+        # default names (the deployed door must list exactly them, no more).
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import app as _gw_defaults  # noqa: E402 - the defaults the deployed door was built from
         expected = sorted(["search", "fetch", "search_thoughts",
                            "list_thoughts", "capture_thought",
-                           "ingest_url", "ingest_urls"])
+                           "ingest_url", "ingest_urls"] + sorted(_gw_defaults.CONTRACT_TOOLS))
         check(names == expected, "exact cloud allow-list",
               f"got={names}")
         check("thought_stats" not in names, "thought_stats absent")
