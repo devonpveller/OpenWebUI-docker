@@ -223,6 +223,26 @@ worse signal than one that says plainly what it checked.
 .\scripts\agent-harness\queue.ps1 -Submit -Id <id> -Branch work/<id> -Developer <your-wt-id> -TestPlan <path>
 ```
 
+**An OB1-only item (its change lives in the OB1 submodule; harness-ob1, 2026-10-18).** Do the
+work on an OB1 branch, push that branch to OB1's remote FIRST (CLAUDE.md), then commit the
+gitlink bump on `work/<id>` to that pushed tip, and submit naming the OB1 branch:
+
+```powershell
+git -C <your-worktree>/OB1 push origin work/<id>               # OB1 first: never pin a commit the remote lacks
+git -C <your-worktree> add OB1; git -C <your-worktree> commit -F <msg-file>   # the bump, on work/<id>
+.\scripts\agent-harness\queue.ps1 -Submit -Id <id> -Branch work/<id> -Developer <your-wt-id> -TestPlan <path> -Ob1Branch work/<id>
+```
+
+The submission records the OB1 gitlink of the submitted commit (`ob1_gitlink`) and the OB1
+branch tip (`ob1_branch`, `ob1_branch_sha`); a branch that moves the gitlink is an OB1 item
+even without `-Ob1Branch`. From then on every verdict row carries the OB1 commit it tested
+(`ob1_sha`: the named OB1 branch's tip, else the gitlink), so the stall detector counts an OB1
+step as moved code and the tier advisory counts the OB1 diff in "lines changed since the last
+verdict". `-Pass` records `tested_ob1_sha`, and `-Merged` accepts only a merge whose OB1 gitlink
+IS that commit (Step 5). Re-submit after each OB1 step (`-Resubmit` re-reads the OB1 tip; re-bump
+the gitlink before the round you expect to pass). An item with no OB1 branch and no gitlink move
+is not an OB1 item and is measured exactly as before.
+
 The plan is written *before* the work is queued, because it is what someone else will
 execute. "I tested it myself" is not a plan, and the tool refuses a submission without one.
 List the **cases** - for each, what to run, what counts as passing, and what would count as
@@ -475,6 +495,15 @@ git -C <main-checkout> worktree remove .claude/worktrees/merge-line
 ```
 
 `-Merged` also refuses (exit 1, no escape hatch) a sha that is not a merge commit with the tested commit behind a non-first parent on the work line - a fast-forward, cherry-pick or rebase/squash skipped the commit hooks; redo it with `git merge --no-ff` (host: `merge.ff=false`, `pull.ff=only`).  
+
+**For an OB1 item** `-Merged` also refuses a merge whose OB1 gitlink is not the item's
+`tested_ob1_sha` - whatever else it contains, it does not pin the OB1 code that was tested. One
+shape is accepted that the rule above would refuse: an OB1-only item whose tested ai-stack commit
+was simply the line's tip (intake-i3), landed by a `--no-ff` merge of a branch that carries the
+gitlink bump (the non-first parent descends from the tested commit) and whose FIRST parent did not
+already pin the tested OB1 commit - so the merge is what introduces the item's work. A lone
+gitlink-bump commit on the line (intake-i2) is still not a merge and is still refused. The
+documented flow in Step 2 (the developer bumps on `work/<id>`) needs no exception at all.
 
 **If the work line is checked out in the main checkout, you cannot merge - hand off
 instead.** Git refuses a second checkout of one branch, and force-moving the ref would
