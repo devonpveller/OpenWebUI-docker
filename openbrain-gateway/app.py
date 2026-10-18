@@ -93,36 +93,38 @@ WRITE_TOOLS = _tool_set("GATEWAY_WRITE_TOOLS", {"capture_thought", "ingest_url",
 # Policed exactly as READ_TOOLS are: the forced read filter is injected into metadata_filter,
 # and the workbench behind them FAILS CLOSED on it - only records whose metadata contains the
 # filter come back, and record kinds that carry no metadata (pages, sessions, ideas, user
-# documents, jobs, tombstones) return nothing while a filter is present. So the cloud reads its
-# own share=cloud sources through the contract and nothing else. The names mirror
+# documents, jobs) return nothing while a filter is present. So the cloud reads its own
+# share=cloud sources through the contract and nothing else. The names mirror
 # OB1/integrations/kubernetes-deployment/contract-tools.json (generated). Kept a separate set
 # so READ_TOOLS keeps its pre-contract default; GATEWAY_CONTRACT_TOOLS="" turns them off (the
 # ops door does).
+#
+# ONLY tools whose manifest entry carries metadata_filter belong here (rw-p0-contract2, after
+# the reviewer reject of rw-p0-contract). Labelling a tool a filtered read does not make it
+# filtered: openbrain-mcp registers each tool with its manifest input schema and the MCP SDK
+# drops every argument the schema does not name, so the forced filter never reached a tool
+# without the parameter. test_openbrain_gateway_contract_tools.py fails on any entry here that
+# lacks it. Left out, local-MCP only: contract_diff_check (POST body, no scope parameter),
+# contract_registries / contract_registry (no personal data, but no scope parameter either),
+# and the six typed 501 stubs (contract_watches, contract_proposals, contract_stance_map,
+# contract_podcasts, contract_presenters, contract_teams). contract_dependence and
+# contract_tombstone now carry metadata_filter and their routes scope by it.
 CONTRACT_TOOLS = _tool_set("GATEWAY_CONTRACT_TOOLS", {
     "contract_chunk_context",
     "contract_claims",
     "contract_dependence",
-    "contract_diff_check",
     "contract_documents",
     "contract_idea",
     "contract_ideas",
     "contract_jobs",
     "contract_neighbours",
-    "contract_podcasts",
-    "contract_presenters",
-    "contract_proposals",
     "contract_quality",
     "contract_reference",
-    "contract_registries",
-    "contract_registry",
     "contract_search",
     "contract_session",
-    "contract_stance_map",
-    "contract_teams",
     "contract_timeline",
     "contract_tombstone",
     "contract_trail",
-    "contract_watches",
 })
 FILTERED_READ_TOOLS = READ_TOOLS | CONTRACT_TOOLS
 ALLOWED_TOOLS = READ_TOOLS | WRITE_TOOLS | CONTRACT_TOOLS
