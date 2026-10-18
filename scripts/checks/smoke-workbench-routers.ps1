@@ -4,18 +4,30 @@
 #
 # Capture before a change, capture after, compare: a changed response FAILS.
 #
-#   # live, through Caddy's tailnet block (Caddy injects X-Brain-Key; READ-ONLY requests):
-#   powershell -NoProfile -File scripts\checks\smoke-workbench-routers.ps1 -Capture <dir-before>
+# THE TARGET IS NEVER A DEFAULT. A capture names its container and base URL, or says -Live:
+#
+#   # live, through Caddy's tailnet block (Caddy injects X-Brain-Key; READ-ONLY requests). A
+#   # deploy-time check made by the gated deploy, never a test:
+#   powershell -NoProfile -File scripts\checks\smoke-workbench-routers.ps1 -Live -Capture <dir-before>
 #   ... deploy ...
-#   powershell -NoProfile -File scripts\checks\smoke-workbench-routers.ps1 -Capture <dir-after>
-#   powershell -NoProfile -File scripts\checks\smoke-workbench-routers.ps1 -Compare <dir-before> <dir-after>
+#   powershell -NoProfile -File scripts\checks\smoke-workbench-routers.ps1 -Live -Capture <dir-after>
 #
 #   # against a disposable :wt container (the contract test run does this), no Caddy:
 #   ... -ExecContainer <test container> -BaseUrl http://localhost:8000 -KeyEnv WORKBENCH_KEY -Capture <dir>
 #
+#   # compare - IN-PROCESS, with ONE array argument (powershell -File would bind "-Compare a b" as
+#   # Compare=@(a) and b to -Capture; this script refuses that combination):
+#   & scripts\checks\smoke-workbench-routers.ps1 -Compare @('<dir-before>', '<dir-after>')
+#
+# Refused (exit 2): -Capture with -Compare; -Compare with other than two directories; a capture
+# with no -ExecContainer/-BaseUrl and no -Live; the live container (openbrain-workbench) or the
+# live Caddy URL named explicitly without -Live; -Live together with an explicit target. Every
+# capture prints its target and writes it to <dir>\_target.txt, so a caller can check where the
+# responses came from.
+#
 # HOW A REQUEST IS MADE: `docker exec <ExecContainer> deno eval` runs fetch() from inside a
-# container that can reach the target (default: the openbrain-workbench container, which shares
-# app-net with caddy, fetching http://caddy:8446). The requests are fixed below and NONE of them
+# container that can reach the target (with -Live: the openbrain-workbench container, which
+# shares app-net with caddy, fetching http://caddy:8446). The requests are fixed below and NONE of them
 # mutates anything: GETs, plus two POSTs the router rejects before any side effect (import with
 # no file and no url -> 400 before a job row exists, import.ts; note-commit with a traversal path
 # -> 400 before git runs, note-history.ts notePath). source-commit has no rejecting request (any
@@ -24,11 +36,29 @@
 param(
   [string]$Capture = '',
   [string[]]$Compare = @(),
-  [string]$ExecContainer = 'openbrain-workbench',
-  [string]$BaseUrl = 'http://caddy:8446',
-  [string]$KeyEnv = ''
+  # No defaults: a capture names its target, or says -Live (rw-p0-contract attempt 2, tester F1).
+  [string]$ExecContainer = '',
+  [string]$BaseUrl = '',
+  [string]$KeyEnv = '',
+  [switch]$Live
 )
 $ErrorActionPreference = 'Stop'
+
+$LiveContainer = 'openbrain-workbench'
+$LiveBaseUrl = 'http://caddy:8446'
+function Refuse([string]$why) { Write-Host "REFUSED: $why"; exit 2 }
+if ($Capture -and $Compare.Count) { Refuse "-Capture and -Compare together (a '-File ... -Compare a b' call binds b to -Capture; compare in-process with -Compare @(a, b))" }
+if ($Compare.Count -and $Compare.Count -ne 2) { Refuse "-Compare takes exactly two directories, got $($Compare.Count)" }
+if ($Capture) {
+  if ($Live) {
+    if ($ExecContainer -or $BaseUrl) { Refuse '-Live names its own target; do not pass -ExecContainer/-BaseUrl with it' }
+    $ExecContainer = $LiveContainer; $BaseUrl = $LiveBaseUrl
+  } else {
+    if (-not $ExecContainer -or -not $BaseUrl) { Refuse 'a capture needs -ExecContainer and -BaseUrl (a disposable target), or -Live for the deployed workbench' }
+    if ($ExecContainer -eq $LiveContainer -or $BaseUrl -match '(?i)caddy') { Refuse "the live target ($ExecContainer, $BaseUrl) needs -Live" }
+  }
+  Write-Host ("target: container={0} base={1} live={2}" -f $ExecContainer, $BaseUrl, [bool]$Live)
+}
 
 # name | method | path | form = send an EMPTY multipart body
 $Cases = @(
@@ -103,7 +133,8 @@ if ($Capture) {
     [System.IO.File]::WriteAllText((Join-Path $Capture "$($r.n).txt"), $text, (New-Object System.Text.UTF8Encoding $false))
     Write-Host ("  {0,-24} {1}" -f $r.n, $r.status)
   }
-  Write-Host "captured $($Cases.Count) responses into $Capture"
+  [System.IO.File]::WriteAllText((Join-Path $Capture '_target.txt'), "container: $ExecContainer`nbase: $BaseUrl`nlive: $([bool]$Live)`n", (New-Object System.Text.UTF8Encoding $false))
+  Write-Host "captured $($Cases.Count) responses from $ExecContainer ($BaseUrl) into $Capture"
   exit 0
 }
 
@@ -126,5 +157,4 @@ if ($Compare.Count -eq 2) {
   exit 0
 }
 
-Write-Host 'usage: -Capture <dir>   or   -Compare <dir-before> <dir-after>'
-exit 2
+Refuse 'usage: -Capture <dir> (-ExecContainer <c> -BaseUrl <url> | -Live)   or   -Compare @(<dir-before>, <dir-after>)'
