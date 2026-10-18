@@ -509,3 +509,97 @@ def test_the_ledger_names_the_item_field_item_id_not_item(ledger):
     row = oos.read_ledger(ledger)[0]
     assert "item_id" in row and row["item_id"] == "itm"
     assert "item" not in row
+
+
+# --------------------------------------------------------------------------------------
+# OB1-only items (harness-ob1) - "the code" includes the OB1 commit the round tested
+# --------------------------------------------------------------------------------------
+
+OB1 = ["0b1" + "0" * 33 + "00a1",
+       "0b1" + "0" * 33 + "00a2",
+       "0b1" + "0" * 33 + "00a3"]
+assert all(len(o) == 40 for o in OB1)
+
+
+def RO(text, sha, ob1):
+    return {"text": text, "sha": sha, "ob1": ob1}
+
+
+def test_ob1_moved_on_an_unchanged_ai_stack_commit_is_progress():
+    """intake-i1: round 2 moved OB1 a379c13 -> e739d0f on an unchanged ai-stack 79ab80e3, and
+    was logged "the failure changed but the code did not". With the OB1 commit recorded, that
+    round moved."""
+    v = oos.evaluate([RO("A", SHA[0], OB1[0]), RO("B", SHA[0], OB1[1]), RO("C", SHA[0], OB1[2])])
+    assert v["stalled"] is False
+    assert [t["moved"] for t in v["trail"]] == [True, True, True]
+    assert [t["progress"] for t in v["trail"]] == [True, True, True]
+    assert all("the code did not" not in t["why"] for t in v["trail"])
+    assert [t["ob1"] for t in v["trail"]] == [o[:12] for o in OB1]
+
+
+def test_ob1_and_ai_stack_both_unchanged_still_stalls_control():
+    """THE CONTROL: recording OB1 must not make a genuinely unmoved round look moved."""
+    v = oos.evaluate([RO("A", SHA[0], OB1[0]), RO("B", SHA[0], OB1[0]), RO("C", SHA[0], OB1[0])])
+    assert v["stalled"] is True
+    assert [t["moved"] for t in v["trail"]] == [True, False, False]
+    assert "the code did not" in v["trail"][1]["why"]
+
+
+def test_ob1_item_ai_stack_moved_with_ob1_unchanged_is_moved():
+    v = oos.evaluate([RO("A", SHA[0], OB1[0]), RO("B", SHA[1], OB1[0])])
+    assert [t["moved"] for t in v["trail"]] == [True, True]
+
+
+def test_ob1_unknown_on_an_unchanged_ai_stack_commit_is_not_scored():
+    """An OB1 item whose OB1 commit could not be read: a failed measurement, never "did not
+    move" - and it neither advances nor resets the counter."""
+    v = oos.evaluate([RO("A", SHA[0], OB1[0]), RO("A", SHA[1], OB1[0]), RO("B", SHA[1], ""),
+                      RO("A", SHA[2], OB1[1])])
+    assert [t["scored"] for t in v["trail"]] == [True, True, False, True]
+    assert [t["stall_after"] for t in v["trail"]] == [0, 1, 1, 2]
+    assert "OB1 commit of this round, or of the one before it, is not recorded" in v["trail"][2]["why"]
+
+
+def test_non_ob1_rounds_carry_no_ob1_key_and_score_as_before():
+    """Byte-identical for every non-OB1 item: no `ob1` in the trail, the same verdict."""
+    v = oos.evaluate([R("A", SHA[0]), R("B", SHA[0]), R("C", SHA[0])])
+    assert all("ob1" not in t for t in v["trail"])
+    assert v["stalled"] is True
+    assert "ob1=" not in oos._fmt_check("x", {"verdict": v, "escalation": {}, "recorded": None})
+
+
+def test_failing_rounds_reads_ob1_sha_only_when_the_row_has_it():
+    item = {"results": [
+        {"verdict": "fail", "reason": "A", "sha": SHA[0], "evidence": "e", "ob1_sha": OB1[0]},
+        {"verdict": "fail", "reason": "B", "sha": SHA[0], "evidence": "e"},
+        {"verdict": "fail", "reason": "C", "sha": SHA[0], "evidence": "e", "ob1_sha": "work/x"},
+    ]}
+    rounds = oos.failing_rounds(item)
+    assert rounds[0]["ob1"] == OB1[0]
+    assert "ob1" not in rounds[1]
+    assert rounds[2]["ob1"] == "", "a branch name is not an OB1 commit - read as not recorded"
+
+
+def test_check_on_an_ob1_item_does_not_fire_when_ob1_moved(ledger):
+    q = ledger / "queue"
+    _write_item(q, "ob1itm", [
+        {"verdict": "fail", "reason": "case 1: guard missing", "sha": SHA[0], "evidence": "x", "ob1_sha": OB1[0]},
+        {"verdict": "fail", "reason": "case 2: wrong exit", "sha": SHA[0], "evidence": "y", "ob1_sha": OB1[1]},
+        {"verdict": "fail", "reason": "case 3: not quoted", "sha": SHA[0], "evidence": "z", "ob1_sha": OB1[2]},
+    ], profile="all-local")
+    res = oos.check(q, "ob1itm", repo=ledger)
+    assert res["verdict"]["stalled"] is False
+    assert oos.read_ledger(ledger, item="ob1itm") == []
+    out = oos._fmt_check("ob1itm", res)
+    assert "ob1=" + OB1[1][:12] in out and "PROGRESS" in out
+
+
+def test_an_unscored_round_is_labelled_unscored_not_no_progress():
+    """harness-ob1 round 2 (X8): "no progress:" on a round the detector did not score read as a
+    verdict it never reached. A scored non-progress round keeps its label (the control)."""
+    v = oos.evaluate([RO("A", SHA[0], OB1[0]), RO("B", SHA[0], ""), RO("B", SHA[0], OB1[0])])
+    out = oos._fmt_check("x", {"verdict": v, "escalation": {}, "recorded": None})
+    r2 = [ln for ln in out.splitlines() if "round 2" in ln][0]
+    r3 = [ln for ln in out.splitlines() if "round 3" in ln][0]
+    assert "UNSCORED:" in r2 and "no progress" not in r2
+    assert "no progress:" in r3

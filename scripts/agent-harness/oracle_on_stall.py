@@ -44,6 +44,14 @@ Two deliberate differences, each stated rather than absorbed:
      `evaluate`. The rule used to score it as "did not move", which turned `git rev-parse`
      failing into a frontier escalation.
 
+     THE CODE INCLUDES OB1 (harness-ob1, 2026-10-18). An item whose work lives in the OB1
+     submodule can move no ai-stack commit at all: intake-i1's round 2 was a379c13 -> e739d0f
+     in OB1 on an unchanged ai-stack 79ab80e3, and was logged "the failure changed but the
+     code did not". queue.ps1 now records `ob1_sha` on every verdict of an OB1 item, and a
+     round carrying it has moved when EITHER commit moved. A round of an OB1 item whose OB1
+     commit is unknown, on an unchanged ai-stack commit, is UNSCORED by the rule above. A
+     round with no `ob1` key (every non-OB1 item) is scored exactly as before.
+
   A NOTE ON THE THRESHOLD, because it is the difference that matters when comparing the
   two implementations: agent-org seeds `seen_sigs` with the pre-existing failing log's
   signature BEFORE its loop, so its first round can already be non-novel. A harness item
@@ -134,10 +142,16 @@ def evaluate(rounds: List[Dict[str, str]], threshold: int = STALL_THRESHOLD) -> 
     seen = set()
     stall = 0
     prev_sha = ""
+    prev_ob1 = ""
     trail: List[Dict[str, Any]] = []
     for i, r in enumerate(rounds, start=1):
         sig = failure_signature(r.get("text", ""))
         sha = (r.get("sha") or "").strip()
+        # None = this round carries no OB1 measurement at all (a non-OB1 item): the
+        # ai-stack sha is the whole of "the code". A string, even "", = an OB1 item's round.
+        ob1 = r.get("ob1")
+        ob1_aware = ob1 is not None
+        ob1 = (ob1 or "").strip()
         novel = sig not in seen
         first = i == 1
         # UNKNOWN IS NOT "DID NOT MOVE". If a round has no branch head recorded, the
@@ -153,9 +167,21 @@ def evaluate(rounds: List[Dict[str, str]], threshold: int = STALL_THRESHOLD) -> 
         scored = first or bool(sha and prev_sha)
         # Round 1 has nothing before it: the code cannot have "not moved" yet.
         moved = True if first else (sha != prev_sha)
+        ob1_unread = False
+        if ob1_aware and not first and scored and not moved:
+            # The ai-stack commit stood still; the OB1 commit decides - and an unknown OB1
+            # side is a failed measurement, not evidence that OB1 stood still.
+            if ob1 and prev_ob1:
+                moved = ob1 != prev_ob1
+            else:
+                scored = False
+                ob1_unread = True
         progress = novel and moved
         seen.add(sig)
-        if not scored:
+        if ob1_unread:
+            why = ("the OB1 commit of this round, or of the one before it, is not recorded - not scored either "
+                   "way (a failed measurement is not evidence that the code stood still)")
+        elif not scored:
             why = ("the branch head could not be read for this round - not scored either "
                    "way (a failed measurement is not evidence that the code stood still)")
         elif not novel and not moved:
@@ -168,12 +194,16 @@ def evaluate(rounds: List[Dict[str, str]], threshold: int = STALL_THRESHOLD) -> 
             why = "new failure on new code"
         if scored:
             stall = 0 if progress else stall + 1
-        trail.append({
+        entry = {
             "round": i, "sig": sig, "sha": sha[:12], "novel": novel,
             "moved": moved if scored else None, "scored": scored,
             "progress": progress if scored else None, "stall_after": stall, "why": why,
-        })
+        }
+        if ob1_aware:
+            entry["ob1"] = ob1[:12]
+        trail.append(entry)
         prev_sha = sha or prev_sha
+        prev_ob1 = ob1 or prev_ob1
     # THE STRUCTURAL INVARIANT, stated where it is produced: round 1 is ALWAYS progress
     # (nothing precedes it, so it is novel and cannot have failed to move), and no round
     # raises the counter by more than one. Therefore `stall <= rounds - 1`, and a stall of
@@ -442,8 +472,12 @@ def failing_rounds(item: Dict[str, Any], queue_dir="") -> List[Dict[str, str]]:
                     ev = p.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 pass
-        out.append({"text": (str(r.get("reason") or "") + "\n" + ev).strip(),
-                    "sha": object_name(str(r.get("sha") or ""))})
+        rnd = {"text": (str(r.get("reason") or "") + "\n" + ev).strip(),
+               "sha": object_name(str(r.get("sha") or ""))}
+        # An OB1 item's round (harness-ob1): queue.ps1 writes `ob1_sha` only for one.
+        if "ob1_sha" in r:
+            rnd["ob1"] = object_name(str(r.get("ob1_sha") or ""))
+        out.append(rnd)
     return out
 
 
@@ -502,8 +536,12 @@ def _fmt_check(item_id: str, res: Dict[str, Any]) -> str:
                      if res.get("recorded") else "  already on the ledger - not re-recorded.")
     for t in v["trail"]:
         lines.append("    round " + str(t["round"]) + "  sig=" + t["sig"] +
-                     "  sha=" + (t["sha"] or "-") + "  " +
-                     ("PROGRESS" if t["progress"] else "no progress") + ": " + t["why"])
+                     "  sha=" + (t["sha"] or "-") +
+                     (("  ob1=" + (t["ob1"] or "-")) if "ob1" in t else "") + "  " +
+                     # An UNSCORED round is neither: "no progress" on a round the detector did
+                     # not score read as a verdict it never reached (harness-ob1 round 2, X8).
+                     ("PROGRESS" if t["progress"] else
+                      ("UNSCORED" if t.get("scored") is False else "no progress")) + ": " + t["why"])
     return "\n".join(lines)
 
 
