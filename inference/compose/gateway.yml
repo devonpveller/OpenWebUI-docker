@@ -207,6 +207,10 @@ services:
       - GENERIC_ROLE_MAPPINGS_GROUP_CLAIM
       - GENERIC_ROLE_MAPPINGS_DEFAULT_ROLE
       - PROXY_BASE_URL
+    # Authentik reached directly on the LAN (past the Cloudflare login) for the
+    # server-side token/userinfo calls. Host and IP live in inference/.env.
+    extra_hosts:
+      - "${LITELLM_UI_AUTH_HOST:-auth.invalid}:${LITELLM_UI_AUTH_HOST_IP:-127.0.0.1}"
     depends_on:
       llm-gateway-db:
         condition: service_healthy
