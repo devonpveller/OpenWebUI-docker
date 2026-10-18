@@ -58,6 +58,11 @@
 #   - openbrain-idea-refinery  running (Idea Refinery drain; profile-gated, liveness only)
 #   - openbrain-pantry      /health {"ok":true,"db":true} via docker exec (NO host port);
 #                           profile-gated 'pantry', OFF by default: ABSENT is a skip, never a fault
+#   - openbrain-intake      /healthz {"ok":true,"db":true,"judge_route":true} via docker exec (NO
+#                           host port; db goes through openbrain-intake-dbrelay, the judge route
+#                           through openbrain-intake-llmrelay); profile-gated 'intake'
+#                           (security-hardening-2026-10 I5), OFF by default: ABSENT is a skip;
+#                           both relays are checked for liveness beside it
 #   - research_jobs         status='error' rows in the last 24 h -> WARN naming count +
 #                           newest id + left(error,80); none -> OK. Queried with
 #                           `docker exec <db> psql -U postgres` over the container's
@@ -699,6 +704,46 @@ if ($pantryState -eq 'absent') {
   }
 } else {
   Confirm-ObContainer 'openbrain-pantry' | Out-Null
+}
+
+# ---- 8. The content screen (profile-gated 'intake'; security-hardening-2026-10 I5) --
+# OFF by default: openbrain-intake and its two relays exist only after the operator's gated
+# deploy + `stack.py enable intake`, so ABSENT is a quiet skip and the stack-health line does
+# not change on a host that never turned it on. When present: no host port (internal
+# intake-net ONLY), so /healthz is read INSIDE the container with python; it is ok only when a
+# screening worker is serving AND the database answers through openbrain-intake-dbrelay AND
+# the judge route (openbrain-intake-llmrelay) accepts a connection. Both relays are confirmed
+# running. REPAIR (intake-i5 attempt 1 F-T8: a relay can be running but stuck) restarts BOTH
+# relays whatever their state, then the service (its workers re-load the classifier: ~20-60 s
+# before /healthz is ok again).
+$intakeProbe = "import json,sys,urllib.request; j = json.load(urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)); sys.exit(0 if j.get('ok') and j.get('db') and j.get('judge_route') else 1)"
+$intakeState = Get-CState 'openbrain-intake'
+if ($intakeState -eq 'absent') {
+  if (-not $Quiet) { Write-Ob 'openbrain-intake' ok 'not deployed (profile intake is off) -- skipped' }
+} elseif ($intakeState -eq 'running') {
+  Confirm-ObContainer 'openbrain-intake-dbrelay' | Out-Null
+  Confirm-ObContainer 'openbrain-intake-llmrelay' | Out-Null
+  docker exec openbrain-intake python -c $intakeProbe 2>$null | Out-Null
+  if ($LASTEXITCODE -eq 0) {
+    Write-Ob 'openbrain-intake' ok '/healthz worker + db ok (in-container; no host port)'
+  } else {
+    Write-Ob 'openbrain-intake' warn 'no serving worker, no DB through the dbrelay, or no judge route: /healthz not ok'
+    if ($Repair) {
+      Write-Ob 'openbrain-intake' fix 'docker restart openbrain-intake-dbrelay openbrain-intake-llmrelay openbrain-intake'
+      docker restart openbrain-intake-dbrelay 2>&1 | Out-Null
+      docker restart openbrain-intake-llmrelay 2>&1 | Out-Null
+      docker restart openbrain-intake 2>&1 | Out-Null
+      Start-Sleep 60
+      docker exec openbrain-intake python -c $intakeProbe 2>$null | Out-Null
+      if ($LASTEXITCODE -eq 0) { Write-Ob 'openbrain-intake' ok '/healthz recovered' }
+      else { Write-Ob 'openbrain-intake' down '/healthz still failing (docker logs openbrain-intake)'; $script:Faults++ }
+    } else {
+      Write-Ob 'openbrain-intake' warn 'run with -Repair to restart'
+      $script:Faults++
+    }
+  }
+} else {
+  Confirm-ObContainer 'openbrain-intake' | Out-Null
 }
 
 Write-Host ""

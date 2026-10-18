@@ -228,6 +228,8 @@ if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0 -or $hcRuleStaged.Coun
             # compose -> json, so the 10 profiled rows would not have FAILED -
             # they would simply have stopped being verified, which is worse than
             # a red check. Passing the profiles keeps all 30 rows covered.
+            # SIX since intake I5 (2026-10-18): `--profile intake` carries rows 32-34,
+            # openbrain-intake, openbrain-intake-dbrelay and openbrain-intake-llmrelay.
             # FIVE since pantry-wire (2026-10-04): `--profile pantry` carries the 31st row,
             # openbrain-pantry. Dropping it would leave that row in the inventory with no
             # render to check it against - the coverage assertion below then fails, which is
@@ -236,7 +238,7 @@ if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0 -or $hcRuleStaged.Coun
                 $renderTargets += @{ P = 'open-brain'; F = 'OB1\docker\docker-compose.yml';
                                      A = @('--profile', 'research', '--profile', 'wiki',
                                            '--profile', 'notebook', '--profile', 'idea-refinery',
-                                           '--profile', 'pantry') }
+                                           '--profile', 'pantry', '--profile', 'intake') }
             }
 
             # A project with inventory rows but NO render target is unverified, and until
