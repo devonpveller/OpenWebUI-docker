@@ -3,8 +3,10 @@
 The anchor adds the contract's MCP tools (OB1 integrations/kubernetes-deployment/
 contract-tools.json, generated from the workbench's OpenAPI document) to ALLOWED_TOOLS.
 What must hold:
-  * every contract tool is allowed, listed and POLICED AS A READ: the forced share=cloud
-    filter reaches the tool whatever the caller sends (the workbench fails closed on it);
+  * every cloud-door contract tool is allowed, listed and POLICED AS A READ: the forced
+    share=cloud filter reaches the tool whatever the caller sends (the workbench fails closed
+    on it) - and (rw-p0-contract2) every one of them carries metadata_filter in its manifest,
+    so the filter survives openbrain-mcp's schema; the unscoped ones are not on this door;
   * the pre-contract READ_TOOLS / WRITE_TOOLS defaults are unchanged;
   * GATEWAY_CONTRACT_TOOLS="" removes them (the ops door sets it);
   * no write is among them (D14: reads only).
@@ -74,11 +76,14 @@ def upstream(monkeypatch):
     return seen
 
 
-def test_every_contract_tool_is_allowed_and_the_old_defaults_are_unchanged():
+def test_the_cloud_contract_tools_are_allowed_and_the_old_defaults_are_unchanged():
     tools = _manifest_tools()
     assert len(tools) >= 20
-    assert tools == gw.CONTRACT_TOOLS, sorted(tools ^ gw.CONTRACT_TOOLS)
-    assert tools <= gw.ALLOWED_TOOLS
+    # rw-p0-contract2: the cloud door carries only the scoped subset (see app.py CONTRACT_TOOLS)
+    assert gw.CONTRACT_TOOLS <= tools, sorted(gw.CONTRACT_TOOLS - tools)
+    assert len(gw.CONTRACT_TOOLS) >= 15
+    assert gw.CONTRACT_TOOLS <= gw.ALLOWED_TOOLS
+    assert not ((tools - gw.CONTRACT_TOOLS) & gw.ALLOWED_TOOLS)
     assert gw.READ_TOOLS == {"search", "fetch", "search_thoughts", "list_thoughts"}
     assert gw.WRITE_TOOLS == {"capture_thought", "ingest_url", "ingest_urls"}
     assert not (gw.CONTRACT_TOOLS & gw.WRITE_TOOLS)
@@ -89,7 +94,9 @@ def test_tools_list_advertises_the_contract_tools_and_still_hides_the_rest(upstr
                                 headers=AUTH)
     assert r.status_code == 200
     names = {t["name"] for t in r.json()["result"]["tools"]}
-    assert _manifest_tools() <= names
+    assert gw.CONTRACT_TOOLS <= names
+    # the unscoped contract tools are local-MCP only: the upstream lists them, the door does not
+    assert not ((_manifest_tools() - gw.CONTRACT_TOOLS) & names), sorted((_manifest_tools() - gw.CONTRACT_TOOLS) & names)
     assert "thought_stats" not in names and "agent_memory_recall" not in names
 
 
@@ -123,3 +130,31 @@ def test_no_contract_tool_is_a_write():
     for t in manifest:
         assert t["operationId"] not in {"suppress", "sever", "erase", "admission", "liftTombstone", "setHidden",
                                          "addUserSource", "removeUserSource", "writeSetting", "steer"}, t["tool"]
+
+
+# rw-p0-contract2 (reviewer reject of rw-p0-contract): labelling a tool a filtered read does not
+# make it filtered. openbrain-mcp registers each contract tool with the input schema of its
+# manifest entry, and the MCP SDK drops every argument that schema does not name - so a tool
+# without metadata_filter loses the forced share=cloud filter before the workbench sees it.
+# Every tool the cloud door exposes by default must therefore carry metadata_filter in its
+# manifest input AND forward it as a JSON query parameter (json_params), where the workbench
+# route reads it and fails closed.
+def _manifest_by_tool():
+    if not _MANIFEST.exists():
+        pytest.skip("OB1 submodule not checked out")
+    return {t["tool"]: t for t in json.loads(_MANIFEST.read_text(encoding="utf-8"))}
+
+
+def test_every_cloud_door_contract_tool_carries_metadata_filter():
+    by = _manifest_by_tool()
+    missing = sorted(n for n in gw.CONTRACT_TOOLS
+                     if n not in by
+                     or "metadata_filter" not in by[n]["input"]["properties"]
+                     or "metadata_filter" not in by[n]["json_params"])
+    assert missing == [], f"cloud-door contract tools that drop the forced filter: {missing}"
+
+
+def test_dependence_and_tombstone_stay_on_the_cloud_door_as_scoped_reads():
+    # the decision for these two is (a) scope them, not (b) drop them: pin it
+    assert {"contract_dependence", "contract_tombstone"} <= gw.CONTRACT_TOOLS
+    assert {"contract_dependence", "contract_tombstone"} <= gw.FILTERED_READ_TOOLS
