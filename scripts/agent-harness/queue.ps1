@@ -49,6 +49,7 @@
 #   .\queue.ps1 -AmendAnchor -Id mem-readme -By alice -Anchor <path> -Reason "..."
 #     (the world turned out different; sends the item BACK to the developer - see the handler)
 #   .\queue.ps1 -Submit -Id mem-readme -Branch work/mem-readme -Developer wt-mem-readme -TestPlan <path>
+#     [-Ob1Branch work/<id>]   (an item whose work lives in the OB1 submodule - see "OB1-only items")
 #   .\queue.ps1 -List
 #   .\queue.ps1 -Claim -Id mem-readme -Role tester -By wt-tester-1
 #   .\queue.ps1 -Pass  -Id mem-readme -By wt-tester-1 -Evidence <path> -PlanAdequate
@@ -139,6 +140,9 @@ param(
     # `param([string]$Profile)` sees "" inside, not the profile path. The name also reads
     # better, since what it selects is which RUNNER each role executes on.
     [string]$RunnerProfile = "",
+    # -Submit / -Resubmit: the OB1 branch this item's work lives on (harness-ob1). Recorded once
+    # and kept; see "OB1-only items" below.
+    [string]$Ob1Branch = "",
     [switch]$PlanAdequate,
     [switch]$PlanInadequate,
     # The reviewer's forced verdict. Renamed from -FitsAnchor/-MissesAnchor on 2026-08-29
@@ -624,19 +628,38 @@ function Get-AdviceDeltaLines($item, [int]$attempt) {
     # --raw beside --numstat (attempt 3): a SUBMODULE bump (gitlink, mode 160000) numstats as
     # "1 1" - a 2-line "small diff" for what may be any amount of moved code. A gitlink change,
     # like a binary one, is UNKNOWN. --raw rows start with ':' and carry both modes.
+    # AN OB1 ITEM (harness-ob1) counts the OB1 diff between the OB1 commit the last verdict
+    # tested and the one this round will test, and its OB1 gitlink row is then MEASURED rather
+    # than unknown. Any other item keeps the gitlink-is-unknown rule above, unchanged.
+    $isOb1 = Test-Ob1Item $item
     $stat = @(Invoke-GitCapture @("diff", "--raw", "--numstat", [string]$prev.sha, [string]$item.branch))
     if ($LASTEXITCODE -ne 0) { return $null }
+    $linkPaths = @()
     $n = 0
     foreach ($row in $stat) {
         if ("$row".StartsWith(":")) {
             $modes = ("$row".Substring(1) -split " ")
-            if (($modes.Count -ge 2) -and (($modes[0] -eq "160000") -or ($modes[1] -eq "160000"))) { return $null }
+            if (($modes.Count -ge 2) -and (($modes[0] -eq "160000") -or ($modes[1] -eq "160000"))) {
+                $rawPath = @("$row" -split "`t")[-1]
+                if ($isOb1 -and $rawPath -eq "OB1") { $linkPaths += $rawPath; continue }
+                return $null
+            }
             continue
         }
         $cols = "$row" -split "`t"
         if ($cols.Count -lt 3) { continue }
+        if ($linkPaths -contains $cols[2]) { continue }
         if ($cols[0] -eq "-" -or $cols[1] -eq "-") { return $null }
         $n += [long]$cols[0] + [long]$cols[1]
+    }
+    if ($isOb1) {
+        $prevOb1 = if (($prev.PSObject.Properties.Name -contains "ob1_sha") -and $prev.ob1_sha) { [string]$prev.ob1_sha } else { Get-GitlinkAt ([string]$prev.sha) }
+        $tipNow = (Invoke-GitCapture @("rev-parse", "--verify", "--quiet", ([string]$item.branch + "^{commit}")) | Select-Object -First 1)
+        if ($LASTEXITCODE -ne 0 -or -not $tipNow) { return $null }
+        $curOb1 = (Get-Ob1Round $item ([string]$tipNow).Trim()).sha
+        $o = Get-Ob1DeltaLines $prevOb1 $curOb1 $item
+        if ($null -eq $o) { return $null }
+        $n += $o
     }
     return $n
 }
@@ -885,6 +908,233 @@ function Find-Ob1CloneHolding($item, [string[]]$Needed) {
         if ($all) { return $c }
     }
     return ""
+}
+
+# --- OB1-only items (harness-ob1, 2026-10-18) ------------------------------------------
+#
+# WHY. Every measurement here read the ai-stack branch only, and an item whose change lives
+# in the OB1 submodule moves no ai-stack code (intake-i1..i4). Three things broke on it:
+# the stall detector logged a real OB1 step as "the failure changed but the code did not"
+# (intake-i1: OB1 a379c13 -> e739d0f, ai-stack 79ab80e3 both rounds); the tier advisory
+# measured "0 lines changed" for a ~400-line OB1 change; and -Merged could not record the
+# landing - a lone gitlink bump is not a merge (intake-i2), and a --no-ff merge of a bump
+# branch has the tested sha as its FIRST parent when the item's ai-stack sha was simply
+# development's tip (intake-i3). Journal: notes/harness-stall-submodule-sha-2026-10-15.md.
+#
+# WHAT MAKES AN ITEM AN OB1 ITEM is decided at -Submit and RECORDED, never re-guessed: the
+# developer names an OB1 branch (-Ob1Branch), or the submitted ai-stack commit moves the
+# OB1 gitlink against its fork point on the line. Such an item carries `ob1_gitlink` (the
+# gitlink at the submitted ai-stack commit), `ob1_branch` and `ob1_branch_sha`, each verdict
+# row carries `ob1_sha` (the OB1 commit that round tested) and `ob1_gitlink`, and -Pass sets
+# `tested_ob1_sha`. An item with none of these is measured exactly as before - no field,
+# no line of output and no refusal changes for it.
+#
+# THE OB1 COMMIT A ROUND TESTED is the named OB1 branch's tip when one is named (that is
+# where the work is, gitlink bumped or not), else the gitlink at the tested ai-stack commit.
+
+function Get-ItemText($item, [string]$name) {
+    # A string field of an item read back from JSON or still an [ordered] dictionary; "" when absent.
+    if ($item -is [System.Collections.IDictionary]) {
+        if ($item.Contains($name) -and $null -ne $item[$name]) { return ([string]$item[$name]).Trim() }
+        return ""
+    }
+    if (($item.PSObject.Properties.Name -contains $name) -and $null -ne $item.$name) { return ([string]$item.$name).Trim() }
+    return ""
+}
+
+function Set-ItemText($item, [string]$name, $value) {
+    # Set-Field for both shapes: an [ordered] dictionary (a new item) serialises its KEYS, and a
+    # note property added to one would be silently dropped by ConvertTo-Json.
+    if ($item -is [System.Collections.IDictionary]) { $item[$name] = $value } else { Set-Field $item $name $value }
+}
+
+function Test-Ob1Item($item) {
+    if ($null -eq $item) { return $false }
+    if ($item -is [System.Collections.IDictionary]) { return $item.Contains("ob1_gitlink") }
+    return ($item.PSObject.Properties.Name -contains "ob1_gitlink")
+}
+
+function Get-GitlinkAt([string]$Rev) {
+    # The OB1 gitlink recorded in commit $Rev of THIS repository, or "" (no such commit, no OB1
+    # entry, or an OB1 entry that is not a submodule). ls-tree, not `rev-parse <rev>:OB1`: the
+    # latter answers a TREE oid as readily as a gitlink, and only mode 160000 is a pin.
+    if (-not $Rev) { return "" }
+    $row = (Invoke-GitCapture @("ls-tree", $Rev, "--", "OB1") | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0 -or -not $row) { return "" }
+    if (([string]$row) -match '^160000 commit ([0-9a-f]{40})\tOB1$') { return $matches[1] }
+    return ""
+}
+
+function Get-CloneRefSha([string]$Clone, [string]$Ref) {
+    $o = (Invoke-GitCapture @("-C", $Clone, "rev-parse", "--verify", "--quiet", ($Ref + "^{commit}")) | Select-Object -First 1)
+    if ($LASTEXITCODE -eq 0 -and $o -and (([string]$o).Trim() -match '^[0-9a-f]{40}$')) { return ([string]$o).Trim().ToLower() }
+    return ""
+}
+
+$script:Ob1Fetched = @{}
+function Invoke-Ob1Fetch([string]$Clone, [string]$Name) {
+    # Refresh ONE remote-tracking ref, once per run per clone. $true when the fetch succeeded.
+    $k = "$Clone|$Name"
+    if ($script:Ob1Fetched.ContainsKey($k)) { return $script:Ob1Fetched[$k] }
+    $prevPrompt = $env:GIT_TERMINAL_PROMPT
+    $env:GIT_TERMINAL_PROMPT = "0"
+    try { [void](Invoke-GitCapture @("-C", $Clone, "fetch", "--quiet", "--no-tags", "origin", ("+refs/heads/{0}:refs/remotes/origin/{0}" -f $Name))) }
+    finally { $env:GIT_TERMINAL_PROMPT = $prevPrompt }
+    $script:Ob1Fetched[$k] = ($LASTEXITCODE -eq 0)
+    return $script:Ob1Fetched[$k]
+}
+
+function Resolve-Ob1BranchTip([string]$Developer, [string]$Name) {
+    # The commit an OB1 branch names: @{ sha; where }, or $null when no clone answers honestly.
+    # The developer's worktree OB1 is asked FIRST (Get-Ob1CloneCandidates orders it so), then the
+    # main checkout's, then the one beside this checkout. In each: the LOCAL branch; else origin's -
+    # but a remote-tracking ref is only as fresh as its last fetch, so it is fetched first, and one
+    # that cannot be fetched is NOT used (round 2, X4b: a stale origin/ ref in the developer's clone
+    # read as "OB1 did not move" while the real branch had). `where` names the clone and the ref,
+    # and every caller prints it - an answer from the main checkout is never silent (X4a).
+    if (-not $Name) { return $null }
+    $registry = Get-WorktreeRegistry
+    $devClone = ""
+    $dev = Normalize-Id $Developer
+    if ($dev -and $registry -and ($registry.PSObject.Properties.Name -contains $dev)) {
+        $row = $registry.$dev
+        if ($row -and ($row.PSObject.Properties.Name -contains "path") -and $row.path) { $devClone = Join-Path ([string]$row.path) "OB1" }
+    }
+    $probe = [pscustomobject]@{ developer = $Developer }
+    foreach ($c in @(Get-Ob1CloneCandidates $probe $registry)) {
+        $label = if ($devClone -and ($c -eq $devClone)) { "the developer's worktree OB1" } else { "OB1 clone" }
+        $local = Get-CloneRefSha $c "refs/heads/$Name"
+        if ($local) { return @{ sha = $local; where = ("{0} {1} (local branch)" -f $label, $c) } }
+        if (Get-CloneRefSha $c "refs/remotes/origin/$Name") {
+            if (Invoke-Ob1Fetch $c $Name) {
+                $s = Get-CloneRefSha $c "refs/remotes/origin/$Name"
+                if ($s) { return @{ sha = $s; where = ("{0} {1} (origin/{2}, just fetched)" -f $label, $c, $Name) } }
+            }
+            Write-Host ("  NOTE: {0} {1} holds origin/{2} but it could not be fetched - a stale remote-tracking ref is not used." -f $label, $c, $Name) -ForegroundColor Yellow
+        }
+    }
+    return $null
+}
+
+function Test-MovesGitlink([string]$Sha, [string]$Line) {
+    # Does ai-stack commit $Sha pin a different OB1 than its fork point on the line?
+    $gitlink = Get-GitlinkAt $Sha
+    if (-not $gitlink -or -not $Line) { return $false }
+    $mb = (Invoke-GitCapture @("merge-base", $Line, $Sha) | Select-Object -First 1)
+    $forkLink = if ($LASTEXITCODE -eq 0 -and $mb) { Get-GitlinkAt ([string]$mb).Trim() } else { "" }
+    return ($gitlink -ne $forkLink)
+}
+
+function Get-Ob1Round($item, [string]$AiSha) {
+    # What OB1 a verdict at ai-stack commit $AiSha is about: @{ sha; gitlink; branch; tip; where }.
+    # `sha` (the stall detector's "did OB1 move") is the named branch tip, else the gitlink; it is
+    # "" when the item names an OB1 branch no clone resolves.
+    $gitlink = Get-GitlinkAt $AiSha
+    $branch = Get-ItemText $item "ob1_branch"
+    $tip = ""; $where = ""
+    if ($branch) {
+        $res = Resolve-Ob1BranchTip (Get-ItemText $item "developer") $branch
+        if ($res) { $tip = $res.sha; $where = $res.where }
+    }
+    $sha = if ($branch) { $tip } else { $gitlink }
+    return @{ sha = $sha; gitlink = $gitlink; branch = $branch; tip = $tip; where = $where }
+}
+
+function Get-Ob1TestTarget($item, [string]$AiSha, $round) {
+    # THE OB1 COMMIT A TESTER HAS (round 2): the gitlink of the ai-stack commit under test - what a
+    # worktree's `submodule update` checks out, and what that commit would land. ONE narrow
+    # exception, the intake-i3 shape: the item names an OB1 branch and the commit under test does
+    # NOT move the gitlink at all, so there is no pin of the work to test and the tester is told to
+    # test the branch tip (-Claim prints it; -Pass refuses if it moved). `from` records which.
+    if ($round.branch -and $round.tip -and -not (Test-MovesGitlink $AiSha (Get-ItemText $item "line"))) {
+        return @{ sha = $round.tip; from = "branch-tip" }
+    }
+    return @{ sha = $round.gitlink; from = "gitlink" }
+}
+
+function Update-Ob1Classification($item, [string]$AiSha) {
+    # An item that was not an OB1 item at -Submit but whose commit under test now moves the
+    # gitlink (a bump committed after -Submit, X3d) becomes one HERE, at -Claim / -Pass / -Fail.
+    # Any other item: nothing written, nothing printed.
+    if (Test-Ob1Item $item) { return }
+    if (-not (Test-MovesGitlink $AiSha (Get-ItemText $item "line"))) { return }
+    Set-ItemText $item "ob1_gitlink" (Get-GitlinkAt $AiSha)
+    Set-ItemText $item "ob1_branch" ""
+    Set-ItemText $item "ob1_branch_sha" ""
+    Write-Host ("  OB1 item: {0} moves the OB1 gitlink, so it is measured as an OB1 item from here on." -f $AiSha.Substring(0, 8)) -ForegroundColor Yellow
+}
+
+function Clear-Ob1Tested($item) {
+    foreach ($f in @("tested_ob1_sha", "tested_ob1_from", "ob1_claim_tip")) {
+        if ($item.PSObject.Properties.Name -contains $f) { $item.$f = "" }
+    }
+}
+
+function Set-Ob1Submission($item, [string]$AiSha, [string]$Line, [string]$Named) {
+    # -Submit / -Resubmit: record what makes this an OB1 item (see the section comment).
+    # Returns the round facts for an OB1 item, $null for any other - which is then untouched.
+    $branch = if ($Named) { $Named.Trim() } else { Get-ItemText $item "ob1_branch" }
+    $gitlink = Get-GitlinkAt $AiSha
+    $isOb1 = [bool]$branch -or (Test-Ob1Item $item)
+    if (-not $isOb1 -and (Test-MovesGitlink $AiSha $Line)) { $isOb1 = $true }
+    if (-not $isOb1) { return $null }
+    $tip = ""; $where = ""
+    if ($branch) {
+        $res = Resolve-Ob1BranchTip (Get-ItemText $item "developer") $branch
+        if (-not $res) {
+            Die (("OB1 branch '{0}' resolves in no OB1 clone this tool can reach (the developer's worktree OB1, the " +
+                  "main checkout's OB1, the OB1 beside this checkout) - as a local branch, or as origin/{0} that could " +
+                  "be fetched. Push it to OB1's remote, or name the branch the work is on. Nothing has been recorded.") -f $branch)
+        }
+        $tip = $res.sha; $where = $res.where
+    }
+    Set-ItemText $item "ob1_gitlink" $gitlink
+    Set-ItemText $item "ob1_branch" $branch
+    Set-ItemText $item "ob1_branch_sha" $tip
+    return @{ sha = $(if ($branch) { $tip } else { $gitlink }); gitlink = $gitlink; branch = $branch; tip = $tip; where = $where
+              bumps = (Test-MovesGitlink $AiSha $Line) }
+}
+
+function Write-Ob1Facts($facts, [string]$AiSha) {
+    if ($null -eq $facts) { return }
+    $g7 = if ($facts.gitlink) { $facts.gitlink.Substring(0, 7) } else { "(none)" }
+    if ($facts.branch) {
+        Write-Host ("  OB1 item: OB1 branch {0} at {1} (resolved in {2}); the OB1 gitlink at {3} is {4}." -f $facts.branch, $facts.tip.Substring(0, 7), $facts.where, $AiSha.Substring(0, 8), $g7)
+        if (($facts.tip -ne $facts.gitlink) -and $facts.bumps) {
+            Write-Host "  NOTE: the gitlink does not pin the OB1 branch tip. A tester tests what the commit PINS, and a pass" -ForegroundColor Yellow
+            Write-Host ("        lands that pin, not {0}: commit the bump on the work branch (OB1 pushed first) before the round you expect to pass." -f $facts.tip.Substring(0, 7)) -ForegroundColor Yellow
+        } elseif ($facts.tip -ne $facts.gitlink) {
+            Write-Host ("  NOTE: the work branch does not bump the gitlink, so the tester tests the OB1 branch tip {0} itself and the" -f $facts.tip.Substring(0, 7)) -ForegroundColor Yellow
+            Write-Host "        land branch may differ from the tested commit ONLY by the bump (MERGE-PROTOCOL Step 5). The documented flow is to bump on work/<id>." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host ("  OB1 item: the OB1 gitlink at {0} is {1}." -f $AiSha.Substring(0, 8), $g7)
+    }
+}
+
+function Get-Ob1DeltaLines([string]$From, [string]$To, $item) {
+    # Lines changed in OB1 between two OB1 commits, by the same rule as the ai-stack count
+    # (binary or a nested gitlink = UNKNOWN). 0 when they are the same commit; $null when a
+    # side is unknown or no reachable clone holds both.
+    if (-not $From -or -not $To) { return $null }
+    if ($From -eq $To) { return 0 }
+    $clone = Find-Ob1CloneHolding $item @($From, $To)
+    if (-not $clone) { return $null }
+    $stat = @(Invoke-GitCapture @("-C", $clone, "diff", "--raw", "--numstat", $From, $To))
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $n = 0
+    foreach ($row in $stat) {
+        if ("$row".StartsWith(":")) {
+            $modes = ("$row".Substring(1) -split " ")
+            if (($modes.Count -ge 2) -and (($modes[0] -eq "160000") -or ($modes[1] -eq "160000"))) { return $null }
+            continue
+        }
+        $cols = "$row" -split "`t"
+        if ($cols.Count -lt 3) { continue }
+        if ($cols[0] -eq "-" -or $cols[1] -eq "-") { return $null }
+        $n += [long]$cols[0] + [long]$cols[1]
+    }
+    return $n
 }
 
 function Get-DockerignoreKeep([string]$Sha, [string]$Ctx, [string]$DfPath) {
@@ -1720,6 +1970,7 @@ if ($AmendAnchor) {
     foreach ($r in $RoleRules.Keys) { Drop-Claim $Id $r }
     Set-Field $item "state" "anchor-confirmed"
     Set-Field $item "tested_at_sha" ""
+    Clear-Ob1Tested $item
     Add-History $item "anchor AMENDED (was '$was'): $Reason" $By
     Write-Item $item
     Write-Host ("Anchor AMENDED for '{0}' by {1}." -f $Id, $By) -ForegroundColor Yellow
@@ -1942,6 +2193,8 @@ if ($Submit) {
             results = @(); history = @()
         }
     }
+    # An OB1 item records its OB1 facts (harness-ob1); any other item gets no new field.
+    $ob1Facts = Set-Ob1Submission $item $sha.Trim() $line $Ob1Branch
     if ($correcting) {
         # Say WHAT was corrected, not just that something was: the whole point of allowing a
         # second -Submit is that the first one recorded the wrong thing, and a history line
@@ -1958,6 +2211,7 @@ if ($Submit) {
     Write-Host ("  Plan copied to {0}" -f $planDest)
     Write-Host ("  {0} case(s) the tester must execute: {1}  (sha256 {2})" -f @($planCaseIds).Count, (@($planCaseIds) -join ", "), $planHash.Substring(0, 12))
     Write-Host "  A tester who is NOT the developer must claim and execute the plan."
+    Write-Ob1Facts $ob1Facts $sha.Trim()
     if (-not $item.line_mergeable) {
         Write-Host ("  NOTE: '{0}' is checked out in the main checkout, so the reviewer will have to" -f $line) -ForegroundColor Yellow
         Write-Host "        hand the merge back to the operator. Known now rather than at landing time." -ForegroundColor Yellow
@@ -2007,6 +2261,23 @@ if ($Claim) {
         Write-Host ("Taking over an EXPIRED {0} claim from {1}." -f $Role, $held.by) -ForegroundColor Yellow
         Remove-Item $c -Force
     }
+    # WHICH OB1 COMMIT TO TEST (round 2). For an OB1 item the tester is told the OB1 commit they
+    # are testing, and the branch tip at this moment is recorded: -Pass refuses if it moves under
+    # the test. Computed BEFORE the claim file exists, so nothing here can leak a claim. Any other
+    # item (no gitlink move, no named OB1 branch): nothing computed is written or printed.
+    $claimOb1 = $null
+    if ($Role -eq "tester") {
+        $claimHead = (Invoke-GitCapture @("rev-parse", "--verify", "--quiet", ([string]$item.branch + "^{commit}")) | Select-Object -First 1)
+        if ($LASTEXITCODE -eq 0 -and $claimHead) {
+            $claimHead = ([string]$claimHead).Trim()
+            Update-Ob1Classification $item $claimHead
+            if (Test-Ob1Item $item) {
+                $cr = Get-Ob1Round $item $claimHead
+                $claimOb1 = @{ round = $cr; target = (Get-Ob1TestTarget $item $claimHead $cr); head = $claimHead }
+                if ($cr.branch) { Set-Field $item "ob1_claim_tip" $cr.tip }
+            }
+        }
+    }
     $payload = ([ordered]@{ by = $By; at = Now; ttl_min = $ClaimTtlMin } | ConvertTo-Json -Depth 3)
     try {
         $fs = [System.IO.File]::Open($c, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
@@ -2042,6 +2313,20 @@ if ($Claim) {
         # reading it as one is how a tester ends up re-testing an already-failed commit.
         $tip = (Invoke-GitCapture @("rev-parse", "--short", $item.branch) | Select-Object -First 1)
         Write-Host ("  Test {0} at its CURRENT tip: {1} (attempt {2})" -f $item.branch, $tip, $item.attempt)
+        if ($claimOb1) {
+            $ct = $claimOb1.target; $cr = $claimOb1.round
+            if (-not $ct.sha) {
+                Write-Host ("  OB1 item: OB1 branch '{0}' resolves in no reachable clone - -Pass will refuse until it does." -f $cr.branch) -ForegroundColor Yellow
+            } elseif ($ct.from -eq "gitlink") {
+                Write-Host ("  OB1 item: test with OB1 at {0} - the commit {1} PINS (git -C <your-wt> submodule update OB1)." -f $ct.sha.Substring(0, 8), $claimOb1.head.Substring(0, 8)) -ForegroundColor Cyan
+                if ($cr.branch -and $cr.tip -and ($cr.tip -ne $ct.sha)) {
+                    Write-Host ("        The OB1 branch {0} is at {1} ({2}), which this commit does NOT pin: a pass is for {3}." -f $cr.branch, $cr.tip.Substring(0, 8), $cr.where, $ct.sha.Substring(0, 8)) -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host ("  OB1 item: test with OB1 at {0} - the tip of OB1 branch {1} ({2}); {3} does not bump the gitlink." -f $ct.sha.Substring(0, 8), $cr.branch, $cr.where, $claimOb1.head.Substring(0, 8)) -ForegroundColor Cyan
+                Write-Host "        If that branch moves before your verdict, -Pass refuses." -ForegroundColor Yellow
+            }
+        }
         Write-Host ("  Execute the plan: {0}" -f $item.test_plan)
         Write-Host "  Touching a plane's RUNNING services? Hold its lease first (lease.ps1)."
     } else {
@@ -2195,7 +2480,39 @@ if ($Pass -or $Fail) {
         Die ("branch '$($item.branch)' not found - cannot record a verdict against a branch " +
              "that does not resolve. Recreate it, or the verdict names a commit nobody can read.")
     }
-    $item.results += [ordered]@{
+    # AN OB1 ITEM'S ROUND names the OB1 commit it tested too (harness-ob1): the stall detector
+    # reads it as part of "did the code move", and -Merged checks the landing against it. The
+    # same refusal as a missing branch: a verdict against an OB1 branch that does not resolve
+    # names an OB1 commit nobody can read.
+    #
+    # WHAT WAS TESTED (round 2). `tested_ob1_sha` is the OB1 commit the tester HAD: the gitlink of
+    # the tested ai-stack commit, except in the intake-i3 shape (Get-Ob1TestTarget). And a -Pass is
+    # refused when the named OB1 branch moved since -Claim told the tester what to test (or since the
+    # submission, for a claim made before round 2) and the tip is not what the tested commit pins:
+    # whatever was tested, the record can no longer say which (X5a).
+    Update-Ob1Classification $item $headSha.Trim()
+    $ob1Round = $null; $ob1Target = $null
+    if (Test-Ob1Item $item) {
+        $ob1Round = Get-Ob1Round $item $headSha.Trim()
+        if (-not $ob1Round.sha) {
+            Die (("OB1 branch '{0}' resolves in no OB1 clone this tool can reach - cannot record a verdict against an " +
+                  "OB1 commit nobody can read. Nothing has been recorded; you still hold the claim.") -f $ob1Round.branch)
+        }
+        if ($ob1Round.branch) { Write-Host ("  OB1 branch {0} at {1} (resolved in {2})." -f $ob1Round.branch, $ob1Round.tip.Substring(0, 8), $ob1Round.where) }
+        $ob1Target = Get-Ob1TestTarget $item $headSha.Trim() $ob1Round
+        if ($Pass -and $ob1Round.branch) {
+            $ob1Expected = Get-ItemText $item "ob1_claim_tip"
+            if (-not $ob1Expected) { $ob1Expected = Get-ItemText $item "ob1_branch_sha" }
+            if (($ob1Round.tip -ne $ob1Expected) -and ($ob1Round.tip -ne $ob1Round.gitlink)) {
+                Die (("-Pass on '{0}' is REFUSED: OB1 branch {1} moved under the test - it was {2} when the test began and is {3} " +
+                      "now, and the tested commit {4} pins {5}. The record could not say which OB1 was tested. The developer " +
+                      "re-submits (re-bumping the gitlink if {3} is meant to land), and the next round tests that. Nothing has " +
+                      "been recorded; you still hold the claim.") -f $Id, $ob1Round.branch, $(if ($ob1Expected) { $ob1Expected.Substring(0, 8) } else { "(unrecorded)" }),
+                     $ob1Round.tip.Substring(0, 8), $headSha.Trim().Substring(0, 8), $(if ($ob1Round.gitlink) { $ob1Round.gitlink.Substring(0, 8) } else { "(none)" }))
+            }
+        }
+    }
+    $row = [ordered]@{
         at = Now; by = $By; verdict = $(if ($Pass) { "pass" } else { "fail" })
         attempt = [int]$item.attempt
         sha = $headSha.Trim(); evidence = $evidenceText; reason = $Reason
@@ -2209,6 +2526,8 @@ if ($Pass -or $Fail) {
         # case failed rather than one word for the whole item.
         cases = @($caseRows)
     }
+    if ($ob1Round) { $row["ob1_sha"] = $ob1Round.sha; $row["ob1_gitlink"] = $ob1Round.gitlink }
+    $item.results += $row
     if ($Pass) {
         Write-Host ("  {0} case(s) checked against the plan, every one PASS." -f @($caseRows).Count)
     } elseif (@($caseRows).Count -gt 0) {
@@ -2224,8 +2543,16 @@ if ($Pass -or $Fail) {
         # last cheap moment to change course, so the operator releases it, not the tester.
         $item.state = "test-passed"
         $item.tested_at_sha = $headSha.Trim()
+        if ($ob1Target) { Set-Field $item "tested_ob1_sha" $ob1Target.sha; Set-Field $item "tested_ob1_from" $ob1Target.from }
         Add-History $item "tests PASSED (attempt $($item.attempt))" $By
         Write-Host ("'{0}' PASSED at {1} on attempt {2}." -f $Id, $item.tested_at_sha.Substring(0, 8), $item.attempt) -ForegroundColor Green
+        if ($ob1Target) {
+            $why = if ($ob1Target.from -eq "gitlink") { "the OB1 the tested commit pins" } else { "the OB1 branch tip - the tested commit does not bump the gitlink (intake-i3 shape)" }
+            Write-Host ("  OB1 item: tested OB1 {0} ({1}). -Merged accepts only a merge whose OB1 gitlink is that commit." -f $ob1Target.sha.Substring(0, 8), $why)
+            if ($ob1Round.branch -and ($ob1Round.tip -ne $ob1Target.sha)) {
+                Write-Host ("  NOTE: OB1 branch {0} is at {1}, which was NOT tested and will not land with this pass." -f $ob1Round.branch, $ob1Round.tip.Substring(0, 8)) -ForegroundColor Yellow
+            }
+        }
         $gd = Resolve-GateOrDie "pre_review"
         if ($gd.passer -eq "auto") {
             # THE PRE-REVIEW GATE, unattended. The tester's verdict is already written
@@ -2249,6 +2576,7 @@ if ($Pass -or $Fail) {
         # Stamp the sha on failure too. Without it a resubmit loses which commit the
         # finding was against, and `submitted_sha` gets overwritten by the next attempt.
         $item.tested_at_sha = $headSha.Trim()
+        if ($ob1Target) { Set-Field $item "tested_ob1_sha" $ob1Target.sha; Set-Field $item "tested_ob1_from" $ob1Target.from }
         Add-History $item "tests FAILED (attempt $($item.attempt)): $Reason" $By
         Write-Host ("'{0}' FAILED on attempt {1} - back to {2}, who fixes in the same worktree and runs -Resubmit." -f $Id, $item.attempt, $item.developer) -ForegroundColor Yellow
     }
@@ -2332,12 +2660,57 @@ if ($Merged) {
             Die (("'{0}' is not a merge commit ({1} parent(s)): a fast-forward, cherry-pick or rebase/squash onto the line " +
                   "runs no commit hook, so the gates never saw it. {2}") -f $Sha, ($mgParts.Count - 1), $mgFix) 1
         }
+        # AN OB1 ITEM (harness-ob1): what landed must pin exactly the OB1 commit that was tested.
+        # Checked for every OB1 item, whichever way its ai-stack side reached the merge.
+        $mgOb1Tested = ""
+        if (Test-Ob1Item $item) {
+            $mgOb1Tested = Get-ItemText $item "tested_ob1_sha"
+            if (-not $mgOb1Tested) {
+                Die ("'$Id' is an OB1 item but records no tested_ob1_sha, so there is no OB1 commit to prove this merge pins. " +
+                     "Only a tested item reaches review. Nothing has been recorded.") 1
+            }
+            $mgOb1 = Get-GitlinkAt $Sha
+            if ($mgOb1 -ne $mgOb1Tested) {
+                Die (("'{0}' pins OB1 {1}, but the OB1 commit this item's tests passed at is {2}, so that is not a merge of " +
+                      "this item's tested code. Bump the gitlink to the tested OB1 commit (or send it back to test if OB1 moved). " +
+                      "Nothing has been recorded.") -f $Sha, $(if ($mgOb1) { $mgOb1 } else { "(no gitlink)" }), $mgOb1Tested) 1
+            }
+        }
         # The tested work must be INTRODUCED by this merge: already behind the first parent means
         # it entered the line some other way (a fast-forward) and this merge is of something else.
         [void](Invoke-GitCapture @("merge-base", "--is-ancestor", $item.tested_at_sha, $mgParts[1]))
         if ($LASTEXITCODE -eq 0) {
-            Die ("'$Sha' is a merge commit, but the tested commit '$($item.tested_at_sha)' is already behind its FIRST parent, " +
-                 "so this merge did not introduce the item's work - it reached the line some other way (a fast-forward?). $mgFix") 1
+            # EXCEPT the OB1 half of an OB1-only item in the intake-i3 shape, and ONLY that, narrowly
+            # (round 2): the tester tested the OB1 branch tip because the tested ai-stack commit bumps
+            # nothing (tested_ob1_from = branch-tip - an item whose tested commit carries its own pin
+            # never qualifies, X6f); the first parent did NOT already pin the tested OB1; and the land
+            # branch differs from the tested ai-stack commit ONLY by the gitlink, as does the merge from
+            # its first parent - no untested ai-stack content rides along (X2b). Otherwise the refusal stands.
+            $mgFpOb1 = if ($mgOb1Tested) { Get-GitlinkAt $mgParts[1] } else { "" }
+            $mgI3 = [bool]$mgOb1Tested -and ((Get-ItemText $item "tested_ob1_from") -eq "branch-tip") -and ($mgFpOb1 -ne $mgOb1Tested)
+            $mgWhy = ""
+            if ($mgI3) {
+                $mgLandOk = $false
+                foreach ($mgP in @($mgParts | Select-Object -Skip 2)) {
+                    [void](Invoke-GitCapture @("merge-base", "--is-ancestor", $item.tested_at_sha, $mgP))
+                    if ($LASTEXITCODE -ne 0) { continue }
+                    $mgNames = @(Invoke-GitCapture @("diff", "--no-renames", "--name-only", $item.tested_at_sha, $mgP) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+                    if ($LASTEXITCODE -eq 0 -and $mgNames.Count -eq 1 -and $mgNames[0] -eq "OB1") { $mgLandOk = $true; break }
+                }
+                $mgFpNames = @(Invoke-GitCapture @("diff", "--no-renames", "--name-only", $mgParts[1], $Sha) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+                $mgFpOk = ($LASTEXITCODE -eq 0 -and $mgFpNames.Count -eq 1 -and $mgFpNames[0] -eq "OB1")
+                if (-not ($mgLandOk -and $mgFpOk)) {
+                    $mgI3 = $false
+                    $mgWhy = (" The OB1-only exception does not apply either: the merged branch must differ from the tested commit " +
+                              "ONLY by the OB1 gitlink (cut the land branch FROM the tested commit and commit just the bump), and the " +
+                              "merge must change only OB1 against its first parent.")
+                }
+            }
+            if (-not $mgI3) {
+                Die ("'$Sha' is a merge commit, but the tested commit '$($item.tested_at_sha)' is already behind its FIRST parent, " +
+                     "so this merge did not introduce the item's work - it reached the line some other way (a fast-forward?).$mgWhy $mgFix") 1
+            }
+            Write-Host ("  OB1 item: the tested ai-stack commit was already on the line; this merge introduces the tested OB1 {0} (first parent pinned {1})." -f $mgOb1Tested.Substring(0, 8), $(if ($mgFpOb1) { $mgFpOb1.Substring(0, 8) } else { "(none)" }))
         }
         $mgBehind = $false
         foreach ($mgP in @($mgParts | Select-Object -Skip 2)) {
@@ -2529,6 +2902,7 @@ if ($Resubmit) {
     $item.attempt = [int]$item.attempt + 1
     $item.state = "ready-to-test"
     $item.tested_at_sha = ""
+    Clear-Ob1Tested $item
     # RE-READ THE BRANCH. This used to keep attempt 1's already-failed commit as
     # `submitted_sha`, so a tester who checked it out would test the very commit that
     # failed and re-report the identical finding - and the reviewer's staleness comparison
@@ -2537,6 +2911,9 @@ if ($Resubmit) {
     $newSha = (Invoke-GitCapture @("rev-parse", $item.branch) | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or -not $newSha) { Die "branch '$($item.branch)' not found - cannot re-submit" }
     $item.submitted_sha = $newSha.Trim()
+    # An OB1 item re-records its OB1 facts (and an item whose re-submitted commit now moves the
+    # gitlink becomes one); any other item is untouched (harness-ob1).
+    $ob1Facts = Set-Ob1Submission $item $newSha.Trim() ([string]$item.line) $Ob1Branch
     # AND RE-READ THE PLAN, when one is offered. A failed case very often means the plan
     # missed something - the protocol tells the developer to add the case, and until now
     # there was no mechanism behind that instruction: -Resubmit took no -TestPlan and left
@@ -2557,6 +2934,7 @@ if ($Resubmit) {
     Add-History $item "re-submitted for testing (attempt $($item.attempt))" $By
     Write-Item $item
     Write-Host ("'{0}' re-submitted - attempt {1} at {2}, awaiting a tester." -f $Id, $item.attempt, $item.submitted_sha.Substring(0, 8)) -ForegroundColor Green
+    Write-Ob1Facts $ob1Facts $item.submitted_sha
     if ($TestPlan) { Write-Host ("  Plan REVISED for this attempt -> {0}" -f $item.test_plan) }
     else {
         Write-Host "  Plan unchanged. If the failure showed the plan missed a case, add it and" -ForegroundColor Yellow
@@ -2608,6 +2986,7 @@ if ($Requeue) {
     # a return to test is the same lap by another name, and so is a developer's withdrawal.
     Set-Field $item "attempt" ([int]$item.attempt + 1)
     Set-Field $item "tested_at_sha" ""
+    Clear-Ob1Tested $item
     # AND CARRY THE REVISED PLAN. A stale-pass return is exactly when a case is most likely
     # to be missing - the reviewer is the one who knows what the rebase changed - and until
     # now -Requeue took no -TestPlan at all, so the revision stayed on the reviewer's disk

@@ -42,6 +42,7 @@ Everything else in here is internal and may change without notice.
 | `andon.ps1` | the andon board: evaluate the stop-the-line conditions (`-Evaluate`, `-List`, `-Baseline`) |
 | `drill-dark-factory.ps1` | the executable drill over the andon board, the gate profiles and the audit trail |
 | `verify-model-tiers.ps1` | the executable drill for the ADVISORY model-tier recommendation `queue.ps1` prints (hermetic fixtures; `-Script` points it at another copy) |
+| `verify-ob1-items.ps1` | the executable drill for OB1-only items: stall, tier advisory and `-Merged` with the change in OB1, plus the non-OB1 byte-identity snapshot (hermetic repo pairs; `-AgainstBaseline` for red) |
 | `harness.config.json` | the configuration (see below) |
 | `config.py` | the reader other Python code imports (`bridge.py` does) |
 | `quadrant/` | the runner x target comparison - its own submodule with its own boundary, see [quadrant/MODULE.md](quadrant/MODULE.md). One of the TWO places that actually run a resolved runner - `dispatch.ps1` is the other, and `adapters.py` here calls the same docker-exec transport. Everything else in the module only resolves one. |
