@@ -20,8 +20,10 @@
 #   & scripts\checks\smoke-workbench-routers.ps1 -Compare @('<dir-before>', '<dir-after>')
 #
 # Refused (exit 2): -Capture with -Compare; -Compare with other than two directories; a capture
-# with no -ExecContainer/-BaseUrl and no -Live; the live container (openbrain-workbench) or the
-# live Caddy URL named explicitly without -Live; -Live together with an explicit target. Every
+# with no -ExecContainer/-BaseUrl and no -Live; without -Live, any target that is not PROVABLY
+# disposable (see "THE DISPOSABLE-TARGET CHECK" below: a loopback or fixture-named base URL host,
+# an exec container docker reports as harness-labelled, in no compose project and on no compose
+# or ai-stack_* network); -Live together with an explicit target. Every
 # capture prints its target and writes it to <dir>\_target.txt, so a caller can check where the
 # responses came from.
 #
@@ -47,6 +49,58 @@ $ErrorActionPreference = 'Stop'
 $LiveContainer = 'openbrain-workbench'
 $LiveBaseUrl = 'http://caddy:8446'
 function Refuse([string]$why) { Write-Host "REFUSED: $why"; exit 2 }
+
+# THE DISPOSABLE-TARGET CHECK (a capture without -Live; rw-p0b-purge-door, tester finding T2-2).
+# An allow-list proven against docker, not a list of live names:
+#   1. the base URL is plain http(s) with no user info, and its host is loopback (localhost,
+#      127.0.0.1, ::1 - the exec container itself) or a fixture name (^rwp[0-9a-z]*-..., the
+#      disposable runs' container names); a fixture-named host must pass 2. as a container too;
+#   2. docker inspects the exec container (an id or a name): it carries the harness owner label
+#      (ai-stack.harness.owner), carries NO com.docker.compose.project label (every live plane -
+#      open-brain and the ai-stack planes - is a compose project), and is attached to no network
+#      that is a compose project's or is named ai-stack_* / open-brain*.
+# Docker unreachable, or any inspect failing, is a refusal (fail closed). Returns '' when the
+# target is disposable, else the reason.
+$FixtureHost = '^rwp[0-9a-z]*-[a-z0-9][a-z0-9-]*$'
+$OwnerLabel = 'ai-stack.harness.owner'
+$ComposeLabel = 'com.docker.compose.project'
+function Get-DockerJson([string[]]$dockerArgs) {
+  $ErrorActionPreference = 'Continue'
+  $raw = (& docker @dockerArgs 2>&1 | ForEach-Object { "$_" }) -join "`n"
+  if ($LASTEXITCODE -ne 0) { return @{ ok = $false; err = (($raw -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 1) } }
+  try { return @{ ok = $true; value = ($raw | ConvertFrom-Json) } } catch { return @{ ok = $false; err = "unreadable docker answer: $raw" } }
+}
+function Get-Keys($obj) { if ($null -eq $obj) { return @() }; return @($obj.PSObject.Properties | ForEach-Object { $_.Name }) }
+function Test-DisposableContainer([string]$name) {
+  $l = Get-DockerJson @('inspect', '--type', 'container', '-f', '{{json .Config.Labels}}', $name)
+  if (-not $l.ok) { return "docker cannot inspect container '$name' ($($l.err))" }
+  $labels = Get-Keys $l.value
+  if ($labels -contains $ComposeLabel) { return "container '$name' belongs to compose project '$($l.value.$ComposeLabel)' (a live plane)" }
+  if ($labels -notcontains $OwnerLabel) { return "container '$name' carries no $OwnerLabel label (not a disposable harness container)" }
+  $n = Get-DockerJson @('inspect', '--type', 'container', '-f', '{{json .NetworkSettings.Networks}}', $name)
+  if (-not $n.ok) { return "docker cannot read the networks of '$name' ($($n.err))" }
+  foreach ($net in (Get-Keys $n.value)) {
+    if ($net -match '^(ai-stack_|open-brain)') { return "container '$name' is attached to the live network '$net'" }
+    $nl = Get-DockerJson @('network', 'inspect', '-f', '{{json .Labels}}', $net)
+    if (-not $nl.ok) { return "docker cannot inspect network '$net' of '$name' ($($nl.err))" }
+    if ((Get-Keys $nl.value) -contains $ComposeLabel) { return "container '$name' is attached to network '$net' of compose project '$($nl.value.$ComposeLabel)'" }
+  }
+  return ''
+}
+function Test-DisposableTarget([string]$container, [string]$url) {
+  $u = $null
+  if ($url -match '[\s\\]' -or -not [System.Uri]::TryCreate($url, [System.UriKind]::Absolute, [ref]$u)) { return "base URL '$url' is not a plain absolute URL" }
+  if ($u.Scheme -notin @('http', 'https')) { return "base URL scheme '$($u.Scheme)' is not http(s)" }
+  if ($u.UserInfo) { return "base URL '$url' carries user info" }
+  $h = $u.Host.ToLowerInvariant()
+  $loopback = $h -in @('localhost', '127.0.0.1', '[::1]', '::1')
+  if (-not $loopback) {
+    if ($h -notmatch $FixtureHost) { return "base URL host '$h' is neither loopback nor a fixture name ($FixtureHost)" }
+    $why = Test-DisposableContainer $h
+    if ($why) { return "base URL host: $why" }
+  }
+  return (Test-DisposableContainer $container)
+}
 if ($Capture -and $Compare.Count) { Refuse "-Capture and -Compare together (a '-File ... -Compare a b' call binds b to -Capture; compare in-process with -Compare @(a, b))" }
 if ($Compare.Count -and $Compare.Count -ne 2) { Refuse "-Compare takes exactly two directories, got $($Compare.Count)" }
 if ($Capture) {
@@ -55,7 +109,12 @@ if ($Capture) {
     $ExecContainer = $LiveContainer; $BaseUrl = $LiveBaseUrl
   } else {
     if (-not $ExecContainer -or -not $BaseUrl) { Refuse 'a capture needs -ExecContainer and -BaseUrl (a disposable target), or -Live for the deployed workbench' }
-    if ($ExecContainer -eq $LiveContainer -or $BaseUrl -match '(?i)caddy') { Refuse "the live target ($ExecContainer, $BaseUrl) needs -Live" }
+    # rw-p0b-purge-door (tester finding T2-2): a name blocklist let '-ExecContainer <other name>
+    # -BaseUrl http://openbrain-workbench:8000' through. Without -Live the target must PROVE it is
+    # disposable - by the base URL's host and by what docker says about the exec container -
+    # before anything is created.
+    $why = Test-DisposableTarget $ExecContainer $BaseUrl
+    if ($why) { Refuse "not a disposable target without -Live: $why" }
   }
   Write-Host ("target: container={0} base={1} live={2}" -f $ExecContainer, $BaseUrl, [bool]$Live)
 }
