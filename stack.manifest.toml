@@ -476,6 +476,22 @@ opt_in      = true
 description = "the household pantry / meal-planner HTTP service: openbrain-pantry (no host port; obnet + llm-net); the `pantry` product enables it"
 opt_in      = true
 
+[planes.ob1.profiles.intake]
+# OB1/docker/docker-compose.yml: openbrain-intake + openbrain-intake-dbrelay
+# (security-hardening-2026-10, build item I5; code in OB1/integrations/intake/, fork-owned).
+# The content screen: POST /v1/intake, /v1/stats, /metrics, /healthz on :8000, NO host port.
+# openbrain-intake sits on its own INTERNAL `intake-net` (subnet 10.243.50.0/24, outside
+# 192.168.0.0/16 - incident 2026-10-17) + ai-stack_llm-net (internal), so it has no route out:
+# it reaches only the dbrelay (-> openbrain-db over obnet) and the `llama-cpp` alias (the
+# second opinion, with its own LiteLLM virtual key - a gated live step). Its engine is
+# openbrain-db (compose depends_on: intake -> dbrelay -> openbrain-db service_healthy), and it
+# needs inference only for the second opinion, which the plane already `requires`.
+# `opt_in`, never `default`: OFF until the operator's gated deploy (I1's migration applied to
+# the live DB, the intake role's password, the virtual key, the llm-queue class, the model
+# files) and `stack.py enable intake`. No `requires`: nothing in ANOTHER profile is needed.
+description = "the content screen (intake I5): openbrain-intake + openbrain-intake-dbrelay (no host port; internal intake-net + llm-net); the `intake` product enables it"
+opt_in      = true
+
 # --------------------------------------------------------------------------
 [planes.agent-org]
 # Mattermost + agent-bridge (the governed org bus) + profile-gated slices.
@@ -643,6 +659,14 @@ surfaces    = { ob1 = ["wiki", "notebook"] }
 description = "the household pantry and meal planner: the OWUI Kitchen model + tool + the openbrain-pantry service (Open Brain's database holds the data)"
 planes      = ["inference", "ob1", "frontend"]
 profiles    = { ob1 = ["pantry"] }
+
+[products.intake]
+# The content screen (security-hardening-2026-10 I5). An ENGINE profile of ob1, not a surface:
+# --headless must not drop it. `inference` because its second opinion is a chat completion
+# through the LiteLLM alias. Shipped inert: nothing calls it until the I6-I8 cut-over.
+description = "the content screen: the intake service that screens external content before Open Brain stores it (OFF until the operator's gated deploy)"
+planes      = ["inference", "ob1"]
+profiles    = { ob1 = ["intake"] }
 
 [products.coding-agent]
 description = "little-coder, the coding agent; its surface is Open WebUI"

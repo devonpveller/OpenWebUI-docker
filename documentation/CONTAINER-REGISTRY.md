@@ -144,6 +144,8 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 | `openbrain-research` | The shared research engine (:8818; queue, GROUNDED synthesis, OWUI async callback) — replaced smolcrawl's in-repo harness |
 | `openbrain-curator` | Research-package ingest inlet (persists via openbrain-mcp) |
 | `openbrain-pantry` | Household pantry / meal planner HTTP service (pantry-meal-planner). Profile `pantry`, OFF until `stack.py enable pantry`; no host port (`obnet` + `llm-net`); no LLM call; tables in `openbrain-db` as the least-privilege `ob_pantry` role. Why: the OWUI Kitchen model's `pantry` tool does stock/cook/restock arithmetic here, never in the model |
+| `openbrain-intake` | The content screen (security-hardening-2026-10 I5; code `OB1/integrations/intake`, fork-owned). Profile `intake`, OFF until the operator's gated deploy; no host port; internal `intake-net` + `llm-net`, no route out. Why: every piece of external content is to pass one screen (CDR, invisible characters, rules, classifier, second opinion) before Open Brain stores it or a model reads it |
+| `openbrain-intake-dbrelay` | TCP relay from `intake-net` to `openbrain-db:5432` (profile `intake`). Why: gives the screen a database route without putting it on the internet-capable `obnet`, and without changing `openbrain-db` |
 
 ### Scheduled slice
 

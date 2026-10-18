@@ -115,7 +115,8 @@ $Script:OB1Profiles = @(
     '--profile', 'wiki',
     '--profile', 'notebook',
     '--profile', 'idea-refinery',
-    '--profile', 'pantry'
+    '--profile', 'pantry',
+    '--profile', 'intake'
 )
 # PANTRY (pantry-wire, 2026-10-04) IS IN THAT LIST FOR TEARDOWN AND STATUS ONLY.
 # `openbrain-pantry` (compose profile `pantry`, opt_in, OFF by default) must be
@@ -126,7 +127,14 @@ $Script:OB1Profiles = @(
 # Get-OB1StartProfiles below, which is $Script:OB1Profiles minus pantry unless it
 # is enabled. compose ignores a profile no service carries, so the flag is also
 # harmless against an OB1 gitlink older than 7953bc5.
+# INTAKE (security-hardening-2026-10 I5) IS THE SAME CASE: `openbrain-intake` and
+# `openbrain-intake-dbrelay` (compose profile `intake`, opt_in, OFF by default until the
+# operator's gated deploy) are named by every stop / down / ps, and started only when the
+# profile is enabled. $Script:OB1OptInProfiles is the list Get-OB1StartProfiles holds back;
+# a future opt-in profile is one more entry there and in $Script:OB1Profiles.
 $Script:OB1PantryProfile = 'pantry'
+$Script:OB1IntakeProfile = 'intake'
+$Script:OB1OptInProfiles = @($Script:OB1PantryProfile, $Script:OB1IntakeProfile)
 # The project name that file declares (`name: open-brain`). Wait-ForRestartLoops
 # filters `docker ps` by it, so it sees the same containers compose does.
 $Script:OB1Project = "open-brain"
@@ -205,11 +213,19 @@ $Script:OB1Services = @(
     "openbrain-idea-refinery"   # Idea Refinery drain (profile-gated 'idea-refinery'; started via the profile below)
 )
 # OPTIONAL: counted and started only when the operator enabled the profile
-# (Test-OB1PantryEnabled). Kept out of $Script:OB1Services so a host that never
+# (Test-OB1ProfileEnabled). Kept out of $Script:OB1Services so a host that never
 # enabled it does not read "30/31 running" as a fault.
 $Script:OB1OptionalServices = @(
-    "openbrain-pantry"          # household pantry / meal planner (profile-gated 'pantry'; no host port; obnet + llm-net)
+    "openbrain-pantry",         # household pantry / meal planner (profile-gated 'pantry'; no host port; obnet + llm-net)
+    "openbrain-intake",         # the content screen, intake I5 (profile-gated 'intake'; no host port; internal intake-net + llm-net)
+    "openbrain-intake-dbrelay"  # intake's only route to openbrain-db (profile 'intake'; obnet + intake-net)
 )
+# Which profile starts each optional service.
+$Script:OB1OptionalServiceProfile = @{
+    "openbrain-pantry"         = 'pantry'
+    "openbrain-intake"         = 'intake'
+    "openbrain-intake-dbrelay" = 'intake'
+}
 
 # agent-org services, default plane only (workers/cloud profiles are gated + excluded,
 # same treatment as the profile-gated Portal). Low-level dependency first; the two
@@ -616,17 +632,23 @@ function Wait-ForRestartLoops {
 }
 
 function Test-OB1PantryEnabled {
-    # Is the `pantry` profile ENABLED on this host? Two sources, exactly the two the
-    # driver itself unions (stack.py effective_profiles): the driver's state file
-    # (.stack\state.json -> planes.ob1.profiles, written by `stack.py enable pantry`)
-    # and COMPOSE_PROFILES in the plane's own OB1\docker\.env. Anything unreadable
-    # is "not enabled": the safe default for a service that is off until chosen.
-    # (Teardown does not call this - it always names the profile.)
+    # Kept for pantry-wire's callers: Test-OB1ProfileEnabled for `pantry`.
+    return (Test-OB1ProfileEnabled $Script:OB1PantryProfile)
+}
+
+function Test-OB1ProfileEnabled([string]$ProfileName) {
+    # Is an opt-in ob1 profile (`pantry`, `intake`) ENABLED on this host? Two sources,
+    # exactly the two the driver itself unions (stack.py effective_profiles): the
+    # driver's state file (.stack\state.json -> planes.ob1.profiles, written by
+    # `stack.py enable <profile>`) and COMPOSE_PROFILES in the plane's own
+    # OB1\docker\.env. Anything unreadable is "not enabled": the safe default for a
+    # service that is off until chosen. (Teardown does not call this - it always
+    # names the profile.)
     try {
         $state = '.stack\state.json'   # cwd is the repo root (Set-Location at the top of this file)
         if (Test-Path $state) {
             $j = Get-Content -Raw -Path $state | ConvertFrom-Json
-            if (@($j.planes.ob1.profiles) -contains $Script:OB1PantryProfile) { return $true }
+            if (@($j.planes.ob1.profiles) -contains $ProfileName) { return $true }
         }
     }
     catch { }
@@ -636,7 +658,7 @@ function Test-OB1PantryEnabled {
             foreach ($line in Get-Content -Path $envFile) {
                 if ($line -match '^\s*COMPOSE_PROFILES\s*=\s*(.*)$') {
                     $vals = $Matches[1].Trim().Trim('"').Trim("'") -split '\s*,\s*'
-                    if ($vals -contains $Script:OB1PantryProfile) { return $true }
+                    if ($vals -contains $ProfileName) { return $true }
                 }
             }
         }
@@ -646,17 +668,20 @@ function Test-OB1PantryEnabled {
 }
 
 function Get-OB1StartProfiles {
-    # The --profile flags for an OB1 `up`: the four the host runs, plus `pantry`
-    # only when it is enabled (see the note at $Script:OB1PantryProfile). Ordering
-    # after openbrain-db is compose's own: openbrain-pantry has
-    # `depends_on: openbrain-db: condition: service_healthy`, and an `up` of the
-    # whole project waits on it.
+    # The --profile flags for an OB1 `up`: the four the host runs, plus each opt-in
+    # profile ($Script:OB1OptInProfiles: `pantry`, `intake`) only when it is enabled
+    # (see the note at $Script:OB1PantryProfile). Ordering after openbrain-db is
+    # compose's own: openbrain-pantry and openbrain-intake-dbrelay have
+    # `depends_on: openbrain-db: condition: service_healthy` (openbrain-intake waits on
+    # the relay), and an `up` of the whole project waits on them.
     $flags = @()
     for ($i = 0; $i -lt $Script:OB1Profiles.Count; $i += 2) {
-        if ($Script:OB1Profiles[$i + 1] -eq $Script:OB1PantryProfile) { continue }
+        if ($Script:OB1OptInProfiles -contains $Script:OB1Profiles[$i + 1]) { continue }
         $flags += $Script:OB1Profiles[$i]; $flags += $Script:OB1Profiles[$i + 1]
     }
-    if (Test-OB1PantryEnabled) { $flags += '--profile'; $flags += $Script:OB1PantryProfile }
+    foreach ($optIn in $Script:OB1OptInProfiles) {
+        if (Test-OB1ProfileEnabled $optIn) { $flags += '--profile'; $flags += $optIn }
+    }
     return ,$flags
 }
 
@@ -668,7 +693,10 @@ function Start-OB1Stack {
         Write-Log "INFO" "Open Brain (OB1) not deployed in this workspace - skipping"
         return
     }
-    $obCount = $Script:OB1Services.Count + $(if (Test-OB1PantryEnabled) { $Script:OB1OptionalServices.Count } else { 0 })
+    $obCount = $Script:OB1Services.Count
+    foreach ($svc in $Script:OB1OptionalServices) {
+        if (Test-OB1ProfileEnabled $Script:OB1OptionalServiceProfile[$svc]) { $obCount++ }
+    }
     Write-Log "INFO" "Starting Open Brain (OB1) stack ($obCount containers)..."
     try {
         # ALL FOUR profiles ($Script:OB1Profiles), or this starts 21 of the 30 it
@@ -682,7 +710,7 @@ function Start-OB1Stack {
         # in OB1/docker/.env would NOT save this line - it has to carry them itself.
         # $Script:OB1Services above is the 30 this script claims to start; that is
         # the number these flags have to keep true.
-        # Get-OB1StartProfiles, not $Script:OB1Profiles: `pantry` only when enabled.
+        # Get-OB1StartProfiles, not $Script:OB1Profiles: `pantry` / `intake` only when enabled.
         $prof = Get-OB1StartProfiles
         docker compose -f $Script:OB1Compose @prof up -d
         Write-Log "INFO" "OB1 up -d returned - watching 60 s for restart loops before calling it started..."
@@ -717,7 +745,7 @@ function Reset-OB1Stack {
         $prof = $Script:OB1Profiles
         docker compose -f $Script:OB1Compose @prof down
         Start-Sleep -Seconds 5
-        # The `up` half names `pantry` only when it is enabled; the `down` half above
+        # The `up` half names `pantry` / `intake` only when enabled; the `down` half above
         # always does (a running one must go).
         $prof = Get-OB1StartProfiles
         docker compose -f $Script:OB1Compose @prof up -d
