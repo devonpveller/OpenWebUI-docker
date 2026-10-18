@@ -22,8 +22,9 @@
 # Refused (exit 2): -Capture with -Compare; -Compare with other than two directories; a capture
 # with no -ExecContainer/-BaseUrl and no -Live; without -Live, any target that is not PROVABLY
 # disposable (see "THE DISPOSABLE-TARGET CHECK" below: a loopback or fixture-named base URL host,
-# an exec container docker reports as harness-labelled, in no compose project and on no compose
-# or ai-stack_* network); -Live together with an explicit target. Every
+# an exec container docker reports as harness-labelled, in no compose project, in a network
+# namespace of its own on user bridge networks that are no compose project's or ai-stack_*,
+# docker answering within -DockerTimeoutSec); -Live together with an explicit target. Every
 # capture prints its target and writes it to <dir>\_target.txt, so a caller can check where the
 # responses came from.
 #
@@ -42,7 +43,12 @@ param(
   [string]$ExecContainer = '',
   [string]$BaseUrl = '',
   [string]$KeyEnv = '',
-  [switch]$Live
+  [switch]$Live,
+  # Every docker call is bounded (rw-p0b-purge-door attempt 2, tester finding N5): an inspect
+  # that does not answer within -DockerTimeoutSec is a refusal; the capture's docker exec gets
+  # -ExecTimeoutSec.
+  [int]$DockerTimeoutSec = 20,
+  [int]$ExecTimeoutSec = 600
 )
 $ErrorActionPreference = 'Stop'
 
@@ -50,41 +56,137 @@ $LiveContainer = 'openbrain-workbench'
 $LiveBaseUrl = 'http://caddy:8446'
 function Refuse([string]$why) { Write-Host "REFUSED: $why"; exit 2 }
 
-# THE DISPOSABLE-TARGET CHECK (a capture without -Live; rw-p0b-purge-door, tester finding T2-2).
-# An allow-list proven against docker, not a list of live names:
-#   1. the base URL is plain http(s) with no user info, and its host is loopback (localhost,
-#      127.0.0.1, ::1 - the exec container itself) or a fixture name (^rwp[0-9a-z]*-..., the
-#      disposable runs' container names); a fixture-named host must pass 2. as a container too;
-#   2. docker inspects the exec container (an id or a name): it carries the harness owner label
-#      (ai-stack.harness.owner), carries NO com.docker.compose.project label (every live plane -
-#      open-brain and the ai-stack planes - is a compose project), and is attached to no network
-#      that is a compose project's or is named ai-stack_* / open-brain*.
-# Docker unreachable, or any inspect failing, is a refusal (fail closed). Returns '' when the
-# target is disposable, else the reason.
+# THE DISPOSABLE-TARGET CHECK (a capture without -Live; rw-p0b-purge-door, tester finding T2-2,
+# and attempt 2's network-namespace bypass). An allow-list proven against docker, not a list of
+# live names:
+#   1. the base URL is plain http(s) with no user info, and its host is loopback (localhost, an
+#      IPv4 127.x address, ::1 in any spelling - the exec container itself) or a fixture name
+#      (^rwp[0-9a-z]*-..., the disposable runs' container names); a fixture-named host must pass
+#      2. as a container too;
+#   2. docker inspects the exec container (an id or a name) and it must:
+#      - carry the harness owner label (ai-stack.harness.owner) and NO com.docker.compose.project
+#        label (every live plane - open-brain and the ai-stack planes - is a compose project);
+#      - own its network namespace: HostConfig.NetworkMode names a user network the container
+#        itself joined. 'host', 'none', 'bridge'/'default' and 'container:<x>' are refused - a
+#        container that shares another's namespace answers 'localhost' with THAT container's
+#        services (attempt 1's bypass: NetworkMode container:<compose container>, Networks {}).
+#        A 'container:<x>' peer is resolved and checked the same way, so the refusal says what
+#        it would have reached; it is refused either way;
+#      - be attached to at least one network, each a user-defined bridge network (driver bridge,
+#        not the default bridge), none named ai-stack_* / open-brain*, none a compose project's;
+#      - share no PID / IPC / UTS namespace with the host or another container (defence in depth).
+# Docker unreachable, any inspect failing or not answering within -DockerTimeoutSec, or an
+# answer that is not the expected JSON, is a refusal (fail closed). Returns '' when the target
+# is disposable, else the reason. Dot-source this script to load the check alone (the unit test,
+# scripts/checks/smoke-workbench-routers.test.ps1, does): it returns before doing anything.
 $FixtureHost = '^rwp[0-9a-z]*-[a-z0-9][a-z0-9-]*$'
 $OwnerLabel = 'ai-stack.harness.owner'
 $ComposeLabel = 'com.docker.compose.project'
+$DockerName = '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'
+
+# A Windows command-line argument (CommandLineToArgvW rules: docker.exe parses its arguments so).
+function ConvertTo-WinArg([string]$s) {
+  if ($s.Length -gt 0 -and $s -notmatch '[\s"]') { return $s }
+  $sb = New-Object System.Text.StringBuilder
+  [void]$sb.Append('"'); $bs = 0
+  foreach ($ch in $s.ToCharArray()) {
+    if ($ch -eq '\') { $bs++; continue }
+    if ($ch -eq '"') { [void]$sb.Append('\' * (2 * $bs + 1)); [void]$sb.Append('"') } else { [void]$sb.Append('\' * $bs); [void]$sb.Append($ch) }
+    $bs = 0
+  }
+  [void]$sb.Append('\' * (2 * $bs)); [void]$sb.Append('"')
+  return $sb.ToString()
+}
+
+# Every docker call of this script goes through here, bounded by $timeoutSec (attempt 2, tester
+# finding N5: a docker endpoint that accepted and never answered hung the check for 120 s+).
+# Returns @{ ok; rc; out; err; timedOut }. A 'docker' that is not an application on PATH (a
+# function in the calling session - the unit test's stand-in) is called as it is; its exit
+# code 124 stands for "did not answer in time".
+function Invoke-DockerCli([string[]]$dockerArgs, [int]$timeoutSec) {
+  $cmd = @(Get-Command docker -ErrorAction SilentlyContinue)[0]
+  if (-not $cmd) { return @{ ok = $false; rc = -1; out = ''; err = 'docker is not on PATH'; timedOut = $false } }
+  if ($cmd.CommandType -ne 'Application') {
+    $ErrorActionPreference = 'Continue'
+    $global:LASTEXITCODE = 0
+    $raw = (& $cmd @dockerArgs 2>&1 | ForEach-Object { "$_" }) -join "`n"
+    $rc = $global:LASTEXITCODE
+    if ($rc -eq 124) { return @{ ok = $false; rc = $rc; out = ''; err = "docker did not answer within $timeoutSec s"; timedOut = $true } }
+    return @{ ok = ($rc -eq 0); rc = $rc; out = $raw; err = $raw; timedOut = $false }
+  }
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $cmd.Source
+  $psi.Arguments = (@($dockerArgs | ForEach-Object { ConvertTo-WinArg $_ }) -join ' ')
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.RedirectStandardInput = $true
+  $psi.StandardOutputEncoding = New-Object System.Text.UTF8Encoding $false
+  $psi.StandardErrorEncoding = New-Object System.Text.UTF8Encoding $false
+  $psi.CreateNoWindow = $true
+  $p = New-Object System.Diagnostics.Process
+  $p.StartInfo = $psi
+  try { [void]$p.Start() } catch { return @{ ok = $false; rc = -1; out = ''; err = "docker did not start: $($_.Exception.Message)"; timedOut = $false } }
+  $p.StandardInput.Close()
+  $so = $p.StandardOutput.ReadToEndAsync(); $se = $p.StandardError.ReadToEndAsync()
+  if (-not $p.WaitForExit([Math]::Max(1, $timeoutSec) * 1000)) {
+    try { $p.Kill() } catch { }
+    [void]$p.WaitForExit(5000)
+    return @{ ok = $false; rc = -1; out = ''; err = "docker did not answer within $timeoutSec s (killed)"; timedOut = $true }
+  }
+  $p.WaitForExit()
+  $out = $so.Result; $err = $se.Result
+  return @{ ok = ($p.ExitCode -eq 0); rc = $p.ExitCode; out = $out; err = $(if ($err) { $err } else { $out }); timedOut = $false }
+}
 function Get-DockerJson([string[]]$dockerArgs) {
-  $ErrorActionPreference = 'Continue'
-  $raw = (& docker @dockerArgs 2>&1 | ForEach-Object { "$_" }) -join "`n"
-  if ($LASTEXITCODE -ne 0) { return @{ ok = $false; err = (($raw -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 1) } }
-  try { return @{ ok = $true; value = ($raw | ConvertFrom-Json) } } catch { return @{ ok = $false; err = "unreadable docker answer: $raw" } }
+  $r = Invoke-DockerCli $dockerArgs $DockerTimeoutSec
+  if (-not $r.ok) { return @{ ok = $false; err = (("$($r.err)" -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -First 1) } }
+  try { $v = @($r.out | ConvertFrom-Json) } catch { return @{ ok = $false; err = "unreadable docker answer: $($r.out)" } }
+  if ($v.Count -ne 1 -or $null -eq $v[0]) { return @{ ok = $false; err = "docker answered $($v.Count) objects, not one" } }
+  return @{ ok = $true; value = $v[0] }
 }
 function Get-Keys($obj) { if ($null -eq $obj) { return @() }; return @($obj.PSObject.Properties | ForEach-Object { $_.Name }) }
-function Test-DisposableContainer([string]$name) {
-  $l = Get-DockerJson @('inspect', '--type', 'container', '-f', '{{json .Config.Labels}}', $name)
-  if (-not $l.ok) { return "docker cannot inspect container '$name' ($($l.err))" }
-  $labels = Get-Keys $l.value
-  if ($labels -contains $ComposeLabel) { return "container '$name' belongs to compose project '$($l.value.$ComposeLabel)' (a live plane)" }
+function Test-SharedNamespace([string]$what, [string]$mode) {
+  if ($mode -eq 'host') { return "shares the HOST's $what namespace ($what mode 'host')" }
+  if ($mode -like 'container:*') { return "shares the $what namespace of another container ($what mode '$mode')" }
+  return ''
+}
+function Test-DisposableContainer([string]$name, [int]$depth = 0) {
+  if ($name -notmatch $DockerName) { return "'$name' is not a container name or id" }
+  $i = Get-DockerJson @('inspect', '--type', 'container', $name)
+  if (-not $i.ok) { return "docker cannot inspect container '$name' ($($i.err))" }
+  $c = $i.value
+  if ($null -eq $c.Config -or $null -eq $c.HostConfig -or $null -eq $c.NetworkSettings) { return "docker's answer for '$name' carries no Config/HostConfig/NetworkSettings" }
+  $labels = Get-Keys $c.Config.Labels
+  if ($labels -contains $ComposeLabel) { return "container '$name' belongs to compose project '$($c.Config.Labels.$ComposeLabel)' (a live plane)" }
   if ($labels -notcontains $OwnerLabel) { return "container '$name' carries no $OwnerLabel label (not a disposable harness container)" }
-  $n = Get-DockerJson @('inspect', '--type', 'container', '-f', '{{json .NetworkSettings.Networks}}', $name)
-  if (-not $n.ok) { return "docker cannot read the networks of '$name' ($($n.err))" }
-  foreach ($net in (Get-Keys $n.value)) {
-    if ($net -match '^(ai-stack_|open-brain)') { return "container '$name' is attached to the live network '$net'" }
-    $nl = Get-DockerJson @('network', 'inspect', '-f', '{{json .Labels}}', $net)
-    if (-not $nl.ok) { return "docker cannot inspect network '$net' of '$name' ($($nl.err))" }
-    if ((Get-Keys $nl.value) -contains $ComposeLabel) { return "container '$name' is attached to network '$net' of compose project '$($nl.value.$ComposeLabel)'" }
+  $mode = [string]$c.HostConfig.NetworkMode
+  if ($mode -like 'container:*') {
+    $peer = $mode.Substring(10)
+    $peerWhy = if ($depth -ge 3) { 'not resolved (chain too deep)' } else {
+      $w = Test-DisposableContainer $peer ($depth + 1)
+      if ($w) { "that peer: $w" } else { 'that peer passes the check itself, but a shared namespace is refused regardless' }
+    }
+    return "container '$name' shares the network namespace of container '$peer' (NetworkMode $mode): its 'localhost' is that container; $peerWhy"
   }
+  if ($mode -in @('host', 'none', 'bridge', 'default', '')) { return "container '$name' has NetworkMode '$mode', not a user network of its own" }
+  foreach ($ns in @(@('PID', [string]$c.HostConfig.PidMode), @('IPC', [string]$c.HostConfig.IpcMode), @('UTS', [string]$c.HostConfig.UTSMode))) {
+    $w = Test-SharedNamespace $ns[0] $ns[1]
+    if ($w) { return "container '$name' $w" }
+  }
+  $nets = @(Get-Keys $c.NetworkSettings.Networks)
+  if ($nets.Count -eq 0) { return "container '$name' is attached to no network (NetworkSettings.Networks is empty)" }
+  $modeIsJoined = $nets -contains $mode
+  foreach ($net in $nets) {
+    if ($net -notmatch $DockerName) { return "container '$name' is attached to a network named '$net' (not a plain network name)" }
+    if ($net -match '^(ai-stack_|open-brain)') { return "container '$name' is attached to the live network '$net'" }
+    $ni = Get-DockerJson @('network', 'inspect', $net)
+    if (-not $ni.ok) { return "docker cannot inspect network '$net' of '$name' ($($ni.err))" }
+    $n = $ni.value
+    if ((Get-Keys $n.Labels) -contains $ComposeLabel) { return "container '$name' is attached to network '$net' of compose project '$($n.Labels.$ComposeLabel)'" }
+    if ([string]$n.Driver -ne 'bridge') { return "container '$name' is attached to network '$net' with driver '$($n.Driver)' (only a user-defined bridge network is disposable)" }
+    if ($net -eq 'bridge' -or [string]$n.Options.'com.docker.network.bridge.default_bridge' -eq 'true') { return "container '$name' is attached to the default bridge network '$net'" }
+    if ($mode.Length -ge 12 -and ([string]$n.Id).StartsWith($mode)) { $modeIsJoined = $true }
+  }
+  if (-not $modeIsJoined) { return "container '$name' has NetworkMode '$mode', which is none of the networks it joined ($($nets -join ', '))" }
   return ''
 }
 function Test-DisposableTarget([string]$container, [string]$url) {
@@ -93,7 +195,12 @@ function Test-DisposableTarget([string]$container, [string]$url) {
   if ($u.Scheme -notin @('http', 'https')) { return "base URL scheme '$($u.Scheme)' is not http(s)" }
   if ($u.UserInfo) { return "base URL '$url' carries user info" }
   $h = $u.Host.ToLowerInvariant()
-  $loopback = $h -in @('localhost', '127.0.0.1', '[::1]', '::1')
+  # Loopback, normalised first (attempt 2, tester finding N6: Windows PowerShell 5.1 expands
+  # [::1] to [0000:...:0001], so a literal list entry never matched): an IP address is loopback
+  # when .NET says so; a name only when it is exactly 'localhost'.
+  $ip = $null
+  $loopback = ($h -eq 'localhost') -or
+    ([System.Net.IPAddress]::TryParse($h.Trim('[', ']'), [ref]$ip) -and [System.Net.IPAddress]::IsLoopback($ip))
   if (-not $loopback) {
     if ($h -notmatch $FixtureHost) { return "base URL host '$h' is neither loopback nor a fixture name ($FixtureHost)" }
     $why = Test-DisposableContainer $h
@@ -101,6 +208,8 @@ function Test-DisposableTarget([string]$container, [string]$url) {
   }
   return (Test-DisposableContainer $container)
 }
+# Dot-sourced (the unit test): the check is loaded, nothing runs.
+if ($MyInvocation.InvocationName -eq '.') { return }
 if ($Capture -and $Compare.Count) { Refuse "-Capture and -Compare together (a '-File ... -Compare a b' call binds b to -Capture; compare in-process with -Compare @(a, b))" }
 if ($Compare.Count -and $Compare.Count -ne 2) { Refuse "-Compare takes exactly two directories, got $($Compare.Count)" }
 if ($Capture) {
@@ -158,9 +267,9 @@ for (const c of cases) {
 }
 console.log(JSON.stringify(out));
 '@
-  $raw = & docker exec -e "SMOKE_CASES=$b64" -e "SMOKE_BASE=$BaseUrl" -e "SMOKE_KEY_ENV=$KeyEnv" $ExecContainer deno eval $code 2>&1
-  if ($LASTEXITCODE -ne 0) { throw "docker exec $ExecContainer failed: $raw" }
-  return ((@($raw) | Where-Object { "$_".StartsWith('[') }) | Select-Object -Last 1 | ConvertFrom-Json)
+  $r = Invoke-DockerCli @('exec', '-e', "SMOKE_CASES=$b64", '-e', "SMOKE_BASE=$BaseUrl", '-e', "SMOKE_KEY_ENV=$KeyEnv", $ExecContainer, 'deno', 'eval', $code) $ExecTimeoutSec
+  if (-not $r.ok) { throw "docker exec $ExecContainer failed: $($r.err)" }
+  return ((@($r.out -split "`r?`n") | Where-Object { "$_".StartsWith('[') }) | Select-Object -Last 1 | ConvertFrom-Json)
 }
 
 # Order-stable form of a body: JSON is re-serialised with sorted keys, text kept as is.
