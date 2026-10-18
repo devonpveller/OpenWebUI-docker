@@ -477,19 +477,23 @@ description = "the household pantry / meal-planner HTTP service: openbrain-pantr
 opt_in      = true
 
 [planes.ob1.profiles.intake]
-# OB1/docker/docker-compose.yml: openbrain-intake + openbrain-intake-dbrelay
-# (security-hardening-2026-10, build item I5; code in OB1/integrations/intake/, fork-owned).
-# The content screen: POST /v1/intake, /v1/stats, /metrics, /healthz on :8000, NO host port.
-# openbrain-intake sits on its own INTERNAL `intake-net` (subnet 10.243.50.0/24, outside
-# 192.168.0.0/16 - incident 2026-10-17) + ai-stack_llm-net (internal), so it has no route out:
-# it reaches only the dbrelay (-> openbrain-db over obnet) and the `llama-cpp` alias (the
-# second opinion, with its own LiteLLM virtual key - a gated live step). Its engine is
-# openbrain-db (compose depends_on: intake -> dbrelay -> openbrain-db service_healthy), and it
-# needs inference only for the second opinion, which the plane already `requires`.
+# OB1/docker/docker-compose.yml: openbrain-intake + openbrain-intake-dbrelay +
+# openbrain-intake-llmrelay (security-hardening-2026-10, build item I5; code in
+# OB1/integrations/intake/, fork-owned). The content screen: POST /v1/intake, /v1/stats,
+# /metrics, /healthz on :8000, NO host port. openbrain-intake sits on its own INTERNAL
+# `intake-net` ONLY (subnet 10.243.50.0/24, outside 192.168.0.0/16 - incident 2026-10-17),
+# whose only other members are two fixed-target byte relays, so it reaches exactly
+# openbrain-db:5432 (dbrelay, on obnet) and llm-gateway:8080 (llmrelay, on ai-stack_llm-net,
+# aliased `llama-cpp` on intake-net; the second opinion, with intake's own LiteLLM virtual
+# key - a gated live step). It is NOT on ai-stack_llm-net itself (intake-i5 attempt 1: ~30
+# callers reachable there). Secrets come from OB1/docker/intake.env (gitignored), loaded by
+# openbrain-intake only - never OB1/docker/.env, which open_notebook loads whole. Its engine is
+# openbrain-db (depends_on: intake -> dbrelay -> openbrain-db service_healthy), and it needs
+# inference only for the second opinion, which the plane already `requires`.
 # `opt_in`, never `default`: OFF until the operator's gated deploy (I1's migration applied to
 # the live DB, the intake role's password, the virtual key, the llm-queue class, the model
 # files) and `stack.py enable intake`. No `requires`: nothing in ANOTHER profile is needed.
-description = "the content screen (intake I5): openbrain-intake + openbrain-intake-dbrelay (no host port; internal intake-net + llm-net); the `intake` product enables it"
+description = "the content screen (intake I5): openbrain-intake (internal intake-net only, no host port) + its two fixed-target relays, openbrain-intake-dbrelay (obnet) and openbrain-intake-llmrelay (llm-net); the `intake` product enables it"
 opt_in      = true
 
 # --------------------------------------------------------------------------

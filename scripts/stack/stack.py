@@ -2597,20 +2597,21 @@ class HealthSweep:
             else:
                 self.console.line("  [skip] OB1: openbrain-pantry /health (no pantry profile in this deployment)")
             # openbrain-intake (security-hardening-2026-10 I5): the content screen. No host port
-            # either; its /healthz is ok only when a screening worker is loaded AND the database
-            # answers through openbrain-intake-dbrelay (so one probe covers both containers).
+            # either; its /healthz is ok only when a screening worker is serving AND the database
+            # answers through openbrain-intake-dbrelay, and it reports judge_route (a connect
+            # through openbrain-intake-llmrelay) - so one probe covers all three containers.
             # Profile-gated `intake`, OFF by default: the same fail-open guard as pantry.
             deployed, note = self.intake_deployed()
             if deployed:
                 if note:
                     self.console.line("  [warn] " + note)
                 self.probe(
-                    "OB1: openbrain-intake /healthz (in-container, worker + db ok)",
+                    "OB1: openbrain-intake /healthz (in-container, worker + db + judge route ok)",
                     lambda: self.docker(
                         "exec", "openbrain-intake", "python", "-c",
                         "import json,sys,urllib.request; "
                         "j = json.load(urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)); "
-                        "sys.exit(0 if j.get('ok') and j.get('db') else 1)",
+                        "sys.exit(0 if j.get('ok') and j.get('db') and j.get('judge_route') else 1)",
                     ).code == 0,
                 )
             else:

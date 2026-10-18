@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
     Executable proof that emergency-recovery.ps1 starts openbrain-pantry only when the
-    `pantry` profile is ENABLED (pantry-wire, 2026-10-04), and openbrain-intake +
-    openbrain-intake-dbrelay only when the `intake` profile is (security-hardening-2026-10
+    `pantry` profile is ENABLED (pantry-wire, 2026-10-04), and openbrain-intake and its two
+    relays only when the `intake` profile is (security-hardening-2026-10
     I5: the same opt-in mechanism, $Script:OB1OptInProfiles). Starts, stops and touches
     NO container, reads NO live state: every case runs in a throwaway directory.
 

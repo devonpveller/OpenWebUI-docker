@@ -127,8 +127,8 @@ $Script:OB1Profiles = @(
 # Get-OB1StartProfiles below, which is $Script:OB1Profiles minus pantry unless it
 # is enabled. compose ignores a profile no service carries, so the flag is also
 # harmless against an OB1 gitlink older than 7953bc5.
-# INTAKE (security-hardening-2026-10 I5) IS THE SAME CASE: `openbrain-intake` and
-# `openbrain-intake-dbrelay` (compose profile `intake`, opt_in, OFF by default until the
+# INTAKE (security-hardening-2026-10 I5) IS THE SAME CASE: `openbrain-intake`,
+# `openbrain-intake-dbrelay` and `openbrain-intake-llmrelay` (compose profile `intake`, opt_in, OFF by default until the
 # operator's gated deploy) are named by every stop / down / ps, and started only when the
 # profile is enabled. $Script:OB1OptInProfiles is the list Get-OB1StartProfiles holds back;
 # a future opt-in profile is one more entry there and in $Script:OB1Profiles.
@@ -217,14 +217,16 @@ $Script:OB1Services = @(
 # enabled it does not read "30/31 running" as a fault.
 $Script:OB1OptionalServices = @(
     "openbrain-pantry",         # household pantry / meal planner (profile-gated 'pantry'; no host port; obnet + llm-net)
-    "openbrain-intake",         # the content screen, intake I5 (profile-gated 'intake'; no host port; internal intake-net + llm-net)
-    "openbrain-intake-dbrelay"  # intake's only route to openbrain-db (profile 'intake'; obnet + intake-net)
+    "openbrain-intake",         # the content screen, intake I5 (profile-gated 'intake'; no host port; internal intake-net ONLY)
+    "openbrain-intake-dbrelay", # intake's only route to openbrain-db (profile 'intake'; obnet + intake-net)
+    "openbrain-intake-llmrelay" # intake's only route to llm-gateway (profile 'intake'; intake-net + llm-net)
 )
 # Which profile starts each optional service.
 $Script:OB1OptionalServiceProfile = @{
     "openbrain-pantry"         = 'pantry'
     "openbrain-intake"         = 'intake'
     "openbrain-intake-dbrelay" = 'intake'
+    "openbrain-intake-llmrelay" = 'intake'
 }
 
 # agent-org services, default plane only (workers/cloud profiles are gated + excluded,

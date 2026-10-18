@@ -1011,7 +1011,7 @@ def test_pantry_probe_runs_anyway_when_docker_ps_cannot_be_read(root):
 # default, no host port; the probe is the in-container /healthz (a worker loaded AND the
 # database reached through openbrain-intake-dbrelay), skipped on a host that never enabled it.
 
-INTAKE_PROBE = "OB1: openbrain-intake /healthz (in-container, worker + db ok)"
+INTAKE_PROBE = "OB1: openbrain-intake /healthz (in-container, worker + db + judge route ok)"
 
 
 def _enable_ob1_profile(root: Path, profile: str) -> None:
@@ -5447,7 +5447,7 @@ def test_the_probe_catalogue_is_the_sweep_itself():
         "frontend: 8 tailnet serve routes": ["tailscale"],
         "frontend: owui/ manifest rows drifted from live webui.db: <count>": ["shell", "plugins"],
         "OB1: openbrain-pantry /health (in-container, db ok)": ["pantry"],
-        "OB1: openbrain-intake /healthz (in-container, worker + db ok)": ["intake"],
+        "OB1: openbrain-intake /healthz (in-container, worker + db + judge route ok)": ["intake"],
     }
     count = stack.DocsGenerator(stack.Manifest.load(REAL_MANIFEST), REPO_ROOT, DocsHost()).health_count()
     assert count.startswith(f"{len(PS1_PROBES) + 2} probes with every plane enabled")
