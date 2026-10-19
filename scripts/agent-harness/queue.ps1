@@ -1212,8 +1212,29 @@ function Get-DeploySurfaces($item, [string]$Sha) {
                 $dfHit = @(Invoke-GitCapture @("-C", $clone, "ls-tree", "--name-only", $new, "integrations/$d/Dockerfile") | Where-Object { ([string]$_).Trim() })
                 if ($dfHit.Count -eq 0) { $notes += ("OB1 integrations/{0} changed but has no Dockerfile at {1} - not an image" -f $d, $new.Substring(0, 7)); continue }
                 $svc = @($svcs | Where-Object { $_.context -and ((Convert-RepoRelative "docker" $_.context) -eq "integrations/$d") } | Select-Object -First 1)
-                if ($svc.Count -gt 0) { $images += ("image:" + $svc[0].name) }
+                if ($svc.Count -gt 0) { $images += ("image:" + $svc[0].name); $notes += ("image:{0} derived by the integrations rule: OB1 integrations/{1} changed and has a Dockerfile" -f $svc[0].name, $d) }
                 else { $images += ("image:integrations/" + $d); $notes += ("no compose service builds integrations/{0} at OB1 {1} - recorded by directory" -f $d, $new.Substring(0, 7)) }
+            }
+            # (1b) the compose services OB1 builds from docker/<service>/ (workbench, wiki-viewer,
+            #      wiki-service, ...). Rule (1) only looks under integrations/, so an item whose only image
+            #      change rode the gitlink under docker/ landed as "no deploy surface derived" and -Deployed
+            #      was refused (rw-p6a-resolve2, 2026-10-20). Every service of docker/docker-compose.yml
+            #      at the NEW pin with a build context that lies under docker/ is an image once when any
+            #      path of the OB1 range lies under that context. A path with no build context
+            #      (docker/init-export.sql) derives nothing; a context at or above docker/ itself is not
+            #      a context a path can be "under" and is skipped; a service rule (1) already recorded
+            #      is not recorded twice.
+            foreach ($sv in $svcs) {
+                if (-not $sv.context) { continue }
+                $cx = Convert-RepoRelative "docker" $sv.context
+                if ($null -eq $cx) { continue }
+                if (-not $cx.StartsWith("docker/")) { continue }
+                $hits = @($ob1Changed | Where-Object { $_.StartsWith($cx + "/") })
+                if ($hits.Count -eq 0) { continue }
+                $nm = "image:" + $sv.name
+                if ($images -contains $nm) { continue }
+                $images += $nm
+                $notes += ("{0} derived by the docker build-context rule: {1} path(s) changed under OB1 {2} (compose service {3})" -f $nm, $hits.Count, $cx, $sv.name)
             }
         }
     }
