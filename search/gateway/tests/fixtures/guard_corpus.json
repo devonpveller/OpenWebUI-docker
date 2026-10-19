@@ -1,0 +1,1440 @@
+{
+ "about": "The search gate's target-guard corpus (search/gateway/src/gateway/egress/guard.py). 'urls': each URL is judged by check_url with ports {80,443}; expect refuse/allow; 'why', when non-empty, is a substring of the refusal reason. 'answers': resolved address sets judged by check_addresses (any non-public answer refuses the name; the pin prefers IPv4). tests/tools/ts_parity.ts runs the same URLs through OB1 ingest-egress.ts urlBlockReason (the guard this ports) to show the port refuses everything the original refuses.",
+ "urls": [
+  {
+   "url": "file:///etc/passwd",
+   "expect": "refuse",
+   "why": "is not http(s)",
+   "group": "scheme"
+  },
+  {
+   "url": "ftp://example.com/",
+   "expect": "refuse",
+   "why": "is not http(s)",
+   "group": "scheme"
+  },
+  {
+   "url": "gopher://example.com/",
+   "expect": "refuse",
+   "why": "is not http(s)",
+   "group": "scheme"
+  },
+  {
+   "url": "javascript:alert(1)",
+   "expect": "refuse",
+   "why": "is not http(s)",
+   "group": "scheme"
+  },
+  {
+   "url": "data:text/html,hi",
+   "expect": "refuse",
+   "why": "is not http(s)",
+   "group": "scheme"
+  },
+  {
+   "url": "ws://example.com/",
+   "expect": "refuse",
+   "why": "is not http(s)",
+   "group": "scheme"
+  },
+  {
+   "url": "wss://example.com/",
+   "expect": "refuse",
+   "why": "is not http(s)",
+   "group": "scheme"
+  },
+  {
+   "url": "dict://example.com:11211/",
+   "expect": "refuse",
+   "why": "is not http(s)",
+   "group": "scheme"
+  },
+  {
+   "url": "ldap://example.com/",
+   "expect": "refuse",
+   "why": "is not http(s)",
+   "group": "scheme"
+  },
+  {
+   "url": "jar:http://example.com!/",
+   "expect": "refuse",
+   "why": "is not http(s)",
+   "group": "scheme"
+  },
+  {
+   "url": "netdoc:///etc/passwd",
+   "expect": "refuse",
+   "why": "is not http(s)",
+   "group": "scheme"
+  },
+  {
+   "url": "//example.com/x",
+   "expect": "refuse",
+   "why": "",
+   "group": "scheme"
+  },
+  {
+   "url": "example.com",
+   "expect": "refuse",
+   "why": "",
+   "group": "scheme"
+  },
+  {
+   "url": "/relative/path",
+   "expect": "refuse",
+   "why": "",
+   "group": "scheme"
+  },
+  {
+   "url": "",
+   "expect": "refuse",
+   "why": "",
+   "group": "scheme"
+  },
+  {
+   "url": "http://user:pw@example.com/",
+   "expect": "refuse",
+   "why": "credentials",
+   "group": "userinfo"
+  },
+  {
+   "url": "http://user@example.com/",
+   "expect": "refuse",
+   "why": "credentials",
+   "group": "userinfo"
+  },
+  {
+   "url": "https://:pw@example.com/",
+   "expect": "refuse",
+   "why": "credentials",
+   "group": "userinfo"
+  },
+  {
+   "url": "http://example.com@10.0.0.1/",
+   "expect": "refuse",
+   "why": "credentials",
+   "group": "userinfo"
+  },
+  {
+   "url": "http://a@b@example.com/",
+   "expect": "refuse",
+   "why": "credentials",
+   "group": "userinfo"
+  },
+  {
+   "url": "http://user%40x@example.com/",
+   "expect": "refuse",
+   "why": "credentials",
+   "group": "userinfo"
+  },
+  {
+   "url": "http://example.com:6379/",
+   "expect": "refuse",
+   "why": "port",
+   "group": "port"
+  },
+  {
+   "url": "https://example.com:8443/",
+   "expect": "refuse",
+   "why": "port",
+   "group": "port"
+  },
+  {
+   "url": "http://example.com:22/",
+   "expect": "refuse",
+   "why": "port",
+   "group": "port"
+  },
+  {
+   "url": "http://example.com:5432/",
+   "expect": "refuse",
+   "why": "port",
+   "group": "port"
+  },
+  {
+   "url": "http://example.com:8080/",
+   "expect": "refuse",
+   "why": "port",
+   "group": "port"
+  },
+  {
+   "url": "http://example.com:0/",
+   "expect": "refuse",
+   "why": "port",
+   "group": "port"
+  },
+  {
+   "url": "http://example.com:99999/",
+   "expect": "refuse",
+   "why": "",
+   "group": "port"
+  },
+  {
+   "url": "http://example.com:-1/",
+   "expect": "refuse",
+   "why": "",
+   "group": "port"
+  },
+  {
+   "url": "http://example.com:80:80/",
+   "expect": "refuse",
+   "why": "",
+   "group": "port"
+  },
+  {
+   "url": "http://example.com:8o/",
+   "expect": "refuse",
+   "why": "",
+   "group": "port"
+  },
+  {
+   "url": "http://localhost/",
+   "expect": "refuse",
+   "why": "localhost",
+   "group": "localhost"
+  },
+  {
+   "url": "http://LOCALHOST/",
+   "expect": "refuse",
+   "why": "localhost",
+   "group": "localhost"
+  },
+  {
+   "url": "http://localhost./",
+   "expect": "refuse",
+   "why": "localhost",
+   "group": "localhost"
+  },
+  {
+   "url": "https://localhost/x",
+   "expect": "refuse",
+   "why": "localhost",
+   "group": "localhost"
+  },
+  {
+   "url": "http://localhost../",
+   "expect": "refuse",
+   "why": "",
+   "group": "localhost"
+  },
+  {
+   "url": "http://foo.localhost/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "localhost"
+  },
+  {
+   "url": "http://a.b.localhost./",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "localhost"
+  },
+  {
+   "url": "http://search-redis/",
+   "expect": "refuse",
+   "why": "single-label",
+   "group": "single-label"
+  },
+  {
+   "url": "http://searxng/",
+   "expect": "refuse",
+   "why": "single-label",
+   "group": "single-label"
+  },
+  {
+   "url": "http://vpn/",
+   "expect": "refuse",
+   "why": "single-label",
+   "group": "single-label"
+  },
+  {
+   "url": "http://intranet/",
+   "expect": "refuse",
+   "why": "single-label",
+   "group": "single-label"
+  },
+  {
+   "url": "http://openbrain-db/",
+   "expect": "refuse",
+   "why": "single-label",
+   "group": "single-label"
+  },
+  {
+   "url": "http://gateway/",
+   "expect": "refuse",
+   "why": "single-label",
+   "group": "single-label"
+  },
+  {
+   "url": "http://llama-cpp/",
+   "expect": "refuse",
+   "why": "single-label",
+   "group": "single-label"
+  },
+  {
+   "url": "http://metadata/",
+   "expect": "refuse",
+   "why": "single-label",
+   "group": "single-label"
+  },
+  {
+   "url": "http://router./",
+   "expect": "refuse",
+   "why": "single-label",
+   "group": "single-label"
+  },
+  {
+   "url": "http://host.local/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://host.localdomain/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://host.internal/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://host.lan/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://host.home/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://host.home.arpa/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://host.arpa/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://host.intranet/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://host.corp/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://host.private/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://host.docker/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://host.test/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://host.invalid/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://host.ts.net/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://1.0.0.127.in-addr.arpa/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://printer.LOCAL./",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://box.tail1234.ts.net/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://metadata.google.internal/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://kubernetes.default.svc.cluster.local/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://host.docker.internal/",
+   "expect": "refuse",
+   "why": "internal hostname",
+   "group": "internal-suffix"
+  },
+  {
+   "url": "http://127.0.0.1.nip.io/",
+   "expect": "refuse",
+   "why": "wildcard-DNS",
+   "group": "wildcard-dns"
+  },
+  {
+   "url": "http://10.0.0.7.nip.io/",
+   "expect": "refuse",
+   "why": "wildcard-DNS",
+   "group": "wildcard-dns"
+  },
+  {
+   "url": "http://app.192.168.1.1.nip.io/",
+   "expect": "refuse",
+   "why": "wildcard-DNS",
+   "group": "wildcard-dns"
+  },
+  {
+   "url": "http://10-0-0-1.sslip.io/",
+   "expect": "refuse",
+   "why": "wildcard-DNS",
+   "group": "wildcard-dns"
+  },
+  {
+   "url": "http://x.xip.io/",
+   "expect": "refuse",
+   "why": "wildcard-DNS",
+   "group": "wildcard-dns"
+  },
+  {
+   "url": "http://localtest.me/",
+   "expect": "refuse",
+   "why": "wildcard-DNS",
+   "group": "wildcard-dns"
+  },
+  {
+   "url": "http://sub.localtest.me/",
+   "expect": "refuse",
+   "why": "wildcard-DNS",
+   "group": "wildcard-dns"
+  },
+  {
+   "url": "http://lvh.me/",
+   "expect": "refuse",
+   "why": "wildcard-DNS",
+   "group": "wildcard-dns"
+  },
+  {
+   "url": "http://a.lvh.me/",
+   "expect": "refuse",
+   "why": "wildcard-DNS",
+   "group": "wildcard-dns"
+  },
+  {
+   "url": "http://a.vcap.me/",
+   "expect": "refuse",
+   "why": "wildcard-DNS",
+   "group": "wildcard-dns"
+  },
+  {
+   "url": "http://x.traefik.me/",
+   "expect": "refuse",
+   "why": "wildcard-DNS",
+   "group": "wildcard-dns"
+  },
+  {
+   "url": "http://lacolhost.com/",
+   "expect": "refuse",
+   "why": "wildcard-DNS",
+   "group": "wildcard-dns"
+  },
+  {
+   "url": "http://make-127.0.0.1-rr.1u.ms/",
+   "expect": "refuse",
+   "why": "wildcard-DNS",
+   "group": "wildcard-dns"
+  },
+  {
+   "url": "http://nip.io/",
+   "expect": "refuse",
+   "why": "wildcard-DNS",
+   "group": "wildcard-dns"
+  },
+  {
+   "url": "http://fbi.com/",
+   "expect": "refuse",
+   "why": "wildcard-DNS",
+   "group": "wildcard-dns"
+  },
+  {
+   "url": "http://0.0.0.0/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://0.1.2.3/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://10.0.0.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://10.255.255.255/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://100.64.0.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://100.127.255.255/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://127.0.0.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://127.255.255.254/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://169.254.169.254/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://169.254.0.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://172.16.0.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://172.31.255.255/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://192.0.0.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://192.0.0.170/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://192.168.0.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://192.168.192.4/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://198.18.0.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://198.19.255.255/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://224.0.0.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://239.255.255.250/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://240.0.0.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://255.255.255.255/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://192.0.2.10/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://198.51.100.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://203.0.113.5/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-literal"
+  },
+  {
+   "url": "http://2130706433/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://0x7f000001/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://0x7f.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://0177.0.0.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://0177.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://127.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://127.0.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://017700000001/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://10.1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://3232235521/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://0xA9FEA9FE/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://0xa9.0xfe.0xa9.0xfe/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://127.0.0.1./",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://0/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://0x0/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://00000000/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://167772161/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://0x0a.0x00.0x00.0x01/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://1.2.3.999/",
+   "expect": "refuse",
+   "why": "numeric but is not a valid IPv4",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://08.1.1.1/",
+   "expect": "refuse",
+   "why": "numeric but is not a valid IPv4",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://1.2.3.4.5/",
+   "expect": "refuse",
+   "why": "numeric but is not a valid IPv4",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://4294967296/",
+   "expect": "refuse",
+   "why": "numeric but is not a valid IPv4",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://256.1.1.1/",
+   "expect": "refuse",
+   "why": "numeric but is not a valid IPv4",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://1.2.3.0x100/",
+   "expect": "refuse",
+   "why": "numeric but is not a valid IPv4",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://0x100000000/",
+   "expect": "refuse",
+   "why": "numeric but is not a valid IPv4",
+   "group": "v4-numeric"
+  },
+  {
+   "url": "http://\uff11\uff12\uff17.\uff10.\uff10.\uff11/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "unicode"
+  },
+  {
+   "url": "http://127\u30020\u30020\u30021/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "unicode"
+  },
+  {
+   "url": "http://127\uff0e0\uff0e0\uff0e1/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "unicode"
+  },
+  {
+   "url": "http://\uff4c\uff4f\uff43\uff41\uff4c\uff48\uff4f\uff53\uff54/",
+   "expect": "refuse",
+   "why": "localhost",
+   "group": "unicode"
+  },
+  {
+   "url": "http://%31%32%37.0.0.1/",
+   "expect": "refuse",
+   "why": "",
+   "group": "encoding"
+  },
+  {
+   "url": "http://exa%00mple.com/",
+   "expect": "refuse",
+   "why": "",
+   "group": "encoding"
+  },
+  {
+   "url": "http://example.com%2F@10.0.0.1/",
+   "expect": "refuse",
+   "why": "",
+   "group": "encoding"
+  },
+  {
+   "url": "http://[::1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[::]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[::ffff:127.0.0.1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[::ffff:7f00:1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[::ffff:10.0.0.1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[::ffff:192.168.192.4]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[::ffff:169.254.169.254]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[::127.0.0.1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[::10.0.0.1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[2002:7f00:1::]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[2002:c0a8:101::1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[2002:a00:1::1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[2001::1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[64:ff9b::7f00:1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[64:ff9b::a00:1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[64:ff9b::a9fe:a9fe]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[64:ff9b:1::1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[fc00::1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[fd12:3456::1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[fdff:ffff::1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[fe80::1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[febf::1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[fec0::1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[ff02::1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[ff05::2]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[2001:db8::1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[100::1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[0:0:0:0:0:ffff:7f00:0001]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[fe80::1%25eth0]/",
+   "expect": "refuse",
+   "why": "",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[::1%25lo]/",
+   "expect": "refuse",
+   "why": "",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[::1/",
+   "expect": "refuse",
+   "why": "",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[:::1]/",
+   "expect": "refuse",
+   "why": "",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[1::2::3]/",
+   "expect": "refuse",
+   "why": "",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[gggg::1]/",
+   "expect": "refuse",
+   "why": "",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://",
+   "expect": "refuse",
+   "why": "",
+   "group": "malformed"
+  },
+  {
+   "url": "http:///x",
+   "expect": "refuse",
+   "why": "",
+   "group": "malformed"
+  },
+  {
+   "url": "not a url",
+   "expect": "refuse",
+   "why": "",
+   "group": "malformed"
+  },
+  {
+   "url": "http://exa mple.com/",
+   "expect": "refuse",
+   "why": "",
+   "group": "malformed"
+  },
+  {
+   "url": "http://example.com\\@evil.example/",
+   "expect": "refuse",
+   "why": "",
+   "group": "malformed"
+  },
+  {
+   "url": "http://ex..ample.com/",
+   "expect": "refuse",
+   "why": "",
+   "group": "malformed"
+  },
+  {
+   "url": "http://-/x",
+   "expect": "refuse",
+   "why": "",
+   "group": "malformed"
+  },
+  {
+   "url": "http://example.com\t/",
+   "expect": "refuse",
+   "why": "",
+   "group": "malformed"
+  },
+  {
+   "url": "http://exa\nmple.com/",
+   "expect": "refuse",
+   "why": "",
+   "group": "malformed"
+  },
+  {
+   "url": "http://.example.com/",
+   "expect": "refuse",
+   "why": "",
+   "group": "malformed"
+  },
+  {
+   "url": "http://_/x",
+   "expect": "refuse",
+   "why": "",
+   "group": "malformed"
+  },
+  {
+   "url": "http://example.com/\u007f",
+   "expect": "refuse",
+   "why": "",
+   "group": "malformed"
+  },
+  {
+   "url": "https://example.com/",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "http://example.com/path?q=1&r=2",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "https://EXAMPLE.com./x",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "https://sub.example.co.uk/a/b",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "https://example.com:443/",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "http://example.com:80/",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "https://example.com:80/",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "http://example.com:443/",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "https://xn--bcher-kva.example/",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "https://b\u00fccher.example/",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "https://example.com/a%20b",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "https://example.com/#frag",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "https://www.wikipedia.org/wiki/Bread",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "https://news.ycombinator.com/item?id=1",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "http://localhostexample.com/",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "http://local.example.com/",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "http://internal.example.com/",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "http://test.example.com/",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "https://my.lan.example.org/",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "http://nip.io.example.com/",
+   "expect": "allow",
+   "group": "public-name"
+  },
+  {
+   "url": "https://93.184.215.14/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://1.1.1.1/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "https://8.8.8.8/dns",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://100.63.255.255/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://100.128.0.1/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://172.15.255.255/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://172.32.0.1/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://198.17.255.255/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://198.20.0.1/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://11.0.0.1/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://192.169.0.1/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://126.255.255.255/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://128.0.0.1/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://169.253.255.255/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://223.255.255.254/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://1572394766/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://0x5db8d70e/",
+   "expect": "allow",
+   "group": "public-v4"
+  },
+  {
+   "url": "http://[2606:2800:21f:cb07:6820:80da:af6b:8b2c]/",
+   "expect": "allow",
+   "group": "public-v6"
+  },
+  {
+   "url": "https://[2001:4860:4860::8888]/",
+   "expect": "allow",
+   "group": "public-v6"
+  },
+  {
+   "url": "http://[2a00:1450:4001:82a::200e]/",
+   "expect": "allow",
+   "group": "public-v6"
+  },
+  {
+   "url": "http://[::ffff:93.184.215.14]/",
+   "expect": "allow",
+   "group": "public-v6"
+  },
+  {
+   "url": "http://[64:ff9b::5db8:d70e]/",
+   "expect": "allow",
+   "group": "public-v6"
+  },
+  {
+   "url": "http://[2002:5db8:d70e::1]/",
+   "expect": "allow",
+   "group": "public-v6"
+  }
+ ],
+ "answers": [
+  {
+   "host": "public.example.com",
+   "answers": [
+    "93.184.215.14"
+   ],
+   "expect": "pin",
+   "pin": "93.184.215.14"
+  },
+  {
+   "host": "dual.example.com",
+   "answers": [
+    "2606:2800:21f:cb07:6820:80da:af6b:8b2c",
+    "93.184.215.14"
+   ],
+   "expect": "pin",
+   "pin": "93.184.215.14"
+  },
+  {
+   "host": "v6only.example.com",
+   "answers": [
+    "2606:2800:21f:cb07:6820:80da:af6b:8b2c"
+   ],
+   "expect": "pin",
+   "pin": "2606:2800:21f:cb07:6820:80da:af6b:8b2c"
+  },
+  {
+   "host": "private.example.com",
+   "answers": [
+    "10.1.2.3"
+   ],
+   "expect": "refuse"
+  },
+  {
+   "host": "rebind.example.com",
+   "answers": [
+    "93.184.215.14",
+    "127.0.0.1"
+   ],
+   "expect": "refuse"
+  },
+  {
+   "host": "rebind6.example.com",
+   "answers": [
+    "93.184.215.14",
+    "::1"
+   ],
+   "expect": "refuse"
+  },
+  {
+   "host": "mapped.example.com",
+   "answers": [
+    "::ffff:10.0.0.1"
+   ],
+   "expect": "refuse"
+  },
+  {
+   "host": "meta.example.com",
+   "answers": [
+    "169.254.169.254"
+   ],
+   "expect": "refuse"
+  },
+  {
+   "host": "cgnat.example.com",
+   "answers": [
+    "100.100.100.100"
+   ],
+   "expect": "refuse"
+  },
+  {
+   "host": "ula.example.com",
+   "answers": [
+    "fd00::1"
+   ],
+   "expect": "refuse"
+  },
+  {
+   "host": "zone.example.com",
+   "answers": [
+    "fe80::1%eth0"
+   ],
+   "expect": "refuse"
+  },
+  {
+   "host": "garbage.example.com",
+   "answers": [
+    "not-an-ip"
+   ],
+   "expect": "refuse"
+  },
+  {
+   "host": "nxdomain.example.com",
+   "answers": [],
+   "expect": "refuse"
+  },
+  {
+   "host": "zero.example.com",
+   "answers": [
+    "0.0.0.0"
+   ],
+   "expect": "refuse"
+  }
+ ]
+}

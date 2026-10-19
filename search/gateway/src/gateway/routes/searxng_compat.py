@@ -6,24 +6,31 @@ Open WebUI v0.8.10's `searxng` engine GETs SEARXNG_QUERY_URL with the
 and reads response.results[].{url,title,content,score}.
 
 This endpoint speaks exactly that contract while internally routing through
-the rotation engine (Tor + cache + circuit breaker + privacy logging).
+the rotation engine (VPN + cache + circuit breaker + privacy logging).
 
-NO bearer auth: OWUI's searxng engine cannot send an Authorization header.
-This is safe because the gateway's SearXNG-compat path is reachable only on
-the internal docker network (not host-published) and called solely by OWUI —
-the same trust model the stack already uses for internal services.
+WHO MAY CALL (search-gate, audit A4: this route was keyless on the published port):
+  * a per-caller key (Authorization: Bearer) -> the SCREENED answer: only results intake labelled
+    clean; `content` is the nonce-fenced text, `labels` rides beside it, `withheld` counts the rest
+  * GATEWAY_API_KEY -> today's unscreened answer
+  * no key -> 401, UNLESS SEARCH_ANONYMOUS_LEGACY=true. That switch exists only because OWUI's
+    `searxng` engine cannot send a header and the research engine calls this path keyless today;
+    the plane's compose sets it until step 5 moves both callers (OWUI to the header-capable
+    POST /v1/owui/search, research to a per-caller key), then it goes.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 
-from gateway.deps import get_engine
+from gateway.callers import Caller
+from gateway.config import Settings, get_settings
+from gateway.deps import GateRuntime, get_engine, get_gate, optional_caller
 from gateway.models import SearchRequest
 from gateway.rotation import AllProvidersFailed, RotationEngine
+from gateway.routes.common import screened_search
 
 router = APIRouter(tags=["searxng-compat"])
 
@@ -43,7 +50,16 @@ async def searxng_compat_search(
     categories: str = Query(""),
     count: int = Query(_DEFAULT_RESULTS, ge=1, le=50),
     engine: RotationEngine = Depends(get_engine),
+    caller: Caller | None = Depends(optional_caller),
+    settings: Settings = Depends(get_settings),
+    gate: GateRuntime = Depends(get_gate),
 ) -> JSONResponse:
+    if caller is None and not settings.search_anonymous_legacy:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="missing or invalid bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     tr = time_range if time_range in _VALID_TIME_RANGES else None
     lang = None if language in ("", "all") else language
 
@@ -54,6 +70,29 @@ async def searxng_compat_search(
         language=lang,
         time_range=tr,  # type: ignore[arg-type]  # validated against the set above
     )
+
+    if caller is not None and caller.screened:
+        try:
+            screened = await screened_search(engine, gate, req)
+        except AllProvidersFailed:
+            return JSONResponse({"query": q, "number_of_results": 0, "results": []},
+                                status_code=200)
+        rows = [
+            {
+                "url": str(r.url),
+                "title": r.title,
+                "content": r.fenced,
+                "engine": r.source_engine or screened.provider_used,
+                "score": r.score if r.score is not None else 0.0,
+                "publishedDate": r.published_at.isoformat() if r.published_at else None,
+                "category": "general",
+                "labels": r.labels,
+            }
+            for r in screened.results
+        ]
+        return JSONResponse({"query": q, "number_of_results": len(rows), "results": rows,
+                             "withheld": screened.withheld, "answers": [], "infoboxes": [],
+                             "suggestions": []})
 
     try:
         resp = await engine.search(req)

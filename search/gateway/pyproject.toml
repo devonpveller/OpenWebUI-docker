@@ -7,6 +7,8 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "httpx[socks]>=0.27",
+    # the gate's DoH resolver (egress/resolve.py): DNS wire format, RFC 8484
+    "dnspython>=2.6",
     "redis>=5.2",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
@@ -49,6 +51,15 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 # B008: FastAPI's Depends()/Header()/Query() in argument defaults is the
 # framework's intended idiom, not a bug.
 ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# a byte copy of OB1 integrations/intake/intake/fence.py (tests/test_gate_units.py asserts it)
+"src/gateway/screen/fence.py" = ["E501"]
+"tests/tools/gen_guard_corpus.py" = ["E501", "UP031"]
+# httpcore's AsyncNetworkBackend interface takes `timeout` parameters
+"src/gateway/egress/transport.py" = ["ASYNC109"]
+# the docker round trip: long check names are the evidence's wording
+"tests/docker/*.py" = ["E501"]
 
 [tool.ruff.lint.isort]
 known-local-folder = ["conftest"]

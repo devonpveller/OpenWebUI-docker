@@ -139,10 +139,25 @@ docker compose -f search/docker-compose.yml build gateway
 docker compose -f search/docker-compose.yml up -d gateway
 ```
 
-**Backup and restore: there is nothing to back up.** The plane has no named
+**Backup and restore: there is no data to back up.** The plane has no named
 volume and no dump sidecar; `redis` is cache by design, and the configuration is
 the tracked `searxng/` directory. `python scripts/stack/stack.py backup search`
-refuses and says so.
+refuses and says so. The gate's secret files (`search/secrets/`, below) are
+bind-mount sources, so the nightly config-secrets backup archives them.
+
+## The gate's secrets (`search/secrets/`, gitignored)
+
+The gate (security plan step 3; [`gateway/README.md`](gateway/README.md#the-gate))
+reads three FILES - never environment values, which every `docker exec` inherits:
+
+| File | Content | Absent |
+|---|---|---|
+| `secrets/redis/redis.conf` | one line, `requirepass <long random>`; redis loads it as its config, the gateway reads the password from it | redis runs without a password, as before the gate, and says so on stderr at every start |
+| `secrets/gate/caller_keys` | one `name=key` per line (keys 32+ printable characters), one per caller: `owui`, `research`, `mcp`, ... | no per-caller keys: the gate's routes refuse everyone |
+| `secrets/gate/intake_key` | the gate's own intake caller key (intake's `intake_caller_keys` carries `search-gate=<same key>`) | screening is off: every screened answer is 503, never unscreened |
+
+All three absent is exactly today's plane. Creating them is the gate's deploy
+step (gated; step 5 then moves the callers).
 
 ## Troubleshooting
 
@@ -165,10 +180,14 @@ refuses and says so.
   the privacy property structural rather than a matter of configuration.
 - **`vpn` dials out on its own** - that is its job - so this plane reaches the
   internet as soon as it starts.
-- **One published port, loopback:** `127.0.0.1:8085` for host tools, behind
-  `GATEWAY_API_KEY`. The proxy on `vpn:8888`, SearXNG and redis publish nothing:
-  an open forward proxy into a VPN, an unauthenticated SearXNG and an
-  unauthenticated redis must not be reachable from the host or the LAN.
+- **One published port, loopback:** `127.0.0.1:8085` for host tools. The proxy
+  on `vpn:8888`, SearXNG and redis publish nothing. Keys: `GATEWAY_API_KEY` (the
+  legacy lane), per-caller keys (the gate), and - until step 5 moves Open WebUI
+  and the research engine - a keyless `GET /search` (`SEARCH_ANONYMOUS_LEGACY=true`
+  in the compose file; the code default refuses it).
+- **redis has a password** once `secrets/redis/redis.conf` exists (above), and the
+  gateway's cache is authenticated either way: keys and values are HMAC'd with a
+  key only the gateway holds, so a value written by anyone else is a miss.
 - **`vpn` and `gateway` are on the shared `ai-stack_default` network** so other
   planes can find them by name: Open WebUI (`SEARXNG_QUERY_URL`), and Open
   Brain's research and grounding services (`http://gateway:8080`,
@@ -185,10 +204,11 @@ checklist is
 places this plane appears:
 
 - [`docker-compose.yml`](docker-compose.yml), [`gateway/`](gateway/README.md) and
-  [`searxng/`](searxng). The gateway receives exactly three variables
-  (`GATEWAY_API_KEY`, `SEARXNG_URL`, `REDIS_URL`); its other settings run on
-  their code defaults, and making one adjustable means adding it to the
-  service's `environment:` block and to `search/.env.example` together.
+  [`searxng/`](searxng). The gateway's `environment:` block names
+  every variable it gets (`GATEWAY_API_KEY` from `search/.env`; the engine, redis,
+  the gate's secret-file paths, intake's URL and the fetch proxy as literals); its
+  other settings run on their code defaults, and making one adjustable means
+  adding it to that block and to `search/.env.example` together.
 - [`../stack.manifest.toml`](../stack.manifest.toml): `[planes.search]` and the
   `search` product.
 - `scripts/stack/stack.py`: the two search probes in `HealthSweep.run()` and

@@ -32,6 +32,7 @@ from gateway.providers.base import (
     SearchProvider,
     TransientProviderError,
 )
+from gateway.providers.fake import FakeEngineProvider
 from gateway.providers.searxng import SearxngProvider
 
 log = get_logger("gateway.rotation")
@@ -44,16 +45,19 @@ class AllProvidersFailed(Exception):
     """Every configured provider failed or was circuit-broken for this request."""
 
 
-def build_provider(name: str, searxng_url: str, timeout: float) -> SearchProvider:
+def build_provider(name: str, engine_url: str, timeout: float) -> SearchProvider:
+    """The adapter for one engine name (SEARCH_ENGINE). The gateway knows engines only through
+    this table and the SearchProvider interface."""
     factories: dict[str, Callable[[], SearchProvider]] = {
-        "searxng": lambda: SearxngProvider(searxng_url, timeout),
+        "searxng": lambda: SearxngProvider(engine_url, timeout),
+        "fake": lambda: FakeEngineProvider(engine_url, timeout),
         "kagi": KagiProvider,
         "mojeek": MojeekProvider,
         "brave": BraveProvider,
         "tavily": TavilyProvider,
     }
     if name not in factories:
-        raise ValueError(f"Unknown provider in PROVIDER_PRIORITY: {name!r}")
+        raise ValueError(f"Unknown engine in SEARCH_ENGINE: {name!r}")
     return factories[name]()
 
 

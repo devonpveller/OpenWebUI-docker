@@ -3,7 +3,6 @@ environment exactly as compose would, a FakeRedis in place of redis, a TestClien
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -11,8 +10,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import FakeRedis
 from fakes import FakeEngine, FakeIntake, FakeInternet
+
+from conftest import FakeRedis
 
 LEGACY_KEY = "legacy-key-0123456789abcdef0123456789"
 CALLERS = {
@@ -51,6 +51,7 @@ def _env(tmp: Path, engine: FakeEngine, internet: FakeInternet, intake: FakeInta
         "GATE_FETCH_TIMEOUT_SECONDS": "4",
         "INTAKE_URL": intake.url + "/v1/intake",
         "INTAKE_KEY_FILE": str(ikey),
+        "SEARCH_ANONYMOUS_LEGACY": "false",
     }
     env.update(extra or {})
     return env
@@ -77,4 +78,3 @@ def running_gate(tmp: Path, monkeypatch: pytest.MonkeyPatch,
         engine.stop()
         internet.stop()
         intake.stop()
-        os.environ.pop("GATE_CALLER_KEYS_FILE", None)
