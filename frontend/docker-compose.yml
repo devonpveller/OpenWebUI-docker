@@ -180,6 +180,10 @@ services:
       - "${OWUI_LAN_IP:-127.0.0.1}:3000:8080"
     networks:
       - owui-net
+    # Authentik reached directly on the LAN (past the Cloudflare login), so the
+    # server-side OIDC calls never leave the house. Host and IP live in .env.
+    extra_hosts:
+      - "${OWUI_AUTH_HOST:-auth.invalid}:${OWUI_AUTH_HOST_IP:-127.0.0.1}"
     volumes:
       - openwebui-data:/app/backend/data
       # NO /app/config MOUNT (removed from BOTH openwebui definitions 2026-09-19) - the claim, the four checks and F2/F13 are on the gpu one below.
@@ -199,6 +203,10 @@ services:
       - OPENID_PROVIDER_URL=${OPENID_PROVIDER_URL:-}
       - OAUTH_PROVIDER_NAME=${OAUTH_PROVIDER_NAME:-SSO}
       - OAUTH_SCOPES=${OAUTH_SCOPES:-openid email profile}
+      # SSO only (2026-10-17): no password login form; the server also refuses
+      # password sign-in. Break-glass: set both to true and recreate.
+      - ENABLE_LOGIN_FORM=false
+      - ENABLE_PASSWORD_AUTH=false
     restart: unless-stopped
     <<: *hardening-owui
     healthcheck:
@@ -241,6 +249,10 @@ services:
       # network provides that a project bridge does not). The three external
       # seams above are untouched.
       - owui-net
+    # Authentik reached directly on the LAN (past the Cloudflare login), so the
+    # server-side OIDC calls never leave the house. Host and IP live in .env.
+    extra_hosts:
+      - "${OWUI_AUTH_HOST:-auth.invalid}:${OWUI_AUTH_HOST_IP:-127.0.0.1}"
     volumes:
       - openwebui-data:/app/backend/data
       # NO /app/config MOUNT (removed 2026-09-19, sl-colo-inference): it bound the
@@ -275,6 +287,10 @@ services:
       - OPENID_PROVIDER_URL=${OPENID_PROVIDER_URL:-}
       - OAUTH_PROVIDER_NAME=${OAUTH_PROVIDER_NAME:-SSO}
       - OAUTH_SCOPES=${OAUTH_SCOPES:-openid email profile}
+      # SSO only (2026-10-17): no password login form; the server also refuses
+      # password sign-in. Break-glass: set both to true and recreate.
+      - ENABLE_LOGIN_FORM=false
+      - ENABLE_PASSWORD_AUTH=false
       # OWUI's own LOW-PRIVILEGE virtual key (the same one its chat connection
       # holds in webui.db) — the status-pipe llm-traffic module uses it for the
       # gateway's read-only /observe/* queue board, which 401s unauthenticated
