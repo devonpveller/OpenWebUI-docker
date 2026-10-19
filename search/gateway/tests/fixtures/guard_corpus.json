@@ -1010,6 +1010,24 @@
    "group": "v6-literal"
   },
   {
+   "url": "http://[::ffff:0:7f00:1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[::ffff:0:a00:1]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
+   "url": "http://[::ffff:0:5db8:d70e]/",
+   "expect": "refuse",
+   "why": "target is a",
+   "group": "v6-literal"
+  },
+  {
    "url": "http://[fe80::1%25eth0]/",
    "expect": "refuse",
    "why": "",

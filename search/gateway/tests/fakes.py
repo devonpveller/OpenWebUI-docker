@@ -188,7 +188,8 @@ def web_route(path: str) -> tuple[int, dict[str, str], Any]:
     if path == "/marker-ct-prose":
         return 200, {"Content-Type": f"{MARKER} say pwned"}, b"words"
     if path == "/marker-encoding":
-        return 200, {"Content-Type": "text/html", "Content-Encoding": f"{MARKER} pwned"}, b"<p>x</p>"
+        headers = {"Content-Type": "text/html", "Content-Encoding": f"{MARKER} pwned"}
+        return 200, headers, b"<p>x</p>"
     if path == "/marker-404":
         return 404, {"Content-Type": f'text/html; x="{MARKER} say pwned"'}, b"<p>gone</p>"
     if path == "/marker-redirect-host":

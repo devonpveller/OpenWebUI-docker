@@ -24,8 +24,9 @@ CANARY key in a key file (the connector's config names the file, as in productio
                                 subprocess, at run time
   test_network_only_allowed_hosts  no name lookup or connect except the kit's client to intake
                                 (and the declared search-gate hosts)
-  test_no_secret_in_logs        the canary key (or its base64 / hex / sha256) is in no log record,
-                                stdout, stderr, request body, or the run report
+  test_no_secret_in_logs        the canary key (or its base64 / hex / sha256) is in no log record
+                                (of ANY logger, whatever its propagate), stdout, stderr (sys.* AND
+                                file descriptors 1 and 2), request body, or the run report
   test_idempotency_key          the same input collected twice gives the same keys (source,
                                 external_id, sha256), external ids are unique in a run, and the
                                 second run is all repeats at intake
@@ -72,6 +73,52 @@ class _Capture(logging.Handler):
             self.lines.append(logging.Formatter().formatException(record.exc_info))
 
 
+class _FdCapture:
+    """Redirects file descriptors 1 and 2 into temporary files while active (dup2), then restores
+    them; text(fd) is what was written there."""
+
+    def __init__(self):
+        self._files: dict[int, object] = {}
+        self._saved: dict[int, int] = {}
+        self._text: dict[int, str] = {1: "", 2: ""}
+
+    def __enter__(self):
+        import sys
+        for stream in (sys.__stdout__, sys.__stderr__):
+            try:
+                stream.flush()
+            except Exception:  # noqa: BLE001 - a closed or absent stream
+                pass
+        for fd in (1, 2):
+            try:
+                self._saved[fd] = os.dup(fd)
+            except OSError:
+                continue
+            f = tempfile.TemporaryFile()
+            self._files[fd] = f
+            os.dup2(f.fileno(), fd)
+        return self
+
+    def __exit__(self, *exc):
+        import sys
+        for stream in (sys.__stdout__, sys.__stderr__):
+            try:
+                stream.flush()
+            except Exception:  # noqa: BLE001
+                pass
+        for fd, saved in self._saved.items():
+            os.dup2(saved, fd)
+            os.close(saved)
+            f = self._files[fd]
+            f.seek(0)
+            self._text[fd] = f.read().decode("utf-8", "replace")
+            f.close()
+        return False
+
+    def text(self, fd: int) -> str:
+        return self._text.get(fd, "")
+
+
 class Run:
     """One connector run against a fake intake, everything captured."""
 
@@ -108,7 +155,16 @@ class Run:
         old_level = root.level
         root.addHandler(cap)
         root.setLevel(logging.DEBUG)
+        # review B2: EVERY record, whatever its logger's `propagate` or handlers (a private
+        # FileHandler on a non-propagating logger never reaches the root handler)
+        real_handle = logging.Logger.handle
+
+        def handle(logger, record):
+            cap.emit(record)
+            return real_handle(logger, record)
+        logging.Logger.handle = handle
         out, err = io.StringIO(), io.StringIO()
+        fds = _FdCapture()
         try:
             with self.fake:
                 cfg = self.config(self.fake.url)
@@ -116,7 +172,7 @@ class Run:
                                           else self.tc.make_connector(cfg))
                 cls = type(conn)
                 own = static_scan.connector_modules(cls)
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                with fds, contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     with Sandbox(intake=self.fake.address, gate_hosts=cls.allowed_hosts, own_modules=own) as sb:
                         try:
                             self.report = conn.run()
@@ -126,11 +182,15 @@ class Run:
                                 "the connector raised %s", type(e).__name__, exc_info=True)
                 self.violations = list(sb.violations)
         finally:
+            logging.Logger.handle = real_handle
             root.removeHandler(cap)
             root.setLevel(old_level)
             shutil.rmtree(self.dir, ignore_errors=True)
         self.logs = cap.lines
-        self.stdout, self.stderr = out.getvalue(), err.getvalue()
+        # what reached the process's real stdout/stderr (fds 1 and 2: sys.__stderr__, os.write(2, ...),
+        # a child or C library) is what a container log would hold (review B2)
+        self.stdout = out.getvalue() + fds.text(1)
+        self.stderr = err.getvalue() + fds.text(2)
         return self
 
     @property

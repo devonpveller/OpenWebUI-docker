@@ -4,7 +4,9 @@ While it is active, it RECORDS and REFUSES:
   socket  a name lookup or a connect to any address except intake's (and then only from the kit's
           client: a connector talking to intake on its own is a bypass) and the search gate hosts
           the connector declared (connector.GATE_HOSTS); a unix socket
-  import  a DB driver, a model SDK, or a third-party HTTP library (FORBIDDEN_MODULES), from
+  import  the C module behind any of these (C_BACKENDS: _socket, _winapi, _sqlite3, ...), from
+          anything but the kit and the standard library;
+          a DB driver, a model SDK, or a third-party HTTP library (FORBIDDEN_MODULES), from
           anywhere but the kit; a stdlib network module (NETWORK_MODULES) from the connector's
           own modules
   db      sqlite3.connect (an already-imported driver cannot be un-imported, so its entry point is
@@ -40,6 +42,12 @@ FORBIDDEN_MODULES = frozenset({
 NETWORK_MODULES = frozenset({"socket", "ssl", "http", "urllib.request", "ftplib", "smtplib", "poplib",
                              "imaplib", "telnetlib", "xmlrpc", "asyncio", "selectors", "subprocess",
                              "multiprocessing", "ctypes"})
+# the C modules behind the blocked ones (review B1): `from _socket import socket` connects without
+# ever touching socket.socket.connect, `_winapi.CreateProcess` / `_posixsubprocess` spawn without
+# subprocess, `_sqlite3.connect` writes without sqlite3. A C type cannot be patched, so the IMPORT
+# is refused, from anything but the kit and the standard library itself.
+C_BACKENDS = frozenset({"_socket", "_ssl", "_winapi", "_posixsubprocess", "_overlapped", "_ctypes", "_sqlite3",
+                        "_multiprocessing", "_asyncio"})
 KIT_PREFIX = "connector_kit"
 CLIENT_MODULE = "connector_kit.client"
 
@@ -93,6 +101,11 @@ class Sandbox:
         name = (globals_ or {}).get("__name__", "") or ""
         return name == KIT_PREFIX or name.startswith(KIT_PREFIX + ".")
 
+    @staticmethod
+    def _importer_is_stdlib(globals_) -> bool:
+        name = (globals_ or {}).get("__name__", "") or ""
+        return _root(name) in sys.stdlib_module_names
+
     def _importer_is_own(self, globals_) -> bool:
         name = (globals_ or {}).get("__name__", "") or ""
         return any(name == m or name.startswith(m + ".") for m in self.own)
@@ -144,13 +157,16 @@ class Sandbox:
                 if _root(name) in FORBIDDEN_MODULES:
                     sb._record("import", f"import {name}")
                     raise ImportError(f"{name} is not allowed in a connector (connector sandbox)")
+                if _root(name) in C_BACKENDS and not sb._importer_is_stdlib(globals):
+                    sb._record("import", f"import {name} (the C module behind a blocked one)")
+                    raise ImportError(f"{name} is not allowed in a connector (connector sandbox)")
                 if sb._importer_is_own(globals) and _network_name(name):
                     sb._record("import", f"import {name} (a network module) from the connector")
                     raise ImportError(f"{name} is not allowed in a connector (connector sandbox)")
             return real_import(name, globals, locals, fromlist, level)
 
         def import_module(name, package=None):
-            if _root(name) in FORBIDDEN_MODULES or _network_name(name):
+            if _root(name) in FORBIDDEN_MODULES or _root(name) in C_BACKENDS or _network_name(name):
                 sb._record("import", f"importlib.import_module({name!r})")
                 raise ImportError(f"{name} is not allowed in a connector (connector sandbox)")
             return real_import_module(name, package)

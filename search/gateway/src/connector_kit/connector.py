@@ -14,7 +14,8 @@ THE CONTRACT (README.md has the full list; testkit/contract.py checks it):
   - it never writes an Open Brain table, never calls a model, and never opens a socket of its
     own: fetching a URL is allowed only through the search gate (plan step 3), whose hosts are
     the only ones a connector may declare in `allowed_hosts` (GATE_HOSTS);
-  - `envelopes()` and `run()` are the kit's and cannot be overridden (refused at class creation).
+  - `envelopes()`, `run()` and `client()` are the kit's and cannot be overridden (refused at class
+    creation).
 
 AN ITEM'S external_id must be STABLE: the same thing collected twice gets the same id, so intake
 answers a repeat (same bytes) or a new revision (changed bytes) - never a second item.
@@ -36,7 +37,7 @@ log = logging.getLogger("connector_kit.connector")
 # The hosts a connector may reach from collect(): the search gate only (PLAN-connectors.md step 3;
 # the compose container name of search/gateway). Nothing else - not the web, not a model, not a DB.
 GATE_HOSTS = frozenset({"search-gateway"})
-KIT_METHODS = ("envelopes", "run", "__init_subclass__")
+KIT_METHODS = ("envelopes", "run", "client", "__init_subclass__")
 
 
 @dataclass(frozen=True)

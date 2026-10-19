@@ -42,7 +42,28 @@ _NUMERIC_PART = re.compile(r"(0x[0-9a-f]*|[0-9]+)")
 
 
 class Refused(Exception):
-    """A policy refusal. The message is safe to return to the caller (no internal detail)."""
+    """A policy refusal. The MESSAGE is for tests and the corpus only and may hold values taken
+    from a response or a redirect; what a caller gets is ``REASONS[kind]``, a fixed gate-authored
+    string (search-gate review T-2: no site-chosen text in a non-ok answer, and no resolver
+    oracle, T-5)."""
+
+    def __init__(self, message: str, kind: str = "target") -> None:
+        super().__init__(message)
+        self.kind = kind if kind in REASONS else "target"
+
+
+# The ONLY refusal texts a caller ever sees.
+REASONS = {
+    "target": "refused: the URL is not an allowed target (scheme, credentials, port, internal "
+              "name or non-public address)",
+    "redirect-target": "refused: a redirect led to a target that is not allowed",
+    "resolve": "refused: the name does not resolve to public addresses only",
+    "redirects": "refused: too many redirects",
+    "type": "refused: the content type is not on the allow-list",
+    "encoding": "refused: the content encoding is not supported",
+    "size": "refused: the body is over the byte cap",
+    "time": "refused: the time cap passed before a complete answer",
+}
 
 
 # -- addresses -------------------------------------------------------------------------------------
@@ -83,6 +104,9 @@ def _v6_reason(ip: ipaddress.IPv6Address) -> str | None:
         return _v4_reason(ip.ipv4_mapped)  # judge the IPv4 it maps
     if all(x == 0 for x in g[:6]):
         return "IPv4-compatible address (::a.b.c.d, deprecated)"
+    if all(x == 0 for x in g[:4]) and g[4] == 0xFFFF and g[5] == 0:
+        # SIIT IPv4-translated ::ffff:0:a.b.c.d (RFC 2765); review T-1: the TS original passes it
+        return "IPv4-translated address (::ffff:0:0:0/96)"
     if ip.sixtofour is not None:
         r = _v4_reason(ip.sixtofour)
         return f"6to4 address embedding a {r}" if r else None

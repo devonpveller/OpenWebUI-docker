@@ -54,7 +54,8 @@ def test_the_port_is_stricter_only_where_the_plan_says() -> None:
     rule (non-global ranges, site-local, invalid numeric hosts, URL hygiene)."""
     ts = ts_verdicts()
     stricter = {u: py_reason(u) for u, why in ts.items() if why is None and py_reason(u)}
-    allowed_kinds = ("port", "localdomain", "wildcard-DNS", "non-global", "site-local",
+    allowed_kinds = ("IPv4-translated", "port", "localdomain", "wildcard-DNS", "non-global",
+                     "site-local",
                      "numeric but is not a valid IPv4", "control characters", "valid domain name",
                      "credentials", "not a valid absolute URL")
     odd = {u: r for u, r in stricter.items() if not any(k in (r or "") for k in allowed_kinds)}

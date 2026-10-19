@@ -236,6 +236,10 @@ def build(*, connector: str, connector_version: str, source: str, external_id: s
     meta = dict(metadata or {})
     if "provenance" in meta:
         raise InvalidEnvelope("metadata.provenance is reserved for the kit")
+    trust = sorted(set(meta) & set(_prov.TRUST_LABELS + ("labels",)))
+    if trust:
+        raise InvalidEnvelope(f"a connector may not set trust labels in metadata ({', '.join(trust)}); "
+                              "intake assigns them")
     when = iso_utc(fetched_at)
     meta["provenance"] = _prov.make(connector=connector, connector_version=connector_version,
                                     source=source, external_id=external_id, fetched_at=when,

@@ -2,7 +2,8 @@
 
 scan_connector(cls) parses the module that defines the connector class (plus the modules it names
 in `extra_modules`) and reports:
-  import    a DB driver, model SDK or HTTP library (sandbox.FORBIDDEN_MODULES), or a stdlib network /
+  import    a DB driver, model SDK or HTTP library (sandbox.FORBIDDEN_MODULES), the C module behind a
+            blocked one (sandbox.C_BACKENDS: _socket, _winapi, _sqlite3, ...), or a stdlib network /
             process module (sandbox.NETWORK_MODULES: socket, http.*, urllib.request, subprocess, ...)
   dynamic   __import__, importlib, exec, eval, compile (each can hide an import or a call)
   call      os.system / os.popen / os.exec* / os.spawn*, *.create_connection, *.open_connection
@@ -21,7 +22,7 @@ import re
 import sys
 from dataclasses import dataclass
 
-from .sandbox import FORBIDDEN_MODULES, NETWORK_MODULES
+from .sandbox import C_BACKENDS, FORBIDDEN_MODULES, NETWORK_MODULES
 
 _SQL = re.compile(r"\b(insert\s+into|update\s+[\w.\"]+\s+set|delete\s+from|copy\s+[\w.\"]+\s+from|truncate\s+"
                   r"|alter\s+table|create\s+table|drop\s+table|merge\s+into|upsert\s)", re.I)
@@ -40,7 +41,7 @@ class Finding:
 
 def _bad_module(name: str) -> bool:
     root = name.split(".", 1)[0]
-    if root in FORBIDDEN_MODULES:
+    if root in FORBIDDEN_MODULES or root in C_BACKENDS:
         return True
     if root == "urllib":
         return name.startswith("urllib.request") or name == "urllib"  # `import urllib` hides .request

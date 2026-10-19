@@ -16,7 +16,10 @@ the whole body:
   6. the body is read as it streams and cut at GATE_FETCH_MAX_BYTES - counted on the wire AND after
      decompression, so neither an oversize page nor a decompression bomb is ever held whole
 
-A refusal raises ``Refused`` with a reason safe to return to the caller. Nothing here logs a URL.
+A refusal raises ``Refused`` with a KIND; callers get only guard.REASONS[kind] (fixed text), never
+the message, which may quote response values. A 3xx WITHOUT a Location is not a redirect: it is
+returned as an answer with that status, and the gate reports it as an HTTP error. Nothing here
+logs a URL.
 """
 
 from __future__ import annotations
@@ -80,7 +83,7 @@ def _decoder(encoding: str) -> zlib._Decompress | None:
         return zlib.decompressobj(16 + zlib.MAX_WBITS)
     if enc == "deflate":
         return zlib.decompressobj()
-    raise Refused(f"content encoding {enc!r} is not supported")
+    raise Refused(f"content encoding {enc!r} is not supported", "encoding")
 
 
 def _header(headers: list[tuple[bytes, bytes]], name: bytes) -> str | None:
@@ -102,12 +105,15 @@ class Fetcher:
                 return await self._fetch(url)
         except TimeoutError:
             raise Refused(
-                f"time cap: no complete answer within {self.policy.timeout_s:g}s") from None
+                f"time cap: no complete answer within {self.policy.timeout_s:g}s", "time") from None
 
     async def _pin(self, t: Target) -> str:
         if t.ip_literal is not None:
             return str(t.ip_literal)
-        return check_addresses(t.host, await self.resolver.resolve(t.host))
+        try:
+            return check_addresses(t.host, await self.resolver.resolve(t.host))
+        except Refused as e:
+            raise Refused(str(e), "resolve") from None
 
     async def _fetch(self, url: str) -> Fetched:
         p = self.policy
@@ -131,9 +137,13 @@ class Fetcher:
                         location = _header(resp.headers, b"location")
                         if 300 <= resp.status < 400 and location:
                             if hop >= p.max_redirects:
-                                raise Refused(f"more than {p.max_redirects} redirects")
+                                raise Refused(f"more than {p.max_redirects} redirects",
+                                              "redirects")
                             nxt = urljoin(current.url, location.strip())
-                            current = check_url(nxt, p.ports)  # every hop judged, final included
+                            try:  # every hop judged, final included
+                                current = check_url(nxt, p.ports)
+                            except Refused as e:
+                                raise Refused(str(e), "redirect-target") from None
                             out.redirects.append(current.url)
                             out.final_url = current.url
                             continue
@@ -143,14 +153,14 @@ class Fetcher:
                             return out  # no body for an error status; the gate reports it
                         mt = media_type(out.content_type)
                         if not mt or mt not in p.content_types:
-                            raise Refused(f"content type {mt or '(none)'} is not allowed")
+                            raise Refused(f"content type {mt or '(none)'} is not allowed", "type")
                         dec = _decoder(_header(resp.headers, b"content-encoding") or "")
                         out.body = await self._read_capped(resp, dec)
                         return out
                 except (httpcore.NetworkError, httpcore.ProtocolError, httpcore.TimeoutException,
                         OSError) as e:
                     raise FetchError(f"network error ({type(e).__name__})") from None
-        raise Refused(f"more than {p.max_redirects} redirects")  # pragma: no cover
+        raise Refused(f"more than {p.max_redirects} redirects", "redirects")  # pragma: no cover
 
     async def _read_capped(self, resp: httpcore.Response, dec: zlib._Decompress | None) -> bytes:
         cap = self.policy.max_bytes
@@ -160,7 +170,7 @@ class Fetcher:
         async for chunk in stream:  # type: ignore[union-attr]
             wire += len(chunk)
             if wire > cap:
-                raise Refused(f"byte cap: the body is over {cap} bytes")
+                raise Refused(f"byte cap: the body is over {cap} bytes", "size")
             if dec is None:
                 body += chunk
             else:
@@ -169,10 +179,10 @@ class Fetcher:
                     try:
                         body += dec.decompress(feed, cap - len(body) + 1)
                     except zlib.error:
-                        raise Refused("the body is not validly compressed") from None
+                        raise Refused("the body is not validly compressed", "encoding") from None
                     if len(body) > cap:
-                        raise Refused(f"byte cap: the decoded body is over {cap} bytes")
+                        raise Refused(f"byte cap: the decoded body is over {cap} bytes", "size")
                     feed = dec.unconsumed_tail
             if len(body) > cap:
-                raise Refused(f"byte cap: the body is over {cap} bytes")
+                raise Refused(f"byte cap: the body is over {cap} bytes", "size")
         return bytes(body)
