@@ -630,9 +630,9 @@ def _build_tailnet_urls(scope_service: Optional[str] = None) -> Dict[str, Any]:
 # Probes use urllib so the pipe stays dependency-free.
 #
 # Only services REACHABLE from the openwebui container get a probe (openwebui
-# is on default + llm-net). Containers on the internal-only search-net
-# (vpn/redis/searxng) or OB1's obnet have no probe — they still appear in
-# the container table (from _STACK_ROSTER) as "registered".
+# is on default + llm-net + app-net). Containers on the internal-only
+# search-net (vpn/redis/searxng) or only on OB1's obnet have no probe — they
+# still appear in the container table (from _STACK_ROSTER) as "registered".
 _PROBES: Dict[str, Dict[str, Any]] = {
     # llama-cpp / llama-cpp-embed are network ALIASES on llm-gateway (LiteLLM)
     # since 2026-06-12 — these hostnames no longer reach a llama.cpp server, so
@@ -693,6 +693,17 @@ _PROBES: Dict[str, Dict[str, Any]] = {
     "openbrain-mcpo": {
         "host": "openbrain-mcpo", "port": 8000,
         "kind": "http_health", "health_path": "/open-brain/openapi.json",
+    },
+    # Wiki viewer — the live renderer: every page is served from the database
+    # (wiki_pages) the moment it listens; there is no build/splash state. It
+    # joins ai-stack_app-net (as openwebui does), so it is reachable by name.
+    # /__health is the endpoint its Docker HEALTHCHECK fetches (200 ok, 503
+    # degraded + reasons) and is a machine probe: it does NOT count as reader
+    # activity. Host runs fall back to the published loopback port.
+    "openbrain-wiki-viewer": {
+        "host": "openbrain-wiki-viewer", "port": 8080,
+        "host_fallback": "127.0.0.1", "host_fallback_port": 8812,
+        "kind": "wiki_viewer_health", "health_path": "/__health",
     },
 }
 
@@ -815,7 +826,8 @@ def _humanize_probe_state(proc: Optional[Dict[str, Any]]) -> str:
     if status == "ready":
         return "ready"
     if status == "degraded":
-        return "degraded"
+        # The wiki viewer's probe names why (its /__health reasons).
+        return f"degraded ({proc['reasons']})" if proc.get("reasons") else "degraded"
     if status == "unreachable":
         err = proc.get("error")
         return f"unreachable ({err})" if err else "unreachable"
@@ -915,12 +927,15 @@ def _resolve_workspace_root() -> str:
 # --- Per-service processing probes ----------------------------------------
 
 def _http_get(
-    url: str, timeout: int = HTTP_TIMEOUT
+    url: str, timeout: int = HTTP_TIMEOUT, error_body: bool = False
 ) -> Tuple[int, Optional[Any], Optional[str]]:
     """GET `url` and return (status_code, parsed_body, error_reason).
 
     On network failure returns code=0 and a short, human-readable reason
     (DNS / refused / timeout / etc.) so callers can surface it to users.
+    `error_body=True` also parses the body of a 4xx/5xx answer (the wiki
+    viewer's /__health says WHY it is degraded in its 503 body); otherwise an
+    error answer's body is None, as before.
     """
     try:
         headers = {"User-Agent": "ai-stack-admin-pipe/1"}
@@ -940,6 +955,15 @@ def _http_get(
                 return resp.status, body, None
     except urllib.error.HTTPError as e:
         # The server responded — caller can decide if 4xx/5xx is "unreachable"
+        if error_body:
+            try:
+                raw = e.read().decode("utf-8", errors="replace")
+                try:
+                    return e.code, json.loads(raw), None
+                except json.JSONDecodeError:
+                    return e.code, raw, None
+            except Exception:
+                pass
         return e.code, None, None
     except socket.timeout:
         return 0, None, f"timeout after {timeout}s"
@@ -971,7 +995,7 @@ def _probe_targets(probe: Dict[str, Any]) -> List[Tuple[str, int]]:
 
 
 def _try_get(
-    probe: Dict[str, Any], path: str
+    probe: Dict[str, Any], path: str, error_body: bool = False
 ) -> Tuple[int, Optional[Any], Optional[str], Optional[str]]:
     """GET `path` against each probe target until one responds.
 
@@ -985,7 +1009,7 @@ def _try_get(
     attempts: List[str] = []
     for host, port in _probe_targets(probe):
         url = f"http://{host}:{port}{path}"
-        code, body, error = _http_get(url, timeout=timeout)
+        code, body, error = _http_get(url, timeout=timeout, error_body=error_body)
         if code != 0:
             return code, body, url, None
         last_error = error
@@ -1055,6 +1079,26 @@ def _probe_processing(probe: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "status": "ready" if 200 <= code < 300 else "degraded",
             "code": code, "via": url,
+        }
+
+    if kind == "wiki_viewer_health":
+        # Same signal as the container's Docker healthcheck, read directly so
+        # the table has it even without a docker socket, and with the reasons.
+        code, body, url, err = _try_get(
+            probe, probe.get("health_path", "/__health"), error_body=True
+        )
+        if code == 0:
+            return {"status": "unreachable", "error": err}
+        detail = body if isinstance(body, dict) else {}
+        if code == 200:
+            return {"status": "ready", "code": code, "via": url,
+                    "note": "live renderer: pages served from the database"}
+        reasons = "; ".join(str(r) for r in (detail.get("reasons") or []))
+        return {
+            "status": "degraded", "code": code, "via": url,
+            "reasons": reasons or f"/__health {detail.get('status', 'degraded')}",
+            "note": f"/__health {detail.get('status', 'degraded')}"
+                    + (f": {reasons}" if reasons else ""),
         }
 
     return {"status": "unknown_probe_kind"}

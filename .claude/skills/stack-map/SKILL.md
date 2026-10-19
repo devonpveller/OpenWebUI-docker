@@ -99,6 +99,12 @@ the Mullvad `vpn`), `search-mcpo`, `lc-mcpo`, `smolcrawl-pipelines`, and the
 bare `llama-cpp` / `llama-cpp-embed` container names — those are now network
 ALIASES on `llm-gateway`, not containers.
 
+The wiki viewer (`openbrain-wiki-viewer`) is a LIVE RENDERER since
+research-workbench P1b: it serves every page from `wiki_pages` the moment it
+listens and carries a Docker healthcheck (`/__health`). Its `/srv` volume is the
+builder's optional bundle cache, not a readiness gate - do not re-add a
+"Building..." splash, a wait for a published snapshot, or `derive-graph-index`.
+
 ## Consistency rule
 
 When a container is added to or removed from a compose file, these must change

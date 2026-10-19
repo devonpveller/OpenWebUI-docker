@@ -633,6 +633,67 @@ function Wait-ForRestartLoops {
     return ,$looping
 }
 
+function Wait-OB1ViewerHealth {
+    # The wiki viewer (openbrain-wiki-viewer) has a Docker HEALTHCHECK since
+    # research-workbench P1b: in-container GET /__health, 200 ok / 503 degraded
+    # (database not up, reconciliation drift, broken page class, render errors),
+    # interval 30 s, retries 3, start_period 120 s. It serves pages from the
+    # database the moment it listens - there is no build to wait for - so this
+    # is a REPORT, never a gate: bounded by $TimeoutSeconds, it returns as soon
+    # as the viewer is healthy or unhealthy, and a degraded / still-starting
+    # viewer is a WARN naming the /__health reasons (read from the published
+    # loopback port), never a failure of the recovery. An image without a
+    # healthcheck (older than P1b) passes on state=running, as Wait-ForHealthy
+    # does. Returns $true only when healthy (or running without a healthcheck).
+    param(
+        [string]$Name = "openbrain-wiki-viewer",
+        [int]$TimeoutSeconds = 150,
+        [int]$PollSeconds = 5,
+        [string]$HealthUrl = "http://127.0.0.1:8812/__health"
+    )
+    $elapsed = 0
+    $h = $null
+    while ($true) {
+        $h = Get-ContainerHealth $Name
+        if (-not $h.Found) {
+            Write-Log "WARN" "Wiki viewer: $($h.Reason) - not waiting on it"
+            return $false
+        }
+        if ($h.Health -eq "healthy") {
+            Write-Log "SUCCESS" "Wiki viewer healthy (/__health ok)"
+            return $true
+        }
+        if ($h.State -eq "running" -and -not $h.Health) {
+            Write-Log "SUCCESS" "Wiki viewer running (no healthcheck in this image)"
+            return $true
+        }
+        if ($h.Health -eq "unhealthy" -or $elapsed -ge $TimeoutSeconds) { break }
+        Start-Sleep -Seconds $PollSeconds
+        $elapsed += $PollSeconds
+    }
+    # Degraded or still starting: name why, from the viewer itself. /__health
+    # answers 503 when degraded, which Invoke-WebRequest (PS 5.1) throws on,
+    # so read the body off the WebException's response.
+    $why = "no /__health answer"
+    $resp = $null
+    try {
+        $req = [System.Net.HttpWebRequest]::Create($HealthUrl)
+        $req.Timeout = 5000
+        $req.ReadWriteTimeout = 5000
+        try { $resp = $req.GetResponse() }
+        catch [System.Net.WebException] { if ($_.Exception.Response) { $resp = $_.Exception.Response } else { throw } }
+        $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        $hb = $reader.ReadToEnd() | ConvertFrom-Json
+        $reader.Dispose()
+        $why = "status $($hb.status)"
+        if (@($hb.reasons).Count -gt 0) { $why += ": " + (@($hb.reasons) -join '; ') }
+    }
+    catch { $why = "/__health not readable ($($_.Exception.Message))" }
+    finally { if ($resp) { $resp.Close() } }
+    Write-Log "WARN" "Wiki viewer not healthy after ${elapsed}s ($($h.Reason)) - $why. It still serves pages; recovery continues (check: scripts\checks\check-openbrain-health.ps1)"
+    return $false
+}
+
 function Test-OB1PantryEnabled {
     # Kept for pantry-wire's callers: Test-OB1ProfileEnabled for `pantry`.
     return (Test-OB1ProfileEnabled $Script:OB1PantryProfile)
@@ -723,6 +784,8 @@ function Start-OB1Stack {
         else {
             Write-Log "WARN" "Open Brain (OB1) stack started WITH $($looping.Count) container(s) in a restart loop: $($looping -join ', ')"
         }
+        # Bounded report on the viewer's healthcheck; never fails the recovery.
+        Wait-OB1ViewerHealth | Out-Null
     }
     catch {
         Write-Log "WARN" "Failed to start OB1 stack: $_"
@@ -759,6 +822,8 @@ function Reset-OB1Stack {
         else {
             Write-Log "WARN" "OB1 stack recreated WITH $($looping.Count) container(s) in a restart loop: $($looping -join ', ')"
         }
+        # Bounded report on the viewer's healthcheck; never fails the recovery.
+        Wait-OB1ViewerHealth | Out-Null
     }
     catch {
         Write-Log "WARN" "OB1 recreate had issues: $_"
