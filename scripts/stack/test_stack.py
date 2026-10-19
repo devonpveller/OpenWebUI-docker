@@ -793,6 +793,8 @@ PS1_PROBES = [
     "OB1: ops door :8062/health",
     "OB1: research-curator http://127.0.0.1:8816/health",
     "OB1: openbrain-db accepting connections",
+    # mcpo-resilience (2026-10-19): a proxy that loaded zero tools is a FAIL, not "up".
+    "OB1: openbrain-mcpo and openbrain-mcpo-ext each serve tools (openapi paths > 0)",
     "agent-org: mattermost ping",
 ]
 
@@ -957,6 +959,7 @@ def test_health_runs_exactly_the_probes_stack_ps1_ran_in_the_same_order(root):
 
 PANTRY_PROBE = "OB1: openbrain-pantry /health (in-container, db ok)"
 DB_PROBE = "OB1: openbrain-db accepting connections"
+MCPO_PROBE = "OB1: openbrain-mcpo and openbrain-mcpo-ext each serve tools (openapi paths > 0)"
 
 
 def _enable_pantry(root: Path) -> None:
@@ -978,7 +981,7 @@ def test_pantry_probe_runs_after_the_db_probe_once_the_profile_is_enabled(root):
     sweep(host, root)            # writes the state
     _enable_pantry(root)
     code, out = sweep(host, root, planes=None)
-    at = PS1_PROBES.index(DB_PROBE) + 1
+    at = PS1_PROBES.index(MCPO_PROBE) + 1
     assert [name for _s, name in probe_lines(out)] == PS1_PROBES[:at] + [PANTRY_PROBE] + PS1_PROBES[at:]
     assert any(c[:3] == ["docker", "exec", "openbrain-pantry"] and "deno" in c for c in host.calls)
     assert code == 0
@@ -1033,7 +1036,7 @@ def test_intake_probe_runs_after_the_db_probe_once_the_profile_is_enabled(root):
     sweep(host, root)
     _enable_ob1_profile(root, "intake")
     code, out = sweep(host, root, planes=None)
-    at = PS1_PROBES.index(DB_PROBE) + 1
+    at = PS1_PROBES.index(MCPO_PROBE) + 1
     assert [name for _s, name in probe_lines(out)] == PS1_PROBES[:at] + [INTAKE_PROBE] + PS1_PROBES[at:]
     assert any(c[:3] == ["docker", "exec", "openbrain-intake"] and "python" in c for c in host.calls)
     assert code == 0
@@ -1045,7 +1048,7 @@ def test_intake_and_pantry_probes_both_run_when_both_are_enabled(root):
     _enable_ob1_profile(root, "pantry")
     _enable_ob1_profile(root, "intake")
     code, out = sweep(host, root, planes=None)
-    at = PS1_PROBES.index(DB_PROBE) + 1
+    at = PS1_PROBES.index(MCPO_PROBE) + 1
     assert [name for _s, name in probe_lines(out)] == (PS1_PROBES[:at] + [PANTRY_PROBE, INTAKE_PROBE]
                                                         + PS1_PROBES[at:])
     assert code == 0
@@ -1072,6 +1075,67 @@ def test_intake_probe_runs_anyway_when_docker_ps_cannot_be_read(root):
     code, out = sweep(FakeHost(intake_ps_code=1), root)
     assert ("OK", INTAKE_PROBE) in probe_lines(out)
     assert "openbrain-intake is deployed - probing it anyway" in out
+
+
+# --- the mcpo tool-count probe (mcpo-resilience, 2026-10-19) -----------------------
+# Both OWUI tool proxies came up with ZERO tools after a Docker restart (they started before
+# openbrain-mcp answered, loaded an empty server list, never retried) and every probe was
+# green: the container was up and the old healthcheck read any 200. The probe is the same
+# in-container read as the compose healthcheck; it passes only when openapi.json has paths.
+
+
+def test_mcpo_probe_runs_for_both_proxies_with_the_paths_rule(root):
+    host = FakeHost()
+    code, out = sweep(host, root)
+    assert ("OK", MCPO_PROBE) in probe_lines(out)
+    execs = [c for c in host.calls if c[:2] == ["docker", "exec"] and c[2] in ("openbrain-mcpo", "openbrain-mcpo-ext")]
+    assert [c[2] for c in execs] == ["openbrain-mcpo", "openbrain-mcpo-ext"]
+    assert "/open-brain/openapi.json" in execs[0][-1] and "/open-brain-extensions/openapi.json" in execs[1][-1]
+    assert all("d.get('paths')" in c[-1] for c in execs)
+
+
+@pytest.mark.parametrize("proxy", ["openbrain-mcpo", "openbrain-mcpo-ext"])
+def test_mcpo_probe_fails_when_either_proxy_serves_no_tools(root, proxy):
+    code, out = sweep(FakeHost(exec_codes={proxy: 1}), root)
+    assert ("FAIL", MCPO_PROBE) in probe_lines(out)
+    assert code == 1
+
+
+def test_mcpo_probe_code_really_distinguishes_zero_paths_from_paths():
+    """The probe string is run for real (this python) against a local stub, URL swapped to it:
+    exit 1 on an openapi with 0 paths and on no answer, exit 0 with paths."""
+    import subprocess
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        paths = 0
+
+        def do_GET(self):
+            body = json.dumps({"paths": {"/t%d" % i: {} for i in range(type(self).paths)}}).encode()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    def exit_code(paths):
+        handler = type("H2", (H,), {"paths": paths})
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            code = stack.MCPO_TOOLS_PROBE % "open-brain"
+            code = code.replace("localhost:8000", "127.0.0.1:%d" % srv.server_address[1])
+            return subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=30).returncode
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    assert exit_code(0) == 1
+    assert exit_code(3) == 0
+    dead = stack.MCPO_TOOLS_PROBE.replace("localhost:8000", "127.0.0.1:1") % "open-brain"
+    assert subprocess.run([sys.executable, "-c", dead], capture_output=True, timeout=30).returncode != 0
 
 
 # --- the inference serving-depth probe (sl-recovery-backups, 2026-09-21) ----
@@ -1210,7 +1274,7 @@ def test_one_dead_plane_costs_its_own_probes_and_not_the_rest_of_the_sweep(root)
     )
     code, out = sweep(host, root)
     rows = probe_lines(out)
-    assert len(rows) == 15          # sixteen with the serving-depth probe; fifteen since mm-retire
+    assert len(rows) == 16          # sixteen with the serving-depth probe; fifteen since mm-retire; sixteen with mcpo-resilience
     assert [name for state, name in rows if state == "FAIL"] == [
         "frontend: OWUI http://127.0.0.1:3000/health",
         "frontend: 8 tailnet serve routes",
@@ -1218,8 +1282,8 @@ def test_one_dead_plane_costs_its_own_probes_and_not_the_rest_of_the_sweep(root)
         "REFUSED - the container 'openwebui' is not running.",
     ]
     assert code == 3
-    # The eight probes AFTER the frontend block still ran and still passed.
-    assert [state for state, _name in rows][-8:] == ["OK"] * 8
+    # The nine probes AFTER the frontend block still ran and still passed.
+    assert [state for state, _name in rows][-9:] == ["OK"] * 9
 
 
 def test_a_drift_count_above_zero_fails_and_the_number_is_in_the_label(root):
@@ -2169,7 +2233,7 @@ def test_the_tailnet_probe_skips_itself_where_the_profile_is_not_deployed(root):
     assert "  [skip] frontend: 8 tailnet serve routes (no tailscale profile in this deployment)" in out
     names = [name for _s, name in probe_lines(out)]
     assert "frontend: 8 tailnet serve routes" not in names
-    assert len(names) == 14          # the other fourteen all still ran
+    assert len(names) == 15          # the other fifteen all still ran
     assert "ALL HEALTH PROBES PASSED" in out
 
 
