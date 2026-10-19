@@ -1,12 +1,14 @@
 <#
 .SYNOPSIS
     Executable proof that emergency-recovery.ps1 starts openbrain-pantry only when the
-    `pantry` profile is ENABLED (pantry-wire, 2026-10-04). Starts, stops and touches
+    `pantry` profile is ENABLED (pantry-wire, 2026-10-04), and openbrain-intake and its two
+    relays only when the `intake` profile is (security-hardening-2026-10
+    I5: the same opt-in mechanism, $Script:OB1OptInProfiles). Starts, stops and touches
     NO container, reads NO live state: every case runs in a throwaway directory.
 
 .DESCRIPTION
     The script under test is never dot-sourced (its main block would run a recovery).
-    Only Test-OB1PantryEnabled and Get-OB1StartProfiles are lifted out of it with the
+    Only Test-OB1PantryEnabled, Test-OB1ProfileEnabled and Get-OB1StartProfiles are lifted out of it with the
     PowerShell parser and defined in a child scope, as verify-recovery-gates.ps1 does.
 
     Cases (each in a temp dir holding its own .stack\state.json / OB1\docker\.env):
@@ -52,7 +54,7 @@ function Check($name, $ok, $detail = '') {
 }
 
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($Target, [ref]$null, [ref]$null)
-$want = 'Test-OB1PantryEnabled', 'Get-OB1StartProfiles', 'Start-OB1Stack', 'Reset-OB1Stack', 'Stop-OB1Stack'
+$want = 'Test-OB1PantryEnabled', 'Test-OB1ProfileEnabled', 'Get-OB1StartProfiles', 'Start-OB1Stack', 'Reset-OB1Stack', 'Stop-OB1Stack'
 
 # ---- STATIC: an ALLOWLIST of what the five functions may execute ------------------------------
 # A denylist of "bad docker forms" cannot win (attempt 1's tester found docker-compose, Start-Job with
@@ -69,8 +71,9 @@ $want = 'Test-OB1PantryEnabled', 'Get-OB1StartProfiles', 'Start-OB1Stack', 'Rese
 # definitions, type expressions/casts ([ScriptBlock]::Create, [Diagnostics.Process]::Start), `using:`.
 # Derived by walking the shipped file 2026-10-05 (inventory of CommandAst names + operators and member calls).
 # If recovery legitimately starts using another cmdlet, add it HERE, on purpose, and say why.
+# intake I5 adds Test-OB1ProfileEnabled (lifted: the generalised check pantry's now wraps).
 $Script:AllowedCommands = @('docker', 'Test-OB1Available', 'Wait-ForRestartLoops', 'Write-Log', 'Start-Sleep',
-    'Test-OB1PantryEnabled', 'Get-OB1StartProfiles', 'ConvertFrom-Json', 'Get-Content', 'Join-Path', 'Split-Path', 'Test-Path')
+    'Test-OB1PantryEnabled', 'Test-OB1ProfileEnabled', 'Get-OB1StartProfiles', 'ConvertFrom-Json', 'Get-Content', 'Join-Path', 'Split-Path', 'Test-Path')
 $Script:AllowedMembers = @('Trim')
 function Get-AllowlistViolations($ast, [string[]]$Fns, [string]$File) {
     $out = New-Object System.Collections.ArrayList
@@ -233,8 +236,8 @@ if (-not $InChild) {
 # Defence in depth (also set by the parent): whatever slips past finds no daemon to talk to.
 $env:DOCKER_HOST = 'tcp://127.0.0.1:1'
 $fns = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $want }, $true)
-Check 'only allowlisted commands and members execute in the five functions (static, AST)' ($escapes.Count -eq 0)
-Check 'the five functions exist in emergency-recovery.ps1' ($fns.Count -eq 5)
+Check 'only allowlisted commands and members execute in the six functions (static, AST)' ($escapes.Count -eq 0)
+Check 'the six functions exist in emergency-recovery.ps1' ($fns.Count -eq 6)
 foreach ($f in $fns) { . ([scriptblock]::Create($f.Extent.Text)) }
 
 # The same constants the script declares, read from it rather than copied.
@@ -242,9 +245,15 @@ $src = Get-Content -Raw -Path $Target
 $m = [regex]::Match($src, '(?s)\$Script:OB1Profiles = @\((.*?)\)')
 $Script:OB1Profiles = @([regex]::Matches($m.Groups[1].Value, "'([^']+)'") | ForEach-Object { $_.Groups[1].Value })
 $Script:OB1PantryProfile = 'pantry'
+$Script:OB1IntakeProfile = 'intake'
+$Script:OB1OptInProfiles = @($Script:OB1PantryProfile, $Script:OB1IntakeProfile)
 $Script:OB1Compose = 'OB1\docker\docker-compose.yml'
+$mOpt = [regex]::Match($src, '(?m)^\$Script:OB1OptInProfiles = @\(([^)]*)\)')
+Check 'the script holds back exactly pantry and intake from a default up ($Script:OB1OptInProfiles)' ($mOpt.Success -and ($mOpt.Groups[1].Value -replace '\s', '') -eq '$Script:OB1PantryProfile,$Script:OB1IntakeProfile') $mOpt.Value
+Check 'the script names intake as $Script:OB1IntakeProfile' ($src -match "(?m)^\`$Script:OB1IntakeProfile = 'intake'")
 
 Check 'teardown/status list names pantry (a running one must go)' ($Script:OB1Profiles -contains 'pantry')
+Check 'teardown/status list names intake (a running one must go)' ($Script:OB1Profiles -contains 'intake')
 # CODE, NOT TEXT (attempt 1's tester: a comment containing "Get-OB1StartProfiles" above an up
 # site satisfied a text look-back while the mutant `$prof = $Script:OB1Profiles` was live).
 # Walk the AST: every compose `up` invocation inside the two start functions must splat a
@@ -299,6 +308,24 @@ try {
     Check 'env COMPOSE_PROFILES without pantry: no flag' ((Flags) -notmatch 'pantry') (Flags)
     'not json {' | Set-Content '.stack\state.json'
     Check 'unreadable state file: fails closed to off' ((Flags) -notmatch 'pantry') (Flags)
+    # intake I5: the same cases for `intake`, and both together
+    Remove-Item '.stack\state.json', 'OB1\docker\.env' -ErrorAction SilentlyContinue
+    Check 'no state, no env: no intake flag' ((Flags) -notmatch 'intake') (Flags)
+    '{"planes":{"ob1":{"profiles":["idea-refinery","research","wiki","notebook"]}}}' | Set-Content '.stack\state.json'
+    Check 'state = the live four profiles: no intake flag' ((Flags) -notmatch 'intake') (Flags)
+    '{"planes":{"ob1":{"profiles":["idea-refinery","research","wiki","notebook","intake"]}}}' | Set-Content '.stack\state.json'
+    Check 'state lists intake: intake flag present, pantry not' (((Flags) -match '--profile intake$') -and ((Flags) -notmatch 'pantry')) (Flags)
+    '{"planes":{"ob1":{"profiles":["idea-refinery","research","wiki","notebook","pantry","intake"]}}}' | Set-Content '.stack\state.json'
+    Check 'state lists both: the four, then pantry, then intake' ((Flags) -eq '--profile research --profile wiki --profile notebook --profile idea-refinery --profile pantry --profile intake') (Flags)
+    Remove-Item '.stack\state.json'
+    'COMPOSE_PROFILES=research,intake' | Set-Content 'OB1\docker\.env'
+    Check 'env COMPOSE_PROFILES has intake: flag present' ((Flags) -match '--profile intake$') (Flags)
+    'COMPOSE_PROFILES=research,intake2' | Set-Content 'OB1\docker\.env'
+    Check 'env COMPOSE_PROFILES names intake2 only: no intake flag (whole names, not substrings)' ((Flags) -notmatch '--profile intake') (Flags)
+    'not json {' | Set-Content '.stack\state.json'
+    Remove-Item 'OB1\docker\.env'
+    Check 'unreadable state file: intake fails closed to off' ((Flags) -notmatch 'intake') (Flags)
+    Remove-Item '.stack\state.json'
 
     # ---- BEHAVIOUR: run the real start/reset/stop functions with `docker` stubbed to record argv.
     # The AST check above cannot see an escape that keeps the right assignment but adds pantry some
@@ -322,7 +349,10 @@ try {
         @{ name = 'disabled (no state, no env)'; state = $null; env = $null; on = $false },
         @{ name = 'disabled (live four-profile state)'; state = '{"planes":{"ob1":{"profiles":["idea-refinery","research","wiki","notebook"]}}}'; env = 'COMPOSE_PROFILES=research,wiki'; on = $false },
         @{ name = 'enabled via state'; state = '{"planes":{"ob1":{"profiles":["research","pantry"]}}}'; env = $null; on = $true },
-        @{ name = 'enabled via OB1/docker/.env'; state = $null; env = 'COMPOSE_PROFILES=research,pantry'; on = $true })) {
+        @{ name = 'enabled via OB1/docker/.env'; state = $null; env = 'COMPOSE_PROFILES=research,pantry'; on = $true },
+        @{ name = 'intake enabled via state'; state = '{"planes":{"ob1":{"profiles":["research","intake"]}}}'; env = $null; on = $false; intake = $true },
+        @{ name = 'intake enabled via OB1/docker/.env'; state = $null; env = 'COMPOSE_PROFILES=research,intake'; on = $false; intake = $true },
+        @{ name = 'both enabled via state'; state = '{"planes":{"ob1":{"profiles":["research","pantry","intake"]}}}'; env = $null; on = $true; intake = $true })) {
         Remove-Item '.stack\state.json', 'OB1\docker\.env' -ErrorAction SilentlyContinue
         if ($case.state) { $case.state | Set-Content '.stack\state.json' }
         if ($case.env) { $case.env | Set-Content 'OB1\docker\.env' }
@@ -335,10 +365,15 @@ try {
         $downs = @(Downs $r.start) + @(Downs $r.reset) + @(Downs $r.stop)
         $downsNoPantry = @($downs | Where-Object { $_ -notmatch '--profile pantry' })
         Check "$($case.name): every down/stop names --profile pantry (a running one must go)" ($downs.Count -ge 2 -and $downsNoPantry.Count -eq 0) ($downsNoPantry -join ' | ')
+        $intakeUps = @($ups | Where-Object { $_ -match '--profile intake' })
+        if ($case.intake) { Check "$($case.name): every up names --profile intake" ($ups.Count -gt 0 -and $intakeUps.Count -eq $ups.Count) ($ups -join ' | ') }
+        else { Check "$($case.name): NO up names intake anywhere" ($intakeUps.Count -eq 0) ($intakeUps -join ' | ') }
+        $downsNoIntake = @($downs | Where-Object { $_ -notmatch '--profile intake' })
+        Check "$($case.name): every down/stop names --profile intake (a running one must go)" ($downs.Count -ge 2 -and $downsNoIntake.Count -eq 0) ($downsNoIntake -join ' | ')
     }
 }
 finally { Pop-Location; Remove-Item -Recurse -Force $tmp }
 
 Write-Host ''
-if ($failed -eq 0) { Write-Host 'ALL PANTRY RECOVERY CASES PASSED' } else { Write-Host "$failed case(s) FAILED" }
+if ($failed -eq 0) { Write-Host 'ALL PANTRY AND INTAKE RECOVERY CASES PASSED' } else { Write-Host "$failed case(s) FAILED" }
 exit $failed

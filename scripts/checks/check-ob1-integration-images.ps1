@@ -126,6 +126,13 @@
   tool is missing reproduces that state quietly. 5b makes the same call for
   node, 5c for deno.
 
+  PYTHON IMAGES (intake I5, 2026-10-18): an integration whose Dockerfile CMD or ENTRYPOINT
+  (exec form) is `python[3] -m <module>` is a Python service (the first one is
+  integrations/intake). The relative-import walk is Deno's, so the static half is skipped for it
+  with one line; the build half builds it the same way and then runs, with --network none,
+  `python -c "import <module>, <module>.__main__"` (a guarded __main__ does not start the
+  service) instead of `deno check`. Green = "builds and its module graph imports".
+
   Exit code 0 = clean or not applicable, 1 = refuse.
 
 .EXAMPLE
@@ -394,14 +401,19 @@ function Normalize-Rel([string]$Path) {
 
 # Returns @{ Glob; Files; Dirs; Entry; EntryFrom } for one Dockerfile.
 function Parse-Dockerfile([string[]]$Raw, [string[]]$TreePaths) {
-    $res = @{ Glob = $false; Files = @(); Dirs = @(); Entry = 'index.ts'; EntryFrom = 'default' }
+    $res = @{ Glob = $false; Files = @(); Dirs = @(); Entry = 'index.ts'; EntryFrom = 'default'; Runtime = 'deno' }
     foreach ($line in (Join-Continuations $Raw)) {
-        # CMD or ENTRYPOINT (exec form): the last *.ts argument is the entrypoint.
+        # CMD or ENTRYPOINT (exec form): the last *.ts argument is the entrypoint;
+        # `python[3] -m <module>` makes it a Python image (see PYTHON IMAGES above).
         if ($line -match '^\s*(CMD|ENTRYPOINT)\s+(\[.*\])\s*$') {
             $kw = $Matches[1]
             $cmdArgs = @([regex]::Matches($Matches[2], '"([^"]*)"') | ForEach-Object { $_.Groups[1].Value })
             $ts = @($cmdArgs | Where-Object { $_ -match '\.(ts|js|mjs|tsx)$' })
             if ($ts.Count -gt 0) { $res.Entry = ($ts[-1] -replace '^\./', ''); $res.EntryFrom = $kw }
+            elseif ($cmdArgs.Count -ge 3 -and $cmdArgs[0] -match '^(/usr/(local/)?bin/)?python3?$' -and $cmdArgs[1] -eq '-m' -and
+                    $cmdArgs[2] -match '^[A-Za-z_][A-Za-z0-9_.]*$') {
+                $res.Entry = $cmdArgs[2]; $res.EntryFrom = $kw; $res.Runtime = 'python'
+            }
             continue
         }
         if ($line -notmatch '^\s*(COPY|ADD)\s+(.*)$') { continue }
@@ -478,8 +490,13 @@ foreach ($svc in $candidates) {
     $treePaths = @(Git-InOB1 @('-c', 'core.quotepath=false', 'ls-tree', '-r', '--name-only', $newSha, '--', "integrations/$svc/") |
         ForEach-Object { $_.Substring("integrations/$svc/".Length) })
     $df = Parse-Dockerfile $dfLines $treePaths
-    $plans += @{ Svc = $svc; Entry = $df.Entry }
+    $plans += @{ Svc = $svc; Entry = $df.Entry; Runtime = $df.Runtime }
 
+    if ($df.Runtime -eq 'python') {
+        Write-Host ("$Tag static: $dockerfileRel is a Python image (python -m $($df.Entry)) - the relative-" +
+            "import walk is Deno's, static half skipped (the build half imports the module).")
+        continue
+    }
     if ($df.Glob) {
         Write-Host ("$Tag static: $dockerfileRel copies by glob/directory - a name list cannot " +
             "drift, static half skipped (the build half decides). entry=$($df.Entry)")
@@ -577,15 +594,23 @@ foreach ($plan in $plans) {
                     $verdict = "docker build of $image (integrations/$svc at $new7) FAILED (exit $($b.Code)) after $([int]$sw.Elapsed.TotalSeconds)s."
                 }
                 else {
-                    $c = Invoke-Native $dockerCmd.Source @('run', '--rm', '--network', 'none', '-e', 'NO_COLOR=1', $image, 'deno', 'check', $entry)
+                    if ($plan.Runtime -eq 'python') {
+                        $checkWhat = "python -c 'import $entry, $entry.__main__'"
+                        $c = Invoke-Native $dockerCmd.Source @('run', '--rm', '--network', 'none', '--entrypoint', 'python',
+                            $image, '-c', "import $entry, $entry.__main__")
+                    }
+                    else {
+                        $checkWhat = "deno check $entry"
+                        $c = Invoke-Native $dockerCmd.Source @('run', '--rm', '--network', 'none', '-e', 'NO_COLOR=1', $image, 'deno', 'check', $entry)
+                    }
                     $log = $c.Lines
                     if ($c.Code -ne 0) {
-                        $verdict = ("'deno check $entry' inside $image FAILED (exit $($c.Code)): the image builds " +
+                        $verdict = ("'$checkWhat' inside $image FAILED (exit $($c.Code)): the image builds " +
                                     "but its module graph does not resolve - this is what the container would " +
                                     "die on at start.")
                     }
                     else {
-                        Write-Host ("$Tag build: $image built and 'deno check $entry' resolved inside it " +
+                        Write-Host ("$Tag build: $image built and '$checkWhat' resolved inside it " +
                             "($([int]$sw.Elapsed.TotalSeconds)s); tag removed.")
                     }
                 }
