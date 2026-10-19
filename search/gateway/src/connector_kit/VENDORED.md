@@ -1,8 +1,10 @@
 # Vendored: OB1 `integrations/connectors/connector_kit`
 
-A byte copy of the connector kit (security plan step 2) at OB1 **ac7e1221c72f920498a89449c55ba3dc4d2795da**
-(`work/search-gate2`: the connector-template round-2 kit tip 1fa4b3a plus the gate's opt-in
-`return_clean_text`), the commit the ai-stack OB1 gitlink points at.
+A byte copy of the connector kit (security plan step 2) at OB1 **d8f083f7d7ed1fb912d623798d50ae04d99297a2**
+(`work/ob1-int-1019`, the forward integration of mcpo-resilience 594598e6 into work/search-gate2
+ac7e122 = the connector-template round-2 kit tip 1fa4b3a plus the gate's opt-in
+`return_clean_text`; its connectors tree equals ac7e122's), the commit the ai-stack OB1 gitlink
+points at.
 
 Why vendored: the search gate is an ai-stack image built from `search/gateway/` alone; it must not
 depend on an OB1 checkout at build or run time. Do not edit these files here: change the kit in OB1,
