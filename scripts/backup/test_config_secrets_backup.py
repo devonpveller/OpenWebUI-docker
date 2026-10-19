@@ -991,3 +991,58 @@ def test_cli_pin_ignores_on_a_checkout_with_a_submodule(tmp_path, policy, monkey
     monkeypatch.setattr(csb, "derive_inventory", lambda *a, **k: inv)
     assert csb.main(["pin-ignores", "--repo-root", str(root), "--policy", str(policy)]) == csb.EXIT_OK
     assert _pinned_block(root) == ["/.stack/state.json"] and _sub_pins(root) == ["/docker/.env"]
+
+
+# ----------------------------------------------------------------------------- intake (intake-i5b)
+
+INTAKE_MODEL_DIR = "OB1/integrations/intake/models/protectai-deberta-v3-base-prompt-injection-v2-90c9989b"
+INTAKE_SECRETS = ("intake_caller_keys", "intake_db_password", "intake_second_opinion_key")
+
+
+def _ob1_fixture(repo: Path, with_secrets: bool) -> tuple[Path, object]:
+    """An ob1 plane on this host (its .env present) whose `intake` profile render bind-mounts the
+    classifier directory and declares the three file-backed compose secrets, as
+    OB1/docker/docker-compose.yml does. The model weights are a > 5 MiB untracked file there."""
+    manifest = repo / "ob1-manifest.toml"
+    manifest.write_text('[planes.ob1]\ncompose = "OB1/docker/docker-compose.yml"\n\n'
+                        '[planes.ob1.profiles.intake]\nopt_in = true\n', encoding="utf-8")
+    write(repo, {"OB1/docker/.env": f"EXAMPLE_OB1={MARK}-ob1\n",
+                 f"{INTAKE_MODEL_DIR}/config.json": "{}\n"})
+    (repo / INTAKE_MODEL_DIR / "model.safetensors").write_bytes(b"\0" * (6 * 1024 * 1024))
+    if with_secrets:
+        write(repo, {f"OB1/docker/intake-secrets/{n}": f"{MARK}-{n}\n" for n in INTAKE_SECRETS})
+
+    def render(plane, spec):
+        if plane != "ob1":
+            return [("(no profile)", {"services": {}})]
+        intake = {"services": {"openbrain-intake": {
+            "volumes": [{"type": "bind", "source": str(repo / INTAKE_MODEL_DIR), "target": "/models"}],
+            "secrets": [{"source": n, "target": n} for n in INTAKE_SECRETS]}},
+            "secrets": {n: {"file": str(repo / "OB1/docker/intake-secrets" / n)} for n in INTAKE_SECRETS}}
+        return [("(this host's profiles)", {"services": {}}), ("(no profile)", {"services": {}}), ("intake", intake)]
+    return manifest, render
+
+
+def test_intake_model_weights_under_the_models_dir_do_not_fail_the_backup(repo, policy):
+    """intake-int review R-1: the nightly job renders every declared ob1 profile, so it follows
+    intake's model bind; the 738 MB weights (over max_file_bytes) were OVERSIZE -> exit 1. The
+    shipped policy excludes OB1/integrations/intake/models/* with a reason."""
+    manifest, render = _ob1_fixture(repo, with_secrets=True)
+    pol = csb.load_policy(policy)
+    inv = csb.derive_inventory(repo, pol, manifest=manifest, renderer=render)
+    assert [p for p in inv.problems if p[0] == "OVERSIZE"] == []
+    assert f"{INTAKE_MODEL_DIR}/model.safetensors" not in inv.files
+    assert f"{INTAKE_MODEL_DIR}/model.safetensors" in inv.excluded
+    assert "sha256" in inv.excluded[f"{INTAKE_MODEL_DIR}/model.safetensors"]
+    # the intake secrets (file-backed compose secrets, R2-F1) ARE archived
+    for n in INTAKE_SECRETS:
+        assert f"OB1/docker/intake-secrets/{n}" in inv.files, n
+    assert inv.problems == []
+
+
+def test_a_host_without_the_intake_secret_files_is_not_a_missing_error(repo, policy):
+    """A host that never enabled intake has no docker/intake-secrets/: the files have no suffix, so
+    the derivation does not call them MISSING (that would fail every host's nightly job)."""
+    manifest, render = _ob1_fixture(repo, with_secrets=False)
+    inv = csb.derive_inventory(repo, csb.load_policy(policy), manifest=manifest, renderer=render)
+    assert inv.problems == []
