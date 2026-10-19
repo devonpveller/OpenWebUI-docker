@@ -20,7 +20,7 @@ from gateway.egress.resolve import DohResolver, Resolver, SystemResolver
 from gateway.logging import configure_logging, get_logger
 from gateway.rotation import RotationEngine, build_provider
 from gateway.routes import gate, health, native, searxng_compat, tavily_shim
-from gateway.screen.connector import Connector, IntakeConnector, Unavailable
+from gateway.screen.connector import Connector, make_connector
 from gateway.screen.gate import Screen
 
 
@@ -44,14 +44,12 @@ def build_gate(settings: Settings) -> tuple[GateRuntime, Resolver, Connector]:
         ),
         resolver,
     )
-    intake_key = read_secret_file(settings.intake_key_file)
-    connector: Connector = (
-        IntakeConnector(settings.intake_url, intake_key, settings.intake_timeout_seconds)
-        if intake_key else Unavailable()
-    )
-    runtime = GateRuntime(callers=callers, fetcher=fetcher,
-                          screen=Screen(connector, settings.intake_concurrency),
-                          screening_configured=bool(intake_key))
+    connector: Connector
+    connector, screening = make_connector(settings.intake_url, settings.intake_key_file,
+                                          settings.intake_timeout_seconds,
+                                          settings.intake_concurrency)
+    runtime = GateRuntime(callers=callers, fetcher=fetcher, screen=Screen(connector),
+                          screening_configured=screening)
     return runtime, resolver, connector
 
 

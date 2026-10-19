@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import gzip
+import hashlib
 import json
 import re
 import socket
@@ -321,9 +322,12 @@ class _IntakeHandler(_Quiet):
         if owner.force_status is not None:
             self._send(owner.force_status, b'{"error": "forced"}')
             return
-        raw = env["raw"]
+        raw_bytes = env["raw"].encode()
         if env.get("raw_encoding") == "base64":
-            raw = base64.b64decode(raw).decode("utf-8", "replace")
+            raw_bytes = base64.b64decode(env["raw"])
+        raw = raw_bytes.decode("utf-8", "replace")
+        key = {"source": env["source"], "external_id": env["external_id"],
+               "sha256": hashlib.sha256(raw_bytes).hexdigest()}
         if _TAG_RE.search(raw) or "display:none" in raw:
             label, text = "injected", None
         elif "pending-me" in raw:
@@ -334,6 +338,7 @@ class _IntakeHandler(_Quiet):
         item_id = str(uuid.UUID(int=owner.seq))  # the real service's ids are UUIDs
         out = {
             "intake_id": item_id, "status": "done" if label != "pending" else "pending",
+            "key": key, "repeat": False, "revision": 1,
             "verdict": label if label != "pending" else None, "label": label,
             "text": text, "title": None, "links": [],
             "labels": {"verdict": label, "connector": env["connector"], "source": env["source"],

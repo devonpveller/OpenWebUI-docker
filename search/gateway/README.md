@@ -116,18 +116,25 @@ The refusal corpus is `tests/fixtures/guard_corpus.json` (229 URLs + 14 answer s
 `tests/test_guard_parity.py` runs it through the TypeScript original under deno and
 asserts the port refuses everything the original refuses.
 
-**The intake hand-off (`screen/`).** Every search result (title + snippet, source
-`web-search`) and every fetched page (source `web-page`, raw bytes, the redirect
-chain in metadata) becomes one intake envelope - intake's stage-1 schema exactly,
-connector `search-gate` - POSTed to `INTAKE_URL` with the gate's own key
-(`INTAKE_KEY_FILE`). The query is never sent. Read policy: only `clean` is returned
-(`suspicious`, `pending`, `injected`, `rejected` and every failure are withheld and
-counted); the text is intake's extracted text, wrapped in the section-6 nonce fence
-`<<UNTRUSTED-{nonce} src=... verdict=clean>> ... <<END-{nonce}>>` with intake's
-labels beside it. No intake key: every screened route is 503, never unscreened.
-`screen/connector.py` is the one module that knows intake (to be swapped for the
-connector-template kit); `screen/fence.py` is a byte copy of intake's `fence.py`
-(a test asserts it).
+**The intake hand-off (`screen/`) - a connector on the connector kit.** The gate is the
+connector `search-gate` (security plan step 2's contract): `screen/gate_connector.py` holds two
+connector classes that only COLLECT what the gate already has - every search result (title +
+snippet, source `web-search`) and every fetched page (raw bytes, source `web-page`, origin = the
+requested URL, redirect_chain = every hop after it). The kit builds each envelope (intake's stage-1
+schema exactly, plus `metadata.provenance`) and its `IntakeClient` sends it to `INTAKE_URL` with the
+gate's key read from `INTAKE_KEY_FILE` (bounded send, no proxy, no redirect; 2 attempts on
+408/503/no answer). The query is never sent. The gate opts in to `return_clean_text`, so a `clean`
+answer carries intake's text and labels. Read policy: only `clean` is returned (`suspicious`,
+`pending`, `injected`, `rejected` and every failure are withheld and counted); the text is intake's,
+wrapped in the section-6 nonce fence `<<UNTRUSTED-{nonce} src=... verdict=clean>> ... <<END-{nonce}>>`
+with intake's labels beside it. No intake key file: every screened route is 503, never unscreened.
+
+The kit is VENDORED at `src/connector_kit/` (a byte copy of OB1 `integrations/connectors/connector_kit`
+at the gitlink; `VENDORED.md` names the sha and how to re-copy), so the image is built from
+`search/gateway/` alone and never needs an OB1 checkout. `tests/test_kit_vendored.py` fails on any
+drift from OB1 or a sha that is not the gitlink; `tests/test_kit_conformance.py` runs the kit's
+conformance runner (its 9 contract tests) against both gate connectors. `screen/fence.py` is a byte
+copy of intake's `fence.py` (a test asserts it).
 
 **The cache (A2).** Keys and values are HMAC'd with a key only the gateway holds
 (`GATE_CACHE_KEY_FILE`, else random per process): a value anyone else wrote is a miss

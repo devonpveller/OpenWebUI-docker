@@ -1,55 +1,49 @@
-"""THE ONE MODULE BOUNDARY between the gate and intake (security plan step 2, connector-template).
+"""THE ONE MODULE BOUNDARY between the gate and intake: the connector kit (security plan step 2).
 
-Everything the gate knows about intake is in this file: the envelope it builds (EXACTLY intake's
-stage-1 schema, OB1 integrations/intake/intake/envelope.py - REQUIRED source, connector,
-external_id, fetched_at, content_type, raw; OPTIONAL raw_encoding, metadata, links; nothing else),
-the POST to /v1/intake with the gate's own caller key, and how each answer maps to an ``Outcome``.
-The rest of the gate sees only ``Item`` in and ``Outcome`` out.
+The gate's connectors (screen/gate_connector.py) collect; the kit (connector_kit, vendored from OB1,
+see src/connector_kit/VENDORED.md) builds each envelope - intake's stage-1 schema exactly, plus
+metadata.provenance (connector, version, fetched_at, origin, redirect_chain, labels) - and its
+IntakeClient sends it: the key from a FILE (INTAKE_KEY_FILE), the envelope re-checked right before
+sending, one deadline per attempt, no proxy, no redirect, a capped reply. The gate opts in to
+`return_clean_text`: a `clean` answer carries intake's text, title and labels; nothing else does.
 
-STATUS: interim. The connector-template kit (envelope builder, bounded client, fake intake) is
-being built in parallel; when it lands, ``IntakeConnector`` becomes a thin adapter over the kit's
-client and this file's own builder goes. Nothing outside this file changes.
+The kit is synchronous (http.client, a watchdog thread); each submission runs in a worker thread
+(asyncio.to_thread) so the event loop is never blocked. The kit's retry policy is narrowed for a
+request path: 2 attempts (408/503/no answer retried once, Retry-After capped at 2 s) within
+INTAKE_TIMEOUT_SECONDS.
 
-What the answers mean (intake_service/core.py + web.py):
-  200  a result. ``label`` clean | suspicious | pending | injected (and ``text`` only for
-       clean/suspicious). The gate's read policy keeps only clean.
-  422  stage 1 rejected the envelope (``rejected``).
-  408 / 503  transient (busy, no worker, store down): ONE retry inside the deadline, then ``error``.
-  400 / 401 / 403 / 413  the gate's own fault or configuration: ``error``, never retried.
-Every outcome that is not clean is withheld by the caller of this module. A failure is never clean.
+How each kit answer maps to the gate's Outcome:
+  record + clean (with text)            clean       -> returned, fenced
+  record + clean, no text               unreadable  (intake withheld it: a repeat whose evidence
+                                                     differs) -> withheld
+  record + suspicious / pending / injected / rejected -> that label -> withheld
+  an envelope the kit refuses (stage 1)  rejected   -> withheld (nothing was sent)
+  stop (401/403/413/422/400/...) or deferred (retries spent)  error -> withheld; logged with the
+                                                     HTTP status, never the key or the URL
+A failure is never clean.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import datetime as dt
-import hashlib
-import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
-import httpx
-
+from connector_kit import ConnectorConfig, IntakeClient, RequestTooLarge, RetryPolicy, load_key_file
 from gateway.logging import get_logger
+from gateway.screen.gate_connector import (
+    CONNECTOR_ID,
+    PageConnector,
+    PageInput,
+    SnippetConnector,
+    SnippetInput,
+)
 
 log = get_logger("gateway.screen")
 
-CONNECTOR = "search-gate"
-SOURCE_SNIPPET = "web-search"
-SOURCE_PAGE = "web-page"
-MAX_EXTERNAL_ID = 1024  # intake envelope.py: external_id 1..1024 characters
-MAX_REPLY_BYTES = 16 * 1024 * 1024
-LABELS = ("clean", "suspicious", "pending", "injected", "rejected", "error")
-
-
-@dataclass(frozen=True)
-class Item:
-    source: str
-    external_id: str
-    content_type: str
-    raw: bytes
-    metadata: dict[str, Any] = field(default_factory=dict)
+LABELS = ("clean", "suspicious", "pending", "injected", "rejected", "unreadable", "error")
 
 
 @dataclass(frozen=True)
@@ -62,96 +56,89 @@ class Outcome:
 
     @property
     def readable(self) -> bool:
-        return self.label in ("clean", "internal") and self.text is not None
+        return self.label == "clean" and self.text is not None
 
 
 class Connector(Protocol):
-    async def submit(self, item: Item) -> Outcome: ...
+    async def snippets(self, inputs: Sequence[SnippetInput]) -> list[Outcome]: ...
+
+    async def pages(self, inputs: Sequence[PageInput]) -> list[Outcome]: ...
 
     async def aclose(self) -> None: ...
 
 
-def external_id_for(url: str) -> str:
-    """A URL is the item's identity; one too long for intake's field becomes its sha256."""
-    if 0 < len(url) <= MAX_EXTERNAL_ID and url.isprintable():
-        return url
-    return "url-sha256:" + hashlib.sha256(url.encode("utf-8", "surrogatepass")).hexdigest()
-
-
-def build_envelope(item: Item, *, now: dt.datetime | None = None) -> dict[str, Any]:
-    """Intake's stage-1 envelope for one item (raw always base64, so no byte is re-encoded)."""
-    fetched_at = (now or dt.datetime.now(dt.UTC)).isoformat(timespec="seconds")
-    return {
-        "source": item.source,
-        "connector": CONNECTOR,
-        "external_id": item.external_id,
-        "fetched_at": fetched_at,
-        "content_type": item.content_type,
-        "raw": base64.b64encode(item.raw).decode("ascii"),
-        "raw_encoding": "base64",
-        "metadata": dict(item.metadata),
-        "links": [],
-    }
+def gate_retry(timeout_s: float) -> RetryPolicy:
+    return RetryPolicy(max_attempts=2, base_s=0.5, cap_s=1.0, retry_after_cap_s=2.0,
+                       budget_s=timeout_s)
 
 
 class IntakeConnector:
-    def __init__(self, url: str, key: str, timeout_s: float) -> None:
-        self._url = url
-        self._timeout_s = timeout_s
-        self._client = httpx.AsyncClient(
-            trust_env=False,  # never a proxy: intake is internal
-            follow_redirects=False,
-            timeout=httpx.Timeout(timeout_s),
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        )
+    """The kit's client with the gate's key; one per process (the client holds no connection)."""
 
-    async def _post_once(self, body: bytes) -> tuple[int, dict[str, Any] | None]:
-        async with self._client.stream("POST", self._url, content=body) as r:
-            buf = bytearray()
-            async for chunk in r.aiter_bytes():
-                buf += chunk
-                if len(buf) > MAX_REPLY_BYTES:
-                    return r.status_code, None
-            try:
-                parsed = json.loads(bytes(buf))
-            except ValueError:
-                parsed = None
-            return r.status_code, parsed if isinstance(parsed, dict) else None
+    def __init__(self, url: str, key_file: str, timeout_s: float, concurrency: int = 4) -> None:
+        self._sem = asyncio.Semaphore(concurrency)
+        self.config = ConnectorConfig(intake_url=url, key_file=key_file, timeout_s=timeout_s,
+                                      retry=gate_retry(timeout_s))
+        self.client = IntakeClient(url, load_key_file(key_file), connector=CONNECTOR_ID,
+                                   timeout_s=timeout_s, retry=self.config.retry,
+                                   return_clean_text=True)
 
-    async def submit(self, item: Item) -> Outcome:
-        body = json.dumps(build_envelope(item), ensure_ascii=True).encode("ascii")
+    async def snippets(self, inputs: Sequence[SnippetInput]) -> list[Outcome]:
+        return await self._run(SnippetConnector(self.config, inputs))
+
+    async def pages(self, inputs: Sequence[PageInput]) -> list[Outcome]:
+        return await self._run(PageConnector(self.config, inputs))
+
+    async def _run(self, conn: SnippetConnector | PageConnector) -> list[Outcome]:
+        prepared = list(conn.envelopes())  # the kit builds and checks; nothing is sent yet
+        return list(await asyncio.gather(*(self._one(p) for p in prepared)))
+
+    async def _one(self, p: Any) -> Outcome:
+        if p.envelope is None:
+            log.warning("intake_envelope_refused", reason=(p.refusal or "")[:40].split(":")[0])
+            return Outcome("rejected", detail="the kit refused the envelope")
         try:
-            async with asyncio.timeout(self._timeout_s):
-                status, reply = await self._post_once(body)
-                if status in (408, 503):
-                    await asyncio.sleep(0.5)
-                    status, reply = await self._post_once(body)
-        except (httpx.HTTPError, TimeoutError) as e:
-            log.warning("intake_unreachable", error=type(e).__name__)
-            return Outcome("error", detail="screening unavailable")
-        if status == 422:
-            return Outcome("rejected", detail="intake rejected the item")
-        if status != 200 or reply is None:
-            log.warning("intake_status", status=status)
-            return Outcome("error", detail=f"screening failed ({status})")
-        label = reply.get("label")
-        if label not in LABELS:
-            return Outcome("error", detail="screening returned an unknown label")
-        labels = reply.get("labels") if isinstance(reply.get("labels"), dict) else {}
-        text = reply.get("text") if isinstance(reply.get("text"), str) else None
-        title = reply.get("title") if isinstance(reply.get("title"), str) else None
-        return Outcome(label, text=text if label == "clean" else None,
-                       title=title if label == "clean" else None, labels=labels)
-
-    async def aclose(self) -> None:
-        await self._client.aclose()
-
-
-class Unavailable:
-    """No intake key configured: every item is ``error`` (screened routes fail closed)."""
-
-    async def submit(self, item: Item) -> Outcome:
-        return Outcome("error", detail="screening is not configured")
+            async with self._sem:
+                sub = await asyncio.to_thread(self.client.submit, p.envelope)
+        except RequestTooLarge:
+            return Outcome("rejected", detail="over intake's request cap")
+        o = sub.outcome
+        if sub.final != "record" or o.label is None:
+            log.warning("intake_not_recorded", result=sub.final, http=o.http, attempts=sub.attempts)
+            return Outcome("error", detail="screening failed")
+        extra = dict(o.extra or {})
+        if o.label == "clean":
+            text = extra.get("text")
+            if not isinstance(text, str):
+                return Outcome("unreadable", detail="intake withheld the text")
+            title = extra.get("title")
+            labels = extra.get("labels")
+            return Outcome("clean", text=text, title=title if isinstance(title, str) else None,
+                           labels=dict(labels) if isinstance(labels, dict) else {})
+        return Outcome(o.label)
 
     async def aclose(self) -> None:
         return None
+
+
+class Unavailable:
+    """No intake key file: every item is ``error`` (the screened routes answer 503 before this)."""
+
+    async def snippets(self, inputs: Sequence[SnippetInput]) -> list[Outcome]:
+        return [Outcome("error", detail="screening is not configured") for _ in inputs]
+
+    async def pages(self, inputs: Sequence[PageInput]) -> list[Outcome]:
+        return [Outcome("error", detail="screening is not configured") for _ in inputs]
+
+    async def aclose(self) -> None:
+        return None
+
+
+def make_connector(url: str, key_file: str, timeout_s: float,
+                   concurrency: int = 4) -> tuple[Connector, bool]:
+    """The intake connector, or Unavailable when no key file is configured or present (the plane
+    ships without one: today's posture). A key file that exists but is malformed RAISES - a
+    misconfigured gate never starts."""
+    if not key_file or not Path(key_file).exists():
+        return Unavailable(), False
+    return IntakeConnector(url, key_file, timeout_s, concurrency), True

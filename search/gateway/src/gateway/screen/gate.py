@@ -1,7 +1,7 @@
 """The gate's read policy over intake's labels (DESIGN-intake.md section 6; PLAN-connectors step 3).
 
-Every search result (title + snippet) and every fetched page becomes one intake item. What goes
-back to a caller:
+Every search result (title + snippet) and every fetched page becomes one intake item (through the
+connector kit: screen/connector.py, screen/gate_connector.py). What goes back to a caller:
   * ONLY items intake labelled ``clean`` (``internal`` is never an external item's label, so in
     practice clean). The gate's callers are model-facing and tool-using (OWUI, the research engine,
     openbrain-mcp): ``suspicious`` is withheld for them (design section 6 and operator D41), and
@@ -16,7 +16,6 @@ back to a caller:
 
 from __future__ import annotations
 
-import asyncio
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
@@ -24,14 +23,8 @@ from typing import Any
 from gateway.egress.fetch import Fetched
 from gateway.models import SearchResult
 from gateway.screen import fence
-from gateway.screen.connector import (
-    SOURCE_PAGE,
-    SOURCE_SNIPPET,
-    Connector,
-    Item,
-    Outcome,
-    external_id_for,
-)
+from gateway.screen.connector import Connector, Outcome
+from gateway.screen.gate_connector import PageInput, SnippetInput
 
 
 @dataclass(frozen=True)
@@ -53,45 +46,24 @@ def _fenced(text: str, outcome: Outcome) -> str:
     return fence.wrap(text, src=_src(outcome), verdict="clean").text
 
 
-def snippet_item(r: SearchResult) -> Item:
-    title = " ".join(r.title.split())
-    raw = f"{title}\n{r.snippet or ''}".encode("utf-8", "replace")
-    return Item(
-        source=SOURCE_SNIPPET,
-        external_id=external_id_for(str(r.url)),
-        content_type="text/plain; charset=utf-8",
-        raw=raw,
-        metadata={"kind": "search-result", "url": str(r.url),
-                  "engine": r.source_engine or r.provider},
-    )
+def snippet_input(r: SearchResult) -> SnippetInput:
+    return SnippetInput(url=str(r.url), title=r.title, snippet=r.snippet or "",
+                        engine=r.source_engine or r.provider)
 
 
-def page_item(f: Fetched) -> Item:
-    return Item(
-        source=SOURCE_PAGE,
-        external_id=external_id_for(f.final_url),
-        content_type=f.content_type,
-        raw=f.body,
-        metadata={"kind": "web-page", "requested_url": f.requested_url, "final_url": f.final_url,
-                  "redirects": list(f.redirects), "http_status": f.status, "via": f.via},
-    )
+def page_input(f: Fetched) -> PageInput:
+    return PageInput(requested_url=f.requested_url, final_url=f.final_url,
+                     redirects=tuple(f.redirects), content_type=f.content_type, body=f.body,
+                     http_status=f.status, via=f.via)
 
 
 class Screen:
-    def __init__(self, connector: Connector, concurrency: int) -> None:
+    def __init__(self, connector: Connector) -> None:
         self.connector = connector
-        self._sem = asyncio.Semaphore(concurrency)
-
-    async def _one(self, item: Item) -> Outcome:
-        async with self._sem:
-            return await self.connector.submit(item)
-
-    async def outcomes(self, items: list[Item]) -> list[Outcome]:
-        return list(await asyncio.gather(*(self._one(i) for i in items)))
 
     async def results(self, results: list[SearchResult]
                       ) -> tuple[list[tuple[SearchResult, ScreenedText]], dict[str, int]]:
-        outs = await self.outcomes([snippet_item(r) for r in results])
+        outs = await self.connector.snippets([snippet_input(r) for r in results])
         kept: list[tuple[SearchResult, ScreenedText]] = []
         withheld: Counter[str] = Counter()
         for r, o in zip(results, outs, strict=True):
@@ -104,7 +76,7 @@ class Screen:
         return kept, dict(withheld)
 
     async def page(self, f: Fetched) -> tuple[Outcome, ScreenedText | None]:
-        o = (await self.outcomes([page_item(f)]))[0]
+        o = (await self.connector.pages([page_input(f)]))[0]
         if not o.readable or o.text is None:
             return o, None
         return o, ScreenedText(title=(o.title or "").strip(), text=o.text,

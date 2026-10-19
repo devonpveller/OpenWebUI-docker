@@ -322,6 +322,7 @@ class Run:
             raise RuntimeError("services did not come up")
         self.check("intake, both gates and SearXNG healthy", True)
         self.part_n()
+        self.part_k()
         self.part_e()
         self.part_r()
         self.part_x()
@@ -341,6 +342,24 @@ class Run:
             sub = info["IPAM"]["Config"][0]["Subnet"]
             self.check(f"N {n} is internal, {sub} outside 192.168.0.0/16",
                        info["Internal"] is True and sub.startswith("10.243.70."), info["Internal"])
+
+    # -- K: the connector kit's conformance runner, inside the gate image ----------------------------
+    def part_k(self) -> None:
+        out = {}
+        for name, spec in (("pages", ["gate_conformance:pages", "gate_conformance:oversize_pages"]),
+                           ("snippets", ["gate_conformance:snippets"])):
+            r = sh("run", "--rm", "--label", self.label, "--network", "none", "-v", f"{TESTS}:/t:ro",
+                   "-w", "/t", "-e", "PYTHONPATH=/t", "--entrypoint", "python", self.a.gate_image,
+                   "-m", "connector_kit.testkit.conformance", *spec, "--json", check=False, timeout=600)
+            try:
+                v = json.loads(r.stdout)
+            except ValueError:
+                v = {"passed": False, "raw": (r.stdout + r.stderr)[-600:]}
+            out[name] = v
+            self.check(f"K the kit's conformance runner passes the gate's {name} connector "
+                       f"({len(v.get('results', {}))} contract tests)",
+                       r.returncode == 0 and v.get("passed") is True, v)
+        self.results["conformance"] = out
 
     # -- E: the engine adapter ------------------------------------------------------------------------
     def part_e(self) -> None:
@@ -379,7 +398,8 @@ class Run:
                  "json": {"url": u}, "timeout": 300} for n, u in (
                     ("clean", "http://public.example.com/page"),
                     ("tag", "http://public.example.com/tag"),
-                    ("hidden", "http://public.example.com/hidden"))]
+                    ("hidden", "http://public.example.com/hidden"),
+                    ("redirected", "http://public.example.com/redir-public"))]
         plan.append({"name": "search", "method": "POST", "url": "http://gate-b:8080/v1/search",
                      "headers": h, "json": {"query": "recipes"}, "timeout": 300})
         plan.append({"name": "loader", "method": "POST", "url": "http://gate-a:8080/v1/web-loader",
@@ -402,6 +422,17 @@ class Run:
                          "i.external_id = 'http://public.example.com/page'")
         self.check("R intake stored the clean page: done/clean under connector search-gate, "
                    "bronze kept", rows == [["done", "clean", "search-gate", "1"]], rows)
+        prov = self.psql("SELECT b.envelope->'metadata'->'provenance' FROM intake.raw_items b "
+                         "WHERE b.source = 'web-page' AND b.external_id = "
+                         "'http://other.example.com/page'")
+        p = json.loads(prov[0][0]) if prov and prov[0] and prov[0][0] else {}
+        self.check("R a redirected page: bronze carries the kit's provenance (connector, origin, "
+                   "redirect chain, labels)",
+                   r["redirected"]["body"].get("status") == "ok"
+                   and p.get("connector") == "search-gate"
+                   and p.get("origin") == "http://public.example.com/redir-public"
+                   and p.get("redirect_chain") == ["http://other.example.com/page"]
+                   and p.get("labels", {}).get("source") == "web-page", p or prov)
         t = r["tag"]["body"]
         self.check("R a TAG-payload page is withheld (no text, no fence)",
                    t.get("status") == "withheld" and t.get("text") is None

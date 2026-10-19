@@ -11,7 +11,12 @@ from gateway.cache import ResultCache, cache_key, redis_password_from
 from gateway.callers import LEGACY, CallerConfigError, CallerRegistry, parse_caller_keys
 from gateway.models import SearchRequest, SearchResponse, SearchResult
 from gateway.screen import fence
-from gateway.screen.connector import MAX_EXTERNAL_ID, Item, build_envelope, external_id_for
+from gateway.screen.gate_connector import (
+    MAX_EXTERNAL_ID,
+    PageConnector,
+    PageInput,
+    external_id_for,
+)
 
 from conftest import FakeRedis
 
@@ -97,8 +102,23 @@ def test_a_long_url_becomes_a_hashed_external_id() -> None:
     assert external_id_for("https://example.com/") == "https://example.com/"
 
 
-def test_envelope_raw_is_base64_and_bytes_exact() -> None:
+RAW = bytes([0xFF, 0xFE]) + b"<b>"  # not UTF-8: the bytes must reach intake unchanged
+
+
+def test_envelope_raw_is_base64_bytes_exact_and_carries_provenance() -> None:
     import base64
 
-    env = build_envelope(Item("web-page", "x", "text/html", b"\xff\xfe<b>"))
-    assert env["raw_encoding"] == "base64" and base64.b64decode(env["raw"]) == b"\xff\xfe<b>"
+    from connector_kit import ConnectorConfig
+
+    cfg = ConnectorConfig(intake_url="http://intake.example:8000/v1/intake", key_file="unused")
+    page = PageInput(requested_url="http://a.example.com/x", final_url="http://b.example.com/y",
+                     redirects=("http://b.example.com/y",), content_type="text/html",
+                     body=RAW, http_status=200, via="proxy")
+    [p] = list(PageConnector(cfg, [page]).envelopes())
+    env = p.envelope.body
+    assert env["raw_encoding"] == "base64" and base64.b64decode(env["raw"]) == RAW
+    prov = env["metadata"]["provenance"]
+    assert prov["origin"] == "http://a.example.com/x"
+    assert prov["redirect_chain"] == ["http://b.example.com/y"]
+    assert prov["labels"] == {"connector": "search-gate", "source": "web-page",
+                              "external_id": "http://b.example.com/y"}
