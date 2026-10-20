@@ -8,6 +8,10 @@ import pytest
 
 # Settings require GATEWAY_API_KEY at import time of any module using config.
 os.environ.setdefault("GATEWAY_API_KEY", "test-key")
+# Today's plane (search/docker-compose.yml) serves GET /search keyless to OWUI and the research
+# engine until step 5; the pre-gate tests describe that plane. The gate's own tests
+# (gate_support.py) turn it OFF, which is the code default.
+os.environ.setdefault("SEARCH_ANONYMOUS_LEGACY", "true")
 
 
 class FakeRedis:

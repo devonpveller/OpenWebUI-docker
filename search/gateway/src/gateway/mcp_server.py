@@ -11,8 +11,8 @@ import asyncio
 
 from mcp.server.fastmcp import FastMCP
 
-from gateway.cache import ResultCache, make_redis
-from gateway.config import get_settings
+from gateway.cache import ResultCache, make_redis, redis_password_from
+from gateway.config import get_settings, read_secret_file
 from gateway.logging import configure_logging
 from gateway.models import SearchRequest
 from gateway.rotation import AllProvidersFailed, RotationEngine, build_provider
@@ -31,13 +31,16 @@ async def _get_engine() -> RotationEngine:
         if _engine is None:
             settings = get_settings()
             configure_logging(settings.log_level)
-            redis_client = make_redis(settings.redis_url)
+            redis_client = make_redis(
+                settings.redis_url,
+                redis_password_from(read_secret_file(settings.redis_password_file)) or None,
+            )
             cache = ResultCache(redis_client, settings.cache_ttl_seconds)
             providers = [
                 build_provider(
-                    name, settings.searxng_url, settings.request_timeout_seconds
+                    name, settings.search_engine_url, settings.request_timeout_seconds
                 )
-                for name in settings.provider_order
+                for name in settings.engine_order
             ]
             _engine = RotationEngine(
                 providers,

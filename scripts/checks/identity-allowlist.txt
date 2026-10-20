@@ -32,6 +32,12 @@ little-coder/tests/test_sanitize.py | operator~github\.com/(?P<allow>[A-Za-z0-9]
 # --- synthetic fixtures ------------------------------------------------------------------
 scripts/stack/test_stack.py | lan-ip~MULLVAD_WG_ADDRESSES=(?P<allow>10\.0\.0\.2)/32 | a made-up WireGuard interface address in the driver tests (a /32 host address, refused since the gate stopped exempting every CIDR); no host has it
 
+search/gateway/tests/** | lan-ip | the search gate's SSRF refusal corpus and exploit probes: private, loopback and link-local targets the guard must refuse, and the internal test-network subnets the docker round trip creates; no host is named
+search/gateway/tests/** | tailnet-ip | CGNAT / tailnet-range SSRF probes in the search gate's refusal corpus (100.64.0.0/10 must be refused); no host is named
+search/gateway/tests/** | tailnet-host | a synthetic *.ts.net name in the search gate's refusal corpus (internal suffixes must be refused); no tailnet is named
+search/gateway/tests/** | link-local-ip | link-local and IPv6 link-local probes in the search gate's refusal corpus (169.254/16, fe80::/10 must be refused)
+search/gateway/src/gateway/egress/** | lan-ip | the target guard names the private ranges it refuses (RFC 1918 and friends); ranges, not hosts
+
 # --- third-party content, not the operator's ---------------------------------------------
 frontend/owui/tools/fileshed.py | email~alice@ex\.com | a synthetic address in a usage example of a vendored third-party Open WebUI tool
 scripts/archive/smolcrawl/pyproject.toml | email~^\s*\{ name="[^"]+", email="[^"]+" \},?$ | the upstream package author's published metadata in an archived third-party project
