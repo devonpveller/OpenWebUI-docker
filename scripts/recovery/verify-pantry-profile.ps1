@@ -62,7 +62,7 @@ $want = 'Test-OB1PantryEnabled', 'Test-OB1ProfileEnabled', 'Get-OB1StartProfiles
 # and every member invocation in the lifted functions must be on a short list derived from the
 # shipped code; anything else is refused with file:line.
 #   (a) the bare `docker` command, no invocation operator: the one name the behavioural stub shadows;
-#   (b) helpers the verifier stubs or lifts BY NAME: Test-OB1Available, Wait-ForRestartLoops, Write-Log,
+#   (b) helpers the verifier stubs or lifts BY NAME: Test-OB1Available, Wait-ForRestartLoops, Confirm-McpoTools, Write-Log,
 #       Start-Sleep (stubbed), Test-OB1PantryEnabled, Get-OB1StartProfiles (lifted, run for real);
 #   (c) the pure/read-only cmdlets the shipped code uses: ConvertFrom-Json, Get-Content, Join-Path,
 #       Split-Path, Test-Path (no Set-/New-Alias, Start-*, Invoke-*, & or . are on it);
@@ -73,7 +73,7 @@ $want = 'Test-OB1PantryEnabled', 'Test-OB1ProfileEnabled', 'Get-OB1StartProfiles
 # If recovery legitimately starts using another cmdlet, add it HERE, on purpose, and say why.
 # intake I5 adds Test-OB1ProfileEnabled (lifted: the generalised check pantry's now wraps).
 $Script:AllowedCommands = @('docker', 'Test-OB1Available', 'Wait-ForRestartLoops', 'Write-Log', 'Start-Sleep',
-    'Test-OB1PantryEnabled', 'Test-OB1ProfileEnabled', 'Get-OB1StartProfiles', 'ConvertFrom-Json', 'Get-Content', 'Join-Path', 'Split-Path', 'Test-Path')
+    'Test-OB1PantryEnabled', 'Test-OB1ProfileEnabled', 'Get-OB1StartProfiles', 'Confirm-McpoTools', 'ConvertFrom-Json', 'Get-Content', 'Join-Path', 'Split-Path', 'Test-Path')
 $Script:AllowedMembers = @('Trim')
 function Get-AllowlistViolations($ast, [string[]]$Fns, [string]$File) {
     $out = New-Object System.Collections.ArrayList
@@ -333,6 +333,7 @@ try {
     function Test-OB1Available { $true }
     function Write-Log { param($Level, $Message) }
     function Wait-ForRestartLoops { param($Seconds) return ,@() }
+    function Confirm-McpoTools { param($WaitSeconds) return ,@() }   # mcpo-resilience: verified by verify-mcpo-tools.ps1
     function Start-Sleep { param($Seconds) }
     $global:DockerCalls = New-Object System.Collections.ArrayList
     function docker { [void]$global:DockerCalls.Add(($args -join ' ')); $global:LASTEXITCODE = 0 }

@@ -251,7 +251,7 @@ python3 scripts/stack/stack.py down               # stop what is enabled, in rev
 ```
 
 `health` probes only the planes you enabled, plus the shared networks; the
-full set is <!-- stack:health-count -->17 probes with every plane enabled, when the frontend deploys the `tailscale` profile, PowerShell is on PATH (`powershell` on Windows, `pwsh` elsewhere), Open WebUI has at least one plugin deployed, the ob1 `pantry` profile is enabled and the ob1 `intake` profile is enabled (13 when none of those holds)<!-- /stack:health-count -->.
+full set is <!-- stack:health-count -->18 probes with every plane enabled, when the frontend deploys the `tailscale` profile, PowerShell is on PATH (`powershell` on Windows, `pwsh` elsewhere), Open WebUI has at least one plugin deployed, the ob1 `pantry` profile is enabled and the ob1 `intake` profile is enabled (14 when none of those holds)<!-- /stack:health-count -->.
 `restore` checks every archive's sha256 and refuses while a container holds
 the volume. Besides these manual backups, each stateful store has a backup
 sidecar in its own plane writing to `backups/<service>/` on a schedule;
