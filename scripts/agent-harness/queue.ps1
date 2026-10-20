@@ -503,7 +503,10 @@ function Assert-PlanReadable([string]$path, [string]$flag) {
 # integrations/<dir>/ that has a Dockerfile at the new pin -> image:<compose service that
 # builds ../integrations/<dir>>; a changed frontend/owui/ file THAT frontend/owui/manifest.csv LISTS ->
 # paste:<path>; a changed build context of a :local-tagged service in this repository's
-# compose files -> image:<service>. A list the author typed is the list the author
+# compose files -> image:<service>; an OB1 gitlink move whose OB1 diff touches a path under the
+# build context (under docker/) of a service of OB1 docker/docker-compose.yml at the new pin ->
+# image:<that service>, once (a context that is not a filesystem path is skipped with a note).
+# A list the author typed is the list the author
 # remembered; this one is what git saw.
 #
 # THE MANIFEST IS THE AUTHORITY ON WHAT IS PASTEABLE (2026-09-06, attempt 1's tester). The
@@ -1226,7 +1229,10 @@ function Get-DeploySurfaces($item, [string]$Sha) {
             #      is not recorded twice.
             foreach ($sv in $svcs) {
                 if (-not $sv.context) { continue }
-                $cx = Convert-RepoRelative "docker" $sv.context
+                # A context that is valid compose but not a filesystem path (a git URL, ${VAR:-./x}, a flow
+                # map) makes GetFullPath throw; one such service must not fail every -Merged (r-qdeploy).
+                try { $cx = Convert-RepoRelative "docker" $sv.context }
+                catch { $skipped += ("OB1 compose service {0}: build context '{1}' is not a filesystem path - not derivable" -f $sv.name, $sv.context); continue }
                 if ($null -eq $cx) { continue }
                 if (-not $cx.StartsWith("docker/")) { continue }
                 $hits = @($ob1Changed | Where-Object { $_.StartsWith($cx + "/") })

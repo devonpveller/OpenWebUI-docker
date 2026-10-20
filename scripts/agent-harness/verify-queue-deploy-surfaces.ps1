@@ -111,9 +111,20 @@ $composeLines = @(
     "      context: ../integrations/mcp",
     "      dockerfile: Dockerfile",
     "    image: openbrain-mcp:local")
+# Valid compose whose build context is not a filesystem path (a git URL, a ${VAR:-./x} default). Listed
+# AFTER openbrain-mcp so the integrations rule (1) still finds its service first.
+$nonPathLines = @(
+    "  ob-remote:",
+    "    build:",
+    "      context: https://example.invalid/x.git#main",
+    "    image: ob-remote:local",
+    "  ob-var:",
+    "    build:",
+    "      context: `${OB_CTX:-./x}",
+    "    image: ob-var:local")
 $ob1Files = @("docker/workbench/x", "docker/wiki-viewer/y", "docker/wiki-service/z", "docker/init-export.sql", "integrations/mcp/index.ts", "integrations/mcp/Dockerfile")
 
-function New-Fixture([string]$name, [string[]]$Touch) {
+function New-Fixture([string]$name, [string[]]$Touch, [switch]$NonPathCtx) {
     # OB1 pin A holds every file in $ob1Files; pin B rewrites only the $Touch ones.
     $repo = Join-Path $Root $name
     $ob1 = Join-Path $repo "OB1"
@@ -128,7 +139,9 @@ function New-Fixture([string]$name, [string[]]$Touch) {
             New-Item -ItemType Directory -Force -Path (Split-Path $full) | Out-Null
             Set-Content -Path $full -Encoding ascii -Value "v1"
         }
-        Set-Content -Path (Join-Path $ob1 "docker/docker-compose.yml") -Encoding ascii -Value $composeLines
+        $cl = $composeLines
+        if ($NonPathCtx) { $cl = $composeLines + $nonPathLines }
+        Set-Content -Path (Join-Path $ob1 "docker/docker-compose.yml") -Encoding ascii -Value $cl
         Invoke-Git -GitArgs @("add", "-A") | Out-Null
         Invoke-Git commit -q -m "OB1 pin A" | Out-Null
         $pinA = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
@@ -231,6 +244,20 @@ $f3c = New-Fixture "c3c" @("integrations/mcp/index.ts", "docker/workbench/x")
 $x = Merge-Item $f3c "qc3c"
 Check "C3: integrations/mcp and docker/workbench together record exactly the two images, no duplicates" `
     ((Get-Sorted $x) -eq "image:openbrain-mcp,image:openbrain-workbench") (Show-Pending $x)
+
+# ======================================================================================
+Step "C4  a compose service whose build context is not a path must not fail -Merged"
+# ======================================================================================
+$f4 = New-Fixture "c4" @("docker/workbench/x") -NonPathCtx
+$x = Merge-Item $f4 "qc4"
+Check "C4: docker/workbench/ range with a URL-context and a VAR-context service: exit 0, records image:openbrain-workbench" `
+    (($x.r.code -eq 0) -and ((@($x.it.deploy_pending) -join ",") -eq "image:openbrain-workbench")) (Show-Pending $x)
+Check "C4: ... and the skipped list names the non-path service" `
+    ((@($x.it.deploy_derived.skipped) -join "`n") -match "ob-remote: build context .* is not a filesystem path") ((@($x.it.deploy_derived.skipped) -join " | "))
+$f4b = New-Fixture "c4b" @("integrations/mcp/index.ts") -NonPathCtx
+$x = Merge-Item $f4b "qc4b"
+Check "C4: integrations-only range with the same compose: exit 0, records image:openbrain-mcp" `
+    (($x.r.code -eq 0) -and ((@($x.it.deploy_pending) -join ",") -eq "image:openbrain-mcp")) (Show-Pending $x)
 
 # --- verdict -----------------------------------------------------------------------------
 $fail = @($results | Where-Object { -not $_.pass })
