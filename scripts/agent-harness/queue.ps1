@@ -1205,6 +1205,16 @@ function Get-DeploySurfaces($item, [string]$Sha) {
             $composeText = @(Invoke-GitCapture @("-C", $clone, "show", "$new`:docker/docker-compose.yml"))
             if ($LASTEXITCODE -eq 0) { $svcs = @(Get-ComposeServices $composeText) }
             else { $notes += ("OB1 {0} has no docker/docker-compose.yml - integration images are recorded by directory" -f $new.Substring(0, 7)) }
+            # Resolve every service's build context ONCE, before rules (1) and (1b). A context that is valid
+            # compose but not a filesystem path (a git URL, ${VAR:-./x}, a flow map) makes GetFullPath throw;
+            # such a service is skipped with a note wherever it sits in the file (r-qdeploy, t-qdeploy).
+            $pathSvcs = @()
+            foreach ($sv in $svcs) {
+                if (-not $sv.context) { continue }
+                try { $rp = Convert-RepoRelative "docker" $sv.context }
+                catch { $skipped += ("OB1 compose service {0}: build context '{1}' is not a filesystem path - not derivable" -f $sv.name, $sv.context); continue }
+                $pathSvcs += [pscustomobject]@{ name = $sv.name; rp = $rp }
+            }
             foreach ($d in $dirs) {
                 # ls-tree, NOT `cat-file -e`: cat-file writes `fatal: path ... does not exist` to
                 # stderr for the ordinary absent-Dockerfile case, and Invoke-GitCapture does not
@@ -1214,7 +1224,7 @@ function Get-DeploySurfaces($item, [string]$Sha) {
                 # exits 0 either way and prints the path only when it is there.
                 $dfHit = @(Invoke-GitCapture @("-C", $clone, "ls-tree", "--name-only", $new, "integrations/$d/Dockerfile") | Where-Object { ([string]$_).Trim() })
                 if ($dfHit.Count -eq 0) { $notes += ("OB1 integrations/{0} changed but has no Dockerfile at {1} - not an image" -f $d, $new.Substring(0, 7)); continue }
-                $svc = @($svcs | Where-Object { $_.context -and ((Convert-RepoRelative "docker" $_.context) -eq "integrations/$d") } | Select-Object -First 1)
+                $svc = @($pathSvcs | Where-Object { $_.rp -eq "integrations/$d" } | Select-Object -First 1)
                 if ($svc.Count -gt 0) { $images += ("image:" + $svc[0].name); $notes += ("image:{0} derived by the integrations rule: OB1 integrations/{1} changed and has a Dockerfile" -f $svc[0].name, $d) }
                 else { $images += ("image:integrations/" + $d); $notes += ("no compose service builds integrations/{0} at OB1 {1} - recorded by directory" -f $d, $new.Substring(0, 7)) }
             }
@@ -1227,12 +1237,8 @@ function Get-DeploySurfaces($item, [string]$Sha) {
             #      (docker/init-export.sql) derives nothing; a context at or above docker/ itself is not
             #      a context a path can be "under" and is skipped; a service rule (1) already recorded
             #      is not recorded twice.
-            foreach ($sv in $svcs) {
-                if (-not $sv.context) { continue }
-                # A context that is valid compose but not a filesystem path (a git URL, ${VAR:-./x}, a flow
-                # map) makes GetFullPath throw; one such service must not fail every -Merged (r-qdeploy).
-                try { $cx = Convert-RepoRelative "docker" $sv.context }
-                catch { $skipped += ("OB1 compose service {0}: build context '{1}' is not a filesystem path - not derivable" -f $sv.name, $sv.context); continue }
+            foreach ($sv in $pathSvcs) {
+                $cx = $sv.rp
                 if ($null -eq $cx) { continue }
                 if (-not $cx.StartsWith("docker/")) { continue }
                 $hits = @($ob1Changed | Where-Object { $_.StartsWith($cx + "/") })
@@ -1298,7 +1304,8 @@ function Get-DeploySurfaces($item, [string]$Sha) {
         foreach ($s in @(Get-ComposeServices $text)) {
             if (-not $s.context) { continue }
             if ($s.image -notmatch ':local(\}|\s|$)') { continue }
-            $ctx = Convert-RepoRelative $dir $s.context
+            try { $ctx = Convert-RepoRelative $dir $s.context }
+            catch { $skipped += ("{0} service {1}: build context '{2}' is not a filesystem path - not derivable" -f $cf, $s.name, $s.context); continue }
             if ($null -eq $ctx) { $skipped += ("{0} service {1}: build context {2} lies outside this repository - not derivable" -f $cf, $s.name, $s.context); continue }
             $df = if ($s.dockerfile) { $s.dockerfile } else { "Dockerfile" }
             $dfPath = Convert-RepoRelative $ctx $df
