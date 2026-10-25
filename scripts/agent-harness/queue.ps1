@@ -503,7 +503,10 @@ function Assert-PlanReadable([string]$path, [string]$flag) {
 # integrations/<dir>/ that has a Dockerfile at the new pin -> image:<compose service that
 # builds ../integrations/<dir>>; a changed frontend/owui/ file THAT frontend/owui/manifest.csv LISTS ->
 # paste:<path>; a changed build context of a :local-tagged service in this repository's
-# compose files -> image:<service>. A list the author typed is the list the author
+# compose files -> image:<service>; an OB1 gitlink move whose OB1 diff touches a path under the
+# build context (under docker/) of a service of OB1 docker/docker-compose.yml at the new pin ->
+# image:<that service>, once (a context that is not a filesystem path is skipped with a note).
+# A list the author typed is the list the author
 # remembered; this one is what git saw.
 #
 # THE MANIFEST IS THE AUTHORITY ON WHAT IS PASTEABLE (2026-09-06, attempt 1's tester). The
@@ -1202,6 +1205,16 @@ function Get-DeploySurfaces($item, [string]$Sha) {
             $composeText = @(Invoke-GitCapture @("-C", $clone, "show", "$new`:docker/docker-compose.yml"))
             if ($LASTEXITCODE -eq 0) { $svcs = @(Get-ComposeServices $composeText) }
             else { $notes += ("OB1 {0} has no docker/docker-compose.yml - integration images are recorded by directory" -f $new.Substring(0, 7)) }
+            # Resolve every service's build context ONCE, before rules (1) and (1b). A context that is valid
+            # compose but not a filesystem path (a git URL, ${VAR:-./x}, a flow map) makes GetFullPath throw;
+            # such a service is skipped with a note wherever it sits in the file (r-qdeploy, t-qdeploy).
+            $pathSvcs = @()
+            foreach ($sv in $svcs) {
+                if (-not $sv.context) { continue }
+                try { $rp = Convert-RepoRelative "docker" $sv.context }
+                catch { $skipped += ("OB1 compose service {0}: build context '{1}' is not a filesystem path - not derivable" -f $sv.name, $sv.context); continue }
+                $pathSvcs += [pscustomobject]@{ name = $sv.name; rp = $rp }
+            }
             foreach ($d in $dirs) {
                 # ls-tree, NOT `cat-file -e`: cat-file writes `fatal: path ... does not exist` to
                 # stderr for the ordinary absent-Dockerfile case, and Invoke-GitCapture does not
@@ -1211,9 +1224,29 @@ function Get-DeploySurfaces($item, [string]$Sha) {
                 # exits 0 either way and prints the path only when it is there.
                 $dfHit = @(Invoke-GitCapture @("-C", $clone, "ls-tree", "--name-only", $new, "integrations/$d/Dockerfile") | Where-Object { ([string]$_).Trim() })
                 if ($dfHit.Count -eq 0) { $notes += ("OB1 integrations/{0} changed but has no Dockerfile at {1} - not an image" -f $d, $new.Substring(0, 7)); continue }
-                $svc = @($svcs | Where-Object { $_.context -and ((Convert-RepoRelative "docker" $_.context) -eq "integrations/$d") } | Select-Object -First 1)
-                if ($svc.Count -gt 0) { $images += ("image:" + $svc[0].name) }
+                $svc = @($pathSvcs | Where-Object { $_.rp -eq "integrations/$d" } | Select-Object -First 1)
+                if ($svc.Count -gt 0) { $images += ("image:" + $svc[0].name); $notes += ("image:{0} derived by the integrations rule: OB1 integrations/{1} changed and has a Dockerfile" -f $svc[0].name, $d) }
                 else { $images += ("image:integrations/" + $d); $notes += ("no compose service builds integrations/{0} at OB1 {1} - recorded by directory" -f $d, $new.Substring(0, 7)) }
+            }
+            # (1b) the compose services OB1 builds from docker/<service>/ (workbench, wiki-viewer,
+            #      wiki-service, ...). Rule (1) only looks under integrations/, so an item whose only image
+            #      change rode the gitlink under docker/ landed as "no deploy surface derived" and -Deployed
+            #      was refused (rw-p6a-resolve2, 2026-10-20). Every service of docker/docker-compose.yml
+            #      at the NEW pin with a build context that lies under docker/ is an image once when any
+            #      path of the OB1 range lies under that context. A path with no build context
+            #      (docker/init-export.sql) derives nothing; a context at or above docker/ itself is not
+            #      a context a path can be "under" and is skipped; a service rule (1) already recorded
+            #      is not recorded twice.
+            foreach ($sv in $pathSvcs) {
+                $cx = $sv.rp
+                if ($null -eq $cx) { continue }
+                if (-not $cx.StartsWith("docker/")) { continue }
+                $hits = @($ob1Changed | Where-Object { $_.StartsWith($cx + "/") })
+                if ($hits.Count -eq 0) { continue }
+                $nm = "image:" + $sv.name
+                if ($images -contains $nm) { continue }
+                $images += $nm
+                $notes += ("{0} derived by the docker build-context rule: {1} path(s) changed under OB1 {2} (compose service {3})" -f $nm, $hits.Count, $cx, $sv.name)
             }
         }
     }
@@ -1271,7 +1304,8 @@ function Get-DeploySurfaces($item, [string]$Sha) {
         foreach ($s in @(Get-ComposeServices $text)) {
             if (-not $s.context) { continue }
             if ($s.image -notmatch ':local(\}|\s|$)') { continue }
-            $ctx = Convert-RepoRelative $dir $s.context
+            try { $ctx = Convert-RepoRelative $dir $s.context }
+            catch { $skipped += ("{0} service {1}: build context '{2}' is not a filesystem path - not derivable" -f $cf, $s.name, $s.context); continue }
             if ($null -eq $ctx) { $skipped += ("{0} service {1}: build context {2} lies outside this repository - not derivable" -f $cf, $s.name, $s.context); continue }
             $df = if ($s.dockerfile) { $s.dockerfile } else { "Dockerfile" }
             $dfPath = Convert-RepoRelative $ctx $df
