@@ -13,7 +13,11 @@ X-Priority-style header (header-trust = injection).
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .config import Settings
 
 
 @dataclass(frozen=True)
@@ -89,13 +93,54 @@ _DEFAULT_CLASSES: dict[str, PriorityClass] = {
 }
 
 
-def build_policy(policy_json: str, default_wait_s: float) -> PriorityPolicy:
+# ── research-branch lane (research-workbench P4a, D16) ─────────────────────────
+#: The caller key (LiteLLM virtual key metadata.lane -> x-ai-stack-caller) of research-tree
+#: branches: steers, gap work and on-demand idea research. Operator-provisioned key.
+RESEARCH_BRANCH_KEY = "research-branch"
+
+
+def research_branch_concurrency(settings: Settings) -> tuple[int, str | None]:
+    """The lane's concurrency: ALL of the plane's slots (D16 as amended 2026-10-26).
+
+    Returns ``(n, warning)``; ``warning`` is set when LLM_QUEUE_SLOTS is unset or blank - the lane
+    then runs at the queue's default slot count, which is also the scheduler's P.
+    """
+    if not settings.slots_declared:
+        return settings.slots, (
+            "LLM_QUEUE_SLOTS is not set: the research-branch lane runs at the queue's default "
+            f"slot count ({settings.slots})"
+        )
+    return settings.slots, None
+
+
+def build_policy(
+    policy_json: str, default_wait_s: float, research_branch: int | None = None
+) -> PriorityPolicy:
     """Build the policy from optional JSON config, falling back to the §8c defaults.
 
     The cap counts per CLASS (``class`` name): keys that share a ``class`` share one cap.
     ``policy_json`` shape: {"<key>": {"class": str, "rank": int,
     "acceptable_wait_s": float, "max_concurrency": int|null}, ...}
+
+    ``research_branch`` (P4a, D16 as amended 2026-10-26): the lane = all of LLM_QUEUE_SLOTS. It
+    becomes the cap of the research-branch key's whole CLASS (``ob-research`` by default, shared
+    with ob-research and ob-podcast): one cap per class, never a per-key override. Research is as
+    wide as the queue admits; the queue's chat reservation (llmq-research-share) keeps chat first.
+    A policy entry keeps its rank / wait budget, but its max_concurrency for that class is replaced.
     """
+    policy = _build_policy(policy_json, default_wait_s)
+    if research_branch is not None:
+        lane = policy.classes.get(RESEARCH_BRANCH_KEY)
+        if lane is None:
+            lane = PriorityClass("ob-research", rank=3, acceptable_wait_s=1800.0)
+            policy.set_key(RESEARCH_BRANCH_KEY, lane)
+        for key, cls in policy.classes.items():
+            if cls.name == lane.name:
+                policy.set_key(key, replace(cls, max_concurrency=research_branch))
+    return policy
+
+
+def _build_policy(policy_json: str, default_wait_s: float) -> PriorityPolicy:
     default = PriorityClass("default", rank=2, acceptable_wait_s=default_wait_s)
     if not policy_json.strip():
         return PriorityPolicy(dict(_DEFAULT_CLASSES), default)
