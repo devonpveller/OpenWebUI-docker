@@ -34,7 +34,7 @@ class AppState:
             )
         else:
             log.info("research_branch_lane", lane_concurrency=self.research_branch_concurrency,
-                     slots=settings.slots, share=settings.research_branch_share)
+                     slots=settings.slots)
         self.policy: PriorityPolicy = build_policy(
             settings.policy_json, settings.default_acceptable_wait_s,
             research_branch=self.research_branch_concurrency,

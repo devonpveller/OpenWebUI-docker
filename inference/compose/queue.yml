@@ -74,12 +74,10 @@ services:
       - LLM_QUEUE_EMBED_UPSTREAM_BASE_URL=http://llama-cpp-embed-upstream:8080
       # Admission sizing — MUST track LLAMA_SWAP_QWEN36_27B_N_PARALLEL
       # (inference/.env; 2 since 2026-07-09). Both values live in that file.
-      # P4a (D16): blank when unset - the queue still schedules with P=3, but the research-branch
-      # lane reads an undeclared capacity as unreadable and runs at its floor (2) with a warning.
+      # P4a (D16 as amended 2026-10-26): blank when unset - the queue schedules with its default P=3
+      # and logs research_branch_capacity_unreadable. The research-branch lane is ALL of the slots;
+      # the research service reads it back via /observe/queue/estimate (no RESEARCH_MAX_CONCURRENCY).
       - LLM_QUEUE_SLOTS=${LLM_QUEUE_SLOTS:-}
-      # research-branch lane = floor(LLM_QUEUE_SLOTS x share), floor 2; the research service reads
-      # it back via /observe/queue/estimate (no RESEARCH_MAX_CONCURRENCY any more).
-      - LLM_QUEUE_RESEARCH_BRANCH_SHARE=${LLM_QUEUE_RESEARCH_BRANCH_SHARE:-0.67}
       - LLM_QUEUE_MAX_IN_FLIGHT=${LLM_QUEUE_MAX_IN_FLIGHT:-4}
       - LLM_QUEUE_BACKSTOP_DEPTH=${LLM_QUEUE_BACKSTOP_DEPTH:-24}
       - LLM_QUEUE_MAX_TOTAL_CONNECTIONS=${LLM_QUEUE_MAX_TOTAL_CONNECTIONS:-128}

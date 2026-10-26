@@ -76,10 +76,11 @@ llama-swap concurrencyLimit  ==  0                     # the queue is the sole g
 
 **research-branch lane (research-workbench P4a, D16).** The `research-branch` caller key
 (research-tree steers, gap work, on-demand idea research; its own LiteLLM virtual key with
-`metadata.lane=research-branch`) gets `max_concurrency = max(2, floor(LLM_QUEUE_SLOTS x
-LLM_QUEUE_RESEARCH_BRANCH_SHARE))` (share default 0.67), rank 3, re-derived at every (re)load.
-An unset or blank `LLM_QUEUE_SLOTS` keeps P=3 for scheduling but runs the lane at 2 and logs
-`research_branch_capacity_unreadable`. A `LLM_QUEUE_POLICY_JSON` entry for the key cannot hand-set
+`metadata.lane=research-branch`) gets `max_concurrency = LLM_QUEUE_SLOTS` (all of the slots; no
+share, floor or cap of its own - D16 as amended 2026-10-26), rank 3, re-derived at every (re)load.
+An unset or blank `LLM_QUEUE_SLOTS` runs P and the lane at the default 3 and logs
+`research_branch_capacity_unreadable`. Chat-first reservation and a class-level research cap are
+item llmq-research-share, not this. A `LLM_QUEUE_POLICY_JSON` entry for the key cannot hand-set
 a second cap (its max_concurrency is replaced). `GET /observe/queue/estimate?key=research-branch`
 reports `max_concurrency` + `capacity_declared`; the research service sizes its job dispatcher
 from it (no `RESEARCH_MAX_CONCURRENCY`).

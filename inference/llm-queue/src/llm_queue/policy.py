@@ -13,7 +13,6 @@ X-Priority-style header (header-trust = injection).
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -94,23 +93,20 @@ _DEFAULT_CLASSES: dict[str, PriorityClass] = {
 #: The caller key (LiteLLM virtual key metadata.lane -> x-ai-stack-caller) of research-tree
 #: branches: steers, gap work and on-demand idea research. Operator-provisioned key.
 RESEARCH_BRANCH_KEY = "research-branch"
-#: The lane never runs below this: a parent and its first branch must be able to run together.
-RESEARCH_BRANCH_FLOOR = 2
 
 
 def research_branch_concurrency(settings: Settings) -> tuple[int, str | None]:
-    """The lane's derived concurrency: ``floor(LLM_QUEUE_SLOTS x share)``, never below 2.
+    """The lane's concurrency: ALL of the plane's slots (D16 as amended 2026-10-26).
 
-    Returns ``(n, warning)``; ``warning`` is set when the plane's capacity is undeclared
-    (LLM_QUEUE_SLOTS unset or blank) - the lane then runs at the floor rather than on a guess.
+    Returns ``(n, warning)``; ``warning`` is set when LLM_QUEUE_SLOTS is unset or blank - the lane
+    then runs at the queue's default slot count, which is also the scheduler's P.
     """
     if not settings.slots_declared:
-        return RESEARCH_BRANCH_FLOOR, (
-            "LLM_QUEUE_SLOTS is not set: the plane's capacity is unreadable, so the "
-            f"research-branch lane runs at its floor ({RESEARCH_BRANCH_FLOOR})"
+        return settings.slots, (
+            "LLM_QUEUE_SLOTS is not set: the research-branch lane runs at the queue's default "
+            f"slot count ({settings.slots})"
         )
-    n = math.floor(settings.slots * settings.research_branch_share)
-    return max(RESEARCH_BRANCH_FLOOR, n), None
+    return settings.slots, None
 
 
 def _research_branch_class(n: int) -> PriorityClass:

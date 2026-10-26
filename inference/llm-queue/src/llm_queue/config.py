@@ -23,8 +23,8 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #: The scheduler's P when LLM_QUEUE_SLOTS is not declared (the long-standing default). The
-#: research-branch lane does NOT derive from this guess: an undeclared capacity is unreadable and
-#: the lane falls to its floor with a warning (research-workbench P4a, D16).
+#: research-branch lane then runs at this default too, with a logged warning (research-workbench
+#: P4a, D16 as amended 2026-10-26).
 DEFAULT_SLOTS = 3
 
 
@@ -55,15 +55,10 @@ class Settings(BaseSettings):
     #: False when LLM_QUEUE_SLOTS was absent or blank (the plane's capacity is unreadable). Set by
     #: the validator below, never from the environment.
     slots_declared: bool = Field(True, exclude=True)
-    # --- research-branch lane (research-workbench P4a, D16, operator 2026-09-25) ---
-    # The lane's concurrency is THIS share of the declared capacity (floor 2), arbitrated against
-    # chat by the ordinary priority policy (no reserved slice). One number describes the plane:
-    # the research service reads the derived value back (GET /observe/queue/estimate), so there is
-    # no second, hand-set research cap anywhere.
-    research_branch_share: float = Field(
-        0.67, alias="LLM_QUEUE_RESEARCH_BRANCH_SHARE", gt=0, le=1,
-        description="Share of LLM_QUEUE_SLOTS the research-branch lane may hold (floor 2).",
-    )
+    # research-branch lane (research-workbench P4a, D16 as amended by the operator 2026-10-26): the
+    # lane is ALL of LLM_QUEUE_SLOTS - no share, floor or cap of its own. How much research runs is
+    # the queue's decision (priority classes; chat reservation + class-level research cap = item
+    # llmq-research-share). The research service reads the lane back (/observe/queue/estimate).
     max_in_flight: int = Field(
         4, alias="LLM_QUEUE_MAX_IN_FLIGHT", ge=1, description="N — admitted to upstream (<= P+1)."
     )
