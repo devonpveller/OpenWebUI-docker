@@ -20,14 +20,15 @@ callers → llama-cpp:8080 (alias) → llm-gateway (LiteLLM) → llm-queue → l
 - **Priority wait-heap** — waiting requests ordered by class (interactive chat >
   batch), dispatched highest-priority-first; per-key max-concurrency so a batch
   caller can't own all the slots.
-- **Priority reservation** (llmq-research-share) - with `LLM_QUEUE_SLOTS >= 2`, a waiter of rank
-  `>= LLM_QUEUE_RESERVE_RANK` (default 3: research, wiki, entity, digest) is not dispatched into the
-  LAST free permit while higher-rank work is present: a rank < 3 request waiting or in flight, or
-  one that finished within `LLM_QUEUE_RESERVE_HOLD_S` (default 5 s). A chat arrival therefore finds
-  a permit at once. With no higher-rank work (past the hold) rank >= 3 may use every permit; with 1
-  slot there is no reservation; `LLM_QUEUE_RESERVE_ENABLED=false` turns it off. Nothing is
-  preempted: a chat arriving when idle research already holds every permit still waits for one
-  completion, which is why `owui-chat`'s `acceptable_wait_s` is 120 s (was 30 s): that chat is dispatched next and not refused.
+- **Priority reservation** (llmq-research-share) - with `LLM_QUEUE_SLOTS >= 2`, one REAL lane (counted
+  against slots, not the N = slots + 1 admission permits) stays free for higher-rank work: while a
+  rank < `LLM_QUEUE_RESERVE_RANK` (default 3) request is waiting or in flight, or finished within
+  `LLM_QUEUE_RESERVE_HOLD_S` (default 5 s), a rank >= 3 waiter (research, wiki, entity, digest) is
+  dispatched only if running + 1 <= slots - 1. A chat arrival therefore finds a free lane at the
+  upstream. With no higher-rank work (past the hold) rank >= 3 may use every lane; with 1 slot there
+  is no reservation; `LLM_QUEUE_RESERVE_ENABLED=false` turns it off. Nothing is preempted: a chat
+  arriving when idle research already holds every lane waits for one completion, which is why
+  `owui-chat`'s `acceptable_wait_s` is 120 s (was 30 s): it is dispatched next and not refused.
 - **Class-level cap** - `max_concurrency` counts in-flight per priority CLASS (`class` name), not
   per key: `ob-research`, `ob-podcast` and `research-branch` are all class `ob-research` (cap 2
   together). In `LLM_QUEUE_POLICY_JSON`, keys sharing a `class` value share one cap; `GET /queue`

@@ -255,7 +255,9 @@ class ModelQueue:
         finishes), so a capped batch caller yields its turn to the next class
         instead of blocking the whole queue."""
         while self._permits > 0 and self._heap:
-            reserve = self._permits == 1 and self._reserve_active_locked()
+            # one REAL lane (slots, not admission permits) stays free for higher-rank work
+            reserve = (len(self._running) + 1 > self._slots - 1
+                       and self._reserve_active_locked())
             picked: tuple[int, int, str] | None = None
             skipped: list[tuple[int, int, str]] = []
             while self._heap:

@@ -6,21 +6,21 @@ from llm_queue.policy import build_policy
 
 
 async def test_reservation_chat_finds_permit_while_research_runs(make_queue, make_waiter):
-    # 2 slots, N=3 (slots+1). A chat call runs (higher-rank work present): research may take
-    # one permit, the last is held, so a second chat arrival dispatches at once.
-    mq = make_queue(slots=2, max_in_flight=3)
+    # 3 slots, N=4. A chat call runs: research may take one more lane, the last REAL lane is
+    # held, so a second chat arrival dispatches at once.
+    mq = make_queue(slots=3, max_in_flight=4)
     chat1 = make_waiter(key="owui-chat", rank=0)
     await mq.enqueue(chat1)
     r1, r2 = make_waiter(key="a", rank=3), make_waiter(key="b", rank=3)
     await mq.enqueue(r1)
     await mq.enqueue(r2)
-    assert chat1.dispatched and r1.dispatched and not r2.dispatched  # last permit held
+    assert chat1.dispatched and r1.dispatched and not r2.dispatched  # last lane held
     await mq.release(r1)
-    assert r2.dispatched  # a permit beyond the last one is free again
+    assert r2.dispatched
     chat2 = make_waiter(key="owui-chat", rank=0)
     await mq.enqueue(chat2)
     assert chat2.dispatched and chat2.wait_seconds < 0.5
-    assert mq.snapshot()["permits_free"] == 0 and r2.dispatched  # never above permits
+    assert len(mq.snapshot()["running"]) <= 3  # never above the real lanes here
 
 
 async def test_reservation_hold_window_after_chat_finishes(make_queue, make_waiter):
@@ -120,13 +120,46 @@ async def test_cold_chat_behind_idle_research_dispatched_next_no_429(make_queue)
 
 
 async def test_hold_path_unchanged_with_longer_budget(make_queue, make_waiter):
-    mq = make_queue(slots=2, max_in_flight=3)
+    mq = make_queue(slots=3, max_in_flight=4)
     chat = make_waiter(key="owui-chat", rank=0)
     await mq.enqueue(chat)
     r1, r2 = make_waiter(rank=3), make_waiter(rank=3)
     await mq.enqueue(r1)
     await mq.enqueue(r2)
-    assert r1.dispatched and not r2.dispatched  # last permit held while chat is in flight
+    assert r1.dispatched and not r2.dispatched  # last lane held while chat is in flight
     chat2 = make_waiter(key="owui-chat", rank=0)
     await mq.enqueue(chat2)
-    assert chat2.dispatched and chat2.wait_seconds < 0.5  # chat never waits for research
+    assert chat2.dispatched and chat2.wait_seconds < 0.5
+
+
+import time  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("slots,n", [(2, 3), (3, 4)])
+async def test_real_lane_free_for_chat(make_queue, make_waiter, slots, n):
+    """Stub upstream of `slots` lanes (a Semaphore, like llama.cpp --parallel): the chat must
+    find a REAL lane free, not merely be dispatched by the queue."""
+    mq = make_queue(slots=slots, max_in_flight=n)
+    lanes = asyncio.Semaphore(slots)
+    waits: dict[str, float] = {}
+
+    async def call(w, dur):
+        await mq.enqueue(w)
+        await mq.await_dispatch(w)
+        t = time.monotonic()
+        async with lanes:
+            waits[w.id] = time.monotonic() - t
+            await asyncio.sleep(dur)
+        await mq.release(w)
+
+    warm = make_waiter(key="owui-chat", rank=0)
+    await call(warm, 0.0)  # chat finished just now: hold window active
+    research = [make_waiter(key=f"r{i}", rank=3) for i in range(slots + 1)]
+    tasks = [asyncio.create_task(call(w, 1.0)) for w in research]
+    await asyncio.sleep(0.1)
+    chat = make_waiter(key="owui-chat", rank=0)
+    await call(chat, 0.0)
+    assert waits[chat.id] < 0.3, f"chat waited {waits[chat.id]:.2f}s for a real lane"
+    await asyncio.gather(*tasks)
