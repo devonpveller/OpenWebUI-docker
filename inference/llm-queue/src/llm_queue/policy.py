@@ -113,12 +113,6 @@ def research_branch_concurrency(settings: Settings) -> tuple[int, str | None]:
     return settings.slots, None
 
 
-def _research_branch_class(n: int) -> PriorityClass:
-    # rank 3 = the batch tier: chat (rank 0) and interactive callers are dispatched first by the
-    # queue's ordinary priority policy; the lane only bounds how much of the pool branches hold.
-    return PriorityClass(RESEARCH_BRANCH_KEY, rank=3, acceptable_wait_s=1800.0, max_concurrency=n)
-
-
 def build_policy(
     policy_json: str, default_wait_s: float, research_branch: int | None = None
 ) -> PriorityPolicy:
@@ -128,16 +122,21 @@ def build_policy(
     ``policy_json`` shape: {"<key>": {"class": str, "rank": int,
     "acceptable_wait_s": float, "max_concurrency": int|null}, ...}
 
-    ``research_branch`` (P4a): the derived lane concurrency. When given, the research-branch
-    class always carries it - a policy entry for the key keeps its rank / wait budget but its
-    max_concurrency is replaced (one number describes the plane; no second, hand-set cap).
+    ``research_branch`` (P4a, D16 as amended 2026-10-26): the lane = all of LLM_QUEUE_SLOTS. It
+    becomes the cap of the research-branch key's whole CLASS (``ob-research`` by default, shared
+    with ob-research and ob-podcast): one cap per class, never a per-key override. Research is as
+    wide as the queue admits; the queue's chat reservation (llmq-research-share) keeps chat first.
+    A policy entry keeps its rank / wait budget, but its max_concurrency for that class is replaced.
     """
     policy = _build_policy(policy_json, default_wait_s)
     if research_branch is not None:
-        cur = policy.classes.get(RESEARCH_BRANCH_KEY)
-        cls = (replace(cur, max_concurrency=research_branch) if cur is not None
-               else _research_branch_class(research_branch))
-        policy.set_key(RESEARCH_BRANCH_KEY, cls)
+        lane = policy.classes.get(RESEARCH_BRANCH_KEY)
+        if lane is None:
+            lane = PriorityClass("ob-research", rank=3, acceptable_wait_s=1800.0)
+            policy.set_key(RESEARCH_BRANCH_KEY, lane)
+        for key, cls in policy.classes.items():
+            if cls.name == lane.name:
+                policy.set_key(key, replace(cls, max_concurrency=research_branch))
     return policy
 
 

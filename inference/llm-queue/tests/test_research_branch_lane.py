@@ -103,6 +103,19 @@ def test_estimate_reports_the_lane_concurrency(monkeypatch):
 
     status, body = asyncio.run(go())
     assert status == 200
-    assert body["priority_class"] == LANE
+    assert body["priority_class"] == "ob-research", "a key of the ob-research class"
     assert body["max_concurrency"] == 8
     assert body["capacity_declared"] is True
+
+
+@pytest.mark.parametrize("slots", [1, 2, 4, 8])
+def test_one_cap_per_class_the_research_class_cap_is_the_lane(monkeypatch, slots):
+    # union with llmq-research-share: ob-research, ob-podcast and research-branch are ONE class with
+    # ONE cap; P4a sets that class cap to the lane (= all slots), never a per-key override.
+    state = AppState(_settings(monkeypatch, slots=slots))
+    classes = {k: state.policy.classify(k) for k in ("ob-research", "ob-podcast", LANE)}
+    assert {c.name for c in classes.values()} == {"ob-research"}
+    assert {c.max_concurrency for c in classes.values()} == {slots}, classes
+    for k, c in state.policy.classes.items():
+        if c.name == "ob-research":
+            assert c.max_concurrency == slots, k
