@@ -74,6 +74,16 @@ LLM_QUEUE_MAX_IN_FLIGHT (N)  <=  P + 1                 # headroom discipline
 llama-swap concurrencyLimit  ==  0                     # the queue is the sole gate
 ```
 
+**research-branch lane (research-workbench P4a, D16).** The `research-branch` caller key
+(research-tree steers, gap work, on-demand idea research; its own LiteLLM virtual key with
+`metadata.lane=research-branch`) gets `max_concurrency = max(2, floor(LLM_QUEUE_SLOTS x
+LLM_QUEUE_RESEARCH_BRANCH_SHARE))` (share default 0.67), rank 3, re-derived at every (re)load.
+An unset or blank `LLM_QUEUE_SLOTS` keeps P=3 for scheduling but runs the lane at 2 and logs
+`research_branch_capacity_unreadable`. A `LLM_QUEUE_POLICY_JSON` entry for the key cannot hand-set
+a second cap (its max_concurrency is replaced). `GET /observe/queue/estimate?key=research-branch`
+reports `max_concurrency` + `capacity_declared`; the research service sizes its job dispatcher
+from it (no `RESEARCH_MAX_CONCURRENCY`).
+
 **Pending (2026-09-25, not built):** this coupling is why the queue cannot see a
 different backend. `P` is one hand-set number for one local upstream; a cloud model
 group behind LiteLLM, or a second engine, is invisible to the lanes. The change and

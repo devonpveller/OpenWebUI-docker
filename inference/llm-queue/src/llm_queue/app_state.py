@@ -11,7 +11,7 @@ import time
 from .config import Settings, get_settings
 from .events import EventSink
 from .logging import get_logger
-from .policy import PriorityPolicy, build_policy
+from .policy import PriorityPolicy, build_policy, research_branch_concurrency
 from .registry import Registry
 from .shedding import ShedMonitor
 from .transport import Upstream
@@ -24,8 +24,20 @@ class AppState:
         self.settings = settings
         self.registry = Registry(settings)
         self.upstream = Upstream(settings.upstream_timeout_s)
+        # P4a (D16): the research-branch lane is derived from the declared capacity at every
+        # (re)load - a restart with a new LLM_QUEUE_SLOTS moves it, nothing else is edited.
+        self.research_branch_concurrency, warn = research_branch_concurrency(settings)
+        if warn:
+            log.warning(
+                "research_branch_capacity_unreadable",
+                lane_concurrency=self.research_branch_concurrency, detail=warn,
+            )
+        else:
+            log.info("research_branch_lane", lane_concurrency=self.research_branch_concurrency,
+                     slots=settings.slots, share=settings.research_branch_share)
         self.policy: PriorityPolicy = build_policy(
-            settings.policy_json, settings.default_acceptable_wait_s
+            settings.policy_json, settings.default_acceptable_wait_s,
+            research_branch=self.research_branch_concurrency,
         )
         self.events = EventSink(settings.events_db_path)
         self.shed = ShedMonitor(

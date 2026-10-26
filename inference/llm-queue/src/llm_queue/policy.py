@@ -13,7 +13,12 @@ X-Priority-style header (header-trust = injection).
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .config import Settings
 
 
 @dataclass(frozen=True)
@@ -85,12 +90,57 @@ _DEFAULT_CLASSES: dict[str, PriorityClass] = {
 }
 
 
-def build_policy(policy_json: str, default_wait_s: float) -> PriorityPolicy:
+# ── research-branch lane (research-workbench P4a, D16) ─────────────────────────
+#: The caller key (LiteLLM virtual key metadata.lane -> x-ai-stack-caller) of research-tree
+#: branches: steers, gap work and on-demand idea research. Operator-provisioned key.
+RESEARCH_BRANCH_KEY = "research-branch"
+#: The lane never runs below this: a parent and its first branch must be able to run together.
+RESEARCH_BRANCH_FLOOR = 2
+
+
+def research_branch_concurrency(settings: Settings) -> tuple[int, str | None]:
+    """The lane's derived concurrency: ``floor(LLM_QUEUE_SLOTS x share)``, never below 2.
+
+    Returns ``(n, warning)``; ``warning`` is set when the plane's capacity is undeclared
+    (LLM_QUEUE_SLOTS unset or blank) - the lane then runs at the floor rather than on a guess.
+    """
+    if not settings.slots_declared:
+        return RESEARCH_BRANCH_FLOOR, (
+            "LLM_QUEUE_SLOTS is not set: the plane's capacity is unreadable, so the "
+            f"research-branch lane runs at its floor ({RESEARCH_BRANCH_FLOOR})"
+        )
+    n = math.floor(settings.slots * settings.research_branch_share)
+    return max(RESEARCH_BRANCH_FLOOR, n), None
+
+
+def _research_branch_class(n: int) -> PriorityClass:
+    # rank 3 = the batch tier: chat (rank 0) and interactive callers are dispatched first by the
+    # queue's ordinary priority policy; the lane only bounds how much of the pool branches hold.
+    return PriorityClass(RESEARCH_BRANCH_KEY, rank=3, acceptable_wait_s=1800.0, max_concurrency=n)
+
+
+def build_policy(
+    policy_json: str, default_wait_s: float, research_branch: int | None = None
+) -> PriorityPolicy:
     """Build the policy from optional JSON config, falling back to the §8c defaults.
 
     ``policy_json`` shape: {"<key>": {"class": str, "rank": int,
     "acceptable_wait_s": float, "max_concurrency": int|null}, ...}
+
+    ``research_branch`` (P4a): the derived lane concurrency. When given, the research-branch
+    class always carries it - a policy entry for the key keeps its rank / wait budget but its
+    max_concurrency is replaced (one number describes the plane; no second, hand-set cap).
     """
+    policy = _build_policy(policy_json, default_wait_s)
+    if research_branch is not None:
+        cur = policy.classes.get(RESEARCH_BRANCH_KEY)
+        cls = (replace(cur, max_concurrency=research_branch) if cur is not None
+               else _research_branch_class(research_branch))
+        policy.set_key(RESEARCH_BRANCH_KEY, cls)
+    return policy
+
+
+def _build_policy(policy_json: str, default_wait_s: float) -> PriorityPolicy:
     default = PriorityClass("default", rank=2, acceptable_wait_s=default_wait_s)
     if not policy_json.strip():
         return PriorityPolicy(dict(_DEFAULT_CLASSES), default)

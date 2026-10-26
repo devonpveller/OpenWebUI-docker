@@ -76,6 +76,10 @@ async def get_estimate(
         "avg_T_s": round(mq.avg_t, 2),
         "P": mq.slots,
         "would_admit": (est <= cls.acceptable_wait_s) if state.settings.enforce_budget else True,
+        # P4a (D16): the class's per-key in-flight cap. For the research-branch lane this is the
+        # derived share of LLM_QUEUE_SLOTS; the research service sizes its dispatcher from it.
+        "max_concurrency": cls.max_concurrency,
+        "capacity_declared": state.settings.slots_declared,
     }
 
 
