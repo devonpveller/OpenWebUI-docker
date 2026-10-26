@@ -17,9 +17,15 @@ is the source of truth; keep it in sync with llama-swap.config.yaml.
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Any
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+#: The scheduler's P when LLM_QUEUE_SLOTS is not declared (the long-standing default). The
+#: research-branch lane then runs at this default too, with a logged warning (research-workbench
+#: P4a, D16 as amended 2026-10-26).
+DEFAULT_SLOTS = 3
 
 
 class Settings(BaseSettings):
@@ -43,7 +49,16 @@ class Settings(BaseSettings):
     )
 
     # --- Admission sizing (keep in sync with llama-swap.config.yaml) ---
-    slots: int = Field(3, alias="LLM_QUEUE_SLOTS", ge=1, description="P — real parallel lanes.")
+    slots: int = Field(
+        DEFAULT_SLOTS, alias="LLM_QUEUE_SLOTS", ge=1, description="P — real parallel lanes."
+    )
+    #: False when LLM_QUEUE_SLOTS was absent or blank (the plane's capacity is unreadable). Set by
+    #: the validator below, never from the environment.
+    slots_declared: bool = Field(True, exclude=True)
+    # research-branch lane (research-workbench P4a, D16 as amended by the operator 2026-10-26): the
+    # lane is ALL of LLM_QUEUE_SLOTS - no share, floor or cap of its own. How much research runs is
+    # the queue's decision (priority classes; chat reservation + class-level research cap = item
+    # llmq-research-share). The research service reads the lane back (/observe/queue/estimate).
     max_in_flight: int = Field(
         4, alias="LLM_QUEUE_MAX_IN_FLIGHT", ge=1, description="N — admitted to upstream (<= P+1)."
     )
@@ -80,6 +95,18 @@ class Settings(BaseSettings):
         alias="LLM_QUEUE_T_TRIM_OUTLIER",
         description="Drop the single worst sample before averaging (a 9-min deep-research "
         "request shouldn't skew the next arrival's estimate — §7.2).",
+    )
+
+    # --- Priority reservation (llmq-research-share) ---
+    reserve_enabled: bool = Field(True, alias="LLM_QUEUE_RESERVE_ENABLED")
+    reserve_rank: int = Field(
+        3, alias="LLM_QUEUE_RESERVE_RANK", ge=1,
+        description="Ranks >= this are held out of the LAST free permit while higher-rank work "
+        "is present (needs slots >= 2).",
+    )
+    reserve_hold_s: float = Field(
+        5.0, alias="LLM_QUEUE_RESERVE_HOLD_S", ge=0,
+        description="Reservation stays on this long after the last higher-rank request ended.",
     )
 
     # --- Policy (P2) ---
@@ -160,6 +187,25 @@ class Settings(BaseSettings):
 
     # --- Logging ---
     log_level: str = Field("INFO", alias="LLM_QUEUE_LOG_LEVEL")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _slots_declared(cls, data: Any) -> Any:
+        """An absent or blank LLM_QUEUE_SLOTS keeps the scheduler's default P but marks the
+        capacity undeclared (compose passes ``${LLM_QUEUE_SLOTS:-}``, so unset arrives blank)."""
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        declared = False
+        for k in ("LLM_QUEUE_SLOTS", "slots"):
+            if k in data:
+                v = data[k]
+                if v is None or (isinstance(v, str) and not v.strip()):
+                    del data[k]
+                else:
+                    declared = True
+        data["slots_declared"] = declared
+        return data
 
 
 @lru_cache

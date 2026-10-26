@@ -2382,6 +2382,16 @@ except Exception as exc:
 """.replace("@PROBE_ROLE@", PROBE_ROLE)
 
 
+# The in-container read behind the mcpo tool-count probe: exit 0 only when the proxy's
+# openapi.json lists at least one path (a tool). Identical in shape to the compose healthcheck
+# of openbrain-mcpo / -ext and to check-openbrain-health.ps1's count. %s = the server name.
+MCPO_TOOLS_PROBE = (
+    "import json,sys,urllib.request; "
+    "d = json.load(urllib.request.urlopen('http://localhost:8000/%s/openapi.json', timeout=8)); "
+    "sys.exit(0 if d.get('paths') else 1)"
+)
+
+
 class HealthSweep:
     """Runs the probes, prints them, counts the failures."""
 
@@ -2576,6 +2586,19 @@ class HealthSweep:
                 lambda: self.docker(
                     "exec", "openbrain-db", "pg_isready", "-U", "postgres", "-d", "openbrain", "-t", "5"
                 ).code == 0,
+            )
+            # The OWUI tool bridges (mcpo-resilience, 2026-10-19). mcpo loads its MCP servers
+            # once, at start; one that started before its upstream answered serves an
+            # openapi.json with no paths for good, and "container up" and the old any-200
+            # healthcheck both read it as fine. No host port, so the probe is the in-container
+            # read the compose healthcheck makes: it passes only when the document has paths.
+            self.probe(
+                "OB1: openbrain-mcpo and openbrain-mcpo-ext each serve tools (openapi paths > 0)",
+                lambda: all([
+                    self.docker("exec", name, "python", "-c", MCPO_TOOLS_PROBE % server).code == 0
+                    for name, server in (("openbrain-mcpo", "open-brain"),
+                                         ("openbrain-mcpo-ext", "open-brain-extensions"))
+                ]),
             )
             # openbrain-pantry (pantry-wire) publishes NO host port, so the probe is the
             # in-container /health its compose healthcheck uses: {"ok":true,"db":true},

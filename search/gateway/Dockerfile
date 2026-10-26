@@ -27,4 +27,7 @@ EXPOSE 8080
 
 # HTTP API. The MCP stdio server is launched separately by the mcpo service
 # via:  python -m gateway.mcp_server
-CMD ["uvicorn", "gateway.main:app", "--host", "0.0.0.0", "--port", "8080"]
+# --no-access-log: uvicorn's access line carries the full path with its query string - every
+# GET /search?q=... (audit A3 / T0-d). The compose command says the same; the image default must
+# not be the leaky one.
+CMD ["uvicorn", "gateway.main:app", "--host", "0.0.0.0", "--port", "8080", "--no-access-log"]

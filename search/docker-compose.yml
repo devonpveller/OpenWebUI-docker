@@ -78,13 +78,30 @@ services:
   redis:
     image: ${SEARCH_REDIS_IMAGE:-redis:7-alpine}
     container_name: search-redis
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # search-gate (audit A2): a password. It is `requirepass` in search/secrets/redis/redis.conf
+    # (gitignored; a one-line file: `requirepass <long random>`), mounted as a directory so a
+    # missing file does not stop the plane: then redis runs WITHOUT a password, as before the gate,
+    # and says so on stderr at every start. The deploy step creates the file (search/README.md).
+    # The gateway reads the same file (REDIS_PASSWORD_FILE). searxng's SEARXNG_REDIS_URL is not
+    # read by the pinned image (it uses valkey settings; audit A11), so nothing else connects.
+    command:
+      - sh
+      - -c
+      - >-
+        if [ -s /run/secrets/search-redis/redis.conf ]; then
+        exec redis-server /run/secrets/search-redis/redis.conf --save '' --appendonly no;
+        else echo 'search-redis: no search/secrets/redis/redis.conf - running WITHOUT a password' >&2;
+        exec redis-server --save '' --appendonly no; fi
+    volumes:
+      - ./secrets/redis:/run/secrets/search-redis:ro
     networks:
       - search-net
     restart: unless-stopped
     <<: *hardening
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # an unauthenticated `redis-cli ping` exits 0 on NOAUTH too, so the check reads the PONG;
+      # tr drops a CR (a file written on Windows) and quotes, as redis's own config parser does
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(sed -n 's/^requirepass[[:space:]]*//p' /run/secrets/search-redis/redis.conf 2>/dev/null | tr -d '\r\"')\" redis-cli --no-auth-warning ping | grep -q PONG"]
       interval: 15s
       timeout: 10s
       retries: 3
@@ -173,8 +190,29 @@ services:
       # running container predated it, so the first recreate (research-trust deploy,
       # 2026-09-11) crash-looped on 'GATEWAY_API_KEY Field required'.
       - GATEWAY_API_KEY=${GATEWAY_API_KEY}
-      - SEARXNG_URL=http://searxng:8080
+      # The engine behind the adapter interface (search-gate artifact 7): SEARCH_ENGINE names the
+      # adapter, SEARCH_ENGINE_URL its address. SearXNG is today's engine, nothing more.
+      - SEARCH_ENGINE=searxng
+      - SEARCH_ENGINE_URL=http://searxng:8080
       - REDIS_URL=redis://redis:6379/1
+      # --- the gate (security plan step 3), shipped beside today's routes ---
+      # GET /search stays keyless for OWUI and the research engine until step 5 moves them to
+      # per-caller keys; then this line goes and the route refuses anonymous callers (the code
+      # default).
+      - SEARCH_ANONYMOUS_LEGACY=true
+      # Secrets are FILES (never environment values; every `docker exec` inherits those), in
+      # search/secrets/ (gitignored). A missing file is the pre-gate posture: no per-caller keys
+      # (the gate's routes refuse everyone), no intake key (every screened answer is 503, never
+      # unscreened), no redis password.
+      - REDIS_PASSWORD_FILE=/run/secrets/search-redis/redis.conf
+      - GATE_CALLER_KEYS_FILE=/run/secrets/search-gate/caller_keys
+      - INTAKE_KEY_FILE=/run/secrets/search-gate/intake_key
+      - INTAKE_URL=http://openbrain-intake:8000/v1/intake
+      # page fetches leave through the plane's VPN proxy; names are resolved by DoH THROUGH it
+      - GATE_FETCH_PROXY_URL=http://vpn:8888
+    volumes:
+      - ./secrets/redis:/run/secrets/search-redis:ro
+      - ./secrets/gate:/run/secrets/search-gate:ro
     ports:
       - "127.0.0.1:8085:8080"   # native REST / Tavily shim for host tools
     restart: unless-stopped

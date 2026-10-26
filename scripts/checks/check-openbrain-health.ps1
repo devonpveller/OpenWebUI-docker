@@ -43,10 +43,17 @@
 # The rule and the measurement are above Invoke-CpuSpinGuard (item ef-mcpo-spin).
 # See memory: openbrain-mcpo-ext-cpu-spin.
 #
+# A third instance (2026-10-19, mcpo-resilience): after a Docker Desktop restart both proxies
+# started before openbrain-mcp answered, loaded an EMPTY server list and served
+# "paths": {} for good while reporting healthy (the old healthcheck read any 200). Each
+# proxy's tool count is now read from inside the container; 0 = FAIL, and -Repair restarts
+# that one proxy (only while its upstream is running) and waits for the tools to load.
+#
 # Probes (by container NAME, project-agnostic — never `docker compose`):
 #   - openbrain-db          running               (the dependency)
 #   - openbrain-mcp         running + STALE-POOL guard (db started after mcp -> restart)
-#   - openbrain-mcpo[-ext]  running + CPU-SPIN guard (>= 80% of a core over 3+ intervals
+#   - openbrain-mcpo[-ext]  running + TOOL COUNT (openapi paths; 0 = FAIL, -Repair restarts it)
+#                           + CPU-SPIN guard (>= 80% of a core over 3+ intervals
 #                           of <= 25 min spanning 30+ min -> restart that one,
 #                           capped 1/h, alert;
 #                           state in logs\.openbrain-cpu-spin-state.json)
@@ -114,7 +121,10 @@ param(
   [ValidateRange(2, 20)][int]$CpuSpinMinIntervals = 3,
   [ValidateRange(2, 60)][int]$CpuSpinMaxIntervalMinutes = 25,
   # Bound on each docker inspect / exec the guard makes (restart: 60 s).
-  [ValidateRange(1, 300)][int]$DockerTimeoutSeconds = 20
+  [ValidateRange(1, 300)][int]$DockerTimeoutSeconds = 20,
+  # Tool-count guard (mcpo-resilience): how long -Repair waits, after restarting a proxy that
+  # served 0 tools, for it to load its tools before calling the repair failed.
+  [ValidateRange(1, 600)][int]$McpoRepairWaitSeconds = 90
 )
 
 $ErrorActionPreference = 'Continue'
@@ -572,8 +582,64 @@ if ($dbUp -and $mcpUp) {
 }
 
 # ---- 3. The Open WebUI tool bridge -----------------------------------------
+# TOOL COUNT (mcpo-resilience). mcpo loads its MCP servers once, at start; one that started
+# before its upstream answered serves an openapi.json with no paths and never retries, and a
+# container-level "running" or even "healthy" (the pre-2026-10-19 healthcheck) does not see it.
+# The count is read INSIDE the container (the proxy publishes no host port) with the same
+# python one-liner shape its healthcheck uses. Fail-closed on the verdict, fail-quiet on the
+# action: 0 tools = FAIL; a count that could not be read = NO DATA, a fault, and NO restart.
+$McpoProxies = @(
+  @{ Name = 'openbrain-mcpo';     Server = 'open-brain';            Upstream = 'openbrain-mcp' },
+  @{ Name = 'openbrain-mcpo-ext'; Server = 'open-brain-extensions'; Upstream = 'openbrain-ext' }
+)
+
+# @{ Count = <int> } or @{ Why = <reason> }. Bounded by -DockerTimeoutSeconds.
+function Get-McpoToolCount {
+  param([string]$Name, [string]$Server)
+  $probe = "import json,urllib.request; d = json.load(urllib.request.urlopen('http://localhost:8000/$Server/openapi.json', timeout=8)); print(len(d.get('paths') or {}))"
+  $r = Invoke-ObDocker @('exec', $Name, 'python', '-c', $probe)
+  if (-not $r.Ok) { return @{ Why = "docker exec $($r.Why)" } }
+  $line = ((@($r.Lines) | Select-Object -First 1) -as [string])
+  $n = ConvertTo-ObInt64 $line
+  if ($null -eq $n) { return @{ Why = "tool count is not a number: '$line'" } }
+  return @{ Count = $n }
+}
+
+function Invoke-McpoToolGuard {
+  param($Proxies)
+  foreach ($p in $Proxies) {
+    $name = $p.Name
+    if ((Get-CState $name) -ne 'running') { continue }   # Confirm-ObContainer above already faulted it
+    $c = Get-McpoToolCount $name $p.Server
+    if ($c.ContainsKey('Why')) {
+      Write-Ob $name warn "NO DATA (tool count: $($c.Why)) - no action"; $script:Faults++; continue
+    }
+    if ($c.Count -gt 0) { Write-Ob $name ok "serves $($c.Count) tools"; continue }
+    Write-Ob $name down "SERVES 0 TOOLS (loaded before $($p.Upstream) answered; Open WebUI shows it connected with no tools)"
+    if (-not $Repair) { Write-Ob $name warn 'run with -Repair to restart it'; $script:Faults++; continue }
+    if ($SpinRestartAllowList -cnotcontains $name) { $script:Faults++; continue }
+    if ((Get-CState $p.Upstream) -ne 'running') {
+      Write-Ob $name warn "upstream $($p.Upstream) is not running - not restarting a proxy into an empty load"; $script:Faults++; continue
+    }
+    Write-Ob $name fix "docker restart $name (reload tools)"
+    $rr = Invoke-ObDocker @('restart', $name) 60
+    if (-not $rr.Ok) { Write-Ob $name down "restart failed: $($rr.Why)"; $script:Faults++; continue }
+    $deadline = (Get-Date).AddSeconds($McpoRepairWaitSeconds)
+    $n2 = $null
+    while ($true) {
+      Start-Sleep -Seconds 3
+      $c2 = Get-McpoToolCount $name $p.Server
+      if ($c2.ContainsKey('Count') -and $c2.Count -gt 0) { $n2 = $c2.Count; break }
+      if ((Get-Date) -ge $deadline) { break }
+    }
+    if ($null -ne $n2) { Write-Ob $name ok "restarted; now serves $n2 tools" }
+    else { Write-Ob $name down "still 0 tools $McpoRepairWaitSeconds s after restart (docker logs $name)"; $script:Faults++ }
+  }
+}
+
 Confirm-ObContainer 'openbrain-mcpo'     | Out-Null
 Confirm-ObContainer 'openbrain-mcpo-ext' | Out-Null
+Invoke-McpoToolGuard -Proxies $McpoProxies
 # ... and the CPU-spin guard for both (green-but-spinning; rule above Invoke-CpuSpinGuard).
 Invoke-CpuSpinGuard -Names $CpuSpinContainers
 

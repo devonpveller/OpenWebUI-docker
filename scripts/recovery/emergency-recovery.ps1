@@ -730,6 +730,83 @@ function Test-OB1ProfileEnabled([string]$ProfileName) {
     return $false
 }
 
+function Confirm-McpoTools {
+    # mcpo-resilience (2026-10-19). After the 2026-10-18 Docker Desktop restart both OWUI tool
+    # proxies (openbrain-mcpo, openbrain-mcpo-ext) started before openbrain-mcp answered, loaded
+    # an EMPTY server list and served "paths": {} for good while `docker ps` said healthy; OWUI
+    # showed the servers connected and the models had no Open Brain tools. `up -d` returning,
+    # and "no restart loop in 60 s", say nothing about that. This is the check that does:
+    #   1. wait until openbrain-mcp is HEALTHY (its compose healthcheck is an MCP initialize);
+    #      never healthy -> say so and verify nothing (a proxy restarted into a dead upstream
+    #      just loads zero tools again);
+    #   2. a proxy that is not running (an `up -d` that stopped at "dependency failed to
+    #      start" never created it) is brought up NOW, which is the first point it can load;
+    #   3. each proxy's tool count (openapi paths, read inside the container) must reach > 0.
+    #      The compose-side guard (OB1 docker/mcpo/mcpo-guard.py) already restarts an empty
+    #      proxy on its own; this waits for that, and only if the count is still 0 restarts the
+    #      proxy ONCE itself and waits again.
+    # Returns the sorted names that STILL serve no tools (empty = verified). Function-level
+    # testable without the stack: the five commands default to the real docker calls.
+    param(
+        [int]$WaitSeconds = 180,
+        [int]$PollSeconds = 5,
+        [int]$RestartWaitSeconds = 60,
+        [scriptblock]$HealthCommand = { param($Name) docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' $Name 2>$null },
+        [scriptblock]$StateCommand = { param($Name) docker inspect --format '{{.State.Status}}' $Name 2>$null },
+        [scriptblock]$StartCommand = { param($Names) $prof = Get-OB1StartProfiles; docker compose -f $Script:OB1Compose @prof up -d @Names },
+        [scriptblock]$CountCommand = {
+            param($Name, $Server)
+            docker exec $Name python -c ("import json,urllib.request; d = json.load(urllib.request.urlopen('http://localhost:8000/{0}/openapi.json', timeout=8)); print(len(d.get('paths') or {{}}))" -f $Server) 2>$null
+        },
+        [scriptblock]$RestartCommand = { param($Name) docker restart $Name 2>&1 | Out-Null }
+    )
+    $proxies = @(
+        @{ Name = 'openbrain-mcpo';     Server = 'open-brain' },
+        @{ Name = 'openbrain-mcpo-ext'; Server = 'open-brain-extensions' }
+    )
+    $count = {
+        param($p)
+        try {
+            $raw = @(& $CountCommand $p.Name $p.Server | Select-Object -First 1)[0]
+            $n = 0
+            if ([int]::TryParse(([string]$raw).Trim(), [ref]$n)) { return $n }
+        } catch { }
+        return -1
+    }
+    $waitUntil = {
+        param([scriptblock]$Done, [int]$Seconds)
+        $deadline = (Get-Date).AddSeconds($Seconds)
+        while ($true) {
+            if (& $Done) { return $true }
+            if ((Get-Date) -ge $deadline) { return $false }
+            Start-Sleep -Seconds $PollSeconds
+        }
+    }
+
+    $mcpOk = & $waitUntil { (([string](@(& $HealthCommand 'openbrain-mcp') | Select-Object -First 1)).Trim()) -eq 'healthy' } $WaitSeconds
+    if (-not $mcpOk) {
+        Write-Log "WARN" "openbrain-mcp is not healthy after $WaitSeconds s - NOT verifying the OWUI tool proxies (a proxy started now would load zero tools). Check: docker logs openbrain-mcp"
+        return ,@('openbrain-mcpo', 'openbrain-mcpo-ext')
+    }
+    $absent = @($proxies | Where-Object { (([string](@(& $StateCommand $_.Name) | Select-Object -First 1)).Trim()) -ne 'running' } | ForEach-Object { $_.Name })
+    if ($absent.Count -gt 0) {
+        Write-Log "INFO" "openbrain-mcp is healthy; starting the tool proxy(ies) that are not running: $($absent -join ', ')"
+        try { & $StartCommand $absent | Out-Null } catch { Write-Log "WARN" "starting $($absent -join ', ') failed: $_" }
+    }
+    $empty = @()
+    foreach ($p in $proxies) {
+        $ok = & $waitUntil { (& $count $p) -gt 0 } $WaitSeconds
+        if (-not $ok) {
+            Write-Log "WARN" "$($p.Name) serves no tools $WaitSeconds s after openbrain-mcp went healthy - restarting it once"
+            try { & $RestartCommand $p.Name } catch { Write-Log "WARN" "restart of $($p.Name) failed: $_" }
+            $ok = & $waitUntil { (& $count $p) -gt 0 } $RestartWaitSeconds
+        }
+        if ($ok) { Write-Log "INFO" "$($p.Name) serves $(& $count $p) tools" }
+        else { Write-Log "WARN" "$($p.Name) STILL serves no tools (Open WebUI would show it connected with none) - docker logs $($p.Name)"; $empty += $p.Name }
+    }
+    return ,@($empty | Sort-Object)
+}
+
 function Get-OB1StartProfiles {
     # The --profile flags for an OB1 `up`: the four the host runs, plus each opt-in
     # profile ($Script:OB1OptInProfiles: `pantry`, `intake`) only when it is enabled
@@ -786,6 +863,9 @@ function Start-OB1Stack {
         }
         # Bounded report on the viewer's healthcheck; never fails the recovery.
         Wait-OB1ViewerHealth | Out-Null
+        # mcpo-resilience: "up" and "no restart loop" do not mean the OWUI tool proxies loaded tools.
+        $noTools = Confirm-McpoTools
+        if ($noTools.Count -eq 0) { Write-Log "SUCCESS" "OWUI tool proxies verified: both serve tools" }
     }
     catch {
         Write-Log "WARN" "Failed to start OB1 stack: $_"
@@ -824,6 +904,9 @@ function Reset-OB1Stack {
         }
         # Bounded report on the viewer's healthcheck; never fails the recovery.
         Wait-OB1ViewerHealth | Out-Null
+        # mcpo-resilience: same check as Start-OB1Stack.
+        $noTools = Confirm-McpoTools
+        if ($noTools.Count -eq 0) { Write-Log "SUCCESS" "OWUI tool proxies verified: both serve tools" }
     }
     catch {
         Write-Log "WARN" "OB1 recreate had issues: $_"

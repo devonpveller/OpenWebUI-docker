@@ -3,21 +3,23 @@
 Accepts the bearer token OR an ``api_key`` field in the body (Tavily clients
 send the latter). Maps search_depth=advanced -> more results. Never
 synthesizes an ``answer`` — returns null to keep the shim honest.
+
+A per-caller key gets the screened answer (only intake-clean results; ``content`` is the fenced
+text); GATEWAY_API_KEY gets today's answer.
 """
 
 from __future__ import annotations
 
-import secrets
 import time
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
-from gateway.config import Settings, get_settings
-from gateway.deps import _bearer_token, get_engine
+from gateway.deps import GateRuntime, _bearer_token, get_engine, get_gate
 from gateway.models import SearchRequest
 from gateway.rotation import AllProvidersFailed, RotationEngine
+from gateway.routes.common import screened_search
 
 router = APIRouter(tags=["tavily"])
 
@@ -50,13 +52,12 @@ class TavilyResponse(BaseModel):
 async def tavily_search(
     body: TavilyRequest,
     authorization: str | None = Header(default=None),
-    settings: Settings = Depends(get_settings),
     engine: RotationEngine = Depends(get_engine),
+    gate: GateRuntime = Depends(get_gate),
 ) -> TavilyResponse:
     supplied = _bearer_token(authorization) or body.api_key
-    if supplied is None or not secrets.compare_digest(
-        supplied, settings.gateway_api_key
-    ):
+    caller = gate.callers.identify(supplied)
+    if caller is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="missing or invalid API key",
@@ -70,10 +71,23 @@ async def tavily_search(
         max_results = 10
 
     started = time.perf_counter()
+    req = SearchRequest(query=body.query, max_results=max_results)
     try:
-        resp = await engine.search(
-            SearchRequest(query=body.query, max_results=max_results)
-        )
+        if caller.screened:
+            screened = await screened_search(engine, gate, req)
+            return TavilyResponse(
+                query=body.query,
+                results=[
+                    TavilyResult(
+                        title=r.title, url=str(r.url), content=r.fenced,
+                        score=r.score if r.score is not None else 0.0,
+                        published_date=r.published_at.isoformat() if r.published_at else None,
+                    )
+                    for r in screened.results
+                ],
+                response_time=round(time.perf_counter() - started, 4),
+            )
+        resp = await engine.search(req)
     except AllProvidersFailed:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

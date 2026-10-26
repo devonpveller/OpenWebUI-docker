@@ -16,6 +16,7 @@ import sys
 import structlog
 
 _configured = False
+_QUIET_LOGGERS = ("httpx", "httpcore", "hpack", "uvicorn.access", "mcp", "urllib3")
 
 
 def configure_logging(level: str) -> None:
@@ -24,6 +25,12 @@ def configure_logging(level: str) -> None:
         return
 
     logging.basicConfig(format="%(message)s", stream=sys.stdout, level=level.upper())
+    # Libraries log through the standard tree, and httpx logs EVERY request line at INFO - the
+    # engine URL with ?q=<query>, every fetched URL (search-gate round trip, 2026-10-19: the live
+    # gateway's log carried each query that way, beside the uvicorn access log audit A3 named).
+    # They never log below WARNING here, whatever LOG_LEVEL says.
+    for noisy in _QUIET_LOGGERS:
+        logging.getLogger(noisy).setLevel(max(logging.WARNING, logging.getLevelName(level.upper())))
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
