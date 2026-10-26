@@ -82,6 +82,18 @@ class Settings(BaseSettings):
         "request shouldn't skew the next arrival's estimate — §7.2).",
     )
 
+    # --- Priority reservation (llmq-research-share) ---
+    reserve_enabled: bool = Field(True, alias="LLM_QUEUE_RESERVE_ENABLED")
+    reserve_rank: int = Field(
+        3, alias="LLM_QUEUE_RESERVE_RANK", ge=1,
+        description="Ranks >= this are held out of the LAST free permit while higher-rank work "
+        "is present (needs slots >= 2).",
+    )
+    reserve_hold_s: float = Field(
+        5.0, alias="LLM_QUEUE_RESERVE_HOLD_S", ge=0,
+        description="Reservation stays on this long after the last higher-rank request ended.",
+    )
+
     # --- Policy (P2) ---
     # Whether to enforce the per-service acceptable-wait budget at admission.
     # P1 ships with this OFF (admission gated by depth backstop only); P2 flips it

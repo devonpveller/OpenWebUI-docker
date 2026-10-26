@@ -99,6 +99,13 @@ class ModelQueue:
         self._waiters: dict[str, Waiter] = {}  # waiting only
         self._running: dict[str, Waiter] = {}
         self._inflight_by_key: dict[str, int] = {}
+        # llmq-research-share: the max_concurrency cap counts per CLASS (cls.name), so every key
+        # mapped to one class (ob-research, ob-podcast, research-branch) shares one in-flight count.
+        self._inflight_by_class: dict[str, int] = {}
+        # Priority reservation: monotonic time the last request ranked above reserve_rank ended.
+        self._last_higher_done: float | None = None
+        self._kick_handle: asyncio.TimerHandle | None = None
+        self._kick_tasks: set[asyncio.Task[None]] = set()
 
     # ---- metrics / introspection -----------------------------------------
 
@@ -113,6 +120,50 @@ class ModelQueue:
     def held(self) -> int:
         """Total requests currently held (waiting + running)."""
         return len(self._heap) + len(self._running)
+
+    def _reserve_active_locked(self) -> bool:
+        """True while the last free permit is held back from low-priority (rank >=
+        reserve_rank) waiters: >= 2 slots AND a higher-rank request is waiting or in flight,
+        or one finished within the last reserve_hold_s seconds. With no higher-rank work
+        (past the hold) low-priority work may use every permit."""
+        st = self._settings
+        if not st.reserve_enabled or self._slots < 2:
+            return False
+        rr = st.reserve_rank
+        if any(w.rank < rr for w in self._running.values()):
+            return True
+        if any(w.rank < rr for w in self._waiters.values() if not w.cancelled):
+            return True
+        if self._last_higher_done is not None:
+            return time.monotonic() - self._last_higher_done < st.reserve_hold_s
+        return False
+
+    def _note_done_locked(self, w: Waiter) -> None:
+        if w.rank < self._settings.reserve_rank:
+            self._last_higher_done = time.monotonic()
+
+    def _schedule_kick_locked(self) -> None:
+        """A low-priority waiter blocked only by the hold window needs a wake-up when the
+        window ends (no other event may come)."""
+        if self._last_higher_done is None or self._kick_handle is not None:
+            return
+        delay = self._settings.reserve_hold_s - (time.monotonic() - self._last_higher_done)
+        if delay <= 0:
+            return
+        loop = asyncio.get_running_loop()
+
+        def _fire() -> None:
+            self._kick_handle = None
+
+            async def _go() -> None:
+                async with self._lock:
+                    self._try_dispatch_locked()
+
+            t = loop.create_task(_go())
+            self._kick_tasks.add(t)
+            t.add_done_callback(self._kick_tasks.discard)
+
+        self._kick_handle = loop.call_later(delay + 0.01, _fire)
 
     def _estimate_wait_locked(self, rank: int) -> float:
         """Projected wait for a NEW request of ``rank`` (design §8b, wave model).
@@ -204,6 +255,7 @@ class ModelQueue:
         finishes), so a capped batch caller yields its turn to the next class
         instead of blocking the whole queue."""
         while self._permits > 0 and self._heap:
+            reserve = self._permits == 1 and self._reserve_active_locked()
             picked: tuple[int, int, str] | None = None
             skipped: list[tuple[int, int, str]] = []
             while self._heap:
@@ -214,8 +266,12 @@ class ModelQueue:
                     self._waiters.pop(wid, None)
                     continue  # drop stale/cancelled entry entirely
                 cap = w.cls.max_concurrency
-                if cap is not None and self._inflight_by_key.get(w.key, 0) >= cap:
-                    skipped.append(entry)  # at cap — leave queued, try next
+                if cap is not None and self._inflight_by_class.get(w.cls.name, 0) >= cap:
+                    skipped.append(entry)  # class at cap, leave queued, try next
+                    continue
+                if reserve and w.rank >= self._settings.reserve_rank:
+                    skipped.append(entry)  # last permit is reserved for higher-rank work
+                    self._schedule_kick_locked()
                     continue
                 picked = entry
                 break
@@ -232,7 +288,16 @@ class ModelQueue:
             w.wait_seconds = w.started_monotonic - w.enqueued_monotonic
             self._running[wid] = w
             self._inflight_by_key[w.key] = self._inflight_by_key.get(w.key, 0) + 1
+            self._inflight_by_class[w.cls.name] = self._inflight_by_class.get(w.cls.name, 0) + 1
             w.dispatched_event.set()
+
+    def _dec_inflight(self, w: Waiter) -> None:
+        for table, k in ((self._inflight_by_key, w.key), (self._inflight_by_class, w.cls.name)):
+            n = table.get(k, 0) - 1
+            if n > 0:
+                table[k] = n
+            else:
+                table.pop(k, None)
 
     async def release(self, waiter: Waiter, *, record_duration: bool = True) -> None:
         """Return the permit and (optionally) feed T. Idempotent for waiters that
@@ -240,11 +305,8 @@ class ModelQueue:
         async with self._lock:
             if waiter.id in self._running:
                 self._running.pop(waiter.id, None)
-                n = self._inflight_by_key.get(waiter.key, 0) - 1
-                if n > 0:
-                    self._inflight_by_key[waiter.key] = n
-                else:
-                    self._inflight_by_key.pop(waiter.key, None)
+                self._dec_inflight(waiter)
+                self._note_done_locked(waiter)
                 self._permits += 1
                 if record_duration and waiter.started_monotonic is not None:
                     self._t.record(time.monotonic() - waiter.started_monotonic)
@@ -265,11 +327,8 @@ class ModelQueue:
             ]
             for w in stale:
                 self._running.pop(w.id, None)
-                n = self._inflight_by_key.get(w.key, 0) - 1
-                if n > 0:
-                    self._inflight_by_key[w.key] = n
-                else:
-                    self._inflight_by_key.pop(w.key, None)
+                self._dec_inflight(w)
+                self._note_done_locked(w)
                 self._permits += 1
             if stale:
                 self._try_dispatch_locked()
@@ -338,4 +397,6 @@ class ModelQueue:
             "P": self._slots,
             "permits_free": self._permits,
             "inflight_by_key": dict(self._inflight_by_key),
+            "inflight_by_class": dict(self._inflight_by_class),
+            "reserve_active": self._reserve_active_locked(),
         }

@@ -20,6 +20,18 @@ callers → llama-cpp:8080 (alias) → llm-gateway (LiteLLM) → llm-queue → l
 - **Priority wait-heap** — waiting requests ordered by class (interactive chat >
   batch), dispatched highest-priority-first; per-key max-concurrency so a batch
   caller can't own all the slots.
+- **Priority reservation** (llmq-research-share) - with `LLM_QUEUE_SLOTS >= 2`, a waiter of rank
+  `>= LLM_QUEUE_RESERVE_RANK` (default 3: research, wiki, entity, digest) is not dispatched into the
+  LAST free permit while higher-rank work is present: a rank < 3 request waiting or in flight, or
+  one that finished within `LLM_QUEUE_RESERVE_HOLD_S` (default 5 s). A chat arrival therefore finds
+  a permit at once. With no higher-rank work (past the hold) rank >= 3 may use every permit; with 1
+  slot there is no reservation; `LLM_QUEUE_RESERVE_ENABLED=false` turns it off. Nothing is
+  preempted: a chat arriving when idle research already holds every permit still waits for one
+  completion.
+- **Class-level cap** - `max_concurrency` counts in-flight per priority CLASS (`class` name), not
+  per key: `ob-research`, `ob-podcast` and `research-branch` are all class `ob-research` (cap 2
+  together). In `LLM_QUEUE_POLICY_JSON`, keys sharing a `class` value share one cap; `GET /queue`
+  shows `inflight_by_class`.
 - **Rolling completion-`T` metric** + projected-wait estimate
   (`ceil(position_ahead / P) × T`), exposed on `X-Queue-*` response headers and
   `GET /queue`.

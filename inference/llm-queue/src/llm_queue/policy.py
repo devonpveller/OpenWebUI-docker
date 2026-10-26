@@ -23,7 +23,7 @@ class PriorityClass:
     name: str
     rank: int
     acceptable_wait_s: float
-    max_concurrency: int | None = None  # per-key in-flight cap (None = unlimited)
+    max_concurrency: int | None = None  # class-wide in-flight cap (None = none)
 
 
 class PriorityPolicy:
@@ -79,6 +79,10 @@ _DEFAULT_CLASSES: dict[str, PriorityClass] = {
     "ob-research": PriorityClass("ob-research", rank=3, acceptable_wait_s=1800.0,
                                  max_concurrency=2),
     "ob-podcast": PriorityClass("ob-research", rank=3, acceptable_wait_s=1800.0, max_concurrency=2),
+    # P4a research-branch lane: same CLASS as ob-research, so the cap (2) is shared by all
+    # three keys, not 2 per key.
+    "research-branch": PriorityClass("ob-research", rank=3, acceptable_wait_s=1800.0,
+                                     max_concurrency=2),
     # Morning digest lane (openbrain-digest: weather brief, synthesizer, semantic
     # search) — wired to the gateway in #27 (LOCAL_LLM_BEARER / OB_DIGEST_LLM_KEY).
     "ob-digest": PriorityClass("ob-digest", rank=3, acceptable_wait_s=600.0, max_concurrency=2),
@@ -88,6 +92,7 @@ _DEFAULT_CLASSES: dict[str, PriorityClass] = {
 def build_policy(policy_json: str, default_wait_s: float) -> PriorityPolicy:
     """Build the policy from optional JSON config, falling back to the §8c defaults.
 
+    The cap counts per CLASS (``class`` name): keys that share a ``class`` share one cap.
     ``policy_json`` shape: {"<key>": {"class": str, "rank": int,
     "acceptable_wait_s": float, "max_concurrency": int|null}, ...}
     """
