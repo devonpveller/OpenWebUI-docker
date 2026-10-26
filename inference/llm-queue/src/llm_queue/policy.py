@@ -62,7 +62,7 @@ class PriorityPolicy:
 # sends "llama", others send junk/empty). Tune in P2 as real keys
 # are attributed. Budgets: interactive short, batch long.
 _DEFAULT_CLASSES: dict[str, PriorityClass] = {
-    "owui-chat": PriorityClass("owui-chat", rank=0, acceptable_wait_s=30.0),
+    "owui-chat": PriorityClass("owui-chat", rank=0, acceptable_wait_s=120.0),
     "ollama": PriorityClass("ollama", rank=1, acceptable_wait_s=60.0),
     "ob-mcp": PriorityClass("ob-mcp", rank=1, acceptable_wait_s=60.0),
     "llama": PriorityClass("lc-coder", rank=2, acceptable_wait_s=120.0),

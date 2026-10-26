@@ -91,3 +91,42 @@ def test_policy_json_class_shares_cap():
         60.0,
     )
     assert p.classify("x").name == p.classify("y").name == "g"
+
+
+async def test_cold_chat_behind_idle_research_dispatched_next_no_429(make_queue):
+    import uuid
+
+    from llm_queue.scheduler import Waiter
+
+    pol = build_policy("", 120.0)
+    assert pol.classify("owui-chat").acceptable_wait_s == 120.0
+    # budget gate ON; T = 100 s simulates a 100 s research call
+    mq = make_queue(slots=2, max_in_flight=2, enforce_budget=True, t_initial_s=100.0)
+
+    def mk(k, seq):
+        return Waiter(id=uuid.uuid4().hex[:8], key=k, model="m", cls=pol.classify(k), seq=seq)
+
+    r1, r2 = mk("ob-research", 1), mk("ob-podcast", 2)
+    await mq.enqueue(r1)
+    await mq.enqueue(r2)
+    assert r1.dispatched and r2.dispatched  # idle: research holds both permits
+    r3 = mk("ob-research", 3)  # a LATER research request, waiting
+    await mq.enqueue(r3)
+    chat = mk("owui-chat", 4)
+    await mq.enqueue(chat)  # must not raise Rejected (est 100 s <= 120 s)
+    assert not chat.dispatched
+    await mq.release(r1)  # ONE completion
+    assert chat.dispatched and not r3.dispatched  # chat next, not behind r3
+
+
+async def test_hold_path_unchanged_with_longer_budget(make_queue, make_waiter):
+    mq = make_queue(slots=2, max_in_flight=3)
+    chat = make_waiter(key="owui-chat", rank=0)
+    await mq.enqueue(chat)
+    r1, r2 = make_waiter(rank=3), make_waiter(rank=3)
+    await mq.enqueue(r1)
+    await mq.enqueue(r2)
+    assert r1.dispatched and not r2.dispatched  # last permit held while chat is in flight
+    chat2 = make_waiter(key="owui-chat", rank=0)
+    await mq.enqueue(chat2)
+    assert chat2.dispatched and chat2.wait_seconds < 0.5  # chat never waits for research

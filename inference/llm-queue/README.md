@@ -27,7 +27,7 @@ callers → llama-cpp:8080 (alias) → llm-gateway (LiteLLM) → llm-queue → l
   a permit at once. With no higher-rank work (past the hold) rank >= 3 may use every permit; with 1
   slot there is no reservation; `LLM_QUEUE_RESERVE_ENABLED=false` turns it off. Nothing is
   preempted: a chat arriving when idle research already holds every permit still waits for one
-  completion.
+  completion, which is why `owui-chat`'s `acceptable_wait_s` is 120 s (was 30 s): that chat is dispatched next and not refused.
 - **Class-level cap** - `max_concurrency` counts in-flight per priority CLASS (`class` name), not
   per key: `ob-research`, `ob-podcast` and `research-branch` are all class `ob-research` (cap 2
   together). In `LLM_QUEUE_POLICY_JSON`, keys sharing a `class` value share one cap; `GET /queue`
