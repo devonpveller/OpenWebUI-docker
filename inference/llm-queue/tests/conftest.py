@@ -33,7 +33,7 @@ def make_queue(make_settings):
 @pytest.fixture
 def make_waiter():
     def _make(key="anon", rank=2, acceptable=120.0, max_concurrency=None):
-        cls = PriorityClass("c", rank, acceptable, max_concurrency)
+        cls = PriorityClass(key, rank, acceptable, max_concurrency)
         return Waiter(
             id=uuid.uuid4().hex[:8], key=key, model="qwen36-27b", cls=cls, seq=next(_seq)
         )
