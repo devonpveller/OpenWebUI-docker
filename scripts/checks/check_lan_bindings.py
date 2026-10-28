@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """The opt-in LAN bindings stay inert until set, and bind exactly what is listed when set.
 
-Work item edge-b2-pub (cluster-transition PLAN.md 5.1, Track B item B2). Three host
+Work item edge-b2-pub (cluster-transition PLAN.md 5.1, Track B item B2). Four host
 ports may be published on the host's LAN address so the Proxmox Traefik can reach them,
 each turned on by ONE variable in the plane's OWN .env:
 
     frontend   OWUI_LAN_IP         openwebui / openwebui-stock   <ip>:3000 -> 8080
     agent-org  MATTERMOST_LAN_IP   mattermost                    <ip>:8065 -> 8065
     inference  LITELLM_UI_LAN_IP   llm-gateway-ui                <ip>:8445 -> 8080
+    ob1        WIKI_VIEWER_LAN_IP  openbrain-wiki-viewer         <ip>:8812 -> 8080  (rw-p2b-workspace:
+               the wiki and /workspace; the viewer forwards /workbench/* with the key server-side,
+               so the workbench itself is never on the LAN)
 
 The check renders each plane with `docker compose config --format json` under every
 profile combination that matters, three times - variable unset, set to "" and set to a
@@ -88,6 +91,11 @@ LAN = {
         "var": "LITELLM_UI_LAN_IP",
         "bindings": {("llm-gateway-ui", "8445", "8080")},
     },
+    # research-workbench P2b: the viewer is the front end (the wiki, /workspace); never a backend
+    "ob1": {
+        "var": "WIKI_VIEWER_LAN_IP",
+        "bindings": {("openbrain-wiki-viewer", "8812", "8080")},
+    },
 }
 # Planes whose compose file has a live `env_file: .env`, which compose refuses to render without.
 # (inference/frontend must NOT get a scratch project directory: their includes and paths are
@@ -99,6 +107,7 @@ COMPOSE = {
     "frontend": ("frontend/docker-compose.yml", "frontend/.env.example"),
     "agent-org": ("agent-org/docker/docker-compose.yml", "agent-org/docker/.env.example"),
     "inference": ("inference/docker-compose.yml", "inference/.env.example"),
+    "ob1": ("OB1/docker/docker-compose.yml", "OB1/docker/.env.example"),
 }
 
 _FRONT_STOCK = {("openwebui-stock", "127.0.0.1", "3000", "8080")}
@@ -106,6 +115,14 @@ _FRONT_GPU = {("openwebui", "127.0.0.1", "3000", "8080")}
 _AO = {("agent-bridge", "127.0.0.1", "8830", "8000"), ("mattermost", "127.0.0.1", "8065", "8065")}
 _INF_LOCAL = {("llama-cpp-upstream", "127.0.0.1", "8081", "8080"),
               ("llama-cpp-embed-upstream", "127.0.0.1", "8082", "8080")}
+# ob1 (measured on rw-p2b-workspace, compose v5.3.0, 2026-10-28). Only the rows that render from
+# .env.example alone: the notebook profile needs the plane's real .env (its `env_file: ./.env`).
+_OB1 = {("openbrain-chunk-worker", "127.0.0.1", "8817", "8000"), ("openbrain-entity-worker", "127.0.0.1", "8810", "8000"),
+        ("openbrain-extract", "127.0.0.1", "8815", "8000"), ("openbrain-gateway", "127.0.0.1", "8061", "8061"),
+        ("openbrain-grounding-backfiller", "127.0.0.1", "8819", "8000"), ("openbrain-ops-gateway", "127.0.0.1", "8062", "8061"),
+        ("openbrain-rest", "127.0.0.1", "3001", "80"), ("openbrain-suggestion-worker", "127.0.0.1", "8813", "8000")}
+_OB1_WIKI = _OB1 | {("openbrain-wiki", "127.0.0.1", "8811", "8000"), ("openbrain-wiki-viewer", "127.0.0.1", "8812", "8080"),
+                    ("openbrain-workbench", "127.0.0.1", "8814", "8000")}
 
 # (plane, profiles, today's loopback bindings). Measured on development e5b501cf with
 # compose v5.3.0, 2026-10-16. The frontend's stock and gpu definitions share a
@@ -121,6 +138,8 @@ RENDERS = [
     ("agent-org", ("workers", "cloud"), _AO),
     ("inference", (), set()),
     ("inference", ("local",), _INF_LOCAL),
+    ("ob1", (), _OB1),
+    ("ob1", ("wiki",), _OB1_WIKI),
 ]
 
 LOOPBACK = "127.0.0.1"

@@ -259,5 +259,56 @@ class RenderWithoutLiveEnv(unittest.TestCase):
         self.assertNotIn("--project-directory", seen["cmd"])
 
 
+def viewer_render(*ports, workbench_ports=None):
+    """research-workbench P2b (rw-p2b-workspace): the ob1 plane's front end - the wiki viewer, which
+    serves /workspace and forwards /workbench/* with the key server-side - and its backend."""
+    wb = {"image": "workbench", "ports": list(workbench_ports or [port("127.0.0.1", 8814, 8000)])}
+    viewer = {"image": "viewer", "ports": [port("127.0.0.1", 8812, 8080), *ports]}
+    return {"name": "open-brain", "services": {"openbrain-wiki-viewer": viewer, "openbrain-workbench": wb}}
+
+
+OB1_BASE = {("openbrain-wiki-viewer", "127.0.0.1", "8812", "8080"), ("openbrain-workbench", "127.0.0.1", "8814", "8000")}
+
+
+class Ob1Viewer(unittest.TestCase):
+    """WIKI_VIEWER_LAN_IP: inert while unset; exactly the viewer's :8812 on one address when set;
+    any other binding - the workbench (a backend), another port, a wildcard - refused."""
+
+    def test_unset_is_inert(self):
+        self.assertEqual(c.check_render("ob1", "t", viewer_render(), OB1_BASE, None), [])
+
+    def test_set_binds_exactly_the_viewer_port(self):
+        self.assertEqual(c.check_render("ob1", "t", viewer_render(port(IP, 8812, 8080)), OB1_BASE, IP), [])
+
+    def test_viewer_lan_port_while_unset_is_refused(self):
+        out = c.check_render("ob1", "t", viewer_render(port(IP, 8812, 8080)), OB1_BASE, None)
+        self.assertTrue(any("non-loopback" in p for p in out), out)
+
+    def test_backend_on_the_lan_is_refused(self):
+        out = c.check_render("ob1", "t", viewer_render(port(IP, 8812, 8080), workbench_ports=[
+            port("127.0.0.1", 8814, 8000), port(IP, 8814, 8000)]), OB1_BASE, IP)
+        self.assertTrue(any("non-loopback" in p for p in out), out)
+
+    def test_another_viewer_port_is_refused(self):
+        out = c.check_render("ob1", "t", viewer_render(port(IP, 8080, 8080)), OB1_BASE, IP)
+        self.assertTrue(any("non-loopback" in p for p in out), out)
+
+    def test_wildcard_is_refused(self):
+        out = c.check_render("ob1", "t", viewer_render(port("0.0.0.0", 8812, 8080)), OB1_BASE, IP)
+        self.assertTrue(any("WILDCARD" in p for p in out), out)
+
+    def test_live_verdicts(self):
+        self.assertEqual(c.judge_live_ports("ob1", viewer_render())[1], "inert (loopback only)")
+        self.assertEqual(c.judge_live_ports("ob1", viewer_render(port(IP, 8812, 8080)))[0], [])
+        probs, verdict = c.judge_live_ports("ob1", viewer_render(workbench_ports=[port(IP, 8814, 8000)]))
+        self.assertEqual(verdict, "REFUSED")
+        self.assertFalse(any(IP in p for p in probs), "a verdict never prints the value")
+
+    def test_ob1_is_rendered_with_the_viewer_profile(self):
+        rows = [(pl, prof) for (pl, prof, _b) in c.RENDERS if pl == "ob1"]
+        self.assertIn(("ob1", ("wiki",)), rows)
+        self.assertEqual(c.COMPOSE["ob1"], ("OB1/docker/docker-compose.yml", "OB1/docker/.env.example"))
+
+
 if __name__ == "__main__":
     unittest.main()
