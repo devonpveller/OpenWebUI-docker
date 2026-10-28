@@ -458,7 +458,7 @@ description = "the research engine: openbrain-research + openbrain-curator; the 
 opt_in      = true
 
 [planes.ob1.profiles.wiki]
-description = "the wiki compiler, the Quartz viewer, the workbench and the wiki backup (a SURFACE); the `open-brain` and `research` products enable it, and --headless drops it"
+description = "the wiki compiler, the wiki viewer (live renderer, frozen Quartz bundle), the workbench and the wiki backup (a SURFACE); the `open-brain` and `research` products enable it, and --headless drops it"
 opt_in      = true
 
 [planes.ob1.profiles.notebook]
