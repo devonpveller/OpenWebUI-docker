@@ -3,10 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Knowledge Wiki — Rebuilding</title>
-  <!-- Auto-refresh: once the Quartz viewer finishes building and binds its
-       port, this reload lands on the real wiki instead of this page. -->
-  <meta http-equiv="refresh" content="15">
+  <title>Knowledge Wiki - Unavailable</title>
+  <!-- Served by the Caddy front door's handle_errors (the (wiki_app) snippet)
+       when it cannot reach openbrain-wiki-viewer. The viewer renders every
+       page from the database as soon as it listens, so there is no rebuild
+       to wait for: this page means the viewer is down. The 30 s refresh lands
+       on the real wiki once it answers again. -->
+  <meta http-equiv="refresh" content="30">
   <style>
     :root {
       --bg: #0f1115;
@@ -14,6 +17,7 @@
       --muted: #9ca3af;
       --card: #1a1d23;
       --accent: #4f8df9;
+      --warn: #f59e0b;
       --border: #2a2f38;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     }
@@ -37,18 +41,13 @@
       padding: 40px 32px;
       text-align: center;
     }
-    .spinner {
+    .mark {
       width: 44px;
       height: 44px;
       margin: 0 auto 24px;
       border: 4px solid var(--border);
-      border-top-color: var(--accent);
+      border-top-color: var(--warn);
       border-radius: 50%;
-      animation: spin 1s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    @media (prefers-reduced-motion: reduce) {
-      .spinner { animation: none; border-top-color: var(--accent); }
     }
     h1 {
       margin: 0 0 12px;
@@ -70,15 +69,16 @@
   </style>
 </head>
 <body>
-  <main class="card">
-    <div class="spinner" role="status" aria-label="Rebuilding"></div>
-    <h1>The knowledge wiki is rebuilding</h1>
-    <p>The viewer regenerates the whole site from the latest notes and
-       knowledge graph before it can serve. With a large wiki this takes
-       a few minutes.</p>
-    <p class="accent">This page refreshes automatically — no need to reload.</p>
-    <p class="small">If this persists for more than ~20 minutes, the viewer
-       may need a look.</p>
+  <main class="card" data-wiki-error="front-door">
+    <div class="mark" role="status" aria-label="Unavailable"></div>
+    <h1>The wiki viewer is not answering</h1>
+    <p>The front door could not reach the wiki viewer
+       (openbrain-wiki-viewer): it is stopped, restarting or has crashed.</p>
+    <p>Pages are served straight from the database as soon as the viewer
+       answers again; there is no rebuild to wait for.</p>
+    <p class="accent">This page retries every 30 seconds - no need to reload.</p>
+    <p class="small">If it does not come back within a few minutes, the
+       operator's health checks report the viewer's state.</p>
   </main>
 </body>
 </html>

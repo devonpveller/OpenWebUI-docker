@@ -36,11 +36,6 @@
       "project": "open-brain (profile wiki)",
       "reason": "Wiki compiler/scheduler with an HTTP trigger port (8811), no healthcheck. Long compiles must not read as unhealthy, so the probe needs choosing with that in mind."
     },
-    "openbrain-wiki-viewer": {
-      "kind": "gap",
-      "project": "open-brain (profile wiki)",
-      "reason": "Quartz viewer (8812), no healthcheck. A cold build serves nothing for minutes (see the wiki cold-build notes), so start_period has to be chosen with that in mind."
-    },
     "surrealdb": {
       "kind": "gap",
       "project": "open-brain (profile notebook)",

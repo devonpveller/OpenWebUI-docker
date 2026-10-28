@@ -44,6 +44,8 @@ compose projects: main `ai-stack` + separate `open-brain`).
     OB1     openbrain-db · openbrain-mcp · openbrain-ext · openbrain-mcpo ·
             openbrain-mcpo-ext · openbrain-postgrest · openbrain-rest ·
             openbrain-entity-worker · openbrain-wiki · openbrain-wiki-viewer
+            (the wiki viewer's Health is its Docker healthcheck, GET /__health:
+            healthy / starting / unhealthy, with the reasons when degraded)
   Examples: "status" · "status of search-gateway" · "status of openbrain-mcpo"
 
 ─ System health  ──────────────────────────────── → modules/system-health

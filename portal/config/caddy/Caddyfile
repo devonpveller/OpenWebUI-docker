@@ -118,8 +118,10 @@
 #   Tailnet  > Caddy > (wiki_app)   on :8446 (no Authelia; tailnet is trusted)
 # Only the auth front differs; these backends are byte-identical. Upload
 # body-cap, /workbench/* gets the injected X-Brain-Key (server-side, never in
-# client JS), everything else → the read-only Quartz viewer, and a friendly
-# auto-refreshing "rebuilding" page while the viewer regenerates.
+# client JS), everything else → the read-only wiki viewer (it renders every
+# page live from the database the moment it listens; there is no rebuild to
+# wait for), and an honest "viewer is not answering" page (503, 30 s refresh)
+# when the viewer cannot be reached (stopped, restarting or crashed).
 (wiki_app) {
     encode zstd gzip
 
@@ -149,10 +151,15 @@
         header Cache-Control "no-store"
         header -Etag
         header -Last-Modified
+        # Marks a front-door error page so probes and the operator can tell it
+        # from a viewer-rendered page (the viewer sets its own x-wiki-render).
+        header x-wiki-render "front-door-error"
         root * /srv/site
-        rewrite * /wiki-building.html
+        rewrite * /wiki-unavailable.html
+        # 503, not 200: an unreachable viewer is an outage and monitors must
+        # see it as one.
         file_server {
-            status 200
+            status 503
         }
     }
 }
@@ -268,7 +275,7 @@ http://wiki.{$PUBLIC_DOMAIN} {
     import authelia_gate
 
     # Authelia > Caddy > app. Backends (body-cap, /workbench key-inject, viewer,
-    # rebuilding page) live in (wiki_app), shared verbatim with the tailnet
+    # viewer-unavailable page) live in (wiki_app), shared verbatim with the tailnet
     # listener below.
     import wiki_app
 }

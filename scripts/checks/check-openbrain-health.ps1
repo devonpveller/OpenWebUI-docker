@@ -61,7 +61,15 @@
 #   - openbrain-curator     http://127.0.0.1:8816/health "db":true  (same guard; absent = the 2026-09-05 loop)
 #   - openbrain-gateway     http://127.0.0.1:8061/health == "ok"   (functional, no secret)
 #   - openbrain-rest        http://127.0.0.1:3001/   (PostgREST proxy reachable)
-#   - openbrain-postgrest / -wiki / -wiki-viewer / -entity-worker  running
+#   - openbrain-wiki-viewer its Docker HEALTHCHECK (GET /__health in-container):
+#                           healthy -> OK; starting -> WARN (no fault); unhealthy ->
+#                           fault, naming the /__health reasons read from
+#                           http://127.0.0.1:8812/__health (database not up,
+#                           reconciliation drift, broken page class, render errors);
+#                           not running -> the liveness repair below. Never restarted
+#                           for unhealthy: the viewer still serves, and a restart
+#                           does not clear drift by itself.
+#   - openbrain-postgrest / -wiki / -entity-worker  running
 #   - openbrain-idea-refinery  running (Idea Refinery drain; profile-gated, liveness only)
 #   - openbrain-pantry      /health {"ok":true,"db":true} via docker exec (NO host port);
 #                           profile-gated 'pantry', OFF by default: ABSENT is a skip, never a fault
@@ -718,8 +726,54 @@ if ((Get-CState 'openbrain-rest') -eq 'running') {
 }
 
 # ---- 5. Remaining OB containers — liveness only ----------------------------
-foreach ($svc in @('openbrain-postgrest','openbrain-wiki','openbrain-wiki-viewer','openbrain-entity-worker')) {
+foreach ($svc in @('openbrain-postgrest','openbrain-wiki','openbrain-entity-worker')) {
   Confirm-ObContainer $svc | Out-Null
+}
+
+# ---- 5b. Wiki viewer - its Docker healthcheck (research-workbench P1b) -------
+# The viewer renders every page live from wiki_pages the moment it listens, so
+# "running" says little; its compose/image HEALTHCHECK fetches /__health
+# in-container (200 ok / 503 degraded: database not up, reconciliation drift,
+# broken page class, render errors). healthy -> OK; starting -> WARN, not a
+# fault (start_period 120 s); unhealthy -> fault, with the reasons read from
+# the published loopback port. No auto-restart for unhealthy: a degraded viewer
+# still serves pages, and a restart does not clear drift on its own. Not
+# running -> the same liveness repair as the containers above.
+function Get-ObViewerHealthReasons {
+  param([string]$Url = 'http://127.0.0.1:8812/__health', [int]$TimeoutMs = 5000)
+  # /__health answers 503 when degraded; PS 5.1 Invoke-WebRequest throws on
+  # that, so read the body off the WebException's response.
+  $resp = $null
+  try {
+    $req = [System.Net.HttpWebRequest]::Create($Url)
+    $req.Timeout = $TimeoutMs
+    $req.ReadWriteTimeout = $TimeoutMs
+    try { $resp = $req.GetResponse() }
+    catch [System.Net.WebException] { if ($_.Exception.Response) { $resp = $_.Exception.Response } else { throw } }
+    $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+    $hb = $reader.ReadToEnd() | ConvertFrom-Json
+    $reader.Dispose()
+    $why = @($hb.reasons) -join '; '
+    if (-not $why) { $why = "status $($hb.status)" }
+    return $why
+  } catch {
+    return "/__health not readable on :8812 ($($_.Exception.Message))"
+  } finally { if ($resp) { $resp.Close() } }
+}
+$viewer = 'openbrain-wiki-viewer'
+if ((Get-CState $viewer) -eq 'running') {
+  $hr = Invoke-ObDocker @('inspect', '--format', '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}', $viewer)
+  $vh = 'unknown'
+  if ($hr.Ok) { $vh = ((@($hr.Lines) | Select-Object -First 1) -as [string]).Trim() }
+  switch ($vh) {
+    'healthy'   { Write-Ob $viewer ok 'healthy (/__health ok)' }
+    'starting'  { Write-Ob $viewer warn 'health: starting (healthcheck start_period 120s) - re-check shortly' }
+    'unhealthy' { Write-Ob $viewer down ("unhealthy: " + (Get-ObViewerHealthReasons)); $script:Faults++ }
+    'none'      { Write-Ob $viewer warn 'running, but this container has no healthcheck (image/compose older than P1b)' }
+    default     { Write-Ob $viewer warn "NO DATA (docker inspect health: $($hr.Why)) - no action"; $script:Faults++ }
+  }
+} else {
+  Confirm-ObContainer $viewer | Out-Null
 }
 
 # ---- 6. Idea Refinery drain (profile-gated 'idea-refinery'; nightly batch) --

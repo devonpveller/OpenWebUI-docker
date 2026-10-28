@@ -13,7 +13,7 @@
 .NOTES
   Run from the repo root:  .\scripts\test-quartz4-offline.ps1 -Phase unit
   e2e needs the shared external nets (llm-net/app-net) to exist (main stack up)
-  and the loopback debug ports 8814/8815 free — stop prod's
+  and the loopback debug ports 8814/8815 free - stop prod's
   openbrain-workbench/-extract first, or expect a port-bind error.
 #>
 param([ValidateSet("unit", "e2e", "all")] [string]$Phase = "unit")
@@ -39,7 +39,6 @@ function Invoke-Unit {
       "OB1/recipes/entity-wiki/generate-wiki.mjs",
       "OB1/docker/wiki-service/wiki-service.mjs",
       "OB1/docker/wiki-viewer/serve.mjs",
-      "OB1/docker/wiki-viewer/derive-graph-index.mjs",
       "OB1/recipes/wiki-synthesis/scripts/synthesize-notebooks.mjs")) {
     node --check $f; if ($LASTEXITCODE -eq 0) { Pass "node --check $f" } else { Fail "node --check $f" }
   }
@@ -278,7 +277,7 @@ ROLLBACK;
     Fail "an invented memory_type was ACCEPTED - the constraint is gone, not widened"
   }
 
-  # §1.1 EXPOSURE, against the real schema. The recall filter reads exposure out of a JSONB
+  # Section 1.1 EXPOSURE, against the real schema. The recall filter reads exposure out of a JSONB
   # key with COALESCE to 'personal', and two things there can only be answered by Postgres:
   # that the expression is valid at all, and that a row written BEFORE exposure shipped -
   # no metadata.exposure - reads as personal rather than dropping out of `= ANY` invisibly.
