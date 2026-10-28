@@ -25,10 +25,9 @@
 # drift (/__health degraded), and deleting it can leave an orphan row until the
 # next repair pass. Run -Note only when that is acceptable.
 #
-# SIDE EFFECT: the page and /__nav requests count as reader activity (they set
-# the viewer's /__last-access), which defers the compiler's backfill drain by
-# WIKI_BACKFILL_IDLE_MIN (15 min). /__health is a probe and does NOT count.
-# Fine for a probe; do not run it in a tight loop.
+# (research-workbench P1c: the viewer keeps no reader-activity clock any more -
+# /__last-access and the compiler's WIKI_BACKFILL_IDLE_MIN gate are gone - so
+# this probe defers nothing. Still do not run it in a tight loop.)
 #
 # Usage:
 #   .\wiki-latency-probe.ps1              # fast checks (1-4)

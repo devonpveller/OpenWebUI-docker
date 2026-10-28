@@ -138,8 +138,8 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 
 | Container | Purpose |
 |---|---|
-| `openbrain-wiki` | Quartz wiki compiler (+ git vault commits; push severed on purpose) |
-| `openbrain-wiki-viewer` | The wiki + workbench UI, rendered live from `wiki_pages` the moment it listens (no build wait, no splash); Docker healthcheck on `/__health` (:8812; tailnet :8444 via caddy) |
+| `openbrain-wiki` | Wiki compiler (+ git vault commits; push severed on purpose): demand-driven - boot, change-watch, on demand; no daily compile (research-workbench P1c) |
+| `openbrain-wiki-viewer` | The wiki + workbench UI, rendered live from `wiki_pages` the moment it listens; no Quartz in the image since research-workbench P1c (the client bundle is a frozen committed asset, `OB1/docker/wiki-viewer/bundle/`; no builder, no `/srv` volume); Docker healthcheck on `/__health` (:8812; tailnet :8444 via caddy) |
 | `openbrain-workbench` | Browser write/read API for the workbench (:8814) — NOT the MCP contract |
 | `openbrain-research` | The shared research engine (:8818; queue, GROUNDED synthesis, OWUI async callback) — replaced smolcrawl's in-repo harness |
 | `openbrain-curator` | Research-package ingest inlet (persists via openbrain-mcp) |

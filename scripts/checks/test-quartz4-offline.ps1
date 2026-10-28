@@ -429,7 +429,7 @@ SELECT 'global_gone', count(*) FROM pg_indexes
 }
 
 function Invoke-E2E {
-  Section "Build images (compiles the Quartz overlay components)"
+  Section "Build images (the viewer's client bundle is frozen since research-workbench P1c - no Quartz compile here)"
   docker compose -f $ob1 build openbrain-workbench openbrain-extract openbrain-wiki-viewer
   if ($LASTEXITCODE -eq 0) { Pass "image build" } else { Fail "image build"; return }
 

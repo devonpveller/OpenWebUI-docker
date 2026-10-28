@@ -636,9 +636,10 @@ function Wait-ForRestartLoops {
 function Wait-OB1ViewerHealth {
     # The wiki viewer (openbrain-wiki-viewer) has a Docker HEALTHCHECK since
     # research-workbench P1b: in-container GET /__health, 200 ok / 503 degraded
-    # (database not up, reconciliation drift, broken page class, render errors),
-    # interval 30 s, retries 3, start_period 120 s. It serves pages from the
-    # database the moment it listens - there is no build to wait for - so this
+    # (P1c: site index warming; database not up, reconciliation drift, broken
+    # page class, render errors), interval 30 s, retries 3, start_period 120 s.
+    # It serves pages from the database the moment it listens - since P1c the
+    # image has no Quartz builder at all, so there is no build to wait for - so this
     # is a REPORT, never a gate: bounded by $TimeoutSeconds, it returns as soon
     # as the viewer is healthy or unhealthy, and a degraded / still-starting
     # viewer is a WARN naming the /__health reasons (read from the published
