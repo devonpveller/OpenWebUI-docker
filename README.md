@@ -332,10 +332,13 @@ Secrets live only in `.env` files and `secrets/` directories, both gitignored.
 Every published port binds to `127.0.0.1`; the only ways in from outside are
 the portal, the frontend's optional `tailscale` profile and an opt-in LAN
 ingress, and only once you turn them on. The LAN ingress is one variable per
-plane (`OWUI_LAN_IP`, `MATTERMOST_LAN_IP`, `LITELLM_UI_LAN_IP`, each in its
-plane's `.env`, blank as shipped) that adds a binding on ONE named host address
-beside the loopback one, for Open WebUI `:3000`, Mattermost `:8065` and the
-LiteLLM Admin UI `:8445` - never the gateway itself. It is meant for a reverse
+plane (`OWUI_LAN_IP`, `MATTERMOST_LAN_IP`, `LITELLM_UI_LAN_IP`,
+`WIKI_VIEWER_LAN_IP`, each in its plane's `.env`, blank as shipped) that adds a
+binding on ONE named host address beside the loopback one, for Open WebUI
+`:3000`, Mattermost `:8065`, the LiteLLM Admin UI `:8445` and the wiki viewer
+`:8812` (the wiki and the research workspace at `/workspace`; it forwards
+`/workbench/*` to the workbench with the key server-side, so no Open Brain
+backend is ever on the LAN) - never the gateway itself. It is meant for a reverse
 proxy on the LAN: scope it with the LAN firewall guard first, and put
 authentication (Authentik) in front of it there.
 `scripts/checks/check_lan_bindings.py` proves it inert while unset. `docker compose config` prints secrets in plain text, so grep
