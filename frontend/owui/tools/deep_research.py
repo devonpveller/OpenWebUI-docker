@@ -1,7 +1,7 @@
 """
 title: Deep Research (thin client)
 author: ai-stack / Open Brain
-version: 1.6.0
+version: 1.6.1
 description: >
   Thin OWUI client for the shared Open Brain research engine (Research Engine
   P5). Submits the query to openbrain-research `POST /research`. ALL the harness logic
@@ -140,6 +140,8 @@ class Tools:
                 on_behalf = await _authentik_subject(__user__, v.oauth_provider)
                 if on_behalf:
                     submit_body["on_behalf_of"] = on_behalf
+                    # reads too: the engine shows a job's prompt only to its own user
+                    headers["x-on-behalf-of"] = on_behalf
                 # Async handoff: name the message the engine should write the
                 # finished report into. Only the IDs travel — the engine holds the
                 # OWUI base URL and key itself, so this can't be aimed elsewhere.
@@ -176,6 +178,7 @@ class Tools:
                             await r.read()
                             await emit("Note: filed as the tool's, not yours (brain_key is not Open WebUI's caller key)…")
                             submit_body.pop("on_behalf_of", None)
+                            headers.pop("x-on-behalf-of", None)
                             continue
                         if r.status == 401:
                             return "Research engine rejected the request (check brain_key valve)."

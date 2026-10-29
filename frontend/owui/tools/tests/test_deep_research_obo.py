@@ -38,12 +38,14 @@ def _guard(self, addr):
 
 class Engine(http.server.BaseHTTPRequestHandler):
     bodies: list = []
+    headers: list = []
     refuse_obo = False  # answer 403 to a body naming a user (a key that is not Open WebUI's)
 
     def do_POST(self):  # noqa: N802
         n = int(self.headers.get("content-length") or 0)
         body = json.loads(self.rfile.read(n) or b"{}")
         Engine.bodies.append(body)
+        Engine.headers.append(self.headers.get("x-on-behalf-of"))
         status = 403 if Engine.refuse_obo and "on_behalf_of" in body else 202
         out = json.dumps({"job_id": "j-1", "status": "queued", "callback_armed": True} if status == 202 else {"error": "refused"}).encode()
         self.send_response(status)
@@ -71,6 +73,7 @@ class OnBehalfOf(unittest.TestCase):
 
     def setUp(self):
         Engine.bodies = []
+        Engine.headers = []
         Engine.refuse_obo = False
         sys.modules.pop("open_webui.models.users", None)
 
@@ -85,6 +88,7 @@ class OnBehalfOf(unittest.TestCase):
     def test_sends_the_users_authentik_subject_from_the_user_record(self):
         self.run_tool({"id": "u1", "email": "a@x", "oauth": {"oidc": {"sub": "ak-alice-0f9e"}}})
         self.assertEqual(Engine.bodies[-1]["on_behalf_of"], "ak-alice-0f9e")
+        self.assertEqual(Engine.headers[-1], "ak-alice-0f9e")  # its reads name the user too
         self.assertEqual(Engine.bodies[-1]["origin"], "owui")
 
     def test_reads_the_record_by_id_when_user_carries_no_oauth(self):
@@ -120,6 +124,7 @@ class OnBehalfOf(unittest.TestCase):
         self.assertEqual(len(Engine.bodies), 2)
         self.assertEqual(Engine.bodies[0]["on_behalf_of"], "ak-alice")
         self.assertNotIn("on_behalf_of", Engine.bodies[1])
+        self.assertIsNone(Engine.headers[1])
         self.assertIn("j-1", out)
 
 
