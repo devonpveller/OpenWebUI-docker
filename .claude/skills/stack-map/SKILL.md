@@ -101,9 +101,11 @@ ALIASES on `llm-gateway`, not containers.
 
 The wiki viewer (`openbrain-wiki-viewer`) is a LIVE RENDERER since
 research-workbench P1b: it serves every page from `wiki_pages` the moment it
-listens and carries a Docker healthcheck (`/__health`). Its `/srv` volume is the
-builder's optional bundle cache, not a readiness gate - do not re-add a
-"Building..." splash, a wait for a published snapshot, or `derive-graph-index`.
+listens and carries a Docker healthcheck (`/__health`). Since P1c the image has
+NO Quartz: the client bundle is the frozen committed `OB1/docker/wiki-viewer/bundle/`
+(no re-emit path since rw-p1c-retire2 deleted the freeze tool: a change is a hand edit plus its `bundle.sha256` line), and there is no builder, no
+`/srv` volume and no nightly rebuild - do not re-add a builder, a snapshot
+volume, a "Building..." splash, `derive-graph-index` or a viewer-idle gate.
 
 ## Consistency rule
 
