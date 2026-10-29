@@ -50,6 +50,19 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
 - ✅ `secrets/google/portal-alerter/credentials.json` and `token.json` gitignored
 - ✅ `portal/config/authelia/.healthcheck.env` is a runtime-populated bind mount (also fine to track since Authelia overwrites at startup)
 - ⚠️ Tailscale auth key rotation cadence: check expiry in Tailscale admin; rotate proactively
+- **Research front end sign-in (rw-identity)** - shipped inert: with no `WORKSPACE_OIDC_*` in
+  `OB1/docker/.env` the workspace is one default user, as before. Configured, the workspace signs its
+  users in with Authentik (OIDC code flow + PKCE, state, nonce; `__Host-` session cookie, Secure,
+  HttpOnly, SameSite=Strict; logout revokes the session server-side). `WORKSPACE_DOOR_KEY` (required
+  then) is the key the viewer's forwarder injects for browsers; `MCP_ACCESS_KEY` becomes an internal
+  service with no user front end. An admin (`WORKSPACE_OIDC_ADMIN_GROUP`) can impersonate a user only
+  after giving a reason; the switch and every request during it go to the append-only `admin_audit`
+  table (readable at `/workbench/auth/audit`, admins only). **Edge-strip rule:** while
+  `WORKSPACE_IDENTITY_HEADER` is used (no sign-in, a forward-auth edge) every proxy in front of the
+  workbench must delete a client-sent copy of that header and set it itself; with sign-in on the
+  workbench ignores the header entirely, and the viewer's forwarder drops it from every client
+  request. Before turning sign-in on, remove the portal Caddy's `/workbench/*` route or make it inject
+  `WORKSPACE_DOOR_KEY` (it injects `MCP_ACCESS_KEY`). Details: `OB1/docker/workbench/README.md` "Sign-in".
 - **agent-bridge HTTP tokens (ao-auth, 2026-10-07)** - `AO_OPERATOR_TOKEN` and `AO_WORKER_TOKEN`
   in `agent-org/docker/.env`. Before them every route on `agent-bridge:8000` (operator verbs via
   `POST /nl`, gate decisions, the kill switch, lane moves) answered anyone who could reach it,

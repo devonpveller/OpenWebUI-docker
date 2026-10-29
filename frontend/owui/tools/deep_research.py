@@ -1,7 +1,7 @@
 """
 title: Deep Research (thin client)
 author: ai-stack / Open Brain
-version: 1.5.5
+version: 1.6.0
 description: >
   Thin OWUI client for the shared Open Brain research engine (Research Engine
   P5). Submits the query to openbrain-research `POST /research`. ALL the harness logic
@@ -30,9 +30,17 @@ description: >
   Grounding guarantees (enforced server-side, see GROUNDING-MODEL.md): the stored
   synthesis is verbatim, only cited sources are linked, and nothing ungrounded is
   stored or reused — a premature stop degrades to honest [GAP]s, never fabrication.
+
+  Whose research (rw-identity, 1.6.0): the tool sends its user's Authentik subject as
+  `on_behalf_of`, read from Open WebUI's own user record (the `oauth` JSON, `<provider>.sub`;
+  the `oauth_provider` valve, `oidc` for Authentik via OPENID_PROVIDER_URL), so the run lands in
+  that user's research front end. The engine accepts it ONLY with Open WebUI's caller key
+  (RESEARCH_CALLERS, origin owui) - set `brain_key` to that key, not MCP_ACCESS_KEY. A local
+  Open WebUI account with no Authentik link sends none (the run is recorded as the tool's).
 """
 
 import asyncio
+import inspect
 import json
 import re
 from typing import Any, Awaitable, Callable, Optional
@@ -49,7 +57,11 @@ class Tools:
         )
         brain_key: str = Field(
             default="",
-            description="MCP_ACCESS_KEY — authenticates the research request (must match the OB1 stack key).",
+            description=(
+                "Open WebUI's own caller key from RESEARCH_CALLERS on openbrain-research (owui-tool=owui:<key>). "
+                "Only that key may file research under the chatting user (on_behalf_of); MCP_ACCESS_KEY still "
+                "authenticates, but every run is then filed as the tool's, not the user's."
+            ),
         )
         poll_interval_sec: float = Field(
             default=2.0, description="How often to poll the job for progress."
@@ -71,6 +83,14 @@ class Tools:
         confidence_floor: float = Field(
             default=0.50,
             description="Reuse floor: claims below this are re-researched, not reused.",
+        )
+        oauth_provider: str = Field(
+            default="oidc",
+            description=(
+                "The key of the Authentik link in Open WebUI's user record (oauth JSON). Open WebUI "
+                "registers an OPENID_PROVIDER_URL provider as `oidc`. The subject found there is sent "
+                "as on_behalf_of, so the research lands in that user's research front end."
+            ),
         )
 
     def __init__(self):
@@ -115,6 +135,11 @@ class Tools:
                     "origin": "owui",
                     "options": {"confidence_floor": v.confidence_floor},
                 }
+                # rw-identity: whose research this is - the user's Authentik subject, from
+                # Open WebUI's own user record; the engine accepts it only with OWUI's key.
+                on_behalf = await _authentik_subject(__user__, v.oauth_provider)
+                if on_behalf:
+                    submit_body["on_behalf_of"] = on_behalf
                 # Async handoff: name the message the engine should write the
                 # finished report into. Only the IDs travel — the engine holds the
                 # OWUI base URL and key itself, so this can't be aimed elsewhere.
@@ -139,14 +164,27 @@ class Tools:
                         "chat_id": __chat_id__,
                         "message_id": __message_id__,
                     }
-                async with session.post(
-                    f"{base}/research", headers=headers, json=submit_body
-                ) as r:
-                    if r.status == 401:
-                        return "Research engine rejected the request (check brain_key valve)."
-                    if r.status >= 400:
-                        return f"Research engine error {r.status}: {(await r.text())[:300]}"
-                    job = await r.json()
+                job = None
+                for _attempt in (1, 2):
+                    async with session.post(
+                        f"{base}/research", headers=headers, json=submit_body
+                    ) as r:
+                        if r.status == 403 and submit_body.get("on_behalf_of"):
+                            # The key is not Open WebUI's caller key (e.g. MCP_ACCESS_KEY): the
+                            # engine files research under a user for that key only. Run it anyway,
+                            # filed as the tool's, and say so.
+                            await r.read()
+                            await emit("Note: filed as the tool's, not yours (brain_key is not Open WebUI's caller key)…")
+                            submit_body.pop("on_behalf_of", None)
+                            continue
+                        if r.status == 401:
+                            return "Research engine rejected the request (check brain_key valve)."
+                        if r.status >= 400:
+                            return f"Research engine error {r.status}: {(await r.text())[:300]}"
+                        job = await r.json()
+                        break
+                if job is None:
+                    return "Research engine refused the request."
                 job_id = job.get("job_id")
                 if not job_id:
                     return (
@@ -238,6 +276,39 @@ class Tools:
             )
         except Exception as e:  # noqa: BLE001 — surface, never crash the chat
             return f"Unexpected error talking to the research engine: {e}"
+
+
+async def _authentik_subject(user: Optional[dict], provider: str = "oidc") -> Optional[str]:
+    """The user's Authentik subject from Open WebUI's user record, or None.
+
+    `__user__` may carry the record's `oauth` JSON already; otherwise the record is read by id
+    (Open WebUI's Users model; async in 0.11). An older record shape keeps `oauth_sub` as
+    "<provider>@<sub>". Never raises: no subject = no on_behalf_of.
+    """
+    if not user:
+        return None
+    oauth = user.get("oauth")
+    if not isinstance(oauth, dict) and user.get("id"):
+        try:
+            from open_webui.models.users import Users  # type: ignore
+
+            rec = Users.get_user_by_id(user["id"])
+            if inspect.isawaitable(rec):
+                rec = await rec
+            oauth = getattr(rec, "oauth", None)
+            if not isinstance(oauth, dict) and getattr(rec, "oauth_sub", None):
+                user = {**user, "oauth_sub": getattr(rec, "oauth_sub")}
+        except Exception:  # noqa: BLE001 - outside Open WebUI, or a record without the field
+            oauth = None
+    if isinstance(oauth, dict):
+        entry = oauth.get(provider)
+        sub = entry.get("sub") if isinstance(entry, dict) else None
+        if isinstance(sub, str) and sub.strip():
+            return sub.strip()
+    legacy = user.get("oauth_sub")
+    if isinstance(legacy, str) and legacy.startswith(provider + "@") and legacy[len(provider) + 1 :].strip():
+        return legacy[len(provider) + 1 :].strip()
+    return None
 
 
 def _handoff_notice(job_id: str) -> str:
