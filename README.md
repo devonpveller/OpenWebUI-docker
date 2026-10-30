@@ -340,10 +340,11 @@ binding on ONE named host address beside the loopback one, for Open WebUI
 `/workbench/*` to the workbench with the key server-side, so no Open Brain
 backend is ever on the LAN) - never the gateway itself. It is meant for a reverse
 proxy on the LAN: scope it with the LAN firewall guard first, and put
-authentication (Authentik) in front of it there. The research workspace can also
-sign its users in with Authentik itself (OIDC, shipped inert: `WORKSPACE_OIDC_*` in
-`OB1/docker/.env`); an admin may then impersonate a user only after giving a reason,
-and every request during it is kept in an append-only audit log.
+authentication (Authentik) in front of it there. The research workspace then takes
+its users from Authentik forward-auth: it verifies the outpost's signed token on every
+request (shipped inert: `WORKSPACE_FORWARD_AUTH_*` in `OB1/docker/.env`); an admin may
+then impersonate a user only after giving a reason, and every request during it is kept
+in an append-only audit log.
 `scripts/checks/check_lan_bindings.py` proves it inert while unset. `docker compose config` prints secrets in plain text, so grep
 the part you need. Details: [SECURITY.md](SECURITY.md).
 
