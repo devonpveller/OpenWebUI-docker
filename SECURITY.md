@@ -50,6 +50,25 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
 - ✅ `secrets/google/portal-alerter/credentials.json` and `token.json` gitignored
 - ✅ `portal/config/authelia/.healthcheck.env` is a runtime-populated bind mount (also fine to track since Authelia overwrites at startup)
 - ⚠️ Tailscale auth key rotation cadence: check expiry in Tailscale admin; rotate proactively
+- **Research front end sign-in (rw-identity, rw-identity2)** - shipped inert: with no
+  `WORKSPACE_FORWARD_AUTH_*` in `OB1/docker/.env` the workspace is one default user, as before.
+  Configured, Authentik signs users in and out at the operator's Traefik (forward-auth, a proxy
+  provider); the workbench keeps no login, session or cookie and verifies the outpost's
+  `X-authentik-jwt` on every request: HS256 only (Authentik signs a proxy provider's token with its
+  client secret), `iss`, `aud` (the client id), `exp`. `WORKSPACE_FORWARD_AUTH_CLIENT_SECRET` is that
+  client secret: whoever holds it can mint a sign-in, so it lives only in `OB1/docker/.env` (rotate it
+  in Authentik if it leaks). The unsigned `X-authentik-*` headers are never trusted; Traefik must
+  strip any client-sent `X-authentik-*` before the forward-auth check. `WORKSPACE_DOOR_KEY` (required
+  then) is the key the viewer's forwarder injects for browsers; `MCP_ACCESS_KEY` becomes an internal
+  service with no user front end. An admin (`WORKSPACE_FORWARD_AUTH_ADMIN_GROUP` in the token, read
+  on every request; a removal takes effect within the provider's token validity) can impersonate a
+  user only after giving a reason; the switch and every request during it go to the append-only
+  `admin_audit` table (readable at `/workbench/auth/audit`, admins only). **Edge-strip rule:** while
+  `WORKSPACE_IDENTITY_HEADER` is used (no sign-in) every proxy in front of the workbench must delete a
+  client-sent copy of that header and set it itself; with sign-in on the workbench ignores the header
+  entirely, and the viewer's forwarder drops it from every client request. Before turning sign-in on,
+  remove the portal Caddy's `/workbench/*` route or make it inject `WORKSPACE_DOOR_KEY` (it injects
+  `MCP_ACCESS_KEY`). Details: `OB1/docker/workbench/README.md` "Sign-in (Authentik forward-auth)".
 - **agent-bridge HTTP tokens (ao-auth, 2026-10-07)** - `AO_OPERATOR_TOKEN` and `AO_WORKER_TOKEN`
   in `agent-org/docker/.env`. Before them every route on `agent-bridge:8000` (operator verbs via
   `POST /nl`, gate decisions, the kill switch, lane moves) answered anyone who could reach it,
