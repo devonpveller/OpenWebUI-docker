@@ -188,7 +188,7 @@ def test_real_manifest_parses_and_every_edge_names_a_real_plane():
     assert manifest.order == PS1_ORDER + ["portal"]
     assert list(manifest.products) == [
         "chat", "inference", "search", "open-brain",
-        "research", "pantry", "intake", "coding-agent", "agent-org", "digest", "portal",
+        "research", "pantry", "intake", "notebook-app", "coding-agent", "agent-org", "digest", "portal",
     ]
 
 
@@ -7563,3 +7563,51 @@ def test_the_writing_path_refuses_a_failed_render_even_with_output(root, no_owui
     code = stack.main(["--root", str(root), "labels"], capture=capture, stdout=out, labels_request=owui)
     assert code == stack.EXIT_REFUSED, out.getvalue()
     assert "exited 1" in out.getvalue() and owui.calls == []
+
+
+# --- the open_notebook switch has a driver command (intake-gate-relay round 3, TG2-2 / D11) --------
+# `notebook-app` is a PRODUCT as well as a profile, so the command every doc and message names -
+# `stack.py enable notebook-app` - turns the app on, and `disable notebook-app` retires it again.
+
+
+def _ob1_line(out: str) -> str:
+    lines = [ln for ln in docker_lines(out) if "OB1/docker/docker-compose.yml" in ln]
+    assert lines, out
+    return lines[0]
+
+
+def test_enable_notebook_app_turns_the_app_on_and_disable_retires_it(root):
+    code, out, _r = run(root, "enable", "research")
+    assert code == 0, out
+    assert "notebook-app" not in state_of(root)["planes"]["ob1"]["profiles"]
+    code, out, _r = run(root, "enable", "notebook-app")
+    assert code == 0, out
+    profiles = state_of(root)["planes"]["ob1"]["profiles"]
+    assert "notebook-app" in profiles and "notebook" in profiles
+    code, out, _r = run(root, "up", "--dry-run")
+    assert code == 0, out
+    assert "--profile notebook-app" in _ob1_line(out)
+    code, out, _r = run(root, "disable", "notebook-app")
+    assert code == 0, out
+    profiles = state_of(root)["planes"]["ob1"]["profiles"]
+    assert "notebook-app" not in profiles
+    assert "notebook" in profiles, "the data side (surrealdb + backup) stays with the research product"
+    code, out, _r = run(root, "up", "--dry-run")
+    assert "--profile notebook-app" not in _ob1_line(out)
+
+
+def test_no_other_product_enables_the_retired_app():
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    for name in manifest.products:
+        if name == "notebook-app":
+            continue
+        prod = manifest.product(name)
+        for key in ("profiles", "surfaces"):
+            assert "notebook-app" not in (prod.get(key) or {}).get("ob1", []), (name, key)
+
+
+def test_every_message_naming_the_enable_command_names_a_real_product():
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    assert "notebook-app" in manifest.products
+    text = (REPO_ROOT / "scripts/stack/stack.py").read_text(encoding="utf-8")
+    assert "enable notebook-app" in text

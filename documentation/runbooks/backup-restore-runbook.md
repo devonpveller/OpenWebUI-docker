@@ -144,9 +144,12 @@ docker compose stop open_notebook
 gunzip -c "$SQ" > /tmp/on.surql
 docker cp /tmp/on.surql surrealdb:/tmp/on.surql
 docker exec surrealdb sh -c 'surreal import --conn http://localhost:8000 --user root --pass root --ns open_notebook --db open_notebook /tmp/on.surql'
-# then restore the notebook-data tar into its bind mount (see §7 pattern), and:
-docker compose start open_notebook
+# then restore the notebook-data tar into its bind mount (see §7 pattern), and - ONLY if the app is
+# not retired (the ob1 profile notebook-app is enabled; the operator retired it 2026-10-31):
+docker compose --profile notebook --profile notebook-app start open_notebook
 ```
+While the app is retired, leave it stopped: the restored data is served by surrealdb, and
+`scripts/backup/restore-from-snapshot.ps1` skips it in its start phase for the same reason.
 
 ---
 

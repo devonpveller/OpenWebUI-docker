@@ -115,7 +115,6 @@ class Run:
         self.projects: list[tuple[str, Path]] = []
         self.extra: list[str] = []          # containers made with docker run
         self.networks: list[str] = []       # networks this runner created itself
-        self.volumes_before = set(sh("volume", "ls", "-q").stdout.split())
         self.results: dict = {"checks": [], "prefix": self.p, "compose_root": str(self.root),
                               "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                               "overrides": {}}
@@ -641,7 +640,7 @@ print(json.dumps({"idle_closed": closed, "second": b.recv(64).split(b"\\r\\n", 1
 
     # -- N: isolation ------------------------------------------------------------------------------
     def part_n(self) -> None:
-        ids = sh("ps", "-aq", "--filter", f"label={LABEL}").stdout.split()
+        ids = sh("ps", "-aq", "--filter", f"label={LABEL}", "--filter", f"name={self.p}").stdout.split()
         bad = {}
         for cid in ids:
             i = json.loads(sh("inspect", cid).stdout)[0]
@@ -650,25 +649,46 @@ print(json.dumps({"idle_closed": closed, "second": b.recv(64).split(b"\\r\\n", 1
                     "PortBindings"):
                 bad[i["Name"]] = nets
         self.check("N every container is on this run's lab networks only, none publishes a port", not bad, bad)
-        for nid in sh("network", "ls", "-q", "--filter", f"label={LABEL}").stdout.split():
+        for nid in sh("network", "ls", "-q", "--filter", f"label={LABEL}", "--filter", f"name={self.p}").stdout.split():
             info = json.loads(sh("network", "inspect", nid).stdout)[0]
             sub = info["IPAM"]["Config"][0]["Subnet"]
             self.check(f"N {info['Name']} is internal, {sub} in the lab range",
                        info["Internal"] is True and sub.startswith("10.243.9"), info["Internal"])
 
     # -- teardown --------------------------------------------------------------------------------
+    def own_volumes(self) -> set[str]:
+        """Volumes attributable to THIS run (round 3, TG2-6: a whole-host diff false-FAILed on other
+        testers' volumes): every volume a container of this run mounts (its prefix, our label) plus
+        every volume compose labelled with one of this run's project names."""
+        vols: set[str] = set()
+        ids = sh("ps", "-aq", "--filter", f"label={LABEL}", check=False).stdout.split()
+        for cid in ids:
+            i = json.loads(sh("inspect", cid).stdout)[0]
+            if not i["Name"].lstrip("/").startswith(self.p):
+                continue
+            vols |= {m["Name"] for m in i.get("Mounts") or [] if m.get("Type") == "volume" and m.get("Name")}
+        for name, _f in self.projects:
+            vols |= set(sh("volume", "ls", "-q", "--filter", f"label=com.docker.compose.project={name}",
+                           check=False).stdout.split())
+        return vols
+
     def cleanup(self) -> None:
+        mine = self.own_volumes()
         for c in self.extra:
             sh("rm", "-f", "-v", c, check=False)   # -v: the peer's image declares VOLUME /data (T-F7)
         for name, f in reversed(self.projects):
             sh("compose", "-p", name, "-f", str(f), "down", "-v", "--remove-orphans", check=False, cwd=self.work)
         for n in self.networks:
             sh("network", "rm", n, check=False)
-        left_c = sh("ps", "-aq", "--filter", f"label={LABEL}").stdout.split()
-        left_n = sh("network", "ls", "-q", "--filter", f"label={LABEL}").stdout.split()
-        # every volume that appeared during the run, labelled or ANONYMOUS (tester T-F7: a peer's
-        # anonymous volume survived `rm -f` and a label filter never saw it)
-        left_v = sorted(set(sh("volume", "ls", "-q").stdout.split()) - self.volumes_before)
+        # this run's only (its prefix): another tester's lab carries the same label (TG2-6)
+        left_c = sh("ps", "-a", "--filter", f"label={LABEL}", "--filter", f"name={self.p}",
+                    "--format", "{{.Names}}").stdout.split()
+        left_n = sh("network", "ls", "--filter", f"label={LABEL}", "--filter", f"name={self.p}",
+                    "--format", "{{.Name}}").stdout.split()
+        # this run's volumes, labelled or ANONYMOUS (T-F7: a peer's anonymous volume survived `rm -f`),
+        # and only this run's (TG2-6)
+        left_v = sorted(mine & set(sh("volume", "ls", "-q").stdout.split()))
+        self.results["own_volumes_seen"] = len(mine)
         self.results["leftovers"] = {"containers": left_c, "networks": left_n, "volumes": left_v}
         shutil.rmtree(self.work, ignore_errors=True)
 

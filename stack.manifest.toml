@@ -704,6 +704,18 @@ description = "the content screen: the intake service that screens external cont
 planes      = ["inference", "ob1"]
 profiles    = { ob1 = ["intake"] }
 
+[products.notebook-app]
+# intake-gate-relay round 3 (TG2-2): the driver command for the ONE open_notebook switch. The operator
+# retired the Open Notebook app 2026-10-31; its ob1 profile `notebook-app` is off unless this product
+# (or COMPOSE_PROFILES in OB1/docker/.env) turns it on. `stack.py enable notebook-app` adds the
+# profile (and `notebook`, which it requires - surrealdb is the app's depends_on); `stack.py disable
+# notebook-app` takes the app back out and leaves `notebook` with whatever other product asked for it.
+# No other product names notebook-app (scripts/stack/test_stack.py holds that), so `enable research`
+# or `enable digest` never brings the retired app back.
+description = "the Open Notebook APP (open_notebook UI + API) - retired by the operator 2026-10-31; enabling this runs it again"
+planes      = ["inference", "search", "ob1"]
+profiles    = { ob1 = ["notebook", "notebook-app"] }
+
 [products.coding-agent]
 description = "little-coder, the coding agent; its surface is Open WebUI"
 planes      = ["coder"]
