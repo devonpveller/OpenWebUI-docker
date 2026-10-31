@@ -2400,7 +2400,7 @@ class HealthSweep:
     PROBED_PLANES = ("anchor", "inference", "frontend", "search", "coder", "ob1", "agent-org")
 
     def __init__(self, console: Console, root: Path, capture, http, planes=None, inference_local=None,
-                 pantry_enabled=None, intake_enabled=None):
+                 pantry_enabled=None, intake_enabled=None, notebook_app_enabled=None):
         self.console = console
         self.root = root
         self.capture = capture
@@ -2414,6 +2414,9 @@ class HealthSweep:
         self.pantry_enabled = pantry_enabled
         # The same for ob1's `intake` profile (security-hardening-2026-10 I5). See intake_deployed.
         self.intake_enabled = intake_enabled
+        # The same for ob1's `notebook-app` profile (open_notebook alone; intake-gate-relay round 2:
+        # the operator retired the app 2026-10-31). See notebook_app_deployed.
+        self.notebook_app_enabled = notebook_app_enabled
         # What upstream_exists() last saw: "exists", "absent" or "unknown" (docker ps failed).
         self.upstream_seen = None
         self.failed = 0
@@ -2499,6 +2502,14 @@ class HealthSweep:
             else:
                 depth, depth_ok = self.inference_serving_depth()
                 self.probe(f"inference: {depth}", depth_ok)
+                # research-workbench P7a: the speech backend (CPU) behind the local-tts route. It has
+                # no host port (internal backend network), so the probe execs inside it.
+                self.probe(
+                    "inference: kokoro-tts-upstream /health (docker exec)",
+                    lambda: self.docker(
+                        "exec", "kokoro-tts-upstream", "curl", "-sf", "--max-time", "5", "http://localhost:8880/health",
+                    ).code == 0,
+                )
         if self.on("frontend"):
             self.probe(
                 "frontend: OWUI http://127.0.0.1:3000/health",
@@ -2569,10 +2580,20 @@ class HealthSweep:
                 ).code == 0,
             )
         if self.on("ob1"):
-            self.probe(
-                "OB1: open_notebook API :5055/api/config",
-                lambda: self.http_ok("http://127.0.0.1:5055/api/config"),
-            )
+            # open_notebook is RETIRED unless the ob1 `notebook-app` profile is on (operator
+            # 2026-10-31, intake-gate-relay round 2): then a stopped app is the intended state and
+            # the line says so instead of going red. A RUNNING one is probed anyway (and flagged).
+            deployed, note = self.notebook_app_deployed()
+            if deployed:
+                if note:
+                    self.console.line("  [warn] " + note)
+                self.probe(
+                    "OB1: open_notebook API :5055/api/config",
+                    lambda: self.http_ok("http://127.0.0.1:5055/api/config"),
+                )
+            else:
+                self.console.line("  [skip] OB1: open_notebook API :5055/api/config "
+                                  "(retired: the ob1 `notebook-app` profile is off)")
             self.probe("OB1: ops door :8062/health", lambda: self.http_ok("http://127.0.0.1:8062/health"))
             # The curator answers 503 with {"ok":false,"db":false} when its DB is gone
             # and nothing at all while crash-looping (2026-09-05: "Module not found
@@ -2637,6 +2658,20 @@ class HealthSweep:
                         "sys.exit(0 if j.get('ok') and j.get('db') and j.get('judge_route') else 1)",
                     ).code == 0,
                 )
+                # intake-gate-relay: the search gate's way IN - search-gateway -> (intake-callers)
+                # openbrain-intake-callrelay -> (intake-net) openbrain-intake:8000. Read from INSIDE
+                # the gateway by the name its INTAKE_URL dials, so a dead relay or a gateway off
+                # intake-callers FAILS here while the probe above stays green.
+                self.probe(
+                    "OB1: intake caller path search-gateway -> openbrain-intake-callrelay -> /healthz ok",
+                    lambda: self.docker(
+                        "exec", "search-gateway", "python", "-c",
+                        "import json,sys,urllib.request; "
+                        "j = json.load(urllib.request.urlopen("
+                        "'http://openbrain-intake-callrelay:8000/healthz', timeout=5)); "
+                        "sys.exit(0 if j.get('ok') else 1)",
+                    ).code == 0,
+                )
             else:
                 self.console.line("  [skip] OB1: openbrain-intake /healthz (no intake profile in this deployment)")
         if self.on("agent-org"):
@@ -2673,7 +2708,7 @@ class HealthSweep:
 
     # The fixed teardown inference/README.md gives for the `local` containers.
     LOCAL_RM = ("docker compose -f inference/docker-compose.yml --profile local rm -sf "
-                "llama-cpp-upstream llama-cpp-embed-upstream llm-queue lm-models-backup")
+                "llama-cpp-upstream llama-cpp-embed-upstream llm-queue lm-models-backup kokoro-tts-upstream")
 
     def _upstream_hint(self, upstream: str) -> str:
         """What the reader should do when the upstream cannot be read - TRUE for why it ran.
@@ -2804,6 +2839,23 @@ class HealthSweep:
         """(is openbrain-intake part of THIS deployment?, a note to print first). See
         profiled_container_deployed."""
         return self.profiled_container_deployed(self.intake_enabled, "openbrain-intake", "intake")
+
+    def notebook_app_deployed(self):
+        """(is the open_notebook app part of THIS deployment?, a note). Unlike
+        profiled_container_deployed, a STOPPED container does not count: retiring the app means
+        stopping it and keeping the container (intake-gate-relay round 2, D-1). Enabled -> probe;
+        not enabled but RUNNING -> probe and say so; `docker ps` unreadable -> probe and say why;
+        otherwise skip."""
+        if self.notebook_app_enabled:
+            return True, ""
+        found = self.docker("ps", "--filter", "name=^open_notebook$", "--format", "{{.Names}}")
+        if found.code != 0:
+            return True, ("`docker ps` could not be read, so health cannot tell whether open_notebook "
+                          "is running - probing it anyway")
+        if any(line.strip() == "open_notebook" for line in found.stdout.splitlines()):
+            return True, ("open_notebook is RUNNING but the `notebook-app` profile is off for ob1 (the app "
+                          f"is retired: stop it, or `{CLI} enable notebook-app`) - probing it anyway")
+        return False, ""
 
     def profiled_container_deployed(self, enabled, container: str, profile: str):
         """The SAME fail-open shape as tailscale_deployed, for one opt-in profile of ob1
@@ -2975,14 +3027,16 @@ def cmd_health(manifest, state, root, console, capture, http) -> int:
         sources = (set(run_profiles(manifest, state, "inference"))
                    | set(compose_profiles_env(manifest, root, "inference")) | shell)
         local = "local" in sources
-    pantry = intake = None
+    pantry = intake = notebook_app = None
     if "ob1" in planes:
         # `pantry` / `intake` from the state file or ob1's OWN env file - the two sources `up` unions.
         ob1 = set(run_profiles(manifest, state, "ob1")) | set(compose_profiles_env(manifest, root, "ob1"))
         pantry = "pantry" in ob1
         intake = "intake" in ob1
+        notebook_app = "notebook-app" in ob1
     return HealthSweep(console, root, capture, http, planes, inference_local=local,
-                       pantry_enabled=pantry, intake_enabled=intake).run()
+                       pantry_enabled=pantry, intake_enabled=intake,
+                       notebook_app_enabled=notebook_app).run()
 
 
 # --------------------------------------------------------------------------
@@ -5564,10 +5618,11 @@ class _CatalogueSweep(HealthSweep):
     condition in the generated text.
     """
 
-    def __init__(self, plane: str, tailscale=True, shell=True, plugins=True, pantry=True, intake=True):
+    def __init__(self, plane: str, tailscale=True, shell=True, plugins=True, pantry=True, intake=True,
+                 notebook_app=True):
         super().__init__(Console(io.StringIO()), Path("."), lambda _cmd, _cwd: CommandResult(0, "", ""),
                          lambda _url, _timeout: HttpResult(200, "{}"), {plane}, pantry_enabled=pantry,
-                         intake_enabled=intake)
+                         intake_enabled=intake, notebook_app_enabled=notebook_app)
         self._tailscale, self._shell, self._plugins = tailscale, shell, plugins
         self.labels: list[str] = []
 
@@ -5585,6 +5640,9 @@ class _CatalogueSweep(HealthSweep):
 
     def intake_deployed(self):
         return self.intake_enabled, ""
+
+    def notebook_app_deployed(self):
+        return self.notebook_app_enabled, ""
 
     def owui_plugin_count(self):
         return 1 if self._plugins else 0
@@ -5606,6 +5664,7 @@ _PROBE_CONDITIONS = (
     ("plugins", "Open WebUI has at least one plugin deployed"),
     ("pantry", "the ob1 `pantry` profile is enabled"),
     ("intake", "the ob1 `intake` profile is enabled"),
+    ("notebook_app", "the ob1 `notebook-app` profile is enabled (the Open Notebook app; retired by default)"),
 )
 
 

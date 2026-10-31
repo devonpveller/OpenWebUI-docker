@@ -900,6 +900,51 @@ function Test-OpenNotebookHealth {
     }
 }
 
+# Is the open_notebook APP deployed on this host? (intake-gate-relay round 2, D-1.) The operator
+# retired it 2026-10-31 (stopped before intake writes bronze); the switch is the ob1 compose
+# profile `notebook-app`, ON when it is in .stack\state.json (planes.ob1.profiles) or in
+# COMPOSE_PROFILES of OB1\docker\.env - the same two sources stack.py and emergency-recovery.ps1
+# read. Unreadable = not deployed: a REPAIR must not start an app the operator stopped.
+function Test-OpenNotebookDeployed {
+    param(
+        [string]$StatePath = (Join-Path $PROJECT_DIR '.stack\state.json'),
+        [string]$EnvPath = (Join-Path $PROJECT_DIR 'OB1\docker\.env')
+    )
+    try {
+        if (Test-Path $StatePath) {
+            $j = Get-Content -Raw -Path $StatePath | ConvertFrom-Json
+            if (@($j.planes.ob1.profiles) -contains 'notebook-app') { return $true }
+        }
+    } catch { }
+    try {
+        if (Test-Path $EnvPath) {
+            foreach ($line in Get-Content -Path $EnvPath) {
+                if ($line -match '^\s*COMPOSE_PROFILES\s*=\s*(.*)$') {
+                    if (($Matches[1].Trim().Trim('"').Trim("'") -split '\s*,\s*') -contains 'notebook-app') { return $true }
+                }
+            }
+        }
+    } catch { }
+    return $false
+}
+
+# The open_notebook step of the health check: probe, repair on failure - only when the app is
+# deployed. Retired -> one DEBUG line and nothing else (surrealdb is still confirmed separately).
+function Invoke-OpenNotebookCheck {
+    if (-not (Test-OpenNotebookDeployed)) {
+        Write-LogEntry "open_notebook retired (ob1 profile notebook-app is off) - not probed, not repaired" "DEBUG"
+        return $true
+    }
+    if (-not (Test-OpenNotebookHealth)) {
+        Write-LogEntry "open-notebook API failed, attempting recovery..." "WARN"
+        if (-not (Repair-OpenNotebook)) {
+            Write-LogEntry "open-notebook recovery failed - notebook UI may be unavailable" "WARN"
+            return $false
+        }
+    }
+    return $true
+}
+
 # Function to repair open-notebook. Ensures surrealdb (its database dependency)
 # is up first, then restarts open_notebook and waits for the API.
 # `docker compose restart` writes container-state messages ("Restarting", "Started")
@@ -917,7 +962,9 @@ function Repair-OpenNotebook {
 
         if (-not (Test-ServiceHealth "open_notebook")) {
             Write-LogEntry "open_notebook container not running, starting..." "WARN"
-            docker compose -f OB1\docker\docker-compose.yml up -d open_notebook 2>&1 | Out-Null
+            # both profiles: naming the service activates only `notebook-app`, and its
+            # depends_on (surrealdb) lives in `notebook` - without it compose refuses the project
+            docker compose -f OB1\docker\docker-compose.yml --profile notebook --profile notebook-app up -d open_notebook 2>&1 | Out-Null
         } else {
             Write-LogEntry "open_notebook running but API unresponsive, restarting..." "WARN"
             docker restart open_notebook 2>&1 | Out-Null
@@ -3742,13 +3789,9 @@ function Invoke-HealthCheck {
 
     # Test open-notebook API independently (separate from running-state check -
     # the FastAPI process can be unresponsive while the container is still up).
-    # Non-fatal: notebook UI is non-critical for the core LLM/RAG path.
-    if (-not (Test-OpenNotebookHealth)) {
-        Write-LogEntry "open-notebook API failed, attempting recovery..." "WARN"
-        if (-not (Repair-OpenNotebook)) {
-            Write-LogEntry "open-notebook recovery failed - notebook UI may be unavailable" "WARN"
-        }
-    }
+    # Non-fatal: notebook UI is non-critical for the core LLM/RAG path. Skipped entirely while the
+    # app is retired (Invoke-OpenNotebookCheck / Test-OpenNotebookDeployed).
+    Invoke-OpenNotebookCheck | Out-Null
 
     # --- Private web-search gateway plane (SearXNG-over-Tor) - non-critical ---
     # Compose SERVICE keys differ from CONTAINER names here (redis ->

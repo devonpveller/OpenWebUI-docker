@@ -30,8 +30,12 @@ import sys
 
 BAD = re.compile(r'(?i)(_HOST|_BASE|API_BASE|BASE_URL|api_base|CHAT_API_BASE|OPENAI[A-Z_]*BASE'
                  r'|EMBED[A-Z_]*BASE|LLM_BASE)\b[^\r\n]*[:=][^\r\n]*'
-                 r'(llama-cpp-upstream|llama-cpp-embed-upstream)')
+                 r'(llama-cpp-upstream|llama-cpp-embed-upstream|kokoro-tts-upstream)')
 QUEUE_UPSTREAM_ALLOW = re.compile(r'(?i)LLM_QUEUE(_EMBED)?_UPSTREAM_BASE_URL')
+# rw-p7a-tts round 2: the ONE sanctioned kokoro-tts-upstream line (the gateway's speech route), in
+# exactly that fragment; the file itself is not allowed, so any other upstream line in it flags.
+SPEECH_ROUTE_FILE = '*\\inference\\config\\litellm\\model_list\\local.tts.yaml'
+SPEECH_ROUTE_LINE = 'api_base: http://kokoro-tts-' + 'upstream:8880/v1'  # split: this file is scanned too
 
 ALLOW_PATH_LIKE = (
     '*\\inference\\config\\litellm.config.yaml',
@@ -188,6 +192,8 @@ def main() -> int:
             if trimmed.startswith('#') or trimmed.startswith('//'):
                 continue
             if QUEUE_UPSTREAM_ALLOW.search(line):
+                continue
+            if line.strip(_NET_WS) == SPEECH_ROUTE_LINE and _like_rx(SPEECH_ROUTE_FILE).fullmatch(rel_for_allow(root_prefix, f)):
                 continue
             if BAD.search(line):
                 rel = f[len(root):].lstrip('\\/')

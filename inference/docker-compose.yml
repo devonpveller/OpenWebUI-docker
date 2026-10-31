@@ -3,7 +3,7 @@
 # its own service tree.
 #
 # SPLIT BY SERVICE GROUP 2026-09-19 (stack-layers sl-inference-split, PLAN 2.6).
-# This file is now the project's SPINE: its name, the four included service
+# This file is now the project's SPINE: its name, the five included service
 # groups, and the networks and volumes they share. The services themselves live
 # in inference/compose/, one file per group, because a group is the unit that
 # gets toggled and the unit a reviewer can hold in their head:
@@ -12,6 +12,7 @@
 #   compose/queue.yml       llm-queue                                      [local]
 #   compose/gateway.yml     llm-gateway, llm-gateway-db, llm-gateway-ui
 #   compose/backups.yml     llm-gateway-backup, lm-models-backup [local]
+#   compose/tts.yml         kokoro-tts-upstream (speech, CPU; P7a)         [local]
 #
 # `include:` keeps ONE compose project: the project name, the container names,
 # the volumes and the rendered service definitions are unchanged - only the file
@@ -40,8 +41,8 @@
 #     four DIFFERING blocks render clean as well (measured). Keep them
 #     identical anyway - divergence here fails silently, not loudly.
 #
-# THE `local` PROFILE (stack-layers D11). The four services marked [local] above
-# are the ones that need this host's GPUs and model files. Off, the project is a
+# THE `local` PROFILE (stack-layers D11). The five services marked [local] above
+# are the ones that need this host's GPUs, CPU speech backend and model files. Off, the project is a
 # LiteLLM gateway + its ledger DB + the Admin-UI sidecar + the ledger backup:
 # a front door that can serve CLOUD models from a machine with no GPU. On, it is
 # the full local inference plane.
@@ -93,6 +94,7 @@ include:
       - compose/gateway.yml
       - compose/gateway-lan${LITELLM_UI_LAN_IP:+-on}.yml
   - compose/backups.yml
+  - compose/tts.yml
 
 volumes:
   # LiteLLM spend-log DB (transparent gateway, guide §1A). Migrated from

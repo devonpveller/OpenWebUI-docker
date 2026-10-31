@@ -129,6 +129,17 @@ answer carries intake's text and labels. Read policy: only `clean` is returned (
 wrapped in the section-6 nonce fence `<<UNTRUSTED-{nonce} src=... verdict=clean>> ... <<END-{nonce}>>`
 with intake's labels beside it. No intake key file: every screened route is 503, never unscreened.
 
+**How the gate reaches intake (intake-gate-relay).** `INTAKE_URL` is
+`http://openbrain-intake-callrelay:8000/v1/intake` in the compose file: the gateway joins the
+plane's own INTERNAL network `intake-callers` (`search_intake-callers`, 10.243.51.0/24), whose only
+other member is OB1's `openbrain-intake-callrelay` (profile `intake`), a fixed-target byte relay to
+`openbrain-intake:8000` on intake's `intake-net`. So the gateway reaches intake's one port and
+nothing else there, and intake keeps its single network. The code default
+(`http://openbrain-intake:8000/...`) is not used by compose: an alias of that name on the relay
+answered the relay's own lookup of its target (measured). With intake off the name resolves to
+nothing and screening is 503. The lab proof is `tests/docker/run_gate_relay_e2e.py` (below); the
+render check is `scripts/checks/check_intake_isolation.py` at the repo root.
+
 The kit is VENDORED at `src/connector_kit/` (a byte copy of OB1 `integrations/connectors/connector_kit`
 at the gitlink; `VENDORED.md` names the sha and how to re-copy), so the image is built from
 `search/gateway/` alone and never needs an OB1 checkout. `tests/test_kit_vendored.py` fails on any
@@ -175,6 +186,8 @@ ruff check src tests
 # the docker round trip (internal test networks in 10.243.70.0/24; never ai-stack_*):
 python tests/docker/run_gate_e2e.py --gate-image private-search-gateway:wt-<id> \
     --intake-image openbrain-intake:wt-<id> --model-dir <verified classifier dir> --out <dir>
+# the relay topology, from the rendered compose of both planes (lab /24s in 10.243.90-95.0/24):
+python tests/docker/run_gate_relay_e2e.py --gate-image private-search-gateway:wt-<id>     --intake-image openbrain-intake:wt-<id> --model-dir <verified classifier dir> --out <dir>
 ```
 
 The gate's test doubles are in `tests/fakes.py` (the internet behind a forward proxy,
