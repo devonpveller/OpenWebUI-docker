@@ -2499,6 +2499,14 @@ class HealthSweep:
             else:
                 depth, depth_ok = self.inference_serving_depth()
                 self.probe(f"inference: {depth}", depth_ok)
+                # research-workbench P7a: the speech backend (CPU) behind the local-tts route. It has
+                # no host port (internal backend network), so the probe execs inside it.
+                self.probe(
+                    "inference: kokoro-tts-upstream /health (docker exec)",
+                    lambda: self.docker(
+                        "exec", "kokoro-tts-upstream", "curl", "-sf", "--max-time", "5", "http://localhost:8880/health",
+                    ).code == 0,
+                )
         if self.on("frontend"):
             self.probe(
                 "frontend: OWUI http://127.0.0.1:3000/health",
@@ -2673,7 +2681,7 @@ class HealthSweep:
 
     # The fixed teardown inference/README.md gives for the `local` containers.
     LOCAL_RM = ("docker compose -f inference/docker-compose.yml --profile local rm -sf "
-                "llama-cpp-upstream llama-cpp-embed-upstream llm-queue lm-models-backup")
+                "llama-cpp-upstream llama-cpp-embed-upstream llm-queue lm-models-backup kokoro-tts-upstream")
 
     def _upstream_hint(self, upstream: str) -> str:
         """What the reader should do when the upstream cannot be read - TRUE for why it ran.

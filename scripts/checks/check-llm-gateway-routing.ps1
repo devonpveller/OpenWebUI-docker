@@ -46,7 +46,7 @@ if (-not $Root) {
 }
 
 # The bypass smell: an inference/serve host or base-url variable set to an upstream.
-$badPattern = '(?i)(_HOST|_BASE|API_BASE|BASE_URL|api_base|CHAT_API_BASE|OPENAI[A-Z_]*BASE|EMBED[A-Z_]*BASE|LLM_BASE)\b[^\r\n]*[:=][^\r\n]*(llama-cpp-upstream|llama-cpp-embed-upstream)'
+$badPattern = '(?i)(_HOST|_BASE|API_BASE|BASE_URL|api_base|CHAT_API_BASE|OPENAI[A-Z_]*BASE|EMBED[A-Z_]*BASE|LLM_BASE)\b[^\r\n]*[:=][^\r\n]*(llama-cpp-upstream|llama-cpp-embed-upstream|kokoro-tts-upstream)'
 
 # SANCTIONED upstream caller (B2, design section 3.2): the llm-queue admission controller
 # sits BEHIND LiteLLM and forwards to *-upstream. Its forward target is carried in
@@ -84,6 +84,9 @@ $allowPathLike = @(
     #  allowed; the model_list fragments under inference\config\litellm\ are
     #  deliberately NOT listed, so a bypass planted in a fragment still flags.)
     '*\inference\config\litellm.config.yaml'
+    # (P7a, 2026-10-30) the speech route fragment: the gateway's own forwarding to
+    #  kokoro-tts-upstream. Only this ONE fragment; every other fragment still flags.
+    '*\inference\config\litellm\model_list\local.tts.yaml'
     # (paths refreshed 2026-08-21: G.2 moved these under scripts\recovery\
     #  and scripts\checks\; the .bat twin was archived at K.8)
     '*\scripts\recovery\emergency-recovery.ps1'

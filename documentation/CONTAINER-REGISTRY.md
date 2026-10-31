@@ -46,6 +46,7 @@ executor; see the Coder section.)
 | `llm-queue` | B2 admission controller between LiteLLM and the upstreams | Hold-and-dispatch + per-caller priority lanes on ONE GPU; turned fan-out 429s into ordered queuing. (Lanes reach full power after the J.1 virtual-keys cutover) |
 | `llama-cpp-upstream` | Real chat inference: llama-swap → llama.cpp (qwen36-27b, MTP) | The GPU worker; isolated on llm-backend-net so callers physically cannot bypass the gateway |
 | `llama-cpp-embed-upstream` | Real embedding inference (bge-m3, plain llama.cpp) | Separate from chat so embedding bursts (OB1 backfills) never contend for the swap slot |
+| `kokoro-tts-upstream` | Speech: Kokoro-FastAPI on the CPU, the LiteLLM route `local-tts` (research-workbench P7a) | Replaces Open Notebook's Piper voicing of the daily podcast. Its own unmodified container because its runtime chain is GPL-3 (D9); CPU because both GPUs hold the resident models |
 
 ### Search — own compose project `search` since 2026-08-21 (Part K.3)
 
@@ -155,7 +156,7 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 | `openbrain-cron` | The clock: HTTP-triggers the jobs below |
 | `openbrain-digest` | Daily digest composer (gap-dive triage since 08-05) |
 | `openbrain-gmail-pull` / `openbrain-gmail-prune` | Gmail ingest + retention (halve-retry embed fix lives in pull) |
-| `openbrain-podcast` | Digest→podcast renderer (on-demand audio via ON) |
+| `openbrain-podcast` | Digest→podcast renderer (P7a: voices the script through LiteLLM `local-tts`, ffmpeg as a separate process, archives every render; image `openbrain-podcast:local` = Deno + ffmpeg) |
 | `openbrain-idea-refinery` | Profile-gated idea-honing drain (user-gated loop; 100% local since 07-26) |
 
 ### Backup sidecars (moved from ai-stack 2026-08-21 — OB1 owns its backups)
@@ -169,8 +170,8 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 
 | Container | Purpose |
 |---|---|
-| `surrealdb` | ON's local store (SurrealDB v2, digest-pinned; host 127.0.0.1:8003) |
-| `open_notebook` | ON UI + API (IKS fork — openbrain-db is the canonical store; host :8503/:5055; renders the digest→podcast audio) |
+| `surrealdb` | ON's local store (SurrealDB v2, digest-pinned; host 127.0.0.1:8003). QUIESCED pending P7b (P7a captured its podcasts) |
+| `open_notebook` | ON UI + API (IKS fork — openbrain-db is the canonical store; host :8503/:5055). QUIESCED pending P7b: no longer renders the podcast audio (P7a) |
 | `open-notebook-backup` | SurrealDB logical export + notebook_data tar (output still `ai-stack/backups/open-notebook`) |
 
 ---
