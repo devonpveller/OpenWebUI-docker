@@ -154,6 +154,17 @@ class H2DohServer:
                             tls.sendall(BAD_PING_ON_STREAM_1)
                             time.sleep(1)
                             return
+                        if self.mode == "fin-mid-body":
+                            # headers, a few body bytes, then the connection simply goes away
+                            # while later lookups are already multiplexed onto it (post-gate3)
+                            conn.send_headers(ev.stream_id, [
+                                (":status", "200"), ("content-type", "application/dns-message")])
+                            tls.sendall(conn.data_to_send())
+                            time.sleep(0.3)
+                            conn.send_data(ev.stream_id, bytes(5))
+                            tls.sendall(conn.data_to_send())
+                            time.sleep(0.2)
+                            return
                         self._answer(conn, ev)
                 out = conn.data_to_send()
                 if out:

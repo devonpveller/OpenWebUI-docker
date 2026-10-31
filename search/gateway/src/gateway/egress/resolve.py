@@ -24,7 +24,6 @@ import dns.exception
 import dns.message
 import dns.rcode
 import dns.rdatatype
-import h2.exceptions
 import httpx
 
 from gateway.egress.guard import Refused
@@ -63,10 +62,17 @@ class DohResolver:
                     body += chunk
                     if len(body) > MAX_DOH_BYTES:
                         raise Refused("name resolution failed")
-        except (httpx.HTTPError, h2.exceptions.H2Error):
-            # h2.exceptions.H2Error: httpcore maps h2's errors to httpx ones only while it reads the
-            # response HEADERS; one raised while the body streams (a frame violating HTTP/2 after
-            # `:status 200`) comes out raw and would otherwise end as a 500 (search-post-gate2 B1)
+        except Refused:
+            raise
+        except Exception:  # noqa: BLE001 - see below
+            # ANY failure of the network call is a refusal, whatever its type. httpcore maps its
+            # errors to httpx ones only on some paths: an h2 protocol error while the body streams
+            # comes out raw (h2.exceptions.H2Error, search-post-gate2 B1), and a write onto an
+            # HTTP/2 connection the server has already closed comes out as anyio.EndOfStream
+            # (search-post-gate3) - neither is an httpx.HTTPError. One list of types is a list of
+            # the ones seen so far; /v1/fetch answered 500 for each new one. (CancelledError, the
+            # fetch time cap, is a BaseException and still passes.) Only the network call is inside
+            # this try: parsing below stays outside, so a programming error there still surfaces.
             raise Refused("name resolution failed") from None
         try:
             msg = dns.message.from_wire(bytes(body))
