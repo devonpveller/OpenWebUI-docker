@@ -71,6 +71,45 @@ function Write-Log {
 # uses when the key is unset or blank - the restore must write where the
 # service will look. A relative value resolves against the directory of the
 # compose file that holds the bind (compose's own rule for an included file).
+# intake-gate-relay round 3 (TG2-1): the Open Notebook APP is retired unless the ob1 compose
+# profile `notebook-app` is enabled - in .stack\state.json (planes.ob1.profiles) or in
+# COMPOSE_PROFILES of OB1\docker\.env, the two sources stack.py, emergency-recovery.ps1 and the
+# stack-watchdog read (cwd is the repo root: Push-Location above). A bare `compose start
+# open_notebook` STARTS the profile-off app whenever the plane's env activates `notebook` (measured,
+# compose v5.3.0), so an openbrain-db restore would bring a retired app back onto the database.
+# Unreadable = not enabled: a restore must not start an app the operator stopped.
+function Test-NotebookAppEnabled {
+  try {
+    if (Test-Path '.stack\state.json') {
+      $j = Get-Content -Raw -Path '.stack\state.json' | ConvertFrom-Json
+      if (@($j.planes.ob1.profiles) -contains 'notebook-app') { return $true }
+    }
+  } catch { }
+  try {
+    if (Test-Path 'OB1\docker\.env') {
+      foreach ($line in Get-Content -Path 'OB1\docker\.env') {
+        if ($line -match '^\s*COMPOSE_PROFILES\s*=\s*(.*)$') {
+          if (($Matches[1].Trim().Trim('"').Trim("'") -split '\s*,\s*') -contains 'notebook-app') { return $true }
+        }
+      }
+    }
+  } catch { }
+  return $false
+}
+
+# Phase 5's start list for one catalog entry: every listed container, minus a retired open_notebook.
+function Get-RestoreStartList([string[]]$Start) {
+  $out = @()
+  foreach ($c in $Start) {
+    if ($c -eq 'open_notebook' -and -not (Test-NotebookAppEnabled)) {
+      Write-Log "  open_notebook is retired (ob1 profile notebook-app is off) - not started" 'WARN'
+      continue
+    }
+    $out += $c
+  }
+  return $out
+}
+
 function Get-PlaneBindDir {
   param([string]$EnvFile, [string]$Key, [string]$ComposeDir, [string]$Default)
   $value = ''
@@ -475,9 +514,13 @@ foreach ($svc in $restoreOrder) {
   $entry = $catalog[$svc]
   $compose = $entry.Compose
   $cargs = if ($entry.ComposeArgs) { $entry.ComposeArgs } else { @() }
-  foreach ($container in $entry.Start) {
+  # Get-RestoreStartList: a RETIRED open_notebook (ob1 profile notebook-app off) is not started.
+  foreach ($container in (Get-RestoreStartList $entry.Start)) {
     Write-Log "  Starting $container ..."
-    & docker compose -f $compose @cargs start $container 2>&1 | ForEach-Object { Write-Log "    $_" }
+    $c2 = $cargs
+    # the app's profile is notebook-app and its depends_on (surrealdb) is in notebook: name both
+    if ($container -eq 'open_notebook') { $c2 = @('--profile', 'notebook', '--profile', 'notebook-app') }
+    & docker compose -f $compose @c2 start $container 2>&1 | ForEach-Object { Write-Log "    $_" }
   }
 }
 Write-Log ""

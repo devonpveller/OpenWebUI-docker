@@ -82,8 +82,12 @@ services:
     # (gitignored; a one-line file: `requirepass <long random>`), mounted as a directory so a
     # missing file does not stop the plane: then redis runs WITHOUT a password, as before the gate,
     # and says so on stderr at every start. The deploy step creates the file (search/README.md).
-    # The gateway reads the same file (REDIS_PASSWORD_FILE). searxng's SEARXNG_REDIS_URL is not
-    # read by the pinned image (it uses valkey settings; audit A11), so nothing else connects.
+    # The gateway reads the same file (REDIS_PASSWORD_FILE). searxng does not connect to it. The
+    # pinned image takes its valkey URL from `valkey.url` or the deprecated `redis.url`, each
+    # overridable by SEARXNG_VALKEY_URL / SEARXNG_REDIS_URL (the env var wins over settings.yml); this
+    # plane used to set SEARXNG_REDIS_URL (without the password, so SearXNG answered 500 once the
+    # password existed) and a settings.yml `redis:` block. Both are gone (search-post-gate); do not
+    # set any of the four.
     command:
       - sh
       - -c
@@ -135,7 +139,6 @@ services:
         condition: service_healthy
     environment:
       - SEARXNG_SECRET=${SEARXNG_SECRET_KEY}
-      - SEARXNG_REDIS_URL=redis://redis:6379/0
     volumes:
       - ./searxng:/etc/searxng:rw
     restart: unless-stopped
@@ -169,6 +172,13 @@ services:
     networks:
       - search-net
       - default
+      # intake-gate-relay: the gate's way to intake (an internal net; see the networks block)
+      - intake-callers
+    # intake-gate-relay round 2 (tester T-F4): never route between its networks - a NET_ADMIN peer on
+    # intake-callers must not reach search-net or ai-stack_default THROUGH the gateway (the relays'
+    # R2-F2 line, applied to the gate)
+    sysctls:
+      net.ipv4.ip_forward: 0
     depends_on:
       searxng:
         condition: service_started
@@ -207,7 +217,13 @@ services:
       - REDIS_PASSWORD_FILE=/run/secrets/search-redis/redis.conf
       - GATE_CALLER_KEYS_FILE=/run/secrets/search-gate/caller_keys
       - INTAKE_KEY_FILE=/run/secrets/search-gate/intake_key
-      - INTAKE_URL=http://openbrain-intake:8000/v1/intake
+      # intake-gate-relay: the gate reaches intake ONLY through openbrain-intake-callrelay, the one
+      # fixed-target relay into it (OB1/docker/docker-compose.yml, profile `intake`), on
+      # intake-callers (below). The relay's own name, not the code default `openbrain-intake`: an
+      # alias of that name on the relay would also answer the relay's lookup of its target
+      # (measured, the relay dialled itself). With intake off the name resolves to nothing and every
+      # screened answer is 503 (fail closed, never unscreened).
+      - INTAKE_URL=http://openbrain-intake-callrelay:8000/v1/intake
       # page fetches leave through the plane's VPN proxy; names are resolved by DoH THROUGH it
       - GATE_FETCH_PROXY_URL=http://vpn:8888
     volumes:
@@ -241,3 +257,19 @@ networks:
   default:
     external: true
     name: ai-stack_default
+  # intake-gate-relay (security-hardening-2026-10; DESIGN-intake section 12 item 10 for the first
+  # caller): the gate's side of the intake screen. INTERNAL (no gateway, no route out) on an explicit
+  # /24 outside 192.168.0.0/16 (the home LAN, incident 2026-10-17) and outside the daemon's default
+  # pools (172.16.0.0/12, 10.240.0.0/16); beside intake-net's 10.243.50.0/24. OWNED HERE, natively,
+  # so this plane starts on a host that never enables intake (then the gateway is its only member).
+  # OB1 joins it as external with ONE service, openbrain-intake-callrelay (profile `intake`), which
+  # forwards :8000 to the service and nothing else (the gateway's INTAKE_URL above names it).
+  # Members: that relay and this gateway, exactly (scripts/checks/check_intake_isolation.py).
+  # Explicit name, so OB1's external reference does not depend on this project's name.
+  intake-callers:
+    name: search_intake-callers
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.243.51.0/24

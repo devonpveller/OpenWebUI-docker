@@ -46,7 +46,7 @@ if (-not $Root) {
 }
 
 # The bypass smell: an inference/serve host or base-url variable set to an upstream.
-$badPattern = '(?i)(_HOST|_BASE|API_BASE|BASE_URL|api_base|CHAT_API_BASE|OPENAI[A-Z_]*BASE|EMBED[A-Z_]*BASE|LLM_BASE)\b[^\r\n]*[:=][^\r\n]*(llama-cpp-upstream|llama-cpp-embed-upstream)'
+$badPattern = '(?i)(_HOST|_BASE|API_BASE|BASE_URL|api_base|CHAT_API_BASE|OPENAI[A-Z_]*BASE|EMBED[A-Z_]*BASE|LLM_BASE)\b[^\r\n]*[:=][^\r\n]*(llama-cpp-upstream|llama-cpp-embed-upstream|kokoro-tts-upstream)'
 
 # SANCTIONED upstream caller (B2, design section 3.2): the llm-queue admission controller
 # sits BEHIND LiteLLM and forwards to *-upstream. Its forward target is carried in
@@ -57,6 +57,11 @@ $badPattern = '(?i)(_HOST|_BASE|API_BASE|BASE_URL|api_base|CHAT_API_BASE|OPENAI[
 # OTHER *-upstream base/host still flags, so the queue's other files stay scanned.
 $queueUpstreamAllow = '(?i)LLM_QUEUE(_EMBED)?_UPSTREAM_BASE_URL'
 
+# (rw-p7a-tts round 2) The ONE sanctioned kokoro-tts-upstream reference: the gateway's own speech
+# route, exactly this line in exactly this fragment. The file is NOT path-allowed, so any OTHER
+# *-upstream line planted in it (a llama-cpp-upstream api_base, a second kokoro line) still flags.
+$speechRouteFile = '*\inference\config\litellm\model_list\local.tts.yaml'
+$speechRouteLine = 'api_base: http://kokoro-tts-upstream:8880/v1'
 # Legit direct-upstream references (NOT bypasses): the gateway's own forwarding
 # config, recovery/health probe scripts, host monitor modules, docs, this guard.
 #
@@ -219,6 +224,7 @@ foreach ($f in $files) {
         if ($trimmed.StartsWith('#') -or $trimmed.StartsWith('//')) { continue }   # comments
         # Sanctioned: the llm-queue admission controller's forward target (section 3.2).
         if ($line -match $queueUpstreamAllow) { continue }
+        if ($line.Trim() -ceq $speechRouteLine -and (Get-RootRelativePath $f) -like $speechRouteFile) { continue }
         if ($line -match $badPattern) {
             $rel = $f.Substring($Root.Length).TrimStart('\')
             $violations.Add([pscustomobject]@{ File = $rel; Line = $n; Text = $line.Trim() })

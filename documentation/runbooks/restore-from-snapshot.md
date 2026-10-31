@@ -304,13 +304,16 @@ INFO FOR DB;
 **Source**: `./backups/open-notebook/notebook-data-<UTC-ts>.tar.gz`
 
 ```powershell
-# 1. Stop open_notebook.
+# 1. Stop open_notebook. (Since 2026-10-31 the app is RETIRED - ob1 profile `notebook-app` off - and
+#    stays stopped; `-Start` below restarts only the backup sidecar. If the app is enabled again
+#    (`python scripts/stack/stack.py enable notebook-app`), start it afterwards with
+#    `docker compose -f OB1/docker/docker-compose.yml --profile notebook --profile notebook-app start open_notebook`.)
 docker stop open_notebook
 
 # 2. Verify, wipe, restore and start - ONE line (see "Before ANY wipe"). OPEN_NOTEBOOK_DIR lives
 #    in OB1/docker/.env; blank means ../../../open-notebook, resolved against OB1/docker/.
 #    Replace <ts> with the timestamp of YOUR archive (ls .\backups\open-notebook).
-Invoke-BindRestore -Container open_notebook -Destination /app/data -ComposeFile OB1/docker/docker-compose.yml -ComposeProfile notebook -Service open_notebook -ShellVar OPEN_NOTEBOOK_DIR -BackupDir .\backups\open-notebook -Archive 'notebook-data-<ts>.tar.gz' -Start open_notebook
+Invoke-BindRestore -Container open_notebook -Destination /app/data -ComposeFile OB1/docker/docker-compose.yml -ComposeProfile notebook,notebook-app -Service open_notebook -ShellVar OPEN_NOTEBOOK_DIR -BackupDir .\backups\open-notebook -Archive 'notebook-data-<ts>.tar.gz' -Start open-notebook-backup
 ```
 
 ---

@@ -46,6 +46,7 @@ executor; see the Coder section.)
 | `llm-queue` | B2 admission controller between LiteLLM and the upstreams | Hold-and-dispatch + per-caller priority lanes on ONE GPU; turned fan-out 429s into ordered queuing. (Lanes reach full power after the J.1 virtual-keys cutover) |
 | `llama-cpp-upstream` | Real chat inference: llama-swap → llama.cpp (qwen36-27b, MTP) | The GPU worker; isolated on llm-backend-net so callers physically cannot bypass the gateway |
 | `llama-cpp-embed-upstream` | Real embedding inference (bge-m3, plain llama.cpp) | Separate from chat so embedding bursts (OB1 backfills) never contend for the swap slot |
+| `kokoro-tts-upstream` | Speech: Kokoro-FastAPI on the CPU, the LiteLLM route `local-tts` (research-workbench P7a) | Replaces Open Notebook's Piper voicing of the daily podcast. Its own unmodified container because its runtime chain is GPL-3 (D9); CPU because both GPUs hold the resident models |
 
 ### Search — own compose project `search` since 2026-08-21 (Part K.3)
 
@@ -147,6 +148,7 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 | `openbrain-intake` | The content screen (security-hardening-2026-10 I5; code `OB1/integrations/intake`, fork-owned). Profile `intake`, OFF until the operator's gated deploy; no host port; internal `intake-net` ONLY, so no route out: it reaches exactly `openbrain-db:5432` and `llm-gateway:8080`, each through a fixed-target relay. Secrets are compose secrets (files) from `OB1/docker/intake-secrets/` (gitignored), mounted read-only at `/run/secrets` - never environment variables, which every `docker exec` probe inherits (intake-i5b R2-F1); non-secret tuning in `OB1/docker/intake.env` (not `.env`, which open_notebook loads). Why: every piece of external content is to pass one screen (CDR, invisible characters, rules, classifier, second opinion) before Open Brain stores it or a model reads it |
 | `openbrain-intake-dbrelay` | TCP relay from `intake-net` to `openbrain-db:5432` (profile `intake`). Why: gives the screen a database route without putting it on the internet-capable `obnet`, and without changing `openbrain-db` |
 | `openbrain-intake-llmrelay` | TCP relay from `intake-net` (where it is aliased `llama-cpp`) to `llm-gateway:8080` on `ai-stack_llm-net` (profile `intake`). Why: the second opinion's route to LiteLLM without putting the screen on `ai-stack_llm-net`, where every other caller (llm-gateway-db, openwebui, open-terminal, ...) would be reachable |
+| `openbrain-intake-callrelay` | TCP relay from `search_intake-callers` (the search plane's internal network; its only other member is `search-gateway`) to `openbrain-intake:8000` on `intake-net` (profile `intake`; intake-gate-relay). Why: the search gate can hand pages to the screen without the screen gaining a second network or the gateway joining `intake-net`; the gateway reaches that one port and nothing else |
 
 ### Scheduled slice
 
@@ -155,7 +157,7 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 | `openbrain-cron` | The clock: HTTP-triggers the jobs below |
 | `openbrain-digest` | Daily digest composer (gap-dive triage since 08-05) |
 | `openbrain-gmail-pull` / `openbrain-gmail-prune` | Gmail ingest + retention (halve-retry embed fix lives in pull) |
-| `openbrain-podcast` | Digest→podcast renderer (on-demand audio via ON) |
+| `openbrain-podcast` | Digest→podcast renderer (P7a: voices the script through LiteLLM `local-tts`, ffmpeg as a separate process, archives every render; image `openbrain-podcast:local` = Deno + ffmpeg) |
 | `openbrain-idea-refinery` | Profile-gated idea-honing drain (user-gated loop; 100% local since 07-26) |
 
 ### Backup sidecars (moved from ai-stack 2026-08-21 — OB1 owns its backups)
@@ -169,9 +171,11 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 
 | Container | Purpose |
 |---|---|
-| `surrealdb` | ON's local store (SurrealDB v2, digest-pinned; host 127.0.0.1:8003) |
-| `open_notebook` | ON UI + API (IKS fork — openbrain-db is the canonical store; host :8503/:5055; renders the digest→podcast audio) |
+| `surrealdb` | ON's local store (SurrealDB v2, digest-pinned; host 127.0.0.1:8003). QUIESCED pending P7b (P7a captured its podcasts) |
+| `open_notebook` | ON UI + API (IKS fork — openbrain-db is the canonical store; host :8503/:5055). QUIESCED pending P7b: no longer renders the podcast audio (P7a) |
 | `open-notebook-backup` | SurrealDB logical export + notebook_data tar (output still `ai-stack/backups/open-notebook`) |
+
+`open_notebook` is alone in the ob1 profile `notebook-app` since intake-gate-relay round 2 (the operator retired the app 2026-10-31: stopped before intake writes bronze); off unless enabled, `restart: unless-stopped`. `surrealdb` and `open-notebook-backup` stay in `notebook` and keep running.
 
 ---
 
