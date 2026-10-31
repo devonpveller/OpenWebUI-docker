@@ -291,8 +291,14 @@ description = "the tailscale netns companion and its state backup; usable ONLY w
 # --------------------------------------------------------------------------
 [planes.search]
 # Private Search Gateway: Mullvad VPN (all egress) + redis + SearXNG + gateway.
-# requires anchor: search/docker-compose.yml:187-189 (ai-stack_default, which
+# requires anchor: search/docker-compose.yml:246-248 (ai-stack_default, which
 #   is where OB1 and the frontend resolve `vpn` and `gateway` by name).
+# OWNS `search_intake-callers` (intake-gate-relay): an INTERNAL network, 10.243.51.0/24, that the
+#   gateway joins on every host; ob1's openbrain-intake-callrelay (profile `intake`) joins it as
+#   external and is its only other member. Native here, so this plane starts with intake off;
+#   the ob1 -> search `requires` edge below is what orders it before the relay. Not an edge from
+#   search to ob1: with intake off the gate's INTAKE_URL resolves to nothing and every screened
+#   answer is 503 (fail closed), the legacy routes unaffected.
 compose  = "search/docker-compose.yml"
 lease    = "search"
 requires = ["anchor"]
@@ -489,7 +495,13 @@ opt_in      = true
 # openbrain-db:5432 (dbrelay, on obnet) and llm-gateway:8080 (llmrelay, on ai-stack_llm-net,
 # aliased `llama-cpp` on intake-net; the second opinion, with intake's own LiteLLM virtual
 # key - a gated live step). It is NOT on ai-stack_llm-net itself (intake-i5 attempt 1: ~30
-# callers reachable there). Its secrets are compose secrets - files from
+# callers reachable there). Callers come IN through a third relay, openbrain-intake-callrelay
+# (intake-gate-relay): on intake-net + search_intake-callers (internal, 10.243.51.0/24, OWNED by
+# the search plane, joined here as external), forwarding :8000 to the service only (the gate's
+# INTAKE_URL names the relay); its one other member is search-gateway. So the service keeps one network
+# and intake-net keeps only the service and its relays (scripts/checks/check_intake_isolation.py).
+# A `--profile intake up` needs the search plane up first (the external network), which the
+# `requires = [..., "search"]` above already orders. Its secrets are compose secrets - files from
 # OB1/docker/intake-secrets/ (gitignored), mounted read-only at /run/secrets for openbrain-intake
 # only - never environment variables, which every `docker exec` probe inherits (intake-i5b
 # R2-F1), and never OB1/docker/.env, which open_notebook loads whole. Its engine is
@@ -498,7 +510,7 @@ opt_in      = true
 # `opt_in`, never `default`: OFF until the operator's gated deploy (I1's migration applied to
 # the live DB, the intake role's password, the virtual key, the llm-queue class, the model
 # files) and `stack.py enable intake`. No `requires`: nothing in ANOTHER profile is needed.
-description = "the content screen (intake I5): openbrain-intake (internal intake-net only, no host port) + its two fixed-target relays, openbrain-intake-dbrelay (obnet) and openbrain-intake-llmrelay (llm-net); the `intake` product enables it"
+description = "the content screen (intake I5): openbrain-intake (internal intake-net only, no host port) + its three fixed-target relays, openbrain-intake-dbrelay (obnet), openbrain-intake-llmrelay (llm-net) and openbrain-intake-callrelay (search_intake-callers: the search gate's way in); the `intake` product enables it"
 opt_in      = true
 
 # --------------------------------------------------------------------------

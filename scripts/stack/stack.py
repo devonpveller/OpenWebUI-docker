@@ -2637,6 +2637,20 @@ class HealthSweep:
                         "sys.exit(0 if j.get('ok') and j.get('db') and j.get('judge_route') else 1)",
                     ).code == 0,
                 )
+                # intake-gate-relay: the search gate's way IN - search-gateway -> (intake-callers)
+                # openbrain-intake-callrelay -> (intake-net) openbrain-intake:8000. Read from INSIDE
+                # the gateway by the name its INTAKE_URL dials, so a dead relay or a gateway off
+                # intake-callers FAILS here while the probe above stays green.
+                self.probe(
+                    "OB1: intake caller path search-gateway -> openbrain-intake-callrelay -> /healthz ok",
+                    lambda: self.docker(
+                        "exec", "search-gateway", "python", "-c",
+                        "import json,sys,urllib.request; "
+                        "j = json.load(urllib.request.urlopen("
+                        "'http://openbrain-intake-callrelay:8000/healthz', timeout=5)); "
+                        "sys.exit(0 if j.get('ok') else 1)",
+                    ).code == 0,
+                )
             else:
                 self.console.line("  [skip] OB1: openbrain-intake /healthz (no intake profile in this deployment)")
         if self.on("agent-org"):

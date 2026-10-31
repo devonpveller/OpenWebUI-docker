@@ -1015,6 +1015,10 @@ def test_pantry_probe_runs_anyway_when_docker_ps_cannot_be_read(root):
 # database reached through openbrain-intake-dbrelay), skipped on a host that never enabled it.
 
 INTAKE_PROBE = "OB1: openbrain-intake /healthz (in-container, worker + db + judge route ok)"
+# intake-gate-relay: the search gate's path to intake (search-gateway -> openbrain-intake-callrelay
+# on intake-callers -> openbrain-intake:8000), read from INSIDE the gateway, as the gate dials it.
+INTAKE_CALLER_PROBE = ("OB1: intake caller path search-gateway -> openbrain-intake-callrelay "
+                       "-> /healthz ok")
 
 
 def _enable_ob1_profile(root: Path, profile: str) -> None:
@@ -1037,7 +1041,8 @@ def test_intake_probe_runs_after_the_db_probe_once_the_profile_is_enabled(root):
     _enable_ob1_profile(root, "intake")
     code, out = sweep(host, root, planes=None)
     at = PS1_PROBES.index(MCPO_PROBE) + 1
-    assert [name for _s, name in probe_lines(out)] == PS1_PROBES[:at] + [INTAKE_PROBE] + PS1_PROBES[at:]
+    assert [name for _s, name in probe_lines(out)] == (PS1_PROBES[:at] + [INTAKE_PROBE, INTAKE_CALLER_PROBE]
+                                                        + PS1_PROBES[at:])
     assert any(c[:3] == ["docker", "exec", "openbrain-intake"] and "python" in c for c in host.calls)
     assert code == 0
 
@@ -1049,7 +1054,8 @@ def test_intake_and_pantry_probes_both_run_when_both_are_enabled(root):
     _enable_ob1_profile(root, "intake")
     code, out = sweep(host, root, planes=None)
     at = PS1_PROBES.index(MCPO_PROBE) + 1
-    assert [name for _s, name in probe_lines(out)] == (PS1_PROBES[:at] + [PANTRY_PROBE, INTAKE_PROBE]
+    assert [name for _s, name in probe_lines(out)] == (PS1_PROBES[:at] + [PANTRY_PROBE, INTAKE_PROBE,
+                                                                          INTAKE_CALLER_PROBE]
                                                         + PS1_PROBES[at:])
     assert code == 0
 
@@ -1061,6 +1067,35 @@ def test_intake_probe_fails_when_the_health_exec_fails(root):
     code, out = sweep(host, root, planes=None)
     assert ("FAIL", INTAKE_PROBE) in probe_lines(out)
     assert code == 1
+
+
+def test_intake_caller_probe_reads_healthz_through_the_call_relay_from_inside_the_gateway(root):
+    host = FakeHost()
+    sweep(host, root)
+    _enable_ob1_profile(root, "intake")
+    code, out = sweep(host, root, planes=None)
+    assert ("OK", INTAKE_CALLER_PROBE) in probe_lines(out)
+    calls = [c for c in host.calls if c[:3] == ["docker", "exec", "search-gateway"]]
+    # the name the gate's INTAKE_URL dials (search/docker-compose.yml)
+    assert calls and "http://openbrain-intake-callrelay:8000/healthz" in calls[-1][-1], calls
+    assert code == 0
+
+
+def test_intake_caller_probe_fails_when_the_gateway_cannot_reach_intake(root):
+    host = FakeHost(exec_codes={"search-gateway": 1})
+    sweep(host, root)
+    _enable_ob1_profile(root, "intake")
+    code, out = sweep(host, root, planes=None)
+    assert ("FAIL", INTAKE_CALLER_PROBE) in probe_lines(out)
+    assert ("OK", INTAKE_PROBE) in probe_lines(out), "intake itself is fine; only the caller path is down"
+    assert code == 1
+
+
+def test_intake_caller_probe_is_skipped_with_intake_off(root):
+    code, out = sweep(FakeHost(), root)
+    assert INTAKE_CALLER_PROBE not in [n for _s, n in probe_lines(out)]
+    assert not [c for c in FakeHost().calls if c[:3] == ["docker", "exec", "search-gateway"]]
+    assert code == 0
 
 
 def test_intake_probe_runs_anyway_on_a_leftover_container_and_says_so(root):
@@ -5500,9 +5535,9 @@ def test_enable_still_writes_what_the_menu_says(root):
 def test_the_probe_catalogue_is_the_sweep_itself():
     catalogue = stack.probe_catalogue()
     # PS1_PROBES is the pinned all-green list on a host WITHOUT the pantry and intake
-    # profiles; the catalogue also lists those two probes (pantry-wire, intake I5), each of
-    # which runs only when its profile is on.
-    assert len(catalogue) == len(PS1_PROBES) + 2
+    # profiles; the catalogue also lists those profiles' probes (pantry-wire; intake I5 and
+    # intake-gate-relay's caller path), each of which runs only when its profile is on.
+    assert len(catalogue) == len(PS1_PROBES) + 3
     order = list(stack.HealthSweep.PROBED_PLANES)
     planes = [plane for plane, _label, _needs in catalogue]
     assert planes == sorted(planes, key=order.index)
@@ -5512,9 +5547,10 @@ def test_the_probe_catalogue_is_the_sweep_itself():
         "frontend: owui/ manifest rows drifted from live webui.db: <count>": ["shell", "plugins"],
         "OB1: openbrain-pantry /health (in-container, db ok)": ["pantry"],
         "OB1: openbrain-intake /healthz (in-container, worker + db + judge route ok)": ["intake"],
+        INTAKE_CALLER_PROBE: ["intake"],
     }
     count = stack.DocsGenerator(stack.Manifest.load(REAL_MANIFEST), REPO_ROOT, DocsHost()).health_count()
-    assert count.startswith(f"{len(PS1_PROBES) + 2} probes with every plane enabled")
+    assert count.startswith(f"{len(PS1_PROBES) + 3} probes with every plane enabled")
     assert f"({len(PS1_PROBES) - 2} when none of those holds)" in count
 
 
