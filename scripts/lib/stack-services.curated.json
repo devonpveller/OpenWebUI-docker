@@ -106,7 +106,8 @@
         "notebook",
         "idea-refinery",
         "pantry",
-        "intake"
+        "intake",
+        "notebook-app"
       ]
     },
     "agent-org": {
@@ -223,8 +224,8 @@
         "container": "open_notebook",
         "project": "open-brain",
         "critical": false,
-        "note": "being retired (Quartz workbench); still live for podcasts",
-        "profile": "notebook"
+        "note": "the Open Notebook app; RETIRED by the operator 2026-10-31 (stopped before intake writes bronze) and alone in the opt-in profile `notebook-app` since intake-gate-relay round 2, so no driver/recovery `up` or watchdog repair starts it while that profile is off; restart: unless-stopped. surrealdb + open-notebook-backup stay in `notebook`.",
+        "profile": "notebook-app"
       },
       {
         "container": "surrealdb",

@@ -171,6 +171,11 @@ services:
       - default
       # intake-gate-relay: the gate's way to intake (an internal net; see the networks block)
       - intake-callers
+    # intake-gate-relay round 2 (tester T-F4): never route between its networks - a NET_ADMIN peer on
+    # intake-callers must not reach search-net or ai-stack_default THROUGH the gateway (the relays'
+    # R2-F2 line, applied to the gate)
+    sysctls:
+      net.ipv4.ip_forward: 0
     depends_on:
       searxng:
         condition: service_started

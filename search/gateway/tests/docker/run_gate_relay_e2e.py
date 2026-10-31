@@ -115,6 +115,7 @@ class Run:
         self.projects: list[tuple[str, Path]] = []
         self.extra: list[str] = []          # containers made with docker run
         self.networks: list[str] = []       # networks this runner created itself
+        self.volumes_before = set(sh("volume", "ls", "-q").stdout.split())
         self.results: dict = {"checks": [], "prefix": self.p, "compose_root": str(self.root),
                               "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                               "overrides": {}}
@@ -541,6 +542,9 @@ print(json.dumps({"1.1.1.1:443": c("1.1.1.1", 443), "8.8.8.8:53": c("8.8.8.8", 5
                    and "no-new-privileges:true" in (call["SecurityOpt"] or []) and call["ip_forward"] == "0"
                    and call["User"] == "10030:10030", call)
         gw = self.cname("search-gateway")
+        gfwd = sh("exec", gw, "cat", "/proc/sys/net/ipv4/ip_forward").stdout.strip()
+        self.results["gateway_ip_forward"] = gfwd
+        self.check("H search-gateway runs with net.ipv4.ip_forward=0 (tester T-F4)", gfwd == "0", gfwd)
         hc = self.pyexec(gw, """
 import json, socket
 s = socket.create_connection(("openbrain-intake-callrelay", 8000), 10)
@@ -590,7 +594,7 @@ print(json.dumps({"idle_closed": closed, "second": b.recv(64).split(b"\\r\\n", 1
         self.results["relay_idle"] = got
         self.check("H the relay closes a connection idle for INTAKE_RELAY_IDLE_SECONDS (3 s here) and frees its slot",
                    got.get("idle_closed") is True and " 200 " in got.get("second", ""), got)
-        sh("rm", "-f", idle, check=False)
+        sh("rm", "-f", "-v", idle, check=False)
 
     # -- E: end to end -----------------------------------------------------------------------------
     def fetch(self, name: str, paths: list[str]) -> dict:
@@ -655,14 +659,16 @@ print(json.dumps({"idle_closed": closed, "second": b.recv(64).split(b"\\r\\n", 1
     # -- teardown --------------------------------------------------------------------------------
     def cleanup(self) -> None:
         for c in self.extra:
-            sh("rm", "-f", c, check=False)
+            sh("rm", "-f", "-v", c, check=False)   # -v: the peer's image declares VOLUME /data (T-F7)
         for name, f in reversed(self.projects):
             sh("compose", "-p", name, "-f", str(f), "down", "-v", "--remove-orphans", check=False, cwd=self.work)
         for n in self.networks:
             sh("network", "rm", n, check=False)
         left_c = sh("ps", "-aq", "--filter", f"label={LABEL}").stdout.split()
         left_n = sh("network", "ls", "-q", "--filter", f"label={LABEL}").stdout.split()
-        left_v = sh("volume", "ls", "-q", "--filter", f"label=com.docker.compose.project={self.p}-o").stdout.split()
+        # every volume that appeared during the run, labelled or ANONYMOUS (tester T-F7: a peer's
+        # anonymous volume survived `rm -f` and a label filter never saw it)
+        left_v = sorted(set(sh("volume", "ls", "-q").stdout.split()) - self.volumes_before)
         self.results["leftovers"] = {"containers": left_c, "networks": left_n, "volumes": left_v}
         shutil.rmtree(self.work, ignore_errors=True)
 

@@ -468,8 +468,22 @@ description = "the wiki compiler, the wiki viewer (live renderer, frozen Quartz 
 opt_in      = true
 
 [planes.ob1.profiles.notebook]
-description = "the Open Notebook trio: surrealdb + open_notebook + its backup; a SURFACE of the `research` product, and an engine PROFILE of `digest` (openbrain-podcast renders through it)"
+description = "the Open Notebook DATA side: surrealdb + open-notebook-backup (the app itself is `notebook-app`); a SURFACE of the `research` product, and an engine PROFILE of `digest`"
 opt_in      = true
+
+[planes.ob1.profiles.notebook-app]
+# intake-gate-relay round 2 (D-1, tester t-gate-relay): open_notebook ALONE. The operator retired the
+# app 2026-10-31 - it is stopped before intake writes bronze (DESIGN-intake section 12 item 1) - and
+# a stop has to HOLD: the compose `restart:` was `always` (a daemon restart brought it back), the
+# watchdog's Repair-OpenNotebook ran `up -d open_notebook`, emergency-recovery and `stack.py up`
+# started it with `notebook`. THIS PROFILE IS THE ONE SWITCH all of them read: off (the default; no
+# product enables it) = none of them starts the app, `stack.py health` prints a [skip] line for its
+# probe, and surrealdb + open-notebook-backup (`notebook`) keep running. On = `stack.py enable
+# notebook-app` or COMPOSE_PROFILES in OB1/docker/.env. `requires` notebook: the app's depends_on
+# (surrealdb) lives there, and compose refuses the project without it.
+description = "the Open Notebook APP (open_notebook UI + API, :8503/:5055); retired by the operator 2026-10-31 and OFF unless enabled - `stack.py enable notebook-app` runs it again"
+opt_in      = true
+requires    = ["notebook"]
 
 [planes.ob1.profiles.pantry]
 # OB1/docker/docker-compose.yml: openbrain-pantry (pantry-meal-planner; added to the

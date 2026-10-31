@@ -230,7 +230,8 @@ if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0 -or $hcRuleStaged.Coun
             # a red check. Passing the profiles keeps all 30 rows covered.
             # SIX since intake I5 (2026-10-18): `--profile intake` carries rows 32-34,
             # openbrain-intake, openbrain-intake-dbrelay and openbrain-intake-llmrelay, and
-            # since intake-gate-relay row 35, openbrain-intake-callrelay.
+            # since intake-gate-relay row 35, openbrain-intake-callrelay. SEVEN since its round 2:
+            # `--profile notebook-app` carries open_notebook (retired; its own profile).
             # FIVE since pantry-wire (2026-10-04): `--profile pantry` carries the 31st row,
             # openbrain-pantry. Dropping it would leave that row in the inventory with no
             # render to check it against - the coverage assertion below then fails, which is
@@ -239,7 +240,8 @@ if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0 -or $hcRuleStaged.Coun
                 $renderTargets += @{ P = 'open-brain'; F = 'OB1\docker\docker-compose.yml';
                                      A = @('--profile', 'research', '--profile', 'wiki',
                                            '--profile', 'notebook', '--profile', 'idea-refinery',
-                                           '--profile', 'pantry', '--profile', 'intake') }
+                                           '--profile', 'pantry', '--profile', 'intake',
+                                           '--profile', 'notebook-app') }
             }
 
             # A project with inventory rows but NO render target is unverified, and until

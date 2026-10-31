@@ -34,20 +34,24 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import urllib.parse
 import os
 import subprocess
 import sys
+import tempfile
+import urllib.parse
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 
 OB1 = ("OB1/docker/docker-compose.yml", "OB1/docker/.env.example")
 SEARCH = ("search/docker-compose.yml", "search/.env.example")
-# ob1 renders judged: the bare plane and every profile that renders from .env.example alone, each
-# with and without `intake` (the notebook profile needs the plane's real .env; check_lan_bindings).
-OB1_PROFILE_SETS = [(), ("intake",), ("research", "wiki", "idea-refinery", "pantry"),
-                    ("research", "wiki", "idea-refinery", "pantry", "intake")]
+# ob1 renders judged (round 2, tester T-F2): the bare plane, intake alone, and EVERY profile the
+# manifest declares for ob1 (what the live host can run, the notebook pair included) with and
+# without intake. open_notebook's `env_file: ./.env` is required: where OB1/docker/.env is absent
+# (a fresh clone, CI) the render adds a scratch override resetting that one env_file (`!reset`),
+# so the notebook services are judged everywhere.
+_ALL_OB1 = ("idea-refinery", "research", "wiki", "notebook", "notebook-app", "pantry", "intake")
+OB1_PROFILE_SETS = [(), ("intake",), tuple(p for p in _ALL_OB1 if p != "intake"), _ALL_OB1]
 
 INTAKE = "openbrain-intake"
 CALL_RELAY = "openbrain-intake-callrelay"
@@ -93,6 +97,9 @@ def judge(ob1_renders: dict[tuple, dict], search: dict, other_compose_names: dic
     """Problems found (empty = all good). ob1_renders maps a profile tuple to its render;
     other_compose_names maps a compose file outside the two planes to the network names it uses."""
     p: list[str] = []
+    gw_fwd = str(((search.get("services") or {}).get(GATEWAY) or {}).get("sysctls", {}).get("net.ipv4.ip_forward"))
+    if gw_fwd != "0":
+        p.append(f"search-gateway must set net.ipv4.ip_forward=0 (it is {gw_fwd}; tester T-F4)")
     s_callers = _net(search, "intake-callers")
     if s_callers is None:
         p.append("the search plane does not declare the intake-callers network")
@@ -153,6 +160,10 @@ def judge(ob1_renders: dict[tuple, dict], search: dict, other_compose_names: dic
         relay = svcs.get(CALL_RELAY) or {}
         if relay.get("ports"):
             p.append(f"{tag}: {CALL_RELAY} publishes a port: {relay['ports']}")
+        rnets = {(r.get("networks") or {}).get(k, {}).get("name") for k in (relay.get("networks") or {})}
+        if relay and rnets != {intake_net_name, callers_name}:
+            p.append(f"{tag}: the call relay must be on exactly intake-net and intake-callers (it is on "
+                     f"{sorted(str(x) for x in rnets)}; tester M10: a third network is a route out)")
         aliased = sorted(n for n, v in (relay.get("networks") or {}).items() if (v or {}).get("aliases"))
         if aliased:
             p.append(f"{tag}: {CALL_RELAY} carries a network alias on {aliased} (one named after its "
@@ -168,11 +179,22 @@ def judge(ob1_renders: dict[tuple, dict], search: dict, other_compose_names: dic
 
 def _render(compose: str, env_example: str, profiles: tuple = ()) -> dict:
     env = {k: v for k, v in os.environ.items() if k != "COMPOSE_PROFILES"}
-    argv = ["docker", "compose", "-f", str(REPO / compose), "--env-file", str(REPO / env_example)]
+    argv = ["docker", "compose", "-f", str(REPO / compose)]
+    tmp = None
+    if compose == OB1[0] and not (REPO / "OB1/docker/.env").exists():
+        fd, tmp = tempfile.mkstemp(suffix=".yml", prefix="cii-reset-")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("services:\n  open_notebook:\n    env_file: !reset []\n")
+        argv += ["-f", tmp]
+    argv += ["--env-file", str(REPO / env_example)]
     for prof in profiles:
         argv += ["--profile", prof]
-    r = subprocess.run([*argv, "config", "--format", "json"], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", env=env, timeout=180)
+    try:
+        r = subprocess.run([*argv, "config", "--format", "json"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", env=env, timeout=180)
+    finally:
+        if tmp:
+            os.unlink(tmp)
     if r.returncode != 0:
         raise RuntimeError(f"{compose} {list(profiles)}: compose exit {r.returncode}")
     return json.loads(r.stdout)

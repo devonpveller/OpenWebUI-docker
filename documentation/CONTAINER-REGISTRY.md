@@ -174,6 +174,8 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 | `open_notebook` | ON UI + API (IKS fork — openbrain-db is the canonical store; host :8503/:5055; renders the digest→podcast audio) |
 | `open-notebook-backup` | SurrealDB logical export + notebook_data tar (output still `ai-stack/backups/open-notebook`) |
 
+`open_notebook` is alone in the ob1 profile `notebook-app` since intake-gate-relay round 2 (the operator retired the app 2026-10-31: stopped before intake writes bronze); off unless enabled, `restart: unless-stopped`. `surrealdb` and `open-notebook-backup` stay in `notebook` and keep running.
+
 ---
 
 ## Project `agent-org` — 13 running (6 default + 7 `workers` profile)

@@ -48,6 +48,7 @@ def _search() -> dict:
             "services": {"gateway": {"networks": {"default": None, "search-net": None,
                                                   "intake-callers": None},
                                      "environment": {"INTAKE_URL": "http://openbrain-intake-callrelay:8000/v1/intake"},
+                                     "sysctls": {"net.ipv4.ip_forward": "0"},
                                      "ports": [{"host_ip": "127.0.0.1", "published": "8085"}]},
                          "redis": {"networks": {"search-net": None}}}}
 
@@ -189,3 +190,36 @@ def test_no_callers_net_in_search_fails():
 @pytest.mark.skipif(shutil.which("docker") is None, reason="no docker CLI to render with")
 def test_the_real_renders_pass(capsys):
     assert cii.main() == 0, capsys.readouterr().out
+
+
+# --- round 2 (tester t-gate-relay T-F2, T-F4) ------------------------------------------------------
+def test_the_call_relay_on_a_third_network_fails():
+    # M10: the call relay also on obnet = a route out of intake-callers into obnet
+    r = _renders()
+    r[("intake",)]["services"]["openbrain-intake-callrelay"]["networks"]["obnet"] = None
+    _fails(ob1=r, needle="call relay must be on exactly")
+
+
+def test_the_gateway_forwarding_fails():
+    s = _search()
+    s["services"]["gateway"]["sysctls"] = {"net.ipv4.ip_forward": "1"}
+    _fails(search=s, needle="ip_forward")
+    del s["services"]["gateway"]["sysctls"]
+    _fails(search=s, needle="ip_forward")
+
+
+def test_a_notebook_service_on_either_network_fails():
+    # M6/M7: open_notebook (profile notebook / notebook-app) on intake-net or intake-callers
+    for net in ("intake-net", "intake-callers"):
+        r = _renders()
+        r[("intake",)]["services"]["open_notebook"] = {"networks": {net: None}}
+        _fails(ob1=r, needle="members")
+
+
+def test_the_profile_sets_judged_cover_every_ob1_profile_the_manifest_declares():
+    import tomllib
+    m = tomllib.loads((cii.REPO / "stack.manifest.toml").read_text(encoding="utf-8"))
+    declared = set(m["planes"]["ob1"]["profiles"])
+    judged = set().union(*map(set, cii.OB1_PROFILE_SETS))
+    assert declared <= judged, sorted(declared - judged)
+    assert any(set(ps) == declared for ps in cii.OB1_PROFILE_SETS), "one render must carry every profile at once"
