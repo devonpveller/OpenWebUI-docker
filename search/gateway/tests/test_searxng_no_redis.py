@@ -1,8 +1,10 @@
 """search-post-gate, acceptance line 1 (static half): SearXNG gets no redis it cannot log in to.
 
 search-redis requires a password since the gate. SearXNG's valkey client takes its password only
-from the `redis:` URL in settings.yml, which carried none, so once the password existed every
-request to / answered 500 (the compose healthcheck went red). The limiter is off and the gateway
+from its URL: `valkey.url` or the deprecated `redis.url`, each overridable by SEARXNG_VALKEY_URL /
+SEARXNG_REDIS_URL (the env var wins over settings.yml). The plane's URL (the env var, and a
+settings.yml `redis:` block) carried no password, so once the password existed every request to /
+answered 500 (the compose healthcheck went red). The limiter is off and the gateway
 keeps its own cache in redis db 1, so SearXNG needs no redis at all. The runtime half is
 tests/docker/run_post_gate_lab.py (a real SearXNG against a passworded redis).
 """

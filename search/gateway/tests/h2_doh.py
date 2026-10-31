@@ -20,6 +20,7 @@ import datetime
 import socket
 import ssl
 import threading
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -32,6 +33,8 @@ import h2.exceptions
 from fakes import _doh_answer
 
 DOH_HOST = "dns.mullvad.net"
+# a PING frame (type 6) addressed to stream 1: PING must be on stream 0
+BAD_PING_ON_STREAM_1 = b"\x00\x00\x08\x06\x00\x00\x00\x00\x01" + b"\x00" * 8
 
 
 def make_pki(dest: Path, host: str = DOH_HOST) -> None:
@@ -97,6 +100,10 @@ class H2DohServer:
         self.alpn: list[str | None] = []
         self.queries: list[str] = []   # "name. IN A"
         self.http1_attempts = 0    # connections that spoke something other than HTTP/2
+        # "ok" answers; "bad-frame-after-headers" sends `:status 200` and, once the client is
+        # reading the body, a PING frame on stream 1 (an HTTP/2 protocol violation that h2 raises
+        # raw from the body stream - search-post-gate2 B1)
+        self.mode = "ok"
         self._stop = False
         self._t = threading.Thread(target=self._accept, daemon=True)
 
@@ -139,6 +146,14 @@ class H2DohServer:
                     return
                 for ev in events:
                     if isinstance(ev, h2.events.RequestReceived):
+                        if self.mode == "bad-frame-after-headers":
+                            conn.send_headers(ev.stream_id, [
+                                (":status", "200"), ("content-type", "application/dns-message")])
+                            tls.sendall(conn.data_to_send())
+                            time.sleep(0.3)
+                            tls.sendall(BAD_PING_ON_STREAM_1)
+                            time.sleep(1)
+                            return
                         self._answer(conn, ev)
                 out = conn.data_to_send()
                 if out:

@@ -24,6 +24,7 @@ import dns.exception
 import dns.message
 import dns.rcode
 import dns.rdatatype
+import h2.exceptions
 import httpx
 
 from gateway.egress.guard import Refused
@@ -62,7 +63,10 @@ class DohResolver:
                     body += chunk
                     if len(body) > MAX_DOH_BYTES:
                         raise Refused("name resolution failed")
-        except httpx.HTTPError:
+        except (httpx.HTTPError, h2.exceptions.H2Error):
+            # h2.exceptions.H2Error: httpcore maps h2's errors to httpx ones only while it reads the
+            # response HEADERS; one raised while the body streams (a frame violating HTTP/2 after
+            # `:status 200`) comes out raw and would otherwise end as a 500 (search-post-gate2 B1)
             raise Refused("name resolution failed") from None
         try:
             msg = dns.message.from_wire(bytes(body))

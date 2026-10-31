@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -134,7 +136,7 @@ class Lab:
         r = subprocess.run(
             ["docker", "compose", "-f", str(self.root / "search" / "docker-compose.yml"), "config",
              "--format", "json"], capture_output=True, text=True, encoding="utf-8", timeout=120,
-            env={**__import__("os").environ, "MULLVAD_WG_PRIVATE_KEY": "x",
+            env={**os.environ, "MULLVAD_WG_PRIVATE_KEY": "x",
                  "SEARXNG_SECRET_KEY": "lab-" + secrets.token_hex(16), "GATEWAY_API_KEY": "x"})
         if r.returncode != 0:
             raise RuntimeError(r.stderr[-500:])
@@ -283,8 +285,9 @@ class Lab:
             self.check(f"G2 {host} (a non-public answer) is refused with the resolve reason",
                        b.get("status") == "refused" and b.get("reason") == reason, str(b)[:300])
         log = sh("logs", f"{self.p}-vpn", check=False)
-        connects = [ln.split()[1] for ln in (log.stdout + log.stderr).splitlines()
-                    if ln.startswith("CONNECT ")]
+        # FakeInternet prints from concurrent threads, so lines interleave (`CONNECT a:443CONNECT a:443`):
+        # take each target up to the next CONNECT or whitespace, not one per line
+        connects = re.findall(r"CONNECT (\S+?)(?=CONNECT |\s|$)", log.stdout + log.stderr)
         self.results["proxy_connects"] = connects
         allowed = {"dns.mullvad.net:443", f"{PUBLIC_IP}:80"}
         self.check("G3 the proxy saw only the DoH tunnel and the pinned public IP, nothing private",

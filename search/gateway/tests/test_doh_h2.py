@@ -21,7 +21,7 @@ import pytest
 
 from fakes import PUBLIC_IP, FakeInternet
 from gate_support import running_gate
-from gateway.egress.guard import REASONS
+from gateway.egress.guard import REASONS, Refused
 from gateway.egress.resolve import DohResolver
 from h2_doh import DOH_HOST, H2DohServer, make_pki
 
@@ -93,8 +93,7 @@ def test_fetch_of_a_public_url_is_ok_with_the_h2_doh(gate, doh: H2DohServer) -> 
     assert body["status"] == "ok", body
     assert "ordinary article about bread" in body["text"]
     # the DoH CONNECT first, then the page by the PINNED ip - both through the proxy
-    assert gate.internet.connects == [TARGET, TARGET, f"{PUBLIC_IP}:80"] or \
-        gate.internet.connects[-1] == f"{PUBLIC_IP}:80"
+    assert gate.internet.connects[-1] == f"{PUBLIC_IP}:80"
     assert set(gate.internet.connects[:-1]) == {TARGET}
     assert {"public.example.com. IN A", "public.example.com. IN AAAA"} <= set(doh.queries)
     assert gate.internet.gets == [], "no plain-HTTP lookup went anywhere"
@@ -112,3 +111,26 @@ def test_every_answer_is_still_judged(gate, host: str) -> None:
 def test_a_name_that_does_not_exist_is_refused(gate) -> None:
     body = _fetch(gate, "http://nxdomain.example.com/")
     assert body["status"] == "refused" and body["reason"] == REASONS["resolve"], body
+
+
+# -- search-post-gate2 B1: an HTTP/2 violation AFTER the response headers ------------------------
+# httpcore maps h2's ProtocolError only while it reads the headers; while the body streams it comes
+# out raw (not an httpx.HTTPError). The module's contract is that every failure is a Refused.
+async def test_a_protocol_error_while_the_body_streams_is_a_refusal(internet: FakeInternet,
+                                                                    doh: H2DohServer) -> None:
+    doh.mode = "bad-frame-after-headers"
+    r = DohResolver(DOH_URL, internet.url, 5.0)
+    try:
+        with pytest.raises(Refused):
+            await r.resolve("public.example.com")
+    finally:
+        await r.aclose()
+    assert internet.connects.count(TARGET) >= 1
+
+
+def test_fetch_survives_a_protocol_error_while_the_body_streams(gate, doh: H2DohServer) -> None:
+    """Through the gate: the answer is the `resolve` refusal, not a 500."""
+    doh.mode = "bad-frame-after-headers"
+    body = _fetch(gate, "http://public.example.com/page")
+    assert body["status"] == "refused" and body["reason"] == REASONS["resolve"], body
+    assert set(gate.internet.connects) <= {TARGET}, "nothing was fetched"
