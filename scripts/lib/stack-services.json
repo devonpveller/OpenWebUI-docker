@@ -86,14 +86,15 @@
       "compose": "docker compose -f OB1/docker/docker-compose.yml",
       "file": "OB1/docker/docker-compose.yml",
       "env_file": null,
-      "note": "env_file is null, as it now is for every project: compose's project directory here is OB1/docker, so it auto-loads OB1/docker/.env (since sl-env-split every plane works this way). PROFILE-GATED since 2026-09-19 (sl-ob1-profiles): a bare `config` or `up` renders only the 20 core + always-on-scheduled services, so any tool reading this file must pass --profile research --profile wiki --profile notebook --profile idea-refinery --profile pantry --profile intake to see all 34 (pantry, added by pantry-wire, is the 31st; intake I5 adds openbrain-intake, openbrain-intake-dbrelay and openbrain-intake-llmrelay). The rows below carry a `profile` field wherever that applies.",
+      "note": "env_file is null, as it now is for every project: compose's project directory here is OB1/docker, so it auto-loads OB1/docker/.env (since sl-env-split every plane works this way). PROFILE-GATED since 2026-09-19 (sl-ob1-profiles): a bare `config` or `up` renders only the 20 core + always-on-scheduled services, so any tool reading this file must pass --profile research --profile wiki --profile notebook --profile idea-refinery --profile pantry --profile intake to see all 35 (pantry, added by pantry-wire, is the 31st; intake I5 adds openbrain-intake, openbrain-intake-dbrelay and openbrain-intake-llmrelay; intake-gate-relay adds openbrain-intake-callrelay, the 35th). The rows below carry a `profile` field wherever that applies.",
       "profiles": [
         "research",
         "wiki",
         "notebook",
         "idea-refinery",
         "pantry",
-        "intake"
+        "intake",
+        "notebook-app"
       ]
     },
     "agent-org": {
@@ -217,10 +218,10 @@
     "notebook": [
       {
         "container": "open_notebook",
-        "profile": "notebook",
+        "profile": "notebook-app",
         "project": "open-brain",
         "critical": false,
-        "note": "being retired (Quartz workbench); still live for podcasts"
+        "note": "the Open Notebook app; RETIRED by the operator 2026-10-31 (stopped before intake writes bronze) and alone in the opt-in profile `notebook-app` since intake-gate-relay round 2, so no driver/recovery `up` or watchdog repair starts it while that profile is off; restart: unless-stopped. surrealdb + open-notebook-backup stay in `notebook`."
       },
       {
         "container": "surrealdb",
@@ -396,6 +397,13 @@
         "project": "open-brain",
         "critical": false,
         "note": "intake's only route to the LiteLLM gateway (intake-i5 attempt 1: the service must not sit on ai-stack_llm-net, where ~30 callers are reachable). A TCP byte relay (same image as openbrain-intake, `relay` command) on intake-net, where it carries the alias llama-cpp, and ai-stack_llm-net, forwarding :8080 to llm-gateway:8080 only. Profile `intake`, off by default; stateless, no secret. Its liveness is checked by check-openbrain-health.ps1 and reported as /healthz judge_route by openbrain-intake."
+      },
+      {
+        "container": "openbrain-intake-callrelay",
+        "profile": "intake",
+        "project": "open-brain",
+        "critical": false,
+        "note": "the search gate's only way IN to intake (intake-gate-relay; DESIGN-intake section 12 item 10 for the first caller). A TCP byte relay (same image and hardening as the other two intake relays, `relay` command) on intake-net and search_intake-callers - an internal network the SEARCH plane owns (10.243.51.0/24) whose only other member is search-gateway - forwarding :8000 to openbrain-intake:8000 only; the gateway's INTAKE_URL names the relay (no alias: one named openbrain-intake answered the relay's own lookup of its target). Profile `intake`, off by default; stateless, no secret, no host port. Probed by `stack.py health` (the caller-path probe, read inside search-gateway) and check-openbrain-health.ps1 (which restarts it on -Repair)."
       },
       {
         "container": "openbrain-idea-refinery",
