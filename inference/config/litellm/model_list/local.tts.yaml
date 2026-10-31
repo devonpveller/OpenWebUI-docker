@@ -1,0 +1,19 @@
+# LOCAL speech route (research-workbench P7a) - /v1/audio/speech through the gateway.
+#
+# `local-tts` is a ROLE like local-large: callers (openbrain-podcast, with its own virtual key)
+# name it; LiteLLM forwards to Kokoro-FastAPI on the backend network (inference/compose/tts.yml,
+# kokoro-tts-upstream). Speech does NOT go through llm-queue: the queue admits work for the
+# llama.cpp slots, and Kokoro runs on the CPU with no slot to share.
+#
+# Registered only under the `local` profile (assemble-config.py strips `x-requires-profile`), the
+# same profile that starts kokoro-tts-upstream - never a route to an absent backend.
+model_list:
+  - model_name: local-tts
+    litellm_params:
+      model: openai/kokoro
+      api_base: http://kokoro-tts-upstream:8880/v1
+      api_key: dummy            # Kokoro-FastAPI ignores it; must be non-empty
+    model_info:
+      mode: audio_speech
+
+x-requires-profile: local

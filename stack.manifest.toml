@@ -162,6 +162,7 @@ host = [
   "NVIDIA GPU + NVIDIA Container Toolkit (inference/compose/upstreams.yml:122-128 and :173-179) - the `local` profile only",
   "Chat GGUFs under ${LM_MODELS_DIR} (inference/compose/upstreams.yml:24, :76); sl-inference-split replaced the literal per-user path this line used to cite",
   "Embedding GGUF bge-m3-f16.gguf in that same store (inference/compose/upstreams.yml:166)",
+  "CPU cores for kokoro-tts-upstream (speech, research-workbench P7a; KOKORO_CPUS, default 6, inference/compose/tts.yml) - the `local` profile only; no GPU (both hold the resident models)",
   "OPT-IN, off by default: LITELLM_UI_LAN_IP in inference/.env publishes llm-gateway-ui (the Admin UI) on <that LAN address>:8445 for the Proxmox Traefik (edge-b2-pub; compose/gateway-lan-on.yml). One specific IP, never 0.0.0.0; apply the B1 LAN firewall guard first. llm-gateway itself never gets a port",
 ]
 # LITELLM_MASTER_KEY is required since J.1 (per-caller virtual keys); without it
@@ -188,7 +189,7 @@ keys = ["LITELLM_DB_PASSWORD", "LITELLM_MASTER_KEY"]
 # proof). sl-frontend-solo reached the same conclusion for its three frontend
 # profiles and left all of them without a `default` for exactly this reason.
 opt_in      = true
-description = "llama.cpp upstreams + llm-queue + the model-store backup, i.e. local inference (needs the GPU and the GGUFs). Off, the plane is a LiteLLM gateway + ledger + Admin UI that serves cloud models only"
+description = "llama.cpp upstreams + llm-queue + the model-store backup + Kokoro speech on the CPU, i.e. local inference (needs the GPU and the GGUFs). Off, the plane is a LiteLLM gateway + ledger + Admin UI that serves cloud models only"
 
 # --------------------------------------------------------------------------
 [planes.frontend]
@@ -291,8 +292,14 @@ description = "the tailscale netns companion and its state backup; usable ONLY w
 # --------------------------------------------------------------------------
 [planes.search]
 # Private Search Gateway: Mullvad VPN (all egress) + redis + SearXNG + gateway.
-# requires anchor: search/docker-compose.yml:187-189 (ai-stack_default, which
+# requires anchor: search/docker-compose.yml:246-248 (ai-stack_default, which
 #   is where OB1 and the frontend resolve `vpn` and `gateway` by name).
+# OWNS `search_intake-callers` (intake-gate-relay): an INTERNAL network, 10.243.51.0/24, that the
+#   gateway joins on every host; ob1's openbrain-intake-callrelay (profile `intake`) joins it as
+#   external and is its only other member. Native here, so this plane starts with intake off;
+#   the ob1 -> search `requires` edge below is what orders it before the relay. Not an edge from
+#   search to ob1: with intake off the gate's INTAKE_URL resolves to nothing and every screened
+#   answer is 503 (fail closed), the legacy routes unaffected.
 compose  = "search/docker-compose.yml"
 lease    = "search"
 requires = ["anchor"]
@@ -462,8 +469,22 @@ description = "the wiki compiler, the wiki viewer (live renderer, frozen Quartz 
 opt_in      = true
 
 [planes.ob1.profiles.notebook]
-description = "the Open Notebook trio: surrealdb + open_notebook + its backup; a SURFACE of the `research` product, and an engine PROFILE of `digest` (openbrain-podcast renders through it)"
+description = "the Open Notebook DATA side: surrealdb + open-notebook-backup (the app itself is `notebook-app`); a SURFACE of the `research` product, and an engine PROFILE of `digest`"
 opt_in      = true
+
+[planes.ob1.profiles.notebook-app]
+# intake-gate-relay round 2 (D-1, tester t-gate-relay): open_notebook ALONE. The operator retired the
+# app 2026-10-31 - it is stopped before intake writes bronze (DESIGN-intake section 12 item 1) - and
+# a stop has to HOLD: the compose `restart:` was `always` (a daemon restart brought it back), the
+# watchdog's Repair-OpenNotebook ran `up -d open_notebook`, emergency-recovery and `stack.py up`
+# started it with `notebook`. THIS PROFILE IS THE ONE SWITCH all of them read: off (the default; no
+# product enables it) = none of them starts the app, `stack.py health` prints a [skip] line for its
+# probe, and surrealdb + open-notebook-backup (`notebook`) keep running. On = `stack.py enable
+# notebook-app` or COMPOSE_PROFILES in OB1/docker/.env. `requires` notebook: the app's depends_on
+# (surrealdb) lives there, and compose refuses the project without it.
+description = "the Open Notebook APP (open_notebook UI + API, :8503/:5055); retired by the operator 2026-10-31 and OFF unless enabled - `stack.py enable notebook-app` runs it again"
+opt_in      = true
+requires    = ["notebook"]
 
 [planes.ob1.profiles.pantry]
 # OB1/docker/docker-compose.yml: openbrain-pantry (pantry-meal-planner; added to the
@@ -489,7 +510,13 @@ opt_in      = true
 # openbrain-db:5432 (dbrelay, on obnet) and llm-gateway:8080 (llmrelay, on ai-stack_llm-net,
 # aliased `llama-cpp` on intake-net; the second opinion, with intake's own LiteLLM virtual
 # key - a gated live step). It is NOT on ai-stack_llm-net itself (intake-i5 attempt 1: ~30
-# callers reachable there). Its secrets are compose secrets - files from
+# callers reachable there). Callers come IN through a third relay, openbrain-intake-callrelay
+# (intake-gate-relay): on intake-net + search_intake-callers (internal, 10.243.51.0/24, OWNED by
+# the search plane, joined here as external), forwarding :8000 to the service only (the gate's
+# INTAKE_URL names the relay); its one other member is search-gateway. So the service keeps one network
+# and intake-net keeps only the service and its relays (scripts/checks/check_intake_isolation.py).
+# A `--profile intake up` needs the search plane up first (the external network), which the
+# `requires = [..., "search"]` above already orders. Its secrets are compose secrets - files from
 # OB1/docker/intake-secrets/ (gitignored), mounted read-only at /run/secrets for openbrain-intake
 # only - never environment variables, which every `docker exec` probe inherits (intake-i5b
 # R2-F1), and never OB1/docker/.env, which open_notebook loads whole. Its engine is
@@ -498,7 +525,7 @@ opt_in      = true
 # `opt_in`, never `default`: OFF until the operator's gated deploy (I1's migration applied to
 # the live DB, the intake role's password, the virtual key, the llm-queue class, the model
 # files) and `stack.py enable intake`. No `requires`: nothing in ANOTHER profile is needed.
-description = "the content screen (intake I5): openbrain-intake (internal intake-net only, no host port) + its two fixed-target relays, openbrain-intake-dbrelay (obnet) and openbrain-intake-llmrelay (llm-net); the `intake` product enables it"
+description = "the content screen (intake I5): openbrain-intake (internal intake-net only, no host port) + its three fixed-target relays, openbrain-intake-dbrelay (obnet), openbrain-intake-llmrelay (llm-net) and openbrain-intake-callrelay (search_intake-callers: the search gate's way in); the `intake` product enables it"
 opt_in      = true
 
 # --------------------------------------------------------------------------
@@ -677,6 +704,18 @@ profiles    = { ob1 = ["pantry"] }
 description = "the content screen: the intake service that screens external content before Open Brain stores it (OFF until the operator's gated deploy)"
 planes      = ["inference", "ob1"]
 profiles    = { ob1 = ["intake"] }
+
+[products.notebook-app]
+# intake-gate-relay round 3 (TG2-2): the driver command for the ONE open_notebook switch. The operator
+# retired the Open Notebook app 2026-10-31; its ob1 profile `notebook-app` is off unless this product
+# (or COMPOSE_PROFILES in OB1/docker/.env) turns it on. `stack.py enable notebook-app` adds the
+# profile (and `notebook`, which it requires - surrealdb is the app's depends_on); `stack.py disable
+# notebook-app` takes the app back out and leaves `notebook` with whatever other product asked for it.
+# No other product names notebook-app (scripts/stack/test_stack.py holds that), so `enable research`
+# or `enable digest` never brings the retired app back.
+description = "the Open Notebook APP (open_notebook UI + API) - retired by the operator 2026-10-31; enabling this runs it again"
+planes      = ["inference", "search", "ob1"]
+profiles    = { ob1 = ["notebook", "notebook-app"] }
 
 [products.coding-agent]
 description = "little-coder, the coding agent; its surface is Open WebUI"
