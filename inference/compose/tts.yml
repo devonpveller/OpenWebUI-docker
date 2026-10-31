@@ -1,0 +1,64 @@
+# inference/compose/tts.yml - speech synthesis behind the gateway (research-workbench P7a).
+#
+# Included by inference/docker-compose.yml (compose `include:`), so this service is part of the
+# `inference` project like the llama.cpp upstreams. RELATIVE PATHS resolve against THIS file's
+# directory (see upstreams.yml); this file has none.
+#
+# kokoro-tts-upstream: Kokoro-FastAPI (Apache-2.0) serving the Kokoro-82M model (Apache-2.0),
+# CPU build, run as its OWN UNMODIFIED CONTAINER. Its runtime chain includes GPL-3 components
+# (espeak-ng, phonemizer-fork, espeakng-loader) and a GPL ffmpeg build inside the image: they stay
+# inside this separate service and are reached only over HTTP. No product process imports
+# kokoro, misaki, phonemizer or espeakng-loader (D9). Versions and the source offer are in
+# OB1/recipes/daily-digest/THIRD-PARTY-NOTICES.md.
+#
+# GATEWAY-ONLY, like every inference backend: on llm-backend-net (internal) only. Callers reach it
+# as the LiteLLM route `local-tts` (inference/config/litellm/model_list/local.tts.yaml) through the
+# `llama-cpp` alias with their own virtual key; nothing on llm-net or obnet can address it.
+#
+# CPU, NOT GPU (measured 2026-10-30): both GPUs are held by the resident llama.cpp models (1.2 GiB
+# and 0.1 GiB free), so a GPU Kokoro could only load by evicting a model. This container is given
+# no GPU device; it adds 0 MiB of GPU memory. Kokoro on CPU voices ~3.6x faster than real time
+# on this host (a 6.2 s sentence in 1.7 s).
+#
+# PROFILE `local`: a host-specific backend like the llama.cpp upstreams (and its LiteLLM route is
+# registered only under the same profile, so a route never points at an absent backend).
+#
+# The model is baked into the image (api/src/models/v1_0/kokoro-v1_0.pth): DOWNLOAD_MODEL=false so
+# the entrypoint never reaches the internet (the backend network has no egress anyway).
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  kokoro-tts-upstream:
+    # v0.2.4, pinned by digest (pulled and inspected 2026-10-30; the image's own package metadata
+    # reads kokoro_fastapi 0.3.0, kokoro 0.9.2, misaki 0.9.3 - see the notices file)
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.2.4@sha256:c8812546d358cbfd6a5c4087a28795b2b001d8e32d7a322eedd246e6bc13cb55
+    container_name: kokoro-tts-upstream
+    profiles: [local]
+    networks:
+      - llm-backend-net
+    # NO published port: on the internal llm-backend-net a host publish never binds (the llama.cpp
+    # upstreams' 127.0.0.1:8081/8082 do not answer either, measured 2026-10-30). Probes use
+    # `docker exec kokoro-tts-upstream curl -sf http://localhost:8880/health` (stack.py health).
+    environment:
+      - DOWNLOAD_MODEL=false
+      - USE_GPU=false
+      - DEVICE=cpu
+    deploy:
+      resources:
+        limits:
+          # the llama.cpp upstreams are GPU-bound; this caps what speech can take from the host CPU
+          cpus: "${KOKORO_CPUS:-6}"
+          memory: 4G
+    restart: unless-stopped
+    <<: *hardening
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "--max-time", "5", "http://localhost:8880/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"

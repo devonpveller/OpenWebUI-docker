@@ -76,6 +76,8 @@
 #   - openbrain-intake      /healthz {"ok":true,"db":true,"judge_route":true} via docker exec (NO
 #                           host port; db goes through openbrain-intake-dbrelay, the judge route
 #                           through openbrain-intake-llmrelay); profile-gated 'intake'
+#   - intake caller path    /healthz read INSIDE search-gateway through openbrain-intake-callrelay
+#                           (the name the gate's INTAKE_URL dials, on search_intake-callers)
 #                           (security-hardening-2026-10 I5), OFF by default: ABSENT is a skip;
 #                           both relays are checked for liveness beside it
 #   - research_jobs         status='error' rows in the last 24 h -> WARN naming count +
@@ -836,6 +838,12 @@ if ($pantryState -eq 'absent') {
 # running. REPAIR (intake-i5 attempt 1 F-T8: a relay can be running but stuck) restarts BOTH
 # relays whatever their state, then the service (its workers re-load the classifier: ~20-60 s
 # before /healthz is ok again).
+# THE CALLER PATH (intake-gate-relay): once the service is ok, the search gate's way in is read
+# from INSIDE search-gateway by the name the gate's INTAKE_URL dials (openbrain-intake-callrelay,
+# on search_intake-callers). A failure there with the service ok is the
+# call relay (or the gateway off intake-callers): REPAIR restarts the call relay only - it holds
+# no state, and the service and its two relays are not touched.
+$callerProbe = "import json,sys,urllib.request; j = json.load(urllib.request.urlopen('http://openbrain-intake-callrelay:8000/healthz', timeout=5)); sys.exit(0 if j.get('ok') else 1)"
 $intakeProbe = "import json,sys,urllib.request; j = json.load(urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)); sys.exit(0 if j.get('ok') and j.get('db') and j.get('judge_route') else 1)"
 $intakeState = Get-CState 'openbrain-intake'
 if ($intakeState -eq 'absent') {
@@ -843,9 +851,24 @@ if ($intakeState -eq 'absent') {
 } elseif ($intakeState -eq 'running') {
   Confirm-ObContainer 'openbrain-intake-dbrelay' | Out-Null
   Confirm-ObContainer 'openbrain-intake-llmrelay' | Out-Null
+  Confirm-ObContainer 'openbrain-intake-callrelay' | Out-Null
   docker exec openbrain-intake python -c $intakeProbe 2>$null | Out-Null
   if ($LASTEXITCODE -eq 0) {
     Write-Ob 'openbrain-intake' ok '/healthz worker + db ok (in-container; no host port)'
+    docker exec search-gateway python -c $callerProbe 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+      Write-Ob 'openbrain-intake-callrelay' ok 'caller path: search-gateway -> call relay -> /healthz ok'
+    } elseif ($Repair) {
+      Write-Ob 'openbrain-intake-callrelay' fix 'caller path down -> docker restart openbrain-intake-callrelay'
+      docker restart openbrain-intake-callrelay 2>&1 | Out-Null
+      Start-Sleep 5
+      docker exec search-gateway python -c $callerProbe 2>$null | Out-Null
+      if ($LASTEXITCODE -eq 0) { Write-Ob 'openbrain-intake-callrelay' ok 'caller path recovered' }
+      else { Write-Ob 'openbrain-intake-callrelay' down 'caller path still failing (is search-gateway on search_intake-callers?)'; $script:Faults++ }
+    } else {
+      Write-Ob 'openbrain-intake-callrelay' warn 'caller path down (search-gateway cannot reach intake through the call relay); run with -Repair'
+      $script:Faults++
+    }
   } else {
     Write-Ob 'openbrain-intake' warn 'no serving worker, no DB through the dbrelay, or no judge route: /healthz not ok'
     if ($Repair) {
