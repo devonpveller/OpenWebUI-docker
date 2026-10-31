@@ -116,7 +116,8 @@ $Script:OB1Profiles = @(
     '--profile', 'notebook',
     '--profile', 'idea-refinery',
     '--profile', 'pantry',
-    '--profile', 'intake'
+    '--profile', 'intake',
+    '--profile', 'notebook-app'
 )
 # PANTRY (pantry-wire, 2026-10-04) IS IN THAT LIST FOR TEARDOWN AND STATUS ONLY.
 # `openbrain-pantry` (compose profile `pantry`, opt_in, OFF by default) must be
@@ -128,13 +129,18 @@ $Script:OB1Profiles = @(
 # is enabled. compose ignores a profile no service carries, so the flag is also
 # harmless against an OB1 gitlink older than 7953bc5.
 # INTAKE (security-hardening-2026-10 I5) IS THE SAME CASE: `openbrain-intake`,
-# `openbrain-intake-dbrelay` and `openbrain-intake-llmrelay` (compose profile `intake`, opt_in, OFF by default until the
+# `openbrain-intake-dbrelay`, `openbrain-intake-llmrelay` and `openbrain-intake-callrelay` (compose profile `intake`, opt_in, OFF by default until the
 # operator's gated deploy) are named by every stop / down / ps, and started only when the
 # profile is enabled. $Script:OB1OptInProfiles is the list Get-OB1StartProfiles holds back;
 # a future opt-in profile is one more entry there and in $Script:OB1Profiles.
 $Script:OB1PantryProfile = 'pantry'
 $Script:OB1IntakeProfile = 'intake'
-$Script:OB1OptInProfiles = @($Script:OB1PantryProfile, $Script:OB1IntakeProfile)
+# NOTEBOOK-APP (intake-gate-relay round 2, D-1): open_notebook ALONE, in its own profile since the
+# operator retired the app 2026-10-31 (stopped before intake writes bronze). The same opt-in case:
+# named by every stop / down / ps, started only when enabled - so a recovery never brings a
+# retired app back, while surrealdb and open-notebook-backup (profile `notebook`) still start.
+$Script:OB1NotebookAppProfile = 'notebook-app'
+$Script:OB1OptInProfiles = @($Script:OB1PantryProfile, $Script:OB1IntakeProfile, $Script:OB1NotebookAppProfile)
 # The project name that file declares (`name: open-brain`). Wait-ForRestartLoops
 # filters `docker ps` by it, so it sees the same containers compose does.
 $Script:OB1Project = "open-brain"
@@ -219,7 +225,9 @@ $Script:OB1OptionalServices = @(
     "openbrain-pantry",         # household pantry / meal planner (profile-gated 'pantry'; no host port; obnet + llm-net)
     "openbrain-intake",         # the content screen, intake I5 (profile-gated 'intake'; no host port; internal intake-net ONLY)
     "openbrain-intake-dbrelay", # intake's only route to openbrain-db (profile 'intake'; obnet + intake-net)
-    "openbrain-intake-llmrelay" # intake's only route to llm-gateway (profile 'intake'; intake-net + llm-net)
+    "openbrain-intake-llmrelay", # intake's only route to llm-gateway (profile 'intake'; intake-net + llm-net)
+    "openbrain-intake-callrelay", # the search gate's only way IN to intake (profile 'intake'; intake-net + search_intake-callers, which the SEARCH plane owns - started before OB1 below)
+    "open_notebook"              # the Open Notebook app (profile 'notebook-app'; retired by the operator 2026-10-31 - off unless enabled)
 )
 # Which profile starts each optional service.
 $Script:OB1OptionalServiceProfile = @{
@@ -227,7 +235,12 @@ $Script:OB1OptionalServiceProfile = @{
     "openbrain-intake"         = 'intake'
     "openbrain-intake-dbrelay" = 'intake'
     "openbrain-intake-llmrelay" = 'intake'
+    "openbrain-intake-callrelay" = 'intake'
+    "open_notebook"              = 'notebook-app'
 }
+# open_notebook is listed in $Script:OB1Services above (the Open Notebook trio line) for history;
+# since intake-gate-relay round 2 it is an OPTIONAL service (above), so it leaves the fixed list.
+$Script:OB1Services = @($Script:OB1Services | Where-Object { $_ -ne 'open_notebook' })
 
 # agent-org services, default plane only (workers/cloud profiles are gated + excluded,
 # same treatment as the profile-gated Portal). Low-level dependency first; the two

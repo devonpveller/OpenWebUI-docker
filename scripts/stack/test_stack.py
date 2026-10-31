@@ -188,7 +188,7 @@ def test_real_manifest_parses_and_every_edge_names_a_real_plane():
     assert manifest.order == PS1_ORDER + ["portal"]
     assert list(manifest.products) == [
         "chat", "inference", "search", "open-brain",
-        "research", "pantry", "intake", "coding-agent", "agent-org", "digest", "portal",
+        "research", "pantry", "intake", "notebook-app", "coding-agent", "agent-org", "digest", "portal",
     ]
 
 
@@ -436,7 +436,7 @@ def test_the_ob1_profiles_are_no_longer_pending(root):
     """The three OB1 profiles exist in the compose file, so nothing may mark them pending."""
     manifest = stack.Manifest.load(REAL_MANIFEST)
     assert set(manifest.profiles("ob1")) == {"idea-refinery", "research", "wiki", "notebook", "pantry",
-                                              "intake"}
+                                              "intake", "notebook-app"}
     assert manifest.pending_profiles("ob1") == []
     # Only idea-refinery is `default`: `default` means "passed on every
     # invocation", and --headless has to be able to drop wiki and notebook.
@@ -789,7 +789,8 @@ PS1_PROBES = [
     "search: gateway http://127.0.0.1:8085/healthz",
     "search: ok - 4 engine(s) answering",
     "coder: little-coder daemon :8090/health",
-    "OB1: open_notebook API :5055/api/config",
+    # intake-gate-relay round 2: the open_notebook probe runs only with the ob1 `notebook-app`
+    # profile on (the app is retired on this host, operator 2026-10-31) - see ON_PROBE below.
     "OB1: ops door :8062/health",
     "OB1: research-curator http://127.0.0.1:8816/health",
     "OB1: openbrain-db accepting connections",
@@ -852,6 +853,9 @@ class FakeHost:
         # intake I5: the same two answers for openbrain-intake.
         self.intake_exists = broken.get("intake_exists", False)
         self.intake_ps_code = broken.get("intake_ps_code", 0)
+        # intake-gate-relay round 2: is an open_notebook container RUNNING (`docker ps`, not -a)?
+        self.on_running = broken.get("on_running", False)
+        self.on_ps_code = broken.get("on_ps_code", 0)
         self.calls: list[list[str]] = []
 
     def capture(self, cmd, cwd):
@@ -867,6 +871,8 @@ class FakeHost:
             if "name=^openbrain-pantry$" in cmd:
                 return stack.CommandResult(self.pantry_ps_code,
                                            "openbrain-pantry" if self.pantry_exists else "", "")
+            if "name=^open_notebook$" in cmd:
+                return stack.CommandResult(self.on_ps_code, "open_notebook" if self.on_running else "", "")
             if "name=^openbrain-intake$" in cmd:
                 return stack.CommandResult(self.intake_ps_code,
                                            "openbrain-intake" if self.intake_exists else "", "")
@@ -1015,6 +1021,10 @@ def test_pantry_probe_runs_anyway_when_docker_ps_cannot_be_read(root):
 # database reached through openbrain-intake-dbrelay), skipped on a host that never enabled it.
 
 INTAKE_PROBE = "OB1: openbrain-intake /healthz (in-container, worker + db + judge route ok)"
+# intake-gate-relay: the search gate's path to intake (search-gateway -> openbrain-intake-callrelay
+# on intake-callers -> openbrain-intake:8000), read from INSIDE the gateway, as the gate dials it.
+INTAKE_CALLER_PROBE = ("OB1: intake caller path search-gateway -> openbrain-intake-callrelay "
+                       "-> /healthz ok")
 
 
 def _enable_ob1_profile(root: Path, profile: str) -> None:
@@ -1037,7 +1047,8 @@ def test_intake_probe_runs_after_the_db_probe_once_the_profile_is_enabled(root):
     _enable_ob1_profile(root, "intake")
     code, out = sweep(host, root, planes=None)
     at = PS1_PROBES.index(MCPO_PROBE) + 1
-    assert [name for _s, name in probe_lines(out)] == PS1_PROBES[:at] + [INTAKE_PROBE] + PS1_PROBES[at:]
+    assert [name for _s, name in probe_lines(out)] == (PS1_PROBES[:at] + [INTAKE_PROBE, INTAKE_CALLER_PROBE]
+                                                        + PS1_PROBES[at:])
     assert any(c[:3] == ["docker", "exec", "openbrain-intake"] and "python" in c for c in host.calls)
     assert code == 0
 
@@ -1049,7 +1060,8 @@ def test_intake_and_pantry_probes_both_run_when_both_are_enabled(root):
     _enable_ob1_profile(root, "intake")
     code, out = sweep(host, root, planes=None)
     at = PS1_PROBES.index(MCPO_PROBE) + 1
-    assert [name for _s, name in probe_lines(out)] == (PS1_PROBES[:at] + [PANTRY_PROBE, INTAKE_PROBE]
+    assert [name for _s, name in probe_lines(out)] == (PS1_PROBES[:at] + [PANTRY_PROBE, INTAKE_PROBE,
+                                                                          INTAKE_CALLER_PROBE]
                                                         + PS1_PROBES[at:])
     assert code == 0
 
@@ -1061,6 +1073,35 @@ def test_intake_probe_fails_when_the_health_exec_fails(root):
     code, out = sweep(host, root, planes=None)
     assert ("FAIL", INTAKE_PROBE) in probe_lines(out)
     assert code == 1
+
+
+def test_intake_caller_probe_reads_healthz_through_the_call_relay_from_inside_the_gateway(root):
+    host = FakeHost()
+    sweep(host, root)
+    _enable_ob1_profile(root, "intake")
+    code, out = sweep(host, root, planes=None)
+    assert ("OK", INTAKE_CALLER_PROBE) in probe_lines(out)
+    calls = [c for c in host.calls if c[:3] == ["docker", "exec", "search-gateway"]]
+    # the name the gate's INTAKE_URL dials (search/docker-compose.yml)
+    assert calls and "http://openbrain-intake-callrelay:8000/healthz" in calls[-1][-1], calls
+    assert code == 0
+
+
+def test_intake_caller_probe_fails_when_the_gateway_cannot_reach_intake(root):
+    host = FakeHost(exec_codes={"search-gateway": 1})
+    sweep(host, root)
+    _enable_ob1_profile(root, "intake")
+    code, out = sweep(host, root, planes=None)
+    assert ("FAIL", INTAKE_CALLER_PROBE) in probe_lines(out)
+    assert ("OK", INTAKE_PROBE) in probe_lines(out), "intake itself is fine; only the caller path is down"
+    assert code == 1
+
+
+def test_intake_caller_probe_is_skipped_with_intake_off(root):
+    code, out = sweep(FakeHost(), root)
+    assert INTAKE_CALLER_PROBE not in [n for _s, n in probe_lines(out)]
+    assert not [c for c in FakeHost().calls if c[:3] == ["docker", "exec", "search-gateway"]]
+    assert code == 0
 
 
 def test_intake_probe_runs_anyway_on_a_leftover_container_and_says_so(root):
@@ -1075,6 +1116,44 @@ def test_intake_probe_runs_anyway_when_docker_ps_cannot_be_read(root):
     code, out = sweep(FakeHost(intake_ps_code=1), root)
     assert ("OK", INTAKE_PROBE) in probe_lines(out)
     assert "openbrain-intake is deployed - probing it anyway" in out
+
+
+# --- the open_notebook probe (intake-gate-relay round 2, D-1) ------------------------
+# The app is retired by the ob1 `notebook-app` profile being off (operator 2026-10-31: stopped
+# before intake writes bronze). Off and not running -> a [skip] line, never a FAIL; on -> probed;
+# off but a container RUNNING -> probed anyway, with a warning (a retired app that is up again is
+# exactly what the sweep must say).
+
+ON_PROBE = "OB1: open_notebook API :5055/api/config"
+
+
+def test_open_notebook_probe_is_skipped_when_the_app_is_retired(root):
+    code, out = sweep(FakeHost(http_status={"http://127.0.0.1:5055/api/config": 0}), root)
+    assert ON_PROBE not in [n for _s, n in probe_lines(out)]
+    assert "[skip] OB1: open_notebook API :5055/api/config (retired: the ob1 `notebook-app` profile is off)" in out
+    assert code == 0
+
+
+def test_open_notebook_probe_runs_first_in_ob1_when_the_switch_is_on(root):
+    host = FakeHost()
+    sweep(host, root)
+    _enable_ob1_profile(root, "notebook-app")
+    code, out = sweep(host, root, planes=None)
+    at = PS1_PROBES.index("OB1: ops door :8062/health")
+    assert [n for _s, n in probe_lines(out)] == PS1_PROBES[:at] + [ON_PROBE] + PS1_PROBES[at:]
+    assert code == 0
+
+
+def test_open_notebook_probe_runs_and_warns_when_a_retired_app_is_running(root):
+    code, out = sweep(FakeHost(on_running=True), root)
+    assert ("OK", ON_PROBE) in probe_lines(out)
+    assert "open_notebook is RUNNING but the `notebook-app` profile is off" in out
+
+
+def test_open_notebook_probe_runs_anyway_when_docker_ps_cannot_be_read(root):
+    code, out = sweep(FakeHost(on_ps_code=1), root)
+    assert ("OK", ON_PROBE) in probe_lines(out)
+    assert "could not be read" in out
 
 
 # --- the mcpo tool-count probe (mcpo-resilience, 2026-10-19) -----------------------
@@ -1274,7 +1353,9 @@ def test_one_dead_plane_costs_its_own_probes_and_not_the_rest_of_the_sweep(root)
     )
     code, out = sweep(host, root)
     rows = probe_lines(out)
-    assert len(rows) == 16          # sixteen with the serving-depth probe; fifteen since mm-retire; sixteen with mcpo-resilience
+    # sixteen with the serving-depth probe; fifteen since mm-retire; sixteen with mcpo-resilience;
+    # fifteen since intake-gate-relay round 2 (the open_notebook probe needs `notebook-app`)
+    assert len(rows) == 15
     assert [name for state, name in rows if state == "FAIL"] == [
         "frontend: OWUI http://127.0.0.1:3000/health",
         "frontend: 8 tailnet serve routes",
@@ -1282,8 +1363,8 @@ def test_one_dead_plane_costs_its_own_probes_and_not_the_rest_of_the_sweep(root)
         "REFUSED - the container 'openwebui' is not running.",
     ]
     assert code == 3
-    # The nine probes AFTER the frontend block still ran and still passed.
-    assert [state for state, _name in rows][-9:] == ["OK"] * 9
+    # The eight probes AFTER the frontend block still ran and still passed.
+    assert [state for state, _name in rows][-8:] == ["OK"] * 8
 
 
 def test_a_drift_count_above_zero_fails_and_the_number_is_in_the_label(root):
@@ -2208,7 +2289,10 @@ def test_the_shipped_manifest_accounts_for_the_three_ob1_profiles_as_opt_in():
     """
     manifest = stack.Manifest.load(REAL_MANIFEST)
     assert manifest.default_profiles("ob1") == ["idea-refinery"]
-    assert sorted(manifest.opt_in_profiles("ob1")) == ["intake", "notebook", "pantry", "research", "wiki"]
+    assert sorted(manifest.opt_in_profiles("ob1")) == ["intake", "notebook", "notebook-app", "pantry", "research",
+                                                       "wiki"]
+    # intake-gate-relay round 2: the retired app needs the data side it depends on
+    assert manifest.profile_requires("ob1", "notebook-app") == ["notebook"]
     assert manifest.pending_profiles("ob1") == []
     assert manifest.unaccounted_profiles("ob1") == []
     # and the requires edge sl-ob1-profiles added is still enforced
@@ -2233,7 +2317,7 @@ def test_the_tailnet_probe_skips_itself_where_the_profile_is_not_deployed(root):
     assert "  [skip] frontend: 8 tailnet serve routes (no tailscale profile in this deployment)" in out
     names = [name for _s, name in probe_lines(out)]
     assert "frontend: 8 tailnet serve routes" not in names
-    assert len(names) == 15          # the other fifteen all still ran
+    assert len(names) == 14          # the other fourteen all still ran (no open_notebook probe: retired)
     assert "ALL HEALTH PROBES PASSED" in out
 
 
@@ -5500,9 +5584,10 @@ def test_enable_still_writes_what_the_menu_says(root):
 def test_the_probe_catalogue_is_the_sweep_itself():
     catalogue = stack.probe_catalogue()
     # PS1_PROBES is the pinned all-green list on a host WITHOUT the pantry and intake
-    # profiles; the catalogue also lists those two probes (pantry-wire, intake I5), each of
-    # which runs only when its profile is on.
-    assert len(catalogue) == len(PS1_PROBES) + 2
+    # profiles; the catalogue also lists those profiles' probes (pantry-wire; intake I5 and
+    # intake-gate-relay's caller path), each of which runs only when its profile is on.
+    # intake-gate-relay round 2: + the open_notebook probe, which needs `notebook-app`.
+    assert len(catalogue) == len(PS1_PROBES) + 4
     order = list(stack.HealthSweep.PROBED_PLANES)
     planes = [plane for plane, _label, _needs in catalogue]
     assert planes == sorted(planes, key=order.index)
@@ -5512,9 +5597,11 @@ def test_the_probe_catalogue_is_the_sweep_itself():
         "frontend: owui/ manifest rows drifted from live webui.db: <count>": ["shell", "plugins"],
         "OB1: openbrain-pantry /health (in-container, db ok)": ["pantry"],
         "OB1: openbrain-intake /healthz (in-container, worker + db + judge route ok)": ["intake"],
+        INTAKE_CALLER_PROBE: ["intake"],
+        ON_PROBE: ["notebook_app"],
     }
     count = stack.DocsGenerator(stack.Manifest.load(REAL_MANIFEST), REPO_ROOT, DocsHost()).health_count()
-    assert count.startswith(f"{len(PS1_PROBES) + 2} probes with every plane enabled")
+    assert count.startswith(f"{len(PS1_PROBES) + 4} probes with every plane enabled")
     assert f"({len(PS1_PROBES) - 2} when none of those holds)" in count
 
 
@@ -7476,3 +7563,51 @@ def test_the_writing_path_refuses_a_failed_render_even_with_output(root, no_owui
     code = stack.main(["--root", str(root), "labels"], capture=capture, stdout=out, labels_request=owui)
     assert code == stack.EXIT_REFUSED, out.getvalue()
     assert "exited 1" in out.getvalue() and owui.calls == []
+
+
+# --- the open_notebook switch has a driver command (intake-gate-relay round 3, TG2-2 / D11) --------
+# `notebook-app` is a PRODUCT as well as a profile, so the command every doc and message names -
+# `stack.py enable notebook-app` - turns the app on, and `disable notebook-app` retires it again.
+
+
+def _ob1_line(out: str) -> str:
+    lines = [ln for ln in docker_lines(out) if "OB1/docker/docker-compose.yml" in ln]
+    assert lines, out
+    return lines[0]
+
+
+def test_enable_notebook_app_turns_the_app_on_and_disable_retires_it(root):
+    code, out, _r = run(root, "enable", "research")
+    assert code == 0, out
+    assert "notebook-app" not in state_of(root)["planes"]["ob1"]["profiles"]
+    code, out, _r = run(root, "enable", "notebook-app")
+    assert code == 0, out
+    profiles = state_of(root)["planes"]["ob1"]["profiles"]
+    assert "notebook-app" in profiles and "notebook" in profiles
+    code, out, _r = run(root, "up", "--dry-run")
+    assert code == 0, out
+    assert "--profile notebook-app" in _ob1_line(out)
+    code, out, _r = run(root, "disable", "notebook-app")
+    assert code == 0, out
+    profiles = state_of(root)["planes"]["ob1"]["profiles"]
+    assert "notebook-app" not in profiles
+    assert "notebook" in profiles, "the data side (surrealdb + backup) stays with the research product"
+    code, out, _r = run(root, "up", "--dry-run")
+    assert "--profile notebook-app" not in _ob1_line(out)
+
+
+def test_no_other_product_enables_the_retired_app():
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    for name in manifest.products:
+        if name == "notebook-app":
+            continue
+        prod = manifest.product(name)
+        for key in ("profiles", "surfaces"):
+            assert "notebook-app" not in (prod.get(key) or {}).get("ob1", []), (name, key)
+
+
+def test_every_message_naming_the_enable_command_names_a_real_product():
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    assert "notebook-app" in manifest.products
+    text = (REPO_ROOT / "scripts/stack/stack.py").read_text(encoding="utf-8")
+    assert "enable notebook-app" in text

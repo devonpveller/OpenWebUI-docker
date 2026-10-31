@@ -147,6 +147,7 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 | `openbrain-intake` | The content screen (security-hardening-2026-10 I5; code `OB1/integrations/intake`, fork-owned). Profile `intake`, OFF until the operator's gated deploy; no host port; internal `intake-net` ONLY, so no route out: it reaches exactly `openbrain-db:5432` and `llm-gateway:8080`, each through a fixed-target relay. Secrets are compose secrets (files) from `OB1/docker/intake-secrets/` (gitignored), mounted read-only at `/run/secrets` - never environment variables, which every `docker exec` probe inherits (intake-i5b R2-F1); non-secret tuning in `OB1/docker/intake.env` (not `.env`, which open_notebook loads). Why: every piece of external content is to pass one screen (CDR, invisible characters, rules, classifier, second opinion) before Open Brain stores it or a model reads it |
 | `openbrain-intake-dbrelay` | TCP relay from `intake-net` to `openbrain-db:5432` (profile `intake`). Why: gives the screen a database route without putting it on the internet-capable `obnet`, and without changing `openbrain-db` |
 | `openbrain-intake-llmrelay` | TCP relay from `intake-net` (where it is aliased `llama-cpp`) to `llm-gateway:8080` on `ai-stack_llm-net` (profile `intake`). Why: the second opinion's route to LiteLLM without putting the screen on `ai-stack_llm-net`, where every other caller (llm-gateway-db, openwebui, open-terminal, ...) would be reachable |
+| `openbrain-intake-callrelay` | TCP relay from `search_intake-callers` (the search plane's internal network; its only other member is `search-gateway`) to `openbrain-intake:8000` on `intake-net` (profile `intake`; intake-gate-relay). Why: the search gate can hand pages to the screen without the screen gaining a second network or the gateway joining `intake-net`; the gateway reaches that one port and nothing else |
 
 ### Scheduled slice
 
@@ -172,6 +173,8 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 | `surrealdb` | ON's local store (SurrealDB v2, digest-pinned; host 127.0.0.1:8003) |
 | `open_notebook` | ON UI + API (IKS fork — openbrain-db is the canonical store; host :8503/:5055; renders the digest→podcast audio) |
 | `open-notebook-backup` | SurrealDB logical export + notebook_data tar (output still `ai-stack/backups/open-notebook`) |
+
+`open_notebook` is alone in the ob1 profile `notebook-app` since intake-gate-relay round 2 (the operator retired the app 2026-10-31: stopped before intake writes bronze); off unless enabled, `restart: unless-stopped`. `surrealdb` and `open-notebook-backup` stay in `notebook` and keep running.
 
 ---
 
