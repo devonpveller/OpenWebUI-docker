@@ -6,13 +6,13 @@
 #
 # THE TARGET IS NEVER A DEFAULT. A capture names its disposable target, or says -Live:
 #
-#   # live, through Caddy's tailnet block (Caddy injects X-Brain-Key; READ-ONLY requests). A
+#   # live, through the wiki viewer's /workbench forwarder (it injects X-Brain-Key; READ-ONLY requests). A
 #   # deploy-time check made by the gated deploy, never a test:
 #   powershell -NoProfile -File scripts\checks\smoke-workbench-routers.ps1 -Live -Capture <dir-before>
 #   ... deploy ...
 #   powershell -NoProfile -File scripts\checks\smoke-workbench-routers.ps1 -Live -Capture <dir-after>
 #
-#   # against a disposable :wt container (the contract test runs do this), no Caddy:
+#   # against a disposable :wt container (the contract test runs do this), no viewer:
 #   ... -Capture <dir> -Target <test container> -Subnet <a.b.c.d/24..28> [-BaseUrl http://<test container>:8000] [-KeyEnv WORKBENCH_KEY]
 #
 #   # compare - IN-PROCESS, with ONE array argument (powershell -File would bind "-Compare a b" as
@@ -48,8 +48,9 @@
 # to <dir>\_target.txt (the container, its id, the address fetched, the fetch container).
 #
 # HOW A REQUEST IS MADE: fetch() in deno, in the script's fetch container (with -Live: `docker exec
-# openbrain-workbench`, which shares app-net with caddy, fetching http://caddy:8446 - the gated
-# deploy's path, unchanged). The requests are fixed below and NONE of them mutates anything: GETs,
+# openbrain-workbench`, which shares obnet with the viewer, fetching http://openbrain-wiki-viewer:8080 -
+# the browser's path since rw-identity-harden removed the portal Caddy's /workbench route; a POST carries
+# the viewer's own Origin, as the page's do). The requests are fixed below and NONE of them mutates anything: GETs,
 # plus two POSTs the router rejects before any side effect (import with no file and no url -> 400
 # before a job row exists, import.ts; note-commit with a traversal path -> 400 before git runs,
 # note-history.ts notePath). source-commit has no rejecting request (any POST commits dirty source
@@ -72,7 +73,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $LiveContainer = 'openbrain-workbench'
-$LiveBaseUrl = 'http://caddy:8446'
+$LiveBaseUrl = 'http://openbrain-wiki-viewer:8080'
 # The fetch image: denoland/deno:2.3.3 (OB1/docker/workbench/Dockerfile's FROM) by digest; never pulled.
 $FetchImage = 'denoland/deno@sha256:a651423f2bb5aff4f15e86bcbaf364db7b7df4aab52dbab8d6fef932d5d81da1'
 $FetchUser = '1993:1993'
@@ -447,6 +448,8 @@ const out = [];
 for (const c of cases) {
   const headers = {};
   if (key) headers['X-Brain-Key'] = key;
+  const origin = Deno.env.get('SMOKE_ORIGIN') || '';
+  if (origin && c.m !== 'GET' && c.m !== 'HEAD') headers['Origin'] = origin;
   const init = { method: c.m, headers, redirect: 'manual' };
   if (c.form) init.body = new FormData();
   const r = await fetch(base + c.p, init);
@@ -464,9 +467,9 @@ function ConvertFrom-FetchOutput([string]$out) {
   if (-not $line) { throw "the fetch printed no response list: $(First-Line $out)" }
   return ($line | ConvertFrom-Json)
 }
-# -Live: the gated deploy's path (docker exec in the live workbench, through Caddy).
+# -Live: the browser's path (docker exec in the live workbench, through the viewer's forwarder).
 function Get-LiveResponses {
-  $r = Invoke-DockerCli @('exec', '-e', "SMOKE_CASES=$(Get-CasesB64)", '-e', "SMOKE_BASE=$LiveBaseUrl", '-e', "SMOKE_KEY_ENV=$KeyEnv", $LiveContainer, 'deno', 'eval', $FetchCode) $ExecTimeoutSec
+  $r = Invoke-DockerCli @('exec', '-e', "SMOKE_CASES=$(Get-CasesB64)", '-e', "SMOKE_BASE=$LiveBaseUrl", '-e', "SMOKE_ORIGIN=$LiveBaseUrl", '-e', "SMOKE_KEY_ENV=$KeyEnv", $LiveContainer, 'deno', 'eval', $FetchCode) $ExecTimeoutSec
   if (-not $r.ok) { throw "docker exec $LiveContainer failed: $(First-Line $r.err)" }
   return (ConvertFrom-FetchOutput $r.out)
 }

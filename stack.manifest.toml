@@ -571,12 +571,13 @@ opt_in      = true
 #   which is the pair of numbers standing here now (re-derived 2026-10-16, edge-notify-subnet).
 # requires frontend: portal/docker-compose.yml:646-647 - caddy joins
 #   ai-stack_app-net "to reach openwebui:8080 and open_notebook", and
-#   config/caddy/Caddyfile:197 proxies openwebui:8080. Without the frontend the
+#   config/caddy/Caddyfile:190 proxies openwebui:8080. Without the frontend the
 #   portal's primary vhost 502s.
-# optional ob1: config/caddy/Caddyfile:143 (openbrain-wiki-viewer:8080), :136
-#   (openbrain-workbench:8000), :242/:250 (open_notebook) - those vhosts 502
-#   while the rest of the portal serves.
-# optional inference: config/caddy/Caddyfile:295 proxies llm-gateway-ui:8080,
+# optional ob1: config/caddy/Caddyfile:131 (openbrain-wiki-viewer:8080),
+#   :235/:243 (open_notebook) - those vhosts 502 while the rest of the portal
+#   serves. (No workbench route since rw-identity-harden: the viewer forwards
+#   /workbench/* itself.)
+# optional inference: config/caddy/Caddyfile:287 proxies llm-gateway-ui:8080,
 #   which joins ai-stack_app-net for exactly that (inference/compose/gateway.yml:173,
 #   networks at :182-184).
 compose  = "portal/docker-compose.yml"
