@@ -6,7 +6,8 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
-    "httpx[socks]>=0.27",
+    # [http2]: the DoH resolver must speak HTTP/2 (Mullvad's DoH is HTTP/2-only; egress/resolve.py)
+    "httpx[socks,http2]>=0.27",
     # the gate's DoH resolver (egress/resolve.py): DNS wire format, RFC 8484
     "dnspython>=2.6",
     "redis>=5.2",
@@ -20,6 +21,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    # tests/h2_doh.py makes a throwaway CA for the HTTP/2-only DoH stand-in; pyyaml reads the
+    # plane's settings.yml / compose in tests/test_searxng_no_redis.py and the lab runner
+    "cryptography>=42",
+    "pyyaml>=6",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "respx>=0.21",

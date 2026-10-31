@@ -49,8 +49,11 @@ outgoing:
     all://:
       - http://vpn:8888
 
-redis:
-  url: redis://redis:6379/0
+# NO `redis:` block (search-post-gate, 2026-10-31). SearXNG's valkey client takes its password from
+# that URL only, search-redis has required a password since the gate (search/secrets/redis/redis.conf),
+# and a URL without one made every request to / answer 500 (valkey AuthenticationError). Nothing here
+# needs it: the limiter is off (above), so it was never used for rate limiting; the gateway keeps its
+# own cache in redis db 1.
 
 # Engine policy (REMEASURED 2026-09-11 - ../documentation-plans-ai-stack/journal/notes/search-engine-alternatives-2026-09-11.md).
 #

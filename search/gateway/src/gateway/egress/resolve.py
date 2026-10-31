@@ -5,6 +5,11 @@ THROUGH the egress proxy, so no lookup leaves the host outside the tunnel (the r
 did not resolve at all in proxy mode - and so could not pin, leaving a name that resolves to a
 private address to the proxy's own judgement). The DoH endpoint is fixed configuration, never a
 caller's input.
+The DoH client speaks HTTP/2 AND HTTP/1.1 (ALPN offers both): Mullvad's DoH endpoints are
+HTTP/2-only and drop an HTTP/1.1 client without an answer (measured 2026-10-31, harness item
+search-post-gate), which refused every fetch; Cloudflare and Quad9 answer either. HTTP/2 needs the
+``h2`` package (pyproject: ``httpx[http2]``); without it httpx refuses to build the client, so the
+gate fails loudly at start instead of refusing every name.
 DIRECT MODE (GATE_FETCH_PROXY_URL=""): the system resolver.
 """
 
@@ -37,6 +42,7 @@ class DohResolver:
         self._url = doh_url
         self._client = httpx.AsyncClient(
             proxy=proxy_url or None,
+            http2=True,
             trust_env=False,
             follow_redirects=False,
             timeout=httpx.Timeout(timeout_s),
