@@ -82,8 +82,12 @@ services:
     # (gitignored; a one-line file: `requirepass <long random>`), mounted as a directory so a
     # missing file does not stop the plane: then redis runs WITHOUT a password, as before the gate,
     # and says so on stderr at every start. The deploy step creates the file (search/README.md).
-    # The gateway reads the same file (REDIS_PASSWORD_FILE). searxng's SEARXNG_REDIS_URL is not
-    # read by the pinned image (it uses valkey settings; audit A11), so nothing else connects.
+    # The gateway reads the same file (REDIS_PASSWORD_FILE). searxng does not connect to it. The
+    # pinned image takes its valkey URL from `valkey.url` or the deprecated `redis.url`, each
+    # overridable by SEARXNG_VALKEY_URL / SEARXNG_REDIS_URL (the env var wins over settings.yml); this
+    # plane used to set SEARXNG_REDIS_URL (without the password, so SearXNG answered 500 once the
+    # password existed) and a settings.yml `redis:` block. Both are gone (search-post-gate); do not
+    # set any of the four.
     command:
       - sh
       - -c
@@ -135,7 +139,6 @@ services:
         condition: service_healthy
     environment:
       - SEARXNG_SECRET=${SEARXNG_SECRET_KEY}
-      - SEARXNG_REDIS_URL=redis://redis:6379/0
     volumes:
       - ./searxng:/etc/searxng:rw
     restart: unless-stopped

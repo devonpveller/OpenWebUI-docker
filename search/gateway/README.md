@@ -100,7 +100,8 @@ resolution, every hop and the whole body:
    zone ids, and anything not `is_global`).
 2. A name is RESOLVED and every answer judged; one is PINNED. In proxy mode (the
    default, `GATE_FETCH_PROXY_URL=http://vpn:8888`) resolution is DNS-over-HTTPS
-   (`GATE_DOH_URL`) sent THROUGH the proxy, so nothing leaks outside the tunnel;
+   (`GATE_DOH_URL`, default Mullvad's `dns.mullvad.net`, an HTTP/2-only endpoint: the client
+   offers HTTP/2 and HTTP/1.1, `httpx[http2]`) sent THROUGH the proxy, so nothing leaks outside the tunnel;
    `GATE_FETCH_PROXY_URL=""` is direct mode (system resolver), chosen explicitly only.
 3. The connection goes to the pinned IP only (`transport.PinnedBackend` refuses any
    other address): `CONNECT <ip>:<port>` through the proxy, the name kept for the Host
