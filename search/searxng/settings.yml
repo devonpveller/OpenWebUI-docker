@@ -49,8 +49,13 @@ outgoing:
     all://:
       - http://vpn:8888
 
-redis:
-  url: redis://redis:6379/0
+# NO `redis:` / `valkey:` block (search-post-gate, 2026-10-31). The pinned image takes its valkey URL
+# from `valkey.url` or the deprecated `redis.url`, each overridable by SEARXNG_VALKEY_URL /
+# SEARXNG_REDIS_URL (the env var wins over this file); this plane sets none of the four. The client
+# takes its password only from that URL, search-redis has required a password since the gate
+# (search/secrets/redis/redis.conf), and a URL without one made every request to / answer 500
+# (valkey AuthenticationError). Nothing here needs it: the limiter is off (above); the gateway keeps
+# its own cache in redis db 1.
 
 # Engine policy (REMEASURED 2026-09-11 - ../documentation-plans-ai-stack/journal/notes/search-engine-alternatives-2026-09-11.md).
 #

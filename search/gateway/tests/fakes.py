@@ -79,8 +79,9 @@ class _Quiet(BaseHTTPRequestHandler):
 
 
 class _Server:
-    def __init__(self, handler: type[BaseHTTPRequestHandler]) -> None:
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    def __init__(self, handler: type[BaseHTTPRequestHandler], host: str = "127.0.0.1",
+                 port: int = 0) -> None:
+        self.httpd = ThreadingHTTPServer((host, port), handler)
         self.httpd.daemon_threads = True
         self.httpd.owner = self  # type: ignore[attr-defined]
         self.port = self.httpd.server_address[1]
@@ -222,6 +223,9 @@ class FakeInternet:
         self.connects: list[str] = []
         self.gets: list[str] = []
         self.doh_queries: list[str] = []
+        # "host:port" -> (addr, port): a CONNECT to it is piped to that TLS server instead of being
+        # served as plain HTTP (the h2-only DoH stand-in, tests/h2_doh.py)
+        self.tunnels: dict[str, tuple[str, int]] = {}
         self._sock = socket.socket()
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind((host, port))
@@ -273,6 +277,9 @@ class FakeInternet:
             if method == "CONNECT":
                 self.connects.append(target)
                 print(f"CONNECT {target}", flush=True)
+                if target in self.tunnels:
+                    self._tunnel(c, self.tunnels[target])
+                    return
                 c.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
                 inner = self._read_head(c)
                 if inner is None:
@@ -301,6 +308,31 @@ class FakeInternet:
                 c.close()
             except OSError:
                 pass
+
+    @staticmethod
+    def _tunnel(c: socket.socket, upstream: tuple[str, int]) -> None:
+        """200, then bytes both ways until either side closes (a real CONNECT)."""
+        up = socket.create_connection(upstream, timeout=10)
+        c.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+
+        def pump(src: socket.socket, dst: socket.socket) -> None:
+            try:
+                while (piece := src.recv(65536)):
+                    dst.sendall(piece)
+            except OSError:
+                pass
+            finally:
+                for s in (src, dst):
+                    try:
+                        s.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+
+        t = threading.Thread(target=pump, args=(up, c), daemon=True)
+        t.start()
+        pump(c, up)
+        t.join(5)
+        up.close()
 
     @staticmethod
     def _respond(c: socket.socket, path: str) -> None:
@@ -371,8 +403,8 @@ class _IntakeHandler(_Quiet):
 
 
 class FakeIntake(_Server):
-    def __init__(self, key: str) -> None:
-        super().__init__(_IntakeHandler)
+    def __init__(self, key: str, host: str = "127.0.0.1", port: int = 0) -> None:
+        super().__init__(_IntakeHandler, host, port)
         self.key = key
         self.envelopes: list[dict[str, Any]] = []
         self.seq = 0
