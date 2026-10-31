@@ -151,6 +151,13 @@
         "host_health": "http://127.0.0.1:8082/health"
       },
       {
+        "container": "kokoro-tts-upstream",
+        "profile": "local",
+        "project": "inference",
+        "critical": false,
+        "note": "research-workbench P7a: Kokoro-FastAPI speech on the CPU (llm-backend-net only, no host port; reached as the LiteLLM route local-tts; liveness via docker exec curl localhost:8880/health). Stateless: no volume, nothing to back up."
+      },
+      {
         "container": "llm-queue",
         "profile": "local",
         "project": "inference",
@@ -361,7 +368,7 @@
         "container": "openbrain-podcast",
         "project": "open-brain",
         "critical": false,
-        "note": "chain tail. Its enrichment and audio steps reach PROFILED services (RESEARCH_URL -> openbrain-research, ON_BASE -> open_notebook), so a digest chain run without --profile research --profile notebook produces no episode."
+        "note": "chain tail. Its enrichment step reaches a PROFILED service (RESEARCH_URL -> openbrain-research), so a digest chain run without --profile research produces no episode. Audio (P7a): speech through the gateway (local-tts, needs the inference `local` profile for kokoro-tts-upstream) and the archive destination from openbrain-workbench (research profile); it no longer calls open_notebook."
       },
       {
         "container": "openbrain-pantry",

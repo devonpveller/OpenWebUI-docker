@@ -166,6 +166,7 @@ $Script:InferenceCompose = "inference\docker-compose.yml"
 $Script:AnchorCompose = "docker-compose.yml"
 $Script:InferenceServices = @(
     "llama-cpp-upstream", "llama-cpp-embed-upstream", "llm-queue",
+    "kokoro-tts-upstream",   # research-workbench P7a: speech on the CPU, `local` profile, behind llm-gateway (route local-tts); stateless
     "llm-gateway-db", "llm-gateway", "llm-gateway-ui",
     "llm-gateway-backup", "lm-models-backup"
 )
@@ -215,7 +216,7 @@ $Script:OB1Services = @(
     "openbrain-cron", "openbrain-gmail-pull", "openbrain-gmail-prune", "openbrain-digest",
     "openbrain-podcast",
     "openbrain-db-backup", "openbrain-wiki-backup",   # backup sidecars (moved from ai-stack 2026-08-21; output still lands in ai-stack/backups/)
-    "surrealdb", "open_notebook", "open-notebook-backup",   # Open Notebook trio (moved from ai-stack 2026-08-21, K.5b -- ON is OB1-tethered; NOT retiring)
+    "surrealdb", "open_notebook", "open-notebook-backup",   # Open Notebook trio (moved from ai-stack 2026-08-21, K.5b). QUIESCED pending P7b (research-workbench P7a: captured; no writes; removal in P7b)
     "openbrain-idea-refinery"   # Idea Refinery drain (profile-gated 'idea-refinery'; started via the profile below)
 )
 # OPTIONAL: counted and started only when the operator enabled the profile

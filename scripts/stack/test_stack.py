@@ -783,6 +783,8 @@ PS1_PROBES = [
     # sl-recovery-backups (2026-09-21) added the sixteenth: liveliness answers
     # 200 with an EMPTY model store, and did for thirty hours.
     "inference: serving depth: qwen36-27b resident on llama-cpp-upstream (/running)",
+    # rw-p7a-tts (2026-10-30): the speech backend behind the local-tts route.
+    "inference: kokoro-tts-upstream /health (docker exec)",
     "frontend: OWUI http://127.0.0.1:3000/health",
     "frontend: 8 tailnet serve routes",
     "frontend: owui/ manifest rows drifted from live webui.db: 0",
@@ -1354,8 +1356,9 @@ def test_one_dead_plane_costs_its_own_probes_and_not_the_rest_of_the_sweep(root)
     code, out = sweep(host, root)
     rows = probe_lines(out)
     # sixteen with the serving-depth probe; fifteen since mm-retire; sixteen with mcpo-resilience;
-    # fifteen since intake-gate-relay round 2 (the open_notebook probe needs `notebook-app`)
-    assert len(rows) == 15
+    # fifteen since intake-gate-relay round 2 (the open_notebook probe needs `notebook-app`);
+    # sixteen with rw-p7a-tts's speech probe
+    assert len(rows) == 16
     assert [name for state, name in rows if state == "FAIL"] == [
         "frontend: OWUI http://127.0.0.1:3000/health",
         "frontend: 8 tailnet serve routes",
@@ -2317,7 +2320,7 @@ def test_the_tailnet_probe_skips_itself_where_the_profile_is_not_deployed(root):
     assert "  [skip] frontend: 8 tailnet serve routes (no tailscale profile in this deployment)" in out
     names = [name for _s, name in probe_lines(out)]
     assert "frontend: 8 tailnet serve routes" not in names
-    assert len(names) == 14          # the other fourteen all still ran (no open_notebook probe: retired)
+    assert len(names) == 15          # the other fifteen all still ran (no open_notebook probe: retired; rw-p7a-tts added the speech probe)
     assert "ALL HEALTH PROBES PASSED" in out
 
 
@@ -6802,7 +6805,8 @@ def test_health_with_local_from_the_env_file_still_probes(root):
 def test_the_probe_catalogue_is_unchanged_by_the_local_answer():
     """The docs' probe list and count are read from HealthSweep.run(); F4 keeps one line."""
     labels = [label for plane, label, _needs in stack.probe_catalogue() if plane == "inference"]
-    assert labels == ["inference: llm-gateway liveliness", "inference: serving depth: <what it found>"]
+    assert labels == ["inference: llm-gateway liveliness", "inference: serving depth: <what it found>",
+                      "inference: kokoro-tts-upstream /health (docker exec)"]
 
 
 # --------------------------------------------------------------------------
