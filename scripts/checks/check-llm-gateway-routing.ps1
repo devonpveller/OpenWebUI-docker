@@ -57,6 +57,11 @@ $badPattern = '(?i)(_HOST|_BASE|API_BASE|BASE_URL|api_base|CHAT_API_BASE|OPENAI[
 # OTHER *-upstream base/host still flags, so the queue's other files stay scanned.
 $queueUpstreamAllow = '(?i)LLM_QUEUE(_EMBED)?_UPSTREAM_BASE_URL'
 
+# (rw-p7a-tts round 2) The ONE sanctioned kokoro-tts-upstream reference: the gateway's own speech
+# route, exactly this line in exactly this fragment. The file is NOT path-allowed, so any OTHER
+# *-upstream line planted in it (a llama-cpp-upstream api_base, a second kokoro line) still flags.
+$speechRouteFile = '*\inference\config\litellm\model_list\local.tts.yaml'
+$speechRouteLine = 'api_base: http://kokoro-tts-upstream:8880/v1'
 # Legit direct-upstream references (NOT bypasses): the gateway's own forwarding
 # config, recovery/health probe scripts, host monitor modules, docs, this guard.
 #
@@ -84,9 +89,6 @@ $allowPathLike = @(
     #  allowed; the model_list fragments under inference\config\litellm\ are
     #  deliberately NOT listed, so a bypass planted in a fragment still flags.)
     '*\inference\config\litellm.config.yaml'
-    # (P7a, 2026-10-30) the speech route fragment: the gateway's own forwarding to
-    #  kokoro-tts-upstream. Only this ONE fragment; every other fragment still flags.
-    '*\inference\config\litellm\model_list\local.tts.yaml'
     # (paths refreshed 2026-08-21: G.2 moved these under scripts\recovery\
     #  and scripts\checks\; the .bat twin was archived at K.8)
     '*\scripts\recovery\emergency-recovery.ps1'
@@ -222,6 +224,7 @@ foreach ($f in $files) {
         if ($trimmed.StartsWith('#') -or $trimmed.StartsWith('//')) { continue }   # comments
         # Sanctioned: the llm-queue admission controller's forward target (section 3.2).
         if ($line -match $queueUpstreamAllow) { continue }
+        if ($line.Trim() -ceq $speechRouteLine -and (Get-RootRelativePath $f) -like $speechRouteFile) { continue }
         if ($line -match $badPattern) {
             $rel = $f.Substring($Root.Length).TrimStart('\')
             $violations.Add([pscustomobject]@{ File = $rel; Line = $n; Text = $line.Trim() })
