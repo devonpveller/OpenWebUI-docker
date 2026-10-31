@@ -113,7 +113,6 @@ Keys, in `portal/.env`:
 | `PORTAL_ALERT_TELEGRAM_BOT_TOKEN`, `PORTAL_ALERT_TELEGRAM_CHAT_ID` | Not checked by any script. Blank: Telegram is off (`portal-status.ps1` shows `channel telegram off`). Wrong: each send fails, logged per channel; after 3 in a row the host watchdog pages. |
 | `PORTAL_ALERT_MM_URL`, `PORTAL_ALERT_MM_TOKEN`, `PORTAL_ALERT_MM_CHANNEL_ID`, `PORTAL_ALERT_MM_MENTION` | As above, for Mattermost. `PORTAL_ALERT_MM_MENTION` is optional. |
 | `DIGEST_TO`, `DIGEST_FROM` | Not checked by any script. Blank `DIGEST_TO`: email is off (it used to crash-loop the alerter; it no longer does). |
-| `WORKBENCH_KEY` | Not checked. Caddy sends it to Open Brain's workbench, and it must equal Open Brain's `MCP_ACCESS_KEY`; blank means every `/workbench` call is refused. |
 
 `portal-on.ps1` reads its list of required keys from `[planes.portal] keys` in
 the manifest, so the two cannot drift.
