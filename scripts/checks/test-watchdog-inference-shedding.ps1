@@ -5,7 +5,7 @@
 # watchdog turns it into ONE page per episode plus an all-clear, through its
 # own Send-LoopAlert / Resolve-LoopAlert path. This test loads the watchdog's
 # FUNCTIONS only (never its main block) into a sandbox whose PROJECT_DIR is a
-# temp directory, exactly as test-watchdog-portal-alerts.ps1 does:
+# temp directory, exactly as the archived test-watchdog-portal-alerts.ps1 did:
 #   - Get-LlmQueueShedding (the docker exec read) is REDEFINED to return the
 #     case's state object, so no docker call is made;
 #   - Send-TelegramAlert runs <sandbox>\.venv\Scripts\python.exe, a compiled

@@ -74,7 +74,7 @@
 # editing .env.
 # TWO callers do NOT depend on the value, because they pass the profiles
 # themselves: `scripts/backup/restore-from-snapshot.ps1` (its frontend and
-# tailscale entries, as the portal and agent-org entries there already did) and
+# tailscale entries, as its agent-org entries there already did) and
 # the frontend recipe in `documentation/runbooks/restore-from-snapshot.md`.
 # Both were given `--profile gpu --profile tailscale` here, and both exit 0
 # against a profile-less env (measured).
@@ -107,8 +107,9 @@
 # NEVER restart openwebui alone — order is openwebui → (healthy) → tailscale;
 # compose's depends_on encodes it inside this project.
 # Seams (all external): ai-stack_default (reach search `gateway`, host UX),
-# llm-net (llama-cpp aliases), app-net (portal caddy → openwebui; the QUARTZ
-# tailnet serve route reaches caddy:8446 through it).
+# llm-net (llama-cpp aliases), app-net (the tailnet serve routes reach
+# openbrain-wiki-viewer, open_notebook and llm-gateway-ui through it; tailscale
+# shares openwebui's netns, so openwebui must be on it).
 #
 # EXTENSION FIELDS (stack-layers sl-compose-anchors, 2026-09-19). The blocks the
 # five services below used to repeat verbatim are declared ONCE as YAML
@@ -241,7 +242,7 @@ services:
     networks:
       - default
       - llm-net
-      - app-net               # plan §7.4 — portal Caddy reaches openwebui:8080 here
+      - app-net               # tailscale (this netns) reaches the wiki viewer, Open Notebook and llm-gateway-ui here
       # Project-local net, added 2026-09-19 with the profiles: it is the ONE
       # network openwebui-backup can share with BOTH openwebui definitions
       # (its script probes `nc -z openwebui 8080`, and its entrypoint `apk add`s
@@ -405,19 +406,19 @@ services:
       - OPEN_NOTEBOOK_TS_PORT=${OPEN_NOTEBOOK_TS_PORT:-8443}
       - OPEN_NOTEBOOK_API_PORT=${OPEN_NOTEBOOK_API_PORT:-5055}
       - OPEN_NOTEBOOK_API_TS_PORT=${OPEN_NOTEBOOK_API_TS_PORT:-5055}
-      # OB1 Quartz wiki — still pointed at the portal Caddy's tailnet listener
-      # (caddy:8446 → the shared (wiki_app) snippet). The portal (Caddy/Authelia)
-      # is RETIRED (operator 2026-10-31): since rw-identity-harden that snippet
-      # has no /workbench/* route, so /workbench through this path reaches the
-      # viewer, whose forwarder answers 421 for the caddy Host - accepted. The
-      # wiki and its workspace are reached through the viewer directly (its own
-      # /workbench forwarder is the only door); this pointing can be removed later.
-      # caddy is on ai-stack_app-net, which openwebui — whose netns this
-      # container shares — is also on, so caddy:8446 resolves here.
-      # ORDER: caddy must be up before this serve configures at boot; if it isn't,
-      # entrypoint.sh's monitor loop does deferred setup once caddy appears.
-      - QUARTZ_HOST=${QUARTZ_HOST:-caddy}
-      - QUARTZ_PORT=${QUARTZ_PORT:-8446}
+      # OB1 Quartz wiki: the tailnet :8444 route goes straight to the viewer
+      # (edge-b5-portal-retire, 2026-11-01; it went through the retired portal's
+      # caddy:8446 before). openbrain-wiki-viewer is on ai-stack_app-net, which
+      # openwebui - whose netns this container shares - is also on, so
+      # openbrain-wiki-viewer:8080 resolves here. The viewer's own /workbench
+      # forwarder adds the workbench key server-side (rw-identity-harden); it
+      # answers 421 unless the request's Host is one it answers for, so for
+      # /workbench over the tailnet put the tailnet host name in
+      # WIKI_VIEWER_ALLOWED_HOSTS (OB1/docker/.env). Reading needs nothing.
+      # ORDER: the viewer (ob1 plane) starts after this project; entrypoint.sh's
+      # monitor loop does the deferred setup once it answers.
+      - QUARTZ_HOST=${QUARTZ_HOST:-openbrain-wiki-viewer}
+      - QUARTZ_PORT=${QUARTZ_PORT:-8080}
       - QUARTZ_ENABLED=${QUARTZ_ENABLED:-true}
       - QUARTZ_TS_PORT=${QUARTZ_TS_PORT:-8444}
     volumes:
@@ -547,7 +548,7 @@ volumes:
 
 networks:
   # The three ai-stack_* seams are anchor-owned and attached externally so every
-  # DNS name (openwebui for portal caddy; gateway/vpn from here; llama-cpp
+  # DNS name (the tailnet routes' app-net backends; gateway/vpn from here; llama-cpp
   # aliases) keeps resolving unchanged. They are declared here but only the
   # `gpu` definition uses them, and compose does not require an UNUSED external
   # network to exist (verified against compose v5.3, 2026-09-19) — which is what

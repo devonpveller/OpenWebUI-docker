@@ -23,7 +23,7 @@
 #   G  the exclusion rule holds for THIS repo: every git-tracked file under backup/
 #      is top-level;
 #   J  backup-to-nas.ps1 RUN END TO END in a child PowerShell, inside a throw-away
-#      project tree, with net.exe / Resolve-DnsName / the alerter stubbed and the
+#      project tree, with net.exe / Resolve-DnsName / msg.exe stubbed and the
 #      NAS share \\192.0.2.77\backups (TEST-NET-1: not routable) MAPPED onto a local
 #      directory: robocopy.exe and the file cmdlets the lib uses (Get-ChildItem,
 #      Get-Item, Test-Path, Get-FileHash, Copy-Item, Move-Item, New-Item) see the
@@ -728,8 +728,10 @@ try {
   (Get-Item -LiteralPath "$eproj\backup\models\hidsub").Attributes = 'Hidden, Directory'
   $fakePw = 'cfnas-pw-NOT-REAL-4q7z'
   [System.IO.File]::WriteAllLines("$eproj\.env", [string[]]@('NAS_BACKUP_USER=cfnas-user', "NAS_BACKUP_PASSWORD=$fakePw"))
-  [System.IO.File]::WriteAllText("$eproj\scripts\lib\portal-alerter-client.ps1",
-    'function Send-PortalAlert { param($Severity, $Event, $LogLine) Add-Content -LiteralPath $env:CFNAS_TRACE -Value "ALERT|$Event|$LogLine"; return @{ Ok = $true; Reason = ''stub'' } }')
+  # (The portal's alerter-client stub that stood here left with the portal plane, 2026-11-01:
+  # backup-to-nas.ps1 alerts Mattermost + Telegram only. This tree has neither notifier
+  # script, so both fail and the job raises its last-resort msg.exe - the stub below traces
+  # that call WITH its text, and the J checks read the alert from it.)
   $harness = Join-Path $e2e 'harness.ps1'
   [System.IO.File]::WriteAllText($harness, @'
 param([string]$Target)
@@ -757,7 +759,7 @@ function global:Assert-CfDest([string]$p) {
   throw "stub: refusing a write outside the stand-in: $p"
 }
 function global:net.exe { Add-Content -LiteralPath $env:CFNAS_TRACE -Value ('NET|' + ($args -join ' ')); $global:LASTEXITCODE = [int]$env:CFNAS_RC_NET; 'The command completed successfully.' }
-function global:msg.exe { Add-Content -LiteralPath $env:CFNAS_TRACE -Value 'MSGEXE' }
+function global:msg.exe { Add-Content -LiteralPath $env:CFNAS_TRACE -Value ('MSGEXE|' + ($args -join ' ')) }
 function global:Resolve-DnsName { param($Name, $Type, $ErrorAction) [pscustomobject]@{ IPAddress = '192.0.2.77' } }
 function global:robocopy.exe {
   $k = if ($args -contains '/MIR') { 'MIR' } else { 'OTHER' }
@@ -898,9 +900,9 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
   Add-Content -LiteralPath $jm -Value 'changed' -Encoding ascii
   $r = RunStubbed $job "NasUncRoot=$unc"
   Check 'J3 a complete NAS copy that differs from local: exit 2, NO completion marker, NAS untouched' (($r.Code -eq 2) -and ($r.Log -notmatch '=== NAS sync complete ===') -and (SameTree $arcState (TreeHashes $nasArc))) "code=$($r.Code)"
-  Check 'J3b ... [ERROR] MISMATCH lines with the Trust verdict, ONE alert naming BOTH files, MISMATCH=2 in the summary, the integrity check still ran, session torn down' (($r.Log -match '\[ERROR\] archive: MISMATCH orphan-volumes-2026-09-13\\ai-stack_llm-gateway-db-data\.tar .*NOTHING was overwritten\. Trust: UNKNOWN') -and (@($r.Trace | Where-Object { $_ -like 'ALERT|nas-backup.failure|*archive pass: 2 file*' -and $_ -like '*ai-stack_llm-gateway-db-data.tar*' -and $_ -like '*models-export.json*' }).Count -eq 1) -and ($r.Log -match 'archive pass summary: .*MISMATCH=2') -and ($r.Log -match 'verifying a sample') -and ($r.Trace[-1] -like 'NET|use*/delete*'))
+  Check 'J3b ... [ERROR] MISMATCH lines with the Trust verdict, ONE alert naming BOTH files, MISMATCH=2 in the summary, the integrity check still ran, session torn down' (($r.Log -match '\[ERROR\] archive: MISMATCH orphan-volumes-2026-09-13\\ai-stack_llm-gateway-db-data\.tar .*NOTHING was overwritten\. Trust: UNKNOWN') -and (@($r.Trace | Where-Object { $_ -like 'MSGEXE|*archive pass: 2 file*' -and $_ -like '*ai-stack_llm-gateway-db-data.tar*' -and $_ -like '*models-export.json*' }).Count -eq 1) -and ($r.Log -match 'archive pass summary: .*MISMATCH=2') -and ($r.Log -match 'verifying a sample') -and ($r.Trace[-1] -like 'NET|use*/delete*'))
   $r = RunStubbed $job "NasUncRoot=$unc|DryRun"
-  Check 'J4 dry run with that mismatch: exit 2, no DRY RUN complete, alert, nothing written' (($r.Code -eq 2) -and ($r.Log -notmatch 'DRY RUN\) complete') -and (@($r.Trace | Where-Object { $_ -like 'ALERT|*' }).Count -eq 1) -and -not ($r.Trace | Where-Object { $_ -like 'COPY|*' -or $_ -like 'MOVE|*' })) "code=$($r.Code)"
+  Check 'J4 dry run with that mismatch: exit 2, no DRY RUN complete, alert, nothing written' (($r.Code -eq 2) -and ($r.Log -notmatch 'DRY RUN\) complete') -and (@($r.Trace | Where-Object { $_ -like 'MSGEXE|*' }).Count -eq 1) -and -not ($r.Trace | Where-Object { $_ -like 'COPY|*' -or $_ -like 'MOVE|*' })) "code=$($r.Code)"
   Restore-Local $svj; Restore-Local $svjm
 
   Blob "$eproj\backup\models\later.json" 700
@@ -909,24 +911,24 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
   Check 'J5 dry run ok: exit 0, "(DRY RUN) complete", WOULD-COPY logged, mirror carries /L, the share unchanged' (($r.Code -eq 0) -and ($r.Log -match '=== NAS sync \(DRY RUN\) complete ===') -and ($r.Log -match 'archive: WOULD-COPY models\\later\.json') -and (@($r.Trace | Where-Object { $_ -like 'ROBO-MIR*' -and $_ -match ' /L ' }).Count -eq 1) -and (SameTree $shareBefore (TreeHashes $share))) "code=$($r.Code)"
 
   $r = RunStubbed $job "NasUncRoot=$unc" @{ CFNAS_FAIL_COPY = '1' }
-  Check 'J6 the share refuses the write: exit 2, no marker, FAIL-COPY [ERROR], alert, final name never created' (($r.Code -eq 2) -and ($r.Log -notmatch '=== NAS sync complete ===') -and ($r.Log -match '\[ERROR\] archive: FAIL-COPY models\\later\.json') -and (@($r.Trace | Where-Object { $_ -like 'ALERT|*' }).Count -eq 1) -and -not (Test-Path -LiteralPath "$nasArc\models\later.json")) "code=$($r.Code)"
+  Check 'J6 the share refuses the write: exit 2, no marker, FAIL-COPY [ERROR], alert, final name never created' (($r.Code -eq 2) -and ($r.Log -notmatch '=== NAS sync complete ===') -and ($r.Log -match '\[ERROR\] archive: FAIL-COPY models\\later\.json') -and (@($r.Trace | Where-Object { $_ -like 'MSGEXE|*' }).Count -eq 1) -and -not (Test-Path -LiteralPath "$nasArc\models\later.json")) "code=$($r.Code)"
 
   function AlertNames([string]$a) { if ($a -match 'not safely on the NAS \([^)]*\): (.*?)( and \d+ more \(see log .*\))?$') { return @($Matches[1] -split ', ') } else { return @() } }
   1..4 | ForEach-Object { Blob "$eproj\backup\models\cap-$_.json" 300 }
   $r = RunStubbed $job "NasUncRoot=$unc" @{ CFNAS_FAIL_COPY = '1' }
-  $al = @($r.Trace | Where-Object { $_ -like 'ALERT|*' }) -join ''
+  $al = @($r.Trace | Where-Object { $_ -like 'MSGEXE|*' }) -join ''
   Check 'J6c exactly 5 failing files: the alert names all 5 and has NO "more" suffix' (($al -like '*archive pass: 5 file(s)*') -and ($al -notlike '* more (see log*') -and ((AlertNames $al).Count -eq 5)) $al
   Blob "$eproj\backup\models\cap-5.json" 300
   $r = RunStubbed $job "NasUncRoot=$unc" @{ CFNAS_FAIL_COPY = '1' }
   Get-ChildItem -LiteralPath "$eproj\backup\models" -Filter 'cap-*.json' | Remove-Item -Force
-  $al = @($r.Trace | Where-Object { $_ -like 'ALERT|*' }) -join ''
+  $al = @($r.Trace | Where-Object { $_ -like 'MSGEXE|*' }) -join ''
   Check 'J6d 6 failing files: the alert names exactly 5 and ends "and 1 more (see log <path>)"' (($al -like '*archive pass: 6 file(s)*') -and ($al -like '* and 1 more (see log *nas-sync-*.log)*') -and ((AlertNames $al).Count -eq 5)) $al
   $r = RunStubbed $job "NasUncRoot=$unc" @{ CFNAS_RC_MIR = '8' }
-  Check 'J6b slot mirror rc 8: exit 2, no archive pass, alert' (($r.Code -eq 2) -and ($r.Log -notmatch 'archive pass:') -and (@($r.Trace | Where-Object { $_ -like 'ALERT|*' }).Count -ge 1)) "code=$($r.Code)"
+  Check 'J6b slot mirror rc 8: exit 2, no archive pass, alert' (($r.Code -eq 2) -and ($r.Log -notmatch 'archive pass:') -and (@($r.Trace | Where-Object { $_ -like 'MSGEXE|*' }).Count -ge 1)) "code=$($r.Code)"
 
   foreach ($sp in $SlotSpellings) {
     $r = RunStubbed $job ("NasUncRoot=$unc|NasArchiveRoot=\\cfnas-fake.invalid\backups\ai-stack" + $sp)
-    Check "J7 archive root [...ai-stack$sp]: exit 1, alert, no net use, no robocopy, no write" (($r.Code -eq 1) -and (@($r.Trace | Where-Object { $_ -like 'ALERT|*archive root rejected*' }).Count -eq 1) -and -not ($r.Trace | Where-Object { $_ -like 'NET|*' -or $_ -like 'ROBO-*' -or $_ -like 'COPY|*' })) "code=$($r.Code) trace=$($r.Trace -join ' ; ')"
+    Check "J7 archive root [...ai-stack$sp]: exit 1, alert, no net use, no robocopy, no write" (($r.Code -eq 1) -and (@($r.Trace | Where-Object { $_ -like 'MSGEXE|*archive root rejected*' }).Count -eq 1) -and -not ($r.Trace | Where-Object { $_ -like 'NET|*' -or $_ -like 'ROBO-*' -or $_ -like 'COPY|*' })) "code=$($r.Code) trace=$($r.Trace -join ' ; ')"
   }
 
   Rename-Item -LiteralPath "$eproj\backup" -NewName 'backup-hidden'
@@ -939,7 +941,7 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
   Check 'J10 net use fails: exit 1, no robocopy, no write, password not leaked' (($r.Code -eq 1) -and -not ($r.Trace | Where-Object { $_ -like 'ROBO-*' -or $_ -like 'COPY|*' }) -and (NoLeak $r))
 
   $r = RunStubbed $job "NasUncRoot=$unc" @{ CFNAS_THROW_LIST = '1' }
-  Check 'J11 the archive pass THROWS: [ERROR] FAIL-COPY (pass), one alert, exit 2, NO completion marker (tester t3-pass-throw-swallowed)' (($r.Code -eq 2) -and ($r.Log -match '\[ERROR\] archive: FAIL-COPY \(pass\) .*listing the archive source failed') -and (@($r.Trace | Where-Object { $_ -like 'ALERT|*' }).Count -eq 1) -and ($r.Log -notmatch '=== NAS sync complete ===')) "code=$($r.Code)"
+  Check 'J11 the archive pass THROWS: [ERROR] FAIL-COPY (pass), one alert, exit 2, NO completion marker (tester t3-pass-throw-swallowed)' (($r.Code -eq 2) -and ($r.Log -match '\[ERROR\] archive: FAIL-COPY \(pass\) .*listing the archive source failed') -and (@($r.Trace | Where-Object { $_ -like 'MSGEXE|*' }).Count -eq 1) -and ($r.Log -notmatch '=== NAS sync complete ===')) "code=$($r.Code)"
 
   # an UNREADABLE archive subdirectory must fail the run, never shrink the listing (attempt-4 F13)
   $den = "$eproj\backup\denied"
@@ -951,7 +953,7 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
     $threw = $false; try { $null = @(Invoke-NasArchivePass -Source "$eproj\backup" -Destination (Join-Path $root 'nas8')) } catch { $threw = $true }
     Check 'J12a Invoke-NasArchivePass THROWS on an access-denied subdirectory (no silent partial listing)' $threw
     $r = RunStubbed $job "NasUncRoot=$unc"
-    Check 'J12 through the job: [ERROR] FAIL-COPY (pass), one alert, exit 2, NO completion marker' (($r.Code -eq 2) -and ($r.Log -match '\[ERROR\] archive: FAIL-COPY \(pass\)') -and (@($r.Trace | Where-Object { $_ -like 'ALERT|*' }).Count -eq 1) -and ($r.Log -notmatch '=== NAS sync complete ===')) "code=$($r.Code)"
+    Check 'J12 through the job: [ERROR] FAIL-COPY (pass), one alert, exit 2, NO completion marker' (($r.Code -eq 2) -and ($r.Log -match '\[ERROR\] archive: FAIL-COPY \(pass\)') -and (@($r.Trace | Where-Object { $_ -like 'MSGEXE|*' }).Count -eq 1) -and ($r.Log -notmatch '=== NAS sync complete ===')) "code=$($r.Code)"
   } finally {
     $null = & icacls $den /remove:d "*$sid" 2>&1
     Remove-Item -LiteralPath $den -Recurse -Force
@@ -962,7 +964,7 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
   $null = cmd /c "mklink /J `"$jl`" `"$jOut`"" 2>&1
   try {
     $r = RunStubbed $job "NasUncRoot=$unc"
-    Check 'J14 a junction nested under ./backup through the job: [ERROR] FAIL-COPY (pass) naming it, one alert, exit 2, NO marker' (($r.Code -eq 2) -and ($r.Log -match ('\[ERROR\] archive: FAIL-COPY \(pass\) refusing to archive through links.*' + [regex]::Escape($jl))) -and (@($r.Trace | Where-Object { $_ -like 'ALERT|*' }).Count -eq 1) -and ($r.Log -notmatch '=== NAS sync complete ===')) "code=$($r.Code)"
+    Check 'J14 a junction nested under ./backup through the job: [ERROR] FAIL-COPY (pass) naming it, one alert, exit 2, NO marker' (($r.Code -eq 2) -and ($r.Log -match ('\[ERROR\] archive: FAIL-COPY \(pass\) refusing to archive through links.*' + [regex]::Escape($jl))) -and (@($r.Trace | Where-Object { $_ -like 'MSGEXE|*' }).Count -eq 1) -and ($r.Log -notmatch '=== NAS sync complete ===')) "code=$($r.Code)"
   } finally { $null = cmd /c "rmdir `"$jl`"" 2>&1 }
   # the job's FAIL-LOCAL line carries the Trust verdict
   $jr = "$eproj\backup\nas-archive-may2025-owui\may2025-chats-export.json"

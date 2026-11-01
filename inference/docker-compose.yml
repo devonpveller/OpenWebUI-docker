@@ -110,8 +110,9 @@ networks:
   llm-net:
     external: true
     name: ai-stack_llm-net
-  # App seam — owned by the anchor; the portal Caddy reaches llm-gateway-ui
-  # here (litellm.<PUBLIC_DOMAIN>, added 2026-08-22).
+  # App seam — owned by the anchor; the tailnet :8445 route (tailscale, in
+  # openwebui's netns) reaches llm-gateway-ui here. (Added 2026-08-22 for the
+  # portal Caddy, retired 2026-11-01.)
   app-net:
     external: true
     name: ai-stack_app-net

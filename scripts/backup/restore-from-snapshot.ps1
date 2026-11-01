@@ -147,24 +147,11 @@ $lmModelsDir = Get-PlaneBindDir -EnvFile 'inference\.env' -Key 'LM_MODELS_DIR' -
 # each entry names its Compose file (+ ComposeArgs where the project needs a
 # PROFILE - no entry needs an --env-file since sl-env-split, 2026-09-19: each
 # project directory holds its own .env). Volume targets carry the project prefixes
-# (frontend_/coder_/portal_) - the old ai-stack_* volumes are the
-# superseded pre-split copies, NOT the live data.
+# (frontend_/coder_) - the old ai-stack_* volumes are the
+# superseded pre-split copies, NOT the live data. (The retired portal plane's
+# two entries left this catalog 2026-11-01, edge-b5-portal-retire: there is no
+# plane left to restore them into; their archives are records only.)
 $catalog = [ordered]@{
-  'caddy' = @{
-    Archives = @(@{ Pattern = "caddy-*.tar.gz";  Target = 'portal_caddy-data';   Type = 'volume-tar' },
-                 @{ Pattern = "caddy-*.tar.gz";  Target = 'portal_caddy-config'; Type = 'volume-tar' })
-    Stop    = @('caddy')
-    Start   = @('caddy')
-    Compose = 'portal\docker-compose.yml'
-    ComposeArgs = @('--profile','internet')
-  }
-  'authelia' = @{
-    Archives = @(@{ Pattern = "authelia-*.tar.gz"; Target = 'portal_authelia-data'; Type = 'volume-tar' })
-    Stop    = @('authelia')
-    Start   = @('authelia')
-    Compose = 'portal\docker-compose.yml'
-    ComposeArgs = @('--profile','internet')
-  }
   'openwebui' = @{
     Archives = @(@{ Pattern = "openwebui-*.tar.gz"; Target = 'frontend_openwebui-data'; Type = 'volume-tar' })
     # NETNS rule: stop tailscale first, start openwebui before tailscale.
@@ -172,7 +159,7 @@ $catalog = [ordered]@{
     Start   = @('openwebui','tailscale')
     Compose = 'frontend\docker-compose.yml'
     # The frontend plane is PROFILE-GATED (2026-09-19). Passing the profiles
-    # here, as the portal ('internet') and agent-org ('workers') entries do,
+    # here, as the agent-org ('workers') entries do,
     # makes a restore independent of whether frontend/.env has COMPOSE_PROFILES:
     # without them `stop tailscale` / `start tailscale` exit 1 with `no such
     # service: openwebui` - naming tailscale activates only ITS profile, and
@@ -280,8 +267,7 @@ $restoreOrder = @(
   'openbrain-db', 'openbrain-wiki', 'open-notebook',
   'lm-models', 'tailscale',
   'openwebui', 'little-coder',
-  'ao-journals',
-  'caddy', 'authelia'
+  'ao-journals'
 )
 
 # --- Resolve which services to restore --------------------------------
@@ -530,7 +516,6 @@ Write-Log "  Verify by:"
 Write-Log "    - opening Open WebUI and confirming chats are present"
 Write-Log "    - 'docker exec openbrain-db psql -U postgres -d openbrain -c \"select count(*) from thoughts;\"'"
 Write-Log "    - opening open_notebook and confirming notebooks render"
-Write-Log "    - .\scripts\portal-status.ps1 (if portal services were restored)"
 Write-Log "  Log saved to: $logFile"
 
 Pop-Location
