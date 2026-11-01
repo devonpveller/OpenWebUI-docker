@@ -87,27 +87,14 @@ Justification: every stateful byte has exactly one
 sidecar producing verified artifacts into `backups/`, freshness-watched
 twice (watchdog recency table + sysadmin daily check). Schedulers UNIFIED
 2026-08-21 (K.8): sleep-loop for interval tars (crond missed fire-windows on
-VM clock jumps), supercronic for cron-timed dumps (OB1 pg/surreal, portal).
+VM clock jumps), supercronic for cron-timed dumps (OB1 pg/surreal; the portal's too, until it retired 2026-11-01).
 
-### Portal — own compose project `portal` since 2026-08-21 (12 services, **currently ON**)
+### Portal — RETIRED 2026-11-01
 
-| Container | Purpose |
-|---|---|
-| `portal-init` | One-shot volume chown at portal-on (network_mode: none) |
-| `caddy` | Reverse proxy + forward-auth gate (RETIRED with the portal); its :8446 tailnet listener (→ tailnet :8444) proxies the wiki viewer only - no `/workbench/*` route since rw-identity-harden |
-| `authelia` | AuthN/AuthZ front (TOTP), hardened read-only |
-| `cloudflared` | Cloudflare Tunnel — the ONLY internet ingress |
-| `authelia-watcher` | Tails auth logs → alerts on failures/bans |
-| `authelia-notif-bridge` | Converts Authelia file-notifications → alerter |
-| `integrity-tripwire` | Hash-baseline tripwire over portal configs |
-| `portal-alerter` | Gmail alert egress (the single portal internet-egress chokepoint) |
-| `portal-cron` | Scheduled digests (writes `reports/portal-digest/` daily — verified live today) |
-| `tunnel-watcher` | Watches cloudflared health/registration |
-| `caddy-backup`, `authelia-backup` | Portal-state sidecars (same-UID trick for 0600 files) |
-
-Justification: the portal is the deliberate, audited internet exposure
-(SECURITY.md); every sidecar exists because the 2026-05-29 audit added it.
-Running-state is an operator choice (`portal-on.ps1`); the split into its own project positions the portal to front more than ai-stack (operator decision #5). Data lives in `portal_*` volumes (migrated from `ai-stack_*` 2026-08-21).
+The 12-service internet front-end project `portal` is retired; its rows are in
+"Retired 2026-11-01" at the bottom. The internet edge (Traefik, Authentik and a
+Cloudflare tunnel) runs on the Proxmox nodes, outside this repo, and reaches each
+ai-stack service through its own blank-by-default `<SERVICE>_LAN_IP` door.
 
 ---
 
@@ -140,7 +127,7 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 | Container | Purpose |
 |---|---|
 | `openbrain-wiki` | Wiki compiler (+ git vault commits; push severed on purpose): demand-driven - boot, change-watch, on demand; no daily compile (research-workbench P1c) |
-| `openbrain-wiki-viewer` | The wiki + workbench UI, rendered live from `wiki_pages` the moment it listens; no Quartz in the image since research-workbench P1c (the client bundle is a frozen committed asset, `OB1/docker/wiki-viewer/bundle/`; no builder, no `/srv` volume); Docker healthcheck on `/__health` (:8812; tailnet :8444 via caddy) |
+| `openbrain-wiki-viewer` | The wiki + workbench UI, rendered live from `wiki_pages` the moment it listens; no Quartz in the image since research-workbench P1c (the client bundle is a frozen committed asset, `OB1/docker/wiki-viewer/bundle/`; no builder, no `/srv` volume); Docker healthcheck on `/__health` (:8812; tailnet :8444 direct to `openbrain-wiki-viewer:8080` over app-net since the portal retired 2026-11-01) |
 | `openbrain-workbench` | Browser write/read API for the workbench (:8814) — NOT the MCP contract |
 | `openbrain-research` | The shared research engine (:8818; queue, GROUNDED synthesis, OWUI async callback) — replaced smolcrawl's in-repo harness |
 | `openbrain-curator` | Research-package ingest inlet (persists via openbrain-mcp) |
@@ -234,6 +221,25 @@ local job (or vice versa), not that something is broken.
 | `lc-mcpo` | Dormant-since-build third door to little-coder; both real callers use the daemon directly (D-13; source kept for chapter 2) |
 | `iks-chunk-worker`, `iks-suggestion-worker` | Exited 2 months; corpses of the dev overlay |
 | `iks-db`, `iks-mcp`, `iks-notebook`, `iks-surreal` | The whole **iks-dev** overlay: the development environment that BUILT the `open_notebook:iks` fork now in prod. Idle since 08-01 (verified via logs); volumes kept; tree archived at `scripts/archive/iks-dev/` — recreatable in minutes if fork iteration resumes |
+
+## Retired 2026-11-01 (edge-b5-portal-retire)
+
+The whole `portal` project, after the operator moved the tunnel to the Proxmox nodes
+(the workstation `cloudflared` had been stopped since about 2026-10-18). Code, config
+and its README are archived in `scripts/archive/portal-caddy-authelia/`. The live
+containers and the `portal_caddy-data`, `portal_caddy-config`, `portal_authelia-data`
+and `portal_tripwire-data` volumes are removed by a separate, operator-approved step
+(the volumes only after a final tar).
+
+| Container(s) | What it was |
+|---|---|
+| `portal-init` | one-shot volume chown |
+| `caddy` | reverse proxy + forward-auth gate; its :8446 listener also carried the tailnet wiki route, which now goes to the viewer directly |
+| `authelia`, `authelia-watcher`, `authelia-notif-bridge` | SSO/TOTP front and its log watcher and notification bridge (replaced by Authentik on the nodes) |
+| `cloudflared`, `tunnel-watcher` | the workstation tunnel and its health watcher (replaced by a tunnel on the nodes) |
+| `integrity-tripwire` | hash baseline over the portal configs |
+| `portal-alerter`, `portal-cron` | alert/digest egress (Telegram, Mattermost, Gmail) and its scheduler; the NAS-sync failure alert now goes to Mattermost and Telegram directly |
+| `caddy-backup`, `authelia-backup` | the portal-state backup sidecars |
 
 ## Redundancies examined and deliberately KEPT
 

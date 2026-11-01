@@ -31,7 +31,7 @@ into the `mattermost-plugins` volume and enable it in System Console → Plugins
 
 Mattermost is host-published on `127.0.0.1:8065` only. Expose it on the **tailnet** via
 `tailscale serve` (mirrors the open_notebook `:8443` / wiki `:8444` pattern), **not** the
-Cloudflared/Authelia portal (Mattermost Team Edition is dropping SSO; tailnet is simpler and
+Cloudflared/Authelia portal (since retired, 2026-11-01; Mattermost Team Edition is dropping SSO; tailnet is simpler and
 private — PLAN §3.7).
 
 **Two gotchas (both handled below):**

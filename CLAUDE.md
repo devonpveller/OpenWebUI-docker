@@ -2,7 +2,7 @@
 
 Self-hosted AI stack: Open WebUI + local llama.cpp inference behind a LiteLLM gateway
 with an admission queue, a memory layer (Open Brain), a private search
-gateway, a coding agent with a governed multi-agent org, and a gated internet portal.
+gateway, and a coding agent with a governed multi-agent org.
 Each plane is its own compose project around a root `docker-compose.yml` that declares
 only the shared `ai-stack_*` networks. [`README.md`](README.md) is the map; this file is
 the rules.
@@ -17,13 +17,15 @@ the rules.
   (`enable` merges into the state file; `init --force` replaces it).
 - **Each plane's README is the detailed one:** [frontend](frontend/README.md) ·
   [inference](inference/README.md) · [search](search/README.md)
-  · [coder](coder/README.md) · [portal](portal/README.md). Topology: the `/stack-map` skill
+  · [coder](coder/README.md). Topology: the `/stack-map` skill
   or [its reference](.claude/skills/stack-map/references/workspace-stacks.md).
 - **Every plane owns its `.env`** (from `<plane>/.env.example`) and its own
   `COMPOSE_PROFILES`. A variable lives in the file of the plane whose service reads
   it; never pass `--env-file`.
 - Bring Open Brain up only after `llm-gateway` is healthy; tear it down before the
-  planes it depends on. The portal is started only by `scripts/portal/portal-on.ps1`.
+  planes it depends on. The workstation portal (Caddy, Authelia, cloudflared) is
+  retired and archived (`scripts/archive/portal-caddy-authelia/`): the internet edge
+  runs on the Proxmox nodes, and each service has its own `<SERVICE>_LAN_IP` door.
 - Recovery after a crash or netns break: `scripts/recovery/emergency-recovery.ps1`.
 
 ## Rules that protect the live stack
