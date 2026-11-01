@@ -94,7 +94,7 @@ VM clock jumps), supercronic for cron-timed dumps (OB1 pg/surreal, portal).
 | Container | Purpose |
 |---|---|
 | `portal-init` | One-shot volume chown at portal-on (network_mode: none) |
-| `caddy` | Reverse proxy + forward-auth gate; also serves the wiki-workbench path (:8446 → tailnet :8444) |
+| `caddy` | Reverse proxy + forward-auth gate (RETIRED with the portal); its :8446 tailnet listener (→ tailnet :8444) proxies the wiki viewer only - no `/workbench/*` route since rw-identity-harden |
 | `authelia` | AuthN/AuthZ front (TOTP), hardened read-only |
 | `cloudflared` | Cloudflare Tunnel — the ONLY internet ingress |
 | `authelia-watcher` | Tails auth logs → alerts on failures/bans |

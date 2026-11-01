@@ -22,29 +22,9 @@ $PROJECT_DIR = Split-Path -Parent (Split-Path -Parent $PSCommandPath) | Split-Pa
 $LOG_FILE = Join-Path $PROJECT_DIR "logs\tailscale-health.log"
 $SERVICE_NAME = "TailscaleHealthMonitor"
 
-# --- docker compose stderr guard (added 2026-06-05) ---------------------------
-# The caddy service references ${WORKBENCH_KEY} (docker-compose.yml). When that
-# variable is absent from THIS process's environment, every `docker compose ...`
-# call prints "The \"WORKBENCH_KEY\" variable is not set..." to stderr. Combined
-# with $ErrorActionPreference='Stop' above, the first docker call that redirects
-# stderr (e.g. `docker compose logs ... 2>$null` in Test-EntrypointHealth) turns
-# that benign warning into a TERMINATING error (PS 5.1 native-stderr gotcha) and
-# the whole health check aborts at step 1 - the window just flashes and exits 1,
-# checking/repairing nothing. Defining the var here silences the warning at the
-# source for every docker invocation this script makes. This only
-# affects this script's own process env; it does NOT modify .env or any container.
-#
-# The value is a non-empty PLACEHOLDER, not the real key: Windows cannot store an
-# empty env var (PowerShell deletes it on `=''`), and docker only suppresses the
-# "is not set" warning for a DEFINED, non-empty value. This monitor never creates
-# or recreates the caddy service (the sole consumer of WORKBENCH_KEY - it is not
-# in the monitor's managed-service list), so this placeholder never reaches caddy;
-# and even if it somehow did, a wrong key makes caddy reject /workbench (fail
-# closed). A real value present in the environment (e.g. a manual run from a
-# configured shell) is preserved and takes precedence.
-if (-not (Test-Path Env:\WORKBENCH_KEY) -or [string]::IsNullOrEmpty($env:WORKBENCH_KEY)) {
-    $env:WORKBENCH_KEY = 'healthcheck-noop-placeholder'
-}
+# (rw-identity-harden: the 2026-06-05 WORKBENCH_KEY placeholder is gone - no compose file references
+# ${WORKBENCH_KEY} any more, since the portal caddy lost its /workbench route, so compose prints no
+# "variable is not set" warning for it.)
 
 # Create logs directory if it doesn't exist
 $LogDir = Split-Path -Parent $LOG_FILE

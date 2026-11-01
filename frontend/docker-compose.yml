@@ -405,14 +405,15 @@ services:
       - OPEN_NOTEBOOK_TS_PORT=${OPEN_NOTEBOOK_TS_PORT:-8443}
       - OPEN_NOTEBOOK_API_PORT=${OPEN_NOTEBOOK_API_PORT:-5055}
       - OPEN_NOTEBOOK_API_TS_PORT=${OPEN_NOTEBOOK_API_TS_PORT:-5055}
-      # OB1 Quartz wiki — routed through the portal Caddy's tailnet listener
-      # (caddy:8446 → the shared (wiki_app) snippet) so the tailnet gets the SAME
-      # /workbench key-injected routing as the external vhost: Tailnet > Caddy >
-      # app (Authelia skipped — Tailscale device-auth is the trust boundary; the
-      # workbench's X-Brain-Key is injected by Caddy). caddy is on ai-stack_app-net,
-      # which openwebui — whose netns this container shares — is also on, so
-      # caddy:8446 resolves here. (Pre-Caddy this pointed straight at
-      # openbrain-wiki-viewer:8080, which had NO /workbench routing → 404 on tailnet.)
+      # OB1 Quartz wiki — still pointed at the portal Caddy's tailnet listener
+      # (caddy:8446 → the shared (wiki_app) snippet). The portal (Caddy/Authelia)
+      # is RETIRED (operator 2026-10-31): since rw-identity-harden that snippet
+      # has no /workbench/* route, so /workbench through this path reaches the
+      # viewer, whose forwarder answers 421 for the caddy Host - accepted. The
+      # wiki and its workspace are reached through the viewer directly (its own
+      # /workbench forwarder is the only door); this pointing can be removed later.
+      # caddy is on ai-stack_app-net, which openwebui — whose netns this
+      # container shares — is also on, so caddy:8446 resolves here.
       # ORDER: caddy must be up before this serve configures at boot; if it isn't,
       # entrypoint.sh's monitor loop does deferred setup once caddy appears.
       - QUARTZ_HOST=${QUARTZ_HOST:-caddy}

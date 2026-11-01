@@ -66,9 +66,9 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
   `admin_audit` table (readable at `/workbench/auth/audit`, admins only). **Edge-strip rule:** while
   `WORKSPACE_IDENTITY_HEADER` is used (no sign-in) every proxy in front of the workbench must delete a
   client-sent copy of that header and set it itself; with sign-in on the workbench ignores the header
-  entirely, and the viewer's forwarder drops it from every client request. Before turning sign-in on,
-  remove the portal Caddy's `/workbench/*` route or make it inject `WORKSPACE_DOOR_KEY` (it injects
-  `MCP_ACCESS_KEY`). Details: `OB1/docker/workbench/README.md` "Sign-in (Authentik forward-auth)".
+  entirely, and the viewer's forwarder drops it from every client request. The viewer's forwarder is
+  the only browser door to `/workbench/*` (the portal Caddy route that injected `MCP_ACCESS_KEY` was removed,
+  rw-identity-harden). Details: `OB1/docker/workbench/README.md` "Sign-in (Authentik forward-auth)".
 - **agent-bridge HTTP tokens (ao-auth, 2026-10-07)** - `AO_OPERATOR_TOKEN` and `AO_WORKER_TOKEN`
   in `agent-org/docker/.env`. Before them every route on `agent-bridge:8000` (operator verbs via
   `POST /nl`, gate decisions, the kill switch, lane moves) answered anyone who could reach it,
