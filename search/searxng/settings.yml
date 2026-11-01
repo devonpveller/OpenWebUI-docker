@@ -119,5 +119,33 @@ engines:
     disabled: false
   - name: stackoverflow
     disabled: false
+  # rw-p5a-intake (2026-11-01): the SCHOLARLY engines, named enabled so a scholarly question reaches
+  # them. They live in SearXNG's `science` category, which no caller asked for before: the research
+  # service's `academic` contract class now sends categories=general,science (the gateway passes
+  # only general and science). Every one is keyless, upstream's own engine module in the pinned image
+  # (searx/engines/<engine>.py, AGPL-3.0, run unmodified as part of the separate SearXNG service - D9),
+  # and egresses through the vpn proxy like every engine here. The 2026-09-11 audit missed PubMed
+  # 40128952 because the general category never asks pubmed (journal/notes/research-audit-optiplex-
+  # 100hz-2026-09-11.md). openalex and crossref are disabled upstream by default; the rest are
+  # default-enabled but named here so this file, not an upstream default, says they are on.
   - name: arxiv
     disabled: false
+  - name: pubmed
+    disabled: false
+  - name: europepmc
+    disabled: false
+  - name: semantic scholar
+    disabled: true       # MEASURED 2026-11-01 (rw-p5a-intake replay lab, pinned image, through the vpn proxy):
+                         # "parsing error" on every query - the engine no longer reads the site's answer.
+                         # Named so it is not inherited on; re-test after an image bump.
+  - name: crossref
+    disabled: false
+  - name: openalex
+    disabled: false
+  - name: google scholar
+    disabled: false
+  - name: openairepublications
+    disabled: true       # MEASURED 2026-11-01: on by upstream default in `science`, timed out (30 s) on the
+  - name: openairedatasets
+    disabled: true       # first science query of both replay runs and answered nothing in any - a 30 s wall
+                         # past the gateway's 20 s REQUEST_TIMEOUT_SECONDS empties the whole answer.
