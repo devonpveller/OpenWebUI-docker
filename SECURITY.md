@@ -133,7 +133,7 @@ this host takes traffic from the internet. The portal sections below were remove
 ### Tailscale (unchanged from existing stack)
 - Network namespace shared with OpenWebUI for `tailscale serve`
 - Tailnet users see OpenWebUI's own login directly (per plan §6.6 trust posture Option C, see §3 below)
-- The tailnet wiki route (`:8444`) goes straight to `openbrain-wiki-viewer:8080` over `app-net` (through the portal Caddy until 2026-11-01). The viewer injects the workbench key server-side; `/workbench/*` over the tailnet needs the tailnet host name in `WIKI_VIEWER_ALLOWED_HOSTS`, else 421
+- The tailnet wiki route (`:8444`) goes straight to `openbrain-wiki-viewer:8080` over `app-net` (through the portal Caddy until 2026-11-01). The viewer injects the workbench key server-side; `/workbench/*` over the tailnet needs the tailnet host name in `WIKI_VIEWER_ALLOWED_HOSTS`, else 421. The header hygiene the portal Caddy did on that route is the viewer's own since OB1 `d166ed7` (edge-b5-portal-retire round 2): it drops every client-sent unsigned identity or proxy-chain header (`Remote-*`, `X-Forwarded-*`, `X-Real-IP`, `Forwarded`, ...) before forwarding - only the signed `X-authentik-jwt` passes, which the workbench verifies - and sets HSTS, `X-Frame-Options: DENY` and `nosniff` on every response; the workbench takes a change author from its identity seam only, never from a header
 
 ---
 

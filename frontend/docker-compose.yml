@@ -415,6 +415,9 @@ services:
       # answers 421 unless the request's Host is one it answers for, so for
       # /workbench over the tailnet put the tailnet host name in
       # WIKI_VIEWER_ALLOWED_HOSTS (OB1/docker/.env). Reading needs nothing.
+      # The header hygiene the portal Caddy did is the viewer's own (OB1 d166ed7):
+      # client-sent Remote-* / X-Forwarded-* / X-Real-IP never reach the workbench,
+      # and every response carries HSTS, X-Frame-Options DENY and nosniff.
       # ORDER: the viewer (ob1 plane) starts after this project; entrypoint.sh's
       # monitor loop does the deferred setup once it answers.
       - QUARTZ_HOST=${QUARTZ_HOST:-openbrain-wiki-viewer}
