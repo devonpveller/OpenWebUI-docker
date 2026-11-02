@@ -358,8 +358,9 @@ up with your own tools (`lm-models-backup` tars it weekly under `local`).
   the same reason.
 - **The master key issues keys.** Keep it in `inference/.env` and give every
   caller its own virtual key instead.
-- **`llm-gateway-ui` is on `ai-stack_app-net`** so the portal can front `/ui`. It
-  carries no model list and serves no inference.
+- **`llm-gateway-ui` is on `ai-stack_app-net`** (it joined so the portal Caddy
+  could front `/ui`; that portal was retired 2026-11-01, archived at `scripts/archive/portal-caddy-authelia/`).
+  It carries no model list and serves no inference.
 
 ## Changing this plane
 

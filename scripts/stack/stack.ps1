@@ -51,8 +51,8 @@
 #
 # `restart` with no plane still refuses - the refusal is the DRIVER's
 # (stack.py cmd_restart), reached by forwarding "all" rather than reimplemented
-# here. The portal is still not managed (portal-on.ps1 / portal-off.ps1): the
-# manifest marks that plane `manual`, so the driver skips it and says so.
+# here. A plane the manifest marks `manual` is never driven: the driver skips
+# it and says so. (The portal was that plane until it retired, 2026-11-01.)
 #
 # Anything the driver understands can be passed through: a plane name lands in
 # $Plane, everything after it in $Rest.

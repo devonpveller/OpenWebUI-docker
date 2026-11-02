@@ -84,7 +84,7 @@ if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0 -or $hcRuleStaged.Coun
     }
     else {
         # (OB1 + agent-org validate against their own gitignored env files and
-        # are covered by their own workflows; the portal needs its profile.)
+        # are covered by their own workflows. The portal plane retired 2026-11-01.)
         # EACH PROJECT AGAINST ITS OWN EXAMPLE (sl-env-split, 2026-09-19). The
         # example is passed explicitly rather than left to compose's native
         # project-directory load, for the reason render_env_path() gives in
@@ -112,7 +112,6 @@ if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0 -or $hcRuleStaged.Coun
             @{ N = 'inference (local)'; F = 'inference\docker-compose.yml'; A = @('--env-file', 'inference\.env.example', '--profile', 'local') }
             @{ N = 'search';    F = 'search\docker-compose.yml';    A = @('--env-file', 'search\.env.example') }
             @{ N = 'coder';     F = 'coder\docker-compose.yml';     A = @('--env-file', 'coder\.env.example') }
-            @{ N = 'portal';    F = 'portal\docker-compose.yml';    A = @('--env-file', 'portal\.env.example', '--profile', 'internet') }
         )
         foreach ($p in $projects) {
             # cmd /c (sh -c off Windows) so compose's stderr WARNINGS (e.g. an unset optional var)

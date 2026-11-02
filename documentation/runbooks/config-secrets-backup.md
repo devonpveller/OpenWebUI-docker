@@ -1,13 +1,14 @@
 # Config + secrets backup (encrypted)
 
 Every gitignored file the stack cannot run or be recovered without - every plane's
-`.env`, `secrets/`, `portal/config/authelia/users_database.yml`, the OAuth token files
+`.env`, `secrets/`, the OAuth token files
 and other credentials bind-mounted into containers - is archived **every night**,
 **encrypted with [age](https://age-encryption.org)** to the operator's **public** key,
 into `backups/config-secrets/`. The weekly NAS sync mirrors `backups/` as it always has,
 so the archives go off-site with no change there.
 
-Why it exists: on 2026-10-04 Authelia crash-looped 205 times because
+Why it exists: on 2026-10-04 Authelia (the portal plane's login service, retired
+2026-11-01 and archived at `scripts/archive/portal-caddy-authelia/`) crash-looped 205 times because
 `users_database.yml` was gone - and had never been backed up. The sidecars back up
 volumes; nothing backed up these files, and `check-backup-coverage.ps1` said CLEAN
 because it only looked at volumes. It now fails on any such file that is not in the
@@ -206,32 +207,24 @@ AGE=/c/Tools/age/age.exe
 KEY=/e/ai-stack-config-backup.key        # or /e/ai-stack-config-backup.key.age
 ```
 
-### Restore one file (example: `users_database.yml`)
+### Restore one file (example: `frontend/.env`)
 
 Extract into a scratch folder, never straight over the live file:
 
 ```sh
 R=$(mktemp -d)
-"$AGE" --decrypt -i "$KEY" "$F" | tar -xf - -C "$R" portal/config/authelia/users_database.yml
-ls -l "$R/portal/config/authelia/users_database.yml"
+"$AGE" --decrypt -i "$KEY" "$F" | tar -xf - -C "$R" frontend/.env
+ls -l "$R/frontend/.env"
 ```
 
-Then put it in place. For `users_database.yml` specifically: if Authelia started while
-the file was missing, Docker created an empty DIRECTORY with that name - stop Authelia,
-remove that empty directory, copy the file, start Authelia again:
+Then put it in place. If a container that bind-mounts a FILE started while that file
+was missing, Docker created an empty DIRECTORY with that name: stop the container,
+remove the empty directory (`rmdir` only removes an EMPTY directory, so it cannot
+delete anything by mistake), copy the file, start the container again. Clean up with
+`rm -rf "$R"`.
 
-```sh
-docker stop authelia
-[ -d portal/config/authelia/users_database.yml ] && rmdir portal/config/authelia/users_database.yml
-cp "$R/portal/config/authelia/users_database.yml" portal/config/authelia/users_database.yml
-docker start authelia
-rm -rf "$R"
-```
-
-(`rmdir` only removes an EMPTY directory, so it cannot delete anything by mistake.)
 For a plane `.env`, recreate that plane's containers afterwards
-(`python scripts/stack/stack.py restart <plane>`; the portal is `manual` -
-`scripts/portal/portal-off.ps1` then `portal-on.ps1`), since a container reads its env
+(`python scripts/stack/stack.py restart <plane>`), since a container reads its env
 at creation.
 
 ### Restore everything (rebuilt host)

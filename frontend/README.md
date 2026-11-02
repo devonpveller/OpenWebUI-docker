@@ -81,7 +81,8 @@ Keys, in `frontend/.env`:
 network and reaches nothing else in the stack: it has no model until you add a
 connection yourself in Admin Settings. Under `gpu` it reaches, by service name,
 the inference plane (`llama-cpp`), the search plane (`gateway`, for web search),
-and - through the tailnet routes - Open Notebook, the portal's Caddy, the
+and - through the tailnet routes - Open Notebook, the wiki viewer
+(`openbrain-wiki-viewer:8080`, directly over `ai-stack_app-net`), the
 LiteLLM Admin UI and Mattermost. Each of those is optional: the route or
 feature is dead while its plane is off, and chat still serves.
 
@@ -167,7 +168,9 @@ leaves it to you.
 ## Security notes
 
 - The only published port is `127.0.0.1:3000`, loopback. Reach it from other
-  machines through the tailnet or the portal plane, not a LAN bind.
+  machines through the tailnet, or through the opt-in `OWUI_LAN_IP` LAN door
+  behind the Proxmox Traefik (blank by default; the workstation portal plane was
+  retired 2026-11-01, archived at `scripts/archive/portal-caddy-authelia/`).
 - Under `gpu` the container mounts `status-pipe/`, `system-prompts/` and
   `data/tailscale` read-only and nothing else from the repository; no `.env` or
   secret file is visible inside it.

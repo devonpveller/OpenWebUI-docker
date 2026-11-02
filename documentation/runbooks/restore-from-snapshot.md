@@ -10,6 +10,7 @@ which orchestrates the whole stack in dependency order.
 1. Identify the snapshot source. Locally:
    `./backups/<service>/<service>-<UTC-ts>.<ext>`
    On the NAS: `\\<nas>\<share>\ai-stack\portal\slot-<A|B>\<service>\<same-file>`
+   (the NAS folder kept its old `portal` name when the portal plane retired)
 2. **Verify the sha256 sentinel before restoring**:
    ```powershell
    cd <path-to-snapshot-dir>
@@ -318,41 +319,14 @@ Invoke-BindRestore -Container open_notebook -Destination /app/data -ComposeFile 
 
 ---
 
-## Portal (caddy + authelia)
+## Portal (caddy + authelia) - retired
 
-**Sources**:
-- `./backups/caddy/caddy-<UTC-ts>.tar.gz`
-- `./backups/authelia/authelia-<UTC-ts>.tar.gz`
-
-```powershell
-# 1. Stop only the portal services.
-.\scripts\portal\portal-off.ps1
-
-# 2. Verify sentinels.
-docker run --rm -v "${PWD}\backups\caddy:/backups:ro" alpine sh -c "cd /backups && sha256sum -c caddy-*.sha256 | tail -1"
-docker run --rm -v "${PWD}\backups\authelia:/backups:ro" alpine sh -c "cd /backups && sha256sum -c authelia-*.sha256 | tail -1"
-
-# 3. Restore each volume.
-$caddyArchive = 'caddy-20260529T183254Z.tar.gz'
-docker run --rm `
-  -v portal_caddy-data:/dest `
-  -v "${PWD}\backups\caddy:/in:ro" `
-  alpine sh -c "find /dest -mindepth 1 -delete && cd /dest && tar xzf /in/$caddyArchive"
-
-$autheliaArchive = 'authelia-20260529T183254Z.tar.gz'
-docker run --rm `
-  -v portal_authelia-data:/dest `
-  -v "${PWD}\backups\authelia:/in:ro" `
-  alpine sh -c "find /dest -mindepth 1 -delete && cd /dest && tar xzf /in/$autheliaArchive"
-
-# 4. Start back up. portal-init will re-chown if necessary.
-.\scripts\portal\portal-on.ps1
-```
-
-**Important**: after Authelia restore, any sessions issued before the
-backup will still be valid (the JWT secret is the same). If the backup
-predates your last WebAuthn enrollment, you may need to re-enroll —
-verify by signing in.
+The portal plane (Caddy, Authelia, cloudflared and their sidecars) was retired
+2026-11-01 and archived at `scripts/archive/portal-caddy-authelia/`; the edge runs on
+the Proxmox nodes. There is nothing to restore it into. Its last `./backups/caddy/`
+and `./backups/authelia/` archives, and the final tars of the `portal_*` volumes taken
+before those volumes were removed, are kept as records only; the archived plane's
+README describes what they held.
 
 ---
 
@@ -450,21 +424,14 @@ take a while.
 
 Persistent state captured by the snapshot:
 - All application data (chats, notebooks, OB1 thoughts, etc.)
-- WebAuthn / TOTP enrollments (in authelia-data sqlite)
-- Caddy ACME state (regenerable, but useful)
 - Tailscale device identity (skips a re-auth)
 - OB1 wiki git history
 
 **Not captured by backups, must be re-supplied manually**:
 - `.env` (gitignored). Keep an off-host copy of your `.env` so a fresh
   Windows install has the secrets the compose needs.
-- `secrets/google/portal-alerter/credentials.json` and `token.json`
-  (DPAPI-bound — only the original Windows user on the original machine
-  can decrypt). On a new machine, re-run `setup-token.ts`.
 - `secrets/nas-backup-vault.dat` (DPAPI-bound, LocalMachine scope). On a
   new machine, re-run `scripts/backup/set-nas-credential.ps1`.
-- Cloudflare Tunnel registration (`cloudflared` is configured by token;
-  if the token expires you re-create at the Cloudflare dashboard).
 - Tailscale auth key (re-issue at `https://login.tailscale.com/admin/settings/keys`).
 
 If you're restoring to fresh hardware, restore the data first, then

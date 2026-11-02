@@ -128,7 +128,7 @@ seen*.
 | `requires` / `optional` | see above. |
 | `implicit` | the plane is started whenever anything runs and never has to be enabled. Only the anchor. No refusal ever names it, and `enable` never writes it into the state file. |
 | `networks_only` | the compose file declares networks and no service. Only the anchor. `up` never runs `docker compose up -d` on it (compose exits 1, "no service selected"); it renders the file with `config --no-interpolate --format json` and runs `docker network create` for each declared network that does not exist. An existing network is never altered: if it MATCHES the declaration (driver, internal, attachable, each declared driver_opt and label) it is left as is; if it DIFFERS - e.g. an `ai-stack_llm-net` that is not internal - `up` REFUSES before creating anything, and `doctor` reports it as a FAIL. `down` still runs `docker compose down`. |
-| `manual` | present when the driver must **not** start or stop this plane; the value names what does. Only the portal: exposing the stack to the internet stays a human action, exactly as `stack.ps1`'s header says. |
+| `manual` | present when the driver must **not** start or stop this plane; the value names what does. No plane uses it today: the portal, the one plane that did (exposing the stack to the internet stayed a human action), was retired 2026-11-01 and archived at `scripts/archive/portal-caddy-authelia/`. The mechanism stays for any future hand-driven plane. |
 | `host` | what the machine itself must provide, in prose (a GPU, a tunnel, model files). `doctor` prints these; nothing enforces them. |
 | `host_paths` | paths OUTSIDE the checkout that the plane builds from, each `{ path, contains, why, remedy }` with `path` repo-root-relative and `contains` the names that must exist inside it (a plain name a file, a name ending in `/` a directory, `.git` either), so an empty directory or a plain file does not pass. Unlike `host` this is checked: while one is missing or incomplete, `doctor` FAILs the plane and `enable`/`init` refuse, naming `remedy` (the command that creates it, run from the repo root). With `profile`, it is checked only while that profile is active. Only agent-org declares one today: its generated worker configs, under `workers`. |
 | `keys` | variable names that must exist and be non-blank in the plane's env file. A blank one makes `enable` refuse and name the key. So does a value still EQUAL to the non-blank value the plane's `.env.example` ships for that key - for a required key that shipped value is a placeholder by construction - and that one `doctor` and `up` refuse too, before anything starts. **Keys NOT listed here are covered as well**: any value in a plane's `.env.example` that matches `stack.py`'s `PLACEHOLDER_PATTERN` (change-me, REPLACE_WITH, your-/putyour, `<...>`, an example.com domain or address, "placeholder") is refused while the plane's `.env` still holds it, provided a service the plane runs under its active profiles interpolates it (`${VAR}` in the `config --no-interpolate` render; a bulk `env_file:` does not count). So TAILSCALE_AUTH_KEY counts under `tailscale` and not under `stock`. |
@@ -140,7 +140,7 @@ seen*.
 | Flag | Means | Today |
 |---|---|---|
 | `default = true` | the driver passes `--profile <name>` on every invocation | `ob1`'s `idea-refinery` - parity with what `stack.ps1` always passed |
-| `opt_in = true` | a **deliberate choice** turns it on - a product that declares it, or something outside the driver - and the description says what | `inference`'s `local` (`enable inference`, the product, or `COMPOSE_PROFILES=local` in `inference/.env`), `agent-org`'s `workers`/`cloud` (the operator - `stack.ps1`'s header always said these were not managed), `portal`'s `internet` (`portal-on.ps1`) |
+| `opt_in = true` | a **deliberate choice** turns it on - a product that declares it, or something outside the driver - and the description says what | `inference`'s `local` (`enable inference`, the product, or `COMPOSE_PROFILES=local` in `inference/.env`), `agent-org`'s `workers`/`cloud` (the operator - `stack.ps1`'s header always said these were not managed) |
 | `pending = true` | declared here, **not yet in the compose file**; a later item adds it. Enabling one is a no-op and the driver says so | `frontend`'s `gpu`/`tailscale` |
 
 Declaring none of the three is **refused** by `inventory --check`. That gate
@@ -211,7 +211,7 @@ gateway; the check is repeated in the item's findings.
 | `profiles` | `{ plane = ["profile", ...] }` - profiles to enable inside a plane. |
 | `surfaces` | `{ plane = ["profile", ...] }` - how a person reaches the engine. Dropped by `--headless`; a plane that appears **only** under `surfaces` is itself dropped by `--headless`. |
 
-Four names (`inference`, `search`, `agent-org`, `portal`) are both a
+Three names (`inference`, `search`, `agent-org`) are both a
 plane and a product. A bare name means the **product**: a newcomer copies
 `enable <name>` from the product menu and must get what the menu promises -
 `enable inference` turns on `local`, `enable agent-org` turns on `workers`.
@@ -338,7 +338,7 @@ reverse. `--dry-run` prints the exact
 `[COMPOSE_PROFILES=p,...] docker [--context X] compose -f <file> [--profile p]... <verb>`
 lines (the prefix whenever a profile is passed; see above) and runs **nothing**.
 
-A `manual` plane (the portal) is never started or stopped; a `#` comment line
+A `manual` plane (none today; the portal was one until it retired 2026-11-01) is never started or stopped; a `#` comment line
 after the commands names the script that drives it.
 
 If a docker command exits non-zero the run stops there and reports which plane
@@ -449,7 +449,7 @@ dropped. A product that is **not enabled here** - including every product on a
 state file written before products were tracked - is a no-op note, and nothing
 is written. Measured on the attempt this replaced: `disable portal` with only
 the frontend enabled removed the frontend (Open WebUI), because `portal`'s
-product lists `frontend`.
+product listed `frontend` (that product retired with the portal plane, 2026-11-01).
 
 A **plane** (`--plane`) is removed on its own. **Refuses** while a product
 enabled it (naming the product - disable that instead), and while an enabled
@@ -796,7 +796,7 @@ Exactly one of the two flags is required.
 
 | Part of the file | Comes from |
 |---|---|
-| `projects.*` (compose file, `env_file` - `null` for every plane since `sl-env-split` - and the command line) | `stack.manifest.toml`. A `manual` plane (the portal) is deliberately absent: the watchdog must not auto-repair a plane a human starts by hand. `file: null` marks a project that owns no services - the anchor - and the watchdog skips those instead of issuing `up -d` into the void |
+| `projects.*` (compose file, `env_file` - `null` for every plane since `sl-env-split` - and the command line) | `stack.manifest.toml`. A `manual` plane (none today; the portal was one until 2026-11-01) is deliberately absent: the watchdog must not auto-repair a plane a human starts by hand. `file: null` marks a project that owns no services - the anchor - and the watchdog skips those instead of issuing `up -d` into the void |
 | `container`, `service`, `profile` | the compose **render**, with every declared profile switched on |
 | `profile` | the render, EXCEPT where the plane's compose file is a pinned submodule that does not carry the profile yet - there the sidecar's value is a DECLARATION (see below) |
 | `project` | the render too - a sidecar row may omit it. Record it only where the render cannot answer: a project whose compose file may be absent (`open-brain` - CI has no submodule). Where recorded, it is audited against the render |

@@ -18,7 +18,7 @@ to confirm there's no other gap you missed.
 | Plain files / append-only logs / config / immutable git objects | **Generic tar** — `backup/generic-tar-backup.sh` + alpine sidecar | tailscale-backup, openbrain-wiki-backup (OB1 project) |
 | **PostgreSQL** (any version, any extensions including pgvector) | **`pg_dump -Fc`** — custom Dockerfile based on postgres:N-alpine | openbrain-db-backup (OB1 project), llm-gateway-backup |
 | **SurrealDB** (RocksDB store) | **`surreal export`** logical dump — custom Dockerfile based on debian-slim with the surreal binary copied in | open-notebook-backup |
-| **SQLite** under active write | **`sqlite3 .backup`** command (Online Backup API) — NOT a hot tar | (none yet — Authelia's SQLite is currently tar'd via authelia-backup; it works because SQLite WAL mode tolerates concurrent reads) |
+| **SQLite** under active write | **`sqlite3 .backup`** command (Online Backup API) — NOT a hot tar | (none — the one SQLite that was hot-tarred, Authelia's via authelia-backup, retired with the portal plane 2026-11-01) |
 | **Redis** with append-only-file persistence | `BGSAVE` + tar the resulting dump.rdb | (none — search-redis is intentionally in-memory only) |
 | Any database NOT listed above | Treat as opaque — STOP the container before tarring its data dir | — |
 
@@ -69,7 +69,6 @@ Every backup container, regardless of shape, must have:
    can override in `.env`. Schedule conventions:
    - **02:00 UTC** — large or DB-dump jobs (longest run window)
    - **02:15 / 02:20 / 02:25 UTC** — small tar jobs
-   - **03:00 UTC** — portal volumes (after everything else)
    - **04:00 UTC Sunday** — NAS sync (after all nightlies)
    - **Custom (weekly Sunday 01:00 UTC)** — multi-GB jobs that don't need daily cadence (lm-models)
 
@@ -88,7 +87,7 @@ Every backup container, regardless of shape, must have:
 ## Not a volume: gitignored config and secrets
 
 The sidecars back up VOLUMES. The gitignored FILES the stack cannot run without -
-every plane's `.env`, `secrets/`, `portal/config/authelia/users_database.yml`, OAuth
+every plane's `.env`, `secrets/`, OAuth
 token files bind-mounted into containers - are archived nightly, age-encrypted to
 the operator's public key, by `scripts/backup/config_secrets_backup.py` into
 `./backups/config-secrets/` (runbook:

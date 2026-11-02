@@ -556,7 +556,6 @@
       "inference/.env",
       "search/.env",
       "coder/.env",
-      "portal/.env",
       "OB1/docker/.env",
       "OB1/recipes/daily-digest/.env",
       "OB1/recipes/email-history-import/.env",
