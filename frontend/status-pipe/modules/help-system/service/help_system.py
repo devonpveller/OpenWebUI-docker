@@ -69,14 +69,14 @@ class HelpSystemModule:
                     "Run these on the HOST, from the ai-stack repo root.",
                     "docker compose -f frontend\\docker-compose.yml restart tailscale - Lightest network-namespace fix, try it FIRST: restarts tailscale ALONE (safe - it is openwebui that must never be restarted alone), which re-joins openwebui's namespace. Wait ~30 s, then check: docker exec tailscale ping -c 1 8.8.8.8",
                     "python scripts\\recovery\\status_check.py - System overview, read-only (containers, CUDA in openwebui, gateway, upstreams, tailscale)",
-                    "python scripts\\stack\\stack.py health - Health probes for the enabled planes it covers (not the portal: use scripts\\portal\\portal-status.ps1), read-only (exit code = failed probes)",
+                    "python scripts\\stack\\stack.py health - Health probes for the enabled planes it covers read-only (exit code = failed probes)",
                     "docker exec openwebui nvidia-smi - Is the GPU visible inside Open WebUI? (read-only)",
                     "python scripts\\stack\\stack.py restart frontend - Restart openwebui and tailscale together (never restart openwebui alone)"
                 ],
                 "advanced_recovery": [
-                    ".\\scripts\\recovery\\emergency-recovery.ps1 -Action recover - Repairs a broken openwebui/tailscale network namespace (most common). If basic connectivity checks pass it first tries a gentle pass: restart both llama-cpp upstreams, then openwebui (waits for healthy), then tailscale, then 'up -d' for llm-queue/llm-gateway, search, coder, and OB1 and agent-org when deployed. Otherwise, or if that fails, it stops and restarts frontend, inference, search, coder, and OB1 and agent-org when deployed, in dependency order with health gates. It never touches the portal.",
+                    ".\\scripts\\recovery\\emergency-recovery.ps1 -Action recover - Repairs a broken openwebui/tailscale network namespace (most common). If basic connectivity checks pass it first tries a gentle pass: restart both llama-cpp upstreams, then openwebui (waits for healthy), then tailscale, then 'up -d' for llm-queue/llm-gateway, search, coder, and OB1 and agent-org when deployed. Otherwise, or if that fails, it stops and restarts frontend, inference, search, coder, and OB1 and agent-org when deployed, in dependency order with health gates.",
                     ".\\scripts\\recovery\\emergency-recovery.ps1 -Action gpu-reset - GPU recovery: takes down inference and frontend and REBUILDS the openwebui image (heavy)",
-                    ".\\scripts\\recovery\\emergency-recovery.ps1 -Action nuclear - Last resort. It tries the same gentle pass first when connectivity checks pass. Otherwise it runs 'down' on OB1, frontend, coder, search and inference and brings them back up, plus agent-org when deployed. It never stops or starts the portal."
+                    ".\\scripts\\recovery\\emergency-recovery.ps1 -Action nuclear - Last resort. It tries the same gentle pass first when connectivity checks pass. Otherwise it runs 'down' on OB1, frontend, coder, search and inference and brings them back up, plus agent-org when deployed."
                 ]
             },
             "common_issues": {

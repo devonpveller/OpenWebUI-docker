@@ -14,9 +14,10 @@
 # natively from the project directory, and EVERY plane below REFUSES to render
 # when its own file is absent - by three different mechanisms (all measured
 # 2026-09-19, reading the process exit code and not a pipeline's):
-#   the six in-repo planes  a ${VAR:?} guard. The portal's is new with this
-#                           change - it had none, and for one revision it
-#                           rendered clean with every secret blank.
+#   the in-repo planes      a ${VAR:?} guard. (The retired portal plane's
+#                           was added with this change - it had none, and for
+#                           one revision it rendered clean with every secret
+#                           blank.)
 #   agent-org/docker/       a service-level `env_file: .env` on agent-bridge
 #                           (:109-110), which compose stats and refuses.
 #   OB1/docker/             its own ${OPS_GATEWAY_KEY:?} guard (:252).
@@ -25,7 +26,6 @@
 #   inference/  llama.cpp upstreams + llm-queue + LiteLLM gateway    (K.1)
 #   search/     Mullvad vpn + redis + searxng + gateway              (K.3)
 #   coder/      open-terminal + little-coder + lc-egress + backup    (K.4)
-#   portal/     internet front-end (portal-on.ps1 / portal-off.ps1)
 #   OB1/docker/ Open Brain — incl. the Open Notebook trio since K.5b
 #   agent-org/docker/  Mattermost + the governed agent-bridge org
 #
@@ -60,9 +60,10 @@ networks:
   # (search-gw-net in OB1's compose = this network).
   default:
     driver: bridge
-  # The app seam: portal caddy → openwebui / open_notebook, and the tailnet
-  # QUARTZ serve route → caddy:8446. Portal + frontend + OB1 (wiki-viewer,
-  # open_notebook) attach externally.
+  # The app seam: the tailnet serve routes (tailscale, in openwebui's netns) →
+  # openbrain-wiki-viewer:8080 / open_notebook / llm-gateway-ui. (Until 2026-11-01
+  # the retired portal's caddy joined it too.) Frontend + inference (llm-gateway-ui)
+  # + OB1 (wiki-viewer, workbench, open_notebook) attach externally.
   app-net:
     driver: bridge
 

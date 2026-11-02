@@ -79,7 +79,7 @@ function Get-FunctionText {
     return ($text -join "`n`n")
 }
 
-$FnNames = @("Write-Log", "Get-ContainerHealth", "Wait-ForHealthy", "Test-NetworkConnectivity", "Test-PortalRunning", "Confirm-AnchorNetworks")
+$FnNames = @("Write-Log", "Get-ContainerHealth", "Wait-ForHealthy", "Test-NetworkConnectivity", "Confirm-AnchorNetworks")
 # The lifted functions read $Script:AnchorCompose; from a child scope of THIS
 # script that resolves HERE. Test-StaticShape checks the target file assigns
 # the same value.
@@ -114,7 +114,6 @@ $Script:ProjectOfFile = @{
     "inference\docker-compose.yml" = "inference"
     "search\docker-compose.yml"    = "search"
     "coder\docker-compose.yml"     = "coder"
-    "portal\docker-compose.yml"    = "portal"
 }
 
 function Reset-FakeHost {
@@ -137,7 +136,6 @@ function Reset-FakeHost {
         @{ Name = "llama-cpp-upstream"; Project = "inference"; Service = "llama-cpp-upstream"; State = "running"; Health = @("healthy") },
         @{ Name = "search-gateway";     Project = "search";    Service = "gateway";            State = "running"; Health = @("healthy") },
         @{ Name = "little-coder";       Project = "coder";     Service = "little-coder";       State = "running"; Health = @("healthy") },
-        @{ Name = "caddy";              Project = "portal";    Service = "caddy";              State = "running"; Health = @("healthy") },
         @{ Name = "ac-rg-nohc";         Project = "x";         Service = "nohc";               State = "running"; Health = @("") },
         @{ Name = "ac-rg-exited";       Project = "x";         Service = "exited";             State = "exited";  Health = @("") },
         @{ Name = "ac-rg-unhealthy";    Project = "x";         Service = "unhealthy";          State = "running"; Health = @("unhealthy") },
@@ -311,13 +309,6 @@ function Test-HeadStub {
         Reset-FakeHost
         $r = Invoke-Under $Path { Test-NetworkConnectivity "ac-rg-missing" }
         Check ($r.Result[-1] -eq $false) "Test-NetworkConnectivity on an absent container -> False"
-
-        Reset-FakeHost
-        $r = Invoke-Under $Path { Test-PortalRunning }
-        Check ($r.Result[-1] -eq $true) "Test-PortalRunning sees a running caddy (own project) -> True"
-        $Script:Fake = @($Script:Fake | Where-Object { $_.Name -ne "caddy" })
-        $r = Invoke-Under $Path { Test-PortalRunning }
-        Check ($r.Result[-1] -eq $false) "Test-PortalRunning with no caddy -> False"
     }
     finally { Remove-Stub }
 }

@@ -28,8 +28,8 @@ stages, because either alone gets it wrong:
    `ai-stack_llm-net` is `internal: true`, `ai-stack_app-net` and
    `ai-stack_default` are ordinary bridges.
 2. **Read the candidate's source for an outbound call.** Being on a bridge is a
-   *route*, not traffic. `llm-gateway-ui`, the search `gateway`, `openbrain-ext`
-   and the portal's watchers are all on bridges and all make no call off this
+   *route*, not traffic. `llm-gateway-ui`, the search `gateway` and `openbrain-ext`
+   are all on bridges and all make no call off this
    host; they are listed under "network-capable, no outbound call" below rather
    than in the table.
 
@@ -40,6 +40,8 @@ wins.
 
 ## The table
 
+The workstation portal plane (`cloudflared` ingress and the `portal-alerter` Gmail egress, with Caddy and Authelia) was retired 2026-11-01 and is archived in `scripts/archive/portal-caddy-authelia/`; its rows left this table then. The internet edge runs on other machines, outside this repo.
+
 | Cloud-capable component | Where it is defined | What it does when off | What turns it on | Where it egresses |
 |---|---|---|---|---|
 | LiteLLM cloud model group (`cloud-large`, `cloud-small`) | `inference/config/litellm/model_list/cloud.openrouter.yaml` | `config/litellm/assemble-config.py` drops every model entry whose `os.environ/VAR` reference is unset or empty, and logs the drop with its reason. The two models are not registered, so `/v1/models` does not list them and nothing else about the gateway changes. | `OPENROUTER_API_KEY` in `inference/.env`. It is blank in `inference/.env.example`. | **Nowhere.** See "Why a cloud key does not open a route" below: the key makes these models LISTED, not reachable. |
@@ -48,8 +50,6 @@ wins.
 | `agent-bridge`'s GitHub App (the capability plane) | `agent-org/agent-bridge/app/config.py`, `agent-org/docker/docker-compose.yml` | `Settings.github_app_enabled` is false unless `github_app_id` is set **and** the private-key file exists, so the plane stays offline and the bridge runs normally without it. | `AO_GITHUB_APP_ID` + `AO_GITHUB_APP_OWNER` in `agent-org/docker/.env` (absent from the example - this plane leaves `${VAR:-}` names out on purpose), and a readable key at `agent-org/agent-bridge/secrets/github-app-key.pem`. | `https://api.github.com`, directly from `ao-net`, which is a plain bridge. This one does **not** go through `ao-egress`. |
 | `lc-egress`, and the `open-terminal` proxied through it | `coder/docker-compose.yml`, `little-coder/docker/Dockerfile.egress` | Nothing: it is unprofiled and **starts whenever the coder plane starts**. What is "off" is the destination set - tinyproxy runs `FilterDefaultDeny Yes`, so any host not matching the allowlist is refused, and the proxy initiates nothing on its own. | No variable. The allowlist is baked into the image from `little-coder/docker/egress-allowlist.txt`, which ships `github.com` and `githubusercontent.com`; widening it is an edit plus a rebuild. | `CONNECT` to 443 and 22 on allowlisted hosts, out of the coder project's own `default` bridge. `open-terminal` has no other route: it is on `lc-net` (`internal: true`) and `llm-net` (also internal). |
 | `vpn` (Mullvad WireGuard, gluetun) | `search/docker-compose.yml` | **This is an egress that is meant to be on.** It is unprofiled, so it renders and starts with the search plane and dials Mullvad itself. From the examples it cannot connect: `search/.env.example` ships `MULLVAD_WG_PRIVATE_KEY=change-me-real-wg-private-key`, a placeholder rather than a blank because the `${...:?}` guard rejects empty. | Real values for `MULLVAD_WG_PRIVATE_KEY` and `MULLVAD_WG_ADDRESSES` in `search/.env`. | Mullvad, over WireGuard. It exists so search does **not** leak: `searxng` sits on `search-net` (`internal: true`) and `search/searxng/settings.yml` points `outgoing.proxies` at `http://vpn:8888`, so engine queries and page fetches have no other way out and HTTPS `CONNECT` resolves DNS at the far end of the tunnel. |
-| `cloudflared` | `portal/docker-compose.yml` | `profiles: [internet]`, and `portal/.env.example` deliberately carries no `COMPOSE_PROFILES` line. The whole plane is `manual` in `stack.manifest.toml`, so the driver never starts it either. | `scripts/portal/portal-on.ps1`, which passes `--profile internet` on the command line, plus `CLOUDFLARE_TUNNEL_TOKEN` in `portal/.env` (blank in the example). | Cloudflare's edge, from `edge-net`. It is the portal's only ingress - `caddy` publishes no host port. |
-| `portal-alerter` | `portal/docker-compose.yml` | Unprofiled, but it can only start when the portal does, which is by hand. Each channel is off while its settings are blank: Telegram without `PORTAL_ALERT_TELEGRAM_BOT_TOKEN` + `PORTAL_ALERT_TELEGRAM_CHAT_ID`, Mattermost without `PORTAL_ALERT_MM_URL` + `_TOKEN` + `_CHANNEL_ID`, email without `DIGEST_TO` and usable OAuth files (it logs `email disabled: OAuth not configured` once and makes no Google call). | The portal being up, plus, per channel: those `PORTAL_ALERT_*` values in `portal/.env` (blank in the example), and Google OAuth files at `secrets/google/portal-alerter/credentials.json` and `token.json`. | All on `notify-net`: `api.telegram.org` (Telegram Bot API `sendMessage`, added 2026-10-04 by pa-channels), the HOST's published Mattermost port via `PORTAL_ALERT_MM_URL` (e.g. `host.docker.internal:8065` - a host/LAN hop, not the internet, though Mattermost's own push notifications to a phone go out through its push proxy), and `oauth2.googleapis.com` + `gmail.googleapis.com`. Telegram and Mattermost get one minimal line per alert - severity, event name, a host label, the time - never source IPs, usernames or the log line (the Authelia notification bridge's log line carries one-time codes); only the email copy carries detail. No new network, no inbound path: `notify-net` already existed as the alerter's egress leg. **Do not read `auth-net`'s `internal: true` as "the portal has one way out":** the render has FOUR non-internal networks - `edge-net`, `notify-net`, the external `app-net`, and an implicit `default` that both backup sidecars join - and `caddy` itself is on `app-net` and `edge-net`. `notify-net` is the alerter's egress leg, not the plane's only one. |
 | `tailscale` | `frontend/docker-compose.yml` | `profiles: [tailscale]`, and `frontend/.env.example` ships `COMPOSE_PROFILES=stock`, so a fresh clone renders neither it nor its backup. | `tailscale` in `COMPOSE_PROFILES` in `frontend/.env` - necessarily together with `gpu`, because `network_mode: service:openwebui` names the `gpu` definition - plus `TAILSCALE_AUTH_KEY`, which the example leaves as `putyourtskeyhere`. | Tailscale's coordination servers and DERP relays, from inside `openwebui`'s network namespace. |
 | `openwebui` (either profile) | `frontend/docker-compose.yml` | Nothing - one of the two definitions is what this plane exists to run. The `stock` one is on the project-local `owui-net`; the `gpu` one additionally joins `ai-stack_default`, `app-net` and `llm-net`. | Whichever profile is active. | Both sit on an internet-capable bridge. Its web SEARCH does not use that - `SEARXNG_QUERY_URL` points at the search plane's gateway - but that setting covers the query only; what Open WebUI's own loaders fetch at runtime is upstream behaviour this repo does not pin (no `HF_HUB_OFFLINE` is set beside `HF_HOME`). Treat it as network-capable and unbounded rather than as bounded by `SEARXNG_QUERY_URL`. |
 | `openwebui-backup` | `frontend/docker-compose.yml` | Nothing. It is **unprofiled and renders under `stock`**, i.e. in the quickstart deployment, and its `command:` begins `apk add --no-cache pigz` on every container start. | Nothing - this is on by default. | The Alpine package CDN, over `owui-net`. The compose comment beside the network list says so in as many words. It is the only runtime package install in any compose file here; the other backup sidecars run their script and nothing else. |
@@ -70,7 +70,7 @@ These are on ordinary bridges and so pass stage 1, but their source makes no
 outbound call. They are listed so the criterion is visible and so a reader
 who disagrees has something to argue with:
 
-- **`llm-gateway-ui`** - on `app-net` so the portal's Caddy can front `/ui`. Its
+- **`llm-gateway-ui`** - on `app-net` so the tailnet `:8445` serve route reaches it. Its
   `litellm.ui.config.yaml` declares no `model_list`, sets `telemetry: false`,
   and the service sets `LITELLM_LOCAL_MODEL_COST_MAP=True`, so there is a route
   and no call. It carries no alias and serves no inference.
@@ -78,11 +78,6 @@ who disagrees has something to argue with:
   only HTTP client targets `searxng`.
 - **`openbrain-ext`** - its one outbound `fetch` is `WIKI_RECOMPILE_URL`,
   internal.
-- **the portal's `caddy`, watchers, tripwire and `portal-cron`** - internal
-  targets only. Caddy attempts no ACME: every site address in the `Caddyfile` is
-  `http://` or a bare port, which disables auto-HTTPS (the `https://` strings in
-  that file are redirect TARGETS and comments). `authelia`'s notifier is `filesystem`
-  and it is on `auth-net` (`internal: true`).
 - **`frontend/status-pipe/`** - every request target is an internal `host:port`.
 - **the backup sidecars other than `openwebui-backup`** - on a project bridge,
   but each only runs its own script; the NAS sync (`scripts/backup/backup-to-nas.ps1`)
@@ -146,7 +141,7 @@ as shipped. Fixing it is a compose or image change, not a documentation one.
 Copy each plane's `.env.example` and:
 
 - Every **provider** credential is blank (`OPENROUTER_API_KEY`,
-  `CLOUDFLARE_TUNNEL_TOKEN`, `AO_CLOUD_API_KEY`, `LC_DEPLOY_TOKEN`,
+  `AO_CLOUD_API_KEY`, `LC_DEPLOY_TOKEN`,
   `LC_SELF_REMOTE_PAT`) or an unmistakable placeholder
   (`TAILSCALE_AUTH_KEY=putyourtskeyhere`,
   `MULLVAD_WG_PRIVATE_KEY=change-me-real-wg-private-key`). The cloud lane's own

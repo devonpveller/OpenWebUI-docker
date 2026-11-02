@@ -42,11 +42,13 @@ archive deleted or damaged on D: stays intact on the NAS (§8).
 | openbrain-wiki | volume tar (git tree + assets) | `openbrain-wiki-*.tar.gz` | tar extract |
 | tailscale | state-dir tar | `tailscale-*.tar.gz` | tar extract |
 | lm-models | llama.cpp model store tar (~120 GB) | `lm-models-*.tar.gz` | tar extract |
-| caddy / authelia | volume tar (portal) | `caddy-*` / `authelia-*.tar.gz` | tar extract |
-| config-secrets | age-encrypted tar of the gitignored config + secrets (every `.env`, `secrets/`, the Authelia users DB, bind-mounted credentials); a host scheduled task, not a sidecar | `config-secrets-*.tar.age` (+ `.files.txt`) | `age --decrypt` with the operator's OFFLINE key, then tar - [config-secrets-backup.md](config-secrets-backup.md) |
+| config-secrets | age-encrypted tar of the gitignored config + secrets (every `.env`, `secrets/`, bind-mounted credentials); a host scheduled task, not a sidecar | `config-secrets-*.tar.age` (+ `.files.txt`) | `age --decrypt` with the operator's OFFLINE key, then tar - [config-secrets-backup.md](config-secrets-backup.md) |
 
 `smolcrawl` is retired and has no backup sidecar any more; an old `smolcrawl-*.tar.gz`
-archive has nothing to restore into (see `restore-from-snapshot.md`).
+archive has nothing to restore into (see `restore-from-snapshot.md`). Likewise the
+portal plane (Caddy, Authelia, cloudflared) was retired 2026-11-01 and archived at
+`scripts/archive/portal-caddy-authelia/`: old `caddy-*` / `authelia-*` archives are kept
+as final copies only, and no sidecar writes new ones.
 
 ---
 
@@ -153,17 +155,17 @@ While the app is retired, leave it stopped: the restored data is served by surre
 
 ---
 
-## 7. Volume tar restore (openwebui, little-coder, wiki, tailscale, lm-models, caddy, authelia)
+## 7. Volume tar restore (openwebui, little-coder, wiki, tailscale, lm-models)
 
 General pattern: stop consumers, wipe the volume, extract the tar, restart.
 
 ```bash
-SVC=authelia ; VOL=portal_authelia-data ; CONSUMER=authelia
+SVC=little-coder ; VOL=<the volume> ; CONSUMER=<the service> ; PLANE=coder
 F=$(ls -1t backups/$SVC/*.tar.gz | head -1)
-docker compose -f portal/docker-compose.yml stop $CONSUMER
+docker compose -f $PLANE/docker-compose.yml stop $CONSUMER
 docker run --rm -v $VOL:/data -v "$PWD/backups/$SVC":/b:ro alpine \
   sh -c 'rm -rf /data/* /data/..?* /data/.[!.]* 2>/dev/null; tar xzf /b/'"$(basename "$F")"' -C /data'
-docker compose -f portal/docker-compose.yml start $CONSUMER
+docker compose -f $PLANE/docker-compose.yml start $CONSUMER
 ```
 
 **Service-specific care:**
@@ -275,49 +277,14 @@ spelling, or a second session opens and 1219 returns.
 
 ### Do not trust a green alerter
 
-The failure alert goes to the portal-alerter **and** to Mattermost **and** to
-Telegram, and the log records which channels answered. This is deliberate: the
-alerter's Gmail refresh token is dead, so it returns 500 to every `/alert` while
-its `/health` still answers `ready: true` with HTTP 200 — the healthcheck only
-proves the listener is up, not that mail can be sent. Both 2026-09 backup
-failures alerted correctly into that void.
-
-Since pa-channels (2026-10-04) the alerter itself sends to Telegram and/or
-Mattermost as well as Gmail and returns 200 when any one delivered; a refused
-Gmail token now shows as `email disabled: OAuth not configured (...)` in its log
-and as `channel email off` in `portal-status.ps1`, and an alert that reached no
-channel is paged by the host watchdog. The rest of this section still applies to
-the email copy.
-
-**`portal-alerter` and the daily digest are different services with different
-OAuth clients.** `openbrain-digest` has been sending fine throughout. A working
-digest is *not* evidence that the alerter works, and re-consenting one does
-nothing for the other.
-
-To check the alerter specifically:
-
-```powershell
-docker logs --timestamps portal-alerter | Select-String "Token refresh failed" | Select-Object -Last 3
-```
-
-If present, its refresh token returns `invalid_grant` and must be re-minted:
-
-```powershell
-deno run --allow-net --allow-read --allow-write --allow-env portal/config/alerter/setup-token.ts
-docker compose -f portal/docker-compose.yml up -d --force-recreate portal-alerter
-```
-
-**Do not date the outage from the container log.** The log begins when the
-container was created, not when the token broke. The honest last-known-good is
-`expiry_date` inside `secrets/google/portal-alerter/token.json` — `alerter.ts`
-rewrites that file on every successful refresh, so its timestamp is the last time
-mail actually worked. On 2026-09-13 the log implied 23 days and the token file
-said 14 weeks.
-
-Likewise ignore the 0-byte `portal/config/alerter/token.json` / `credentials.json`:
-those are Docker's bind-mount placeholders, created because the compose file
-mounts `./config/alerter:/app` and then layers the real files from `secrets/`
-over it. They are not the credentials and never were.
+The failure alert goes to Mattermost **and** to Telegram, and the log records which
+channels answered; when none does, the log carries `ALERT UNDELIVERABLE` and a
+desktop message is shown. Until 2026-11-01 it also went to the portal-alerter; that
+sidecar retired with the portal plane (archived at
+`scripts/archive/portal-caddy-authelia/`). The lesson from its time still holds:
+both 2026-09 backup failures "alerted" into a Gmail token that had died while the
+alerter's `/health` still said `ready: true`. A healthcheck proves a listener is up,
+not that a message was delivered, so judge a channel by the delivery line in the log.
 
 ---
 
@@ -352,7 +319,7 @@ recreate that one sidecar (`docker compose -f <plane>/docker-compose.yml up -d
 | `LITTLE_CODER_BACKUP_INTERVAL` | little-coder-backup (coder) | 86400 |
 | `LM_MODELS_BACKUP_INTERVAL` | lm-models-backup (inference) | 604800 (weekly; empty = disabled) |
 | `OPENBRAIN_WIKI_BACKUP_INTERVAL` | openbrain-wiki-backup (ob1; set in `OB1/docker/.env`) | 86400 |
-| *(not an interval)* | llm-gateway-backup (inference) sleeps 86400 s, hard-coded in its entrypoint; `caddy-backup` / `authelia-backup` (portal) are supercronic on `*_BACKUP_CRON`, default `0 3 * * *`; `openbrain-db-backup` and `open-notebook-backup` likewise, defaulting to 02:00 and 02:20 UTC | |
+| *(not an interval)* | llm-gateway-backup (inference) sleeps 86400 s, hard-coded in its entrypoint; `openbrain-db-backup` and `open-notebook-backup` are supercronic on `*_BACKUP_CRON`, defaulting to 02:00 and 02:20 UTC | |
 
 **Disk rotation** is autonomous: the `AI-Stack Weekly Maintenance` scheduled
 task (Sundays 03:15) runs `scripts/maintenance/weekly-maintenance.ps1` - a safe

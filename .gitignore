@@ -1,7 +1,7 @@
 # .gitignore
 # NO LEADING SLASH, deliberately: a pattern without one matches at EVERY level,
 # so this single line covers the root .env AND every per-plane one - frontend/.env,
-# inference/.env, search/.env, coder/.env, portal/.env (sl-env-split,
+# inference/.env, search/.env, coder/.env, and the retired portal/.env (sl-env-split,
 # 2026-09-19; verified with `git check-ignore -v frontend/.env`). Anchoring it to
 # `/.env` would leave those live secret files committable. The same holds for every
 # backup pattern below, and `.env.example` at any level stays tracked because no
@@ -46,22 +46,20 @@ secrets/
 !backup/openwebui-backup.sh
 !backup/openwebui-restore.sh
 !backup/little-coder-backup.sh
-!backup/caddy-backup.sh
-!backup/authelia-backup.sh
 !backup/llm-gateway-backup.sh
 !backup/generic-tar-backup.sh
 !backup/pg-backup.sh
 # (openbrain-db/wiki + open-notebook backup scripts and their Dockerfiles
 #  moved to OB1/docker/backup/ 2026-08-21 — OB1 owns its own backup sidecars.)
-# Sidecar build contexts (compose builds ./backup with these) — must be tracked
-# or a fresh clone cannot build the postgres/surreal/generic backup sidecars.
-!backup/Dockerfile
-# ...and its .dockerignore, without which a build sends the gitignored backups here too.
-!backup/.dockerignore
+# (backup/Dockerfile + .dockerignore - the caddy-backup / authelia-backup build
+#  context - and those two scripts moved to scripts/archive/portal-caddy-authelia/backup/
+#  with the portal plane, 2026-11-01; no remaining plane builds ./backup.)
 # The shared module's README (ac-planes-contained): which planes consume backup/.
 !backup/README.md
 
 # --- Portal-specific paths from plan §7.2 ---
+# The portal plane is RETIRED (2026-11-01, archived at scripts/archive/portal-caddy-authelia/),
+# but these secret files can still sit in a host's portal/ directory: keep them ignored.
 portal/config/authelia/users_database.yml
 portal/config/tripwire/baseline.sha256
 portal/config/alerter/credentials.json
