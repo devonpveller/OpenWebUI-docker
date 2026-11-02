@@ -104,7 +104,8 @@ Rules while you work:
   ```
 
   Lease names = the compose planes (`lease-names.conf`): `inference`,
-  `search`, `coder`, `frontend`, `open-brain`, `agent-org`, `portal`. Rules:
+  `search`, `coder`, `frontend`, `open-brain`, `agent-org` (`portal` left the
+  list when that plane retired, 2026-11-01). Rules:
   1. A multi-plane test requests all names in **one call**
      (`-Name "frontend,open-brain"`) — sorted, all-or-nothing, so two agents
      cannot deadlock.
@@ -545,7 +546,7 @@ files, so provision the merge worktree before merging, then check it by hand:
 ```powershell
 $m = '<main-checkout>/.claude/worktrees/merge-line'
 git -C $m submodule update --init OB1                      # OB1 at the line's pin
-foreach ($d in '.', 'frontend', 'inference', 'search', 'coder', 'portal', 'agent-org/docker', 'OB1/docker') {
+foreach ($d in '.', 'frontend', 'inference', 'search', 'coder', 'agent-org/docker', 'OB1/docker') {
     if (-not (Test-Path "$m/$d/.env")) { Copy-Item "$m/$d/.env.example" "$m/$d/.env" } }
 # after `merge --no-ff ... --no-commit` (or before, on the line): OB1 at the MERGED pin
 git -C $m submodule update OB1
@@ -720,7 +721,7 @@ by force-push; `development` history is append-only.
   codebase, and it is paid deliberately - `queue.ps1 -List` is where you see what is
   waiting on whom.
 - **A merge is not a deploy, and the board now says which merges are not yet live.** Anything
-  that must be proven through the real caddy/tailnet chain still happens after the merge,
+  that must be proven through the real tailnet chain still happens after the merge,
   serially, by nature - what changed on 2026-09-06 is that `-Merged` derives from the merge
   range what the item SHIPS (an OB1 integration image, a `:local` build context, a `frontend/owui/`
   file OWUI only sees by paste), `-List` shows that item as `[UNDEPLOYED: ...]` until each

@@ -9,10 +9,11 @@ A self-hosted AI stack on Docker, organized as **one Docker Compose project per
 plane** around a root `docker-compose.yml` that declares only the shared networks
 (`ai-stack_llm-net` / `app-net` / `default`):
 
-- **Planes** `frontend/`, `inference/`, `search/`, `coder/`, `portal/` —
+- **Planes** `frontend/`, `inference/`, `search/`, `coder/` —
   each `<plane>/docker-compose.yml` with its own `<plane>/.env` (compose loads it
-  natively; nothing passes `--env-file`) and its own README. The portal is driven only
-  by `scripts/portal/portal-on.ps1`.
+  natively; nothing passes `--env-file`) and its own README. The workstation portal
+  (Caddy, Authelia, cloudflared) is retired (2026-11-01) and archived in
+  `scripts/archive/portal-caddy-authelia/`; the internet edge runs on the Proxmox nodes.
 - **Inference** (`inference/docker-compose.yml`): `llm-gateway` = LiteLLM front door →
   `llm-queue` → `llama-cpp-upstream` / `llama-cpp-embed-upstream`.
 - **Open Brain** (`OB1/docker/docker-compose.yml`, a pinned git submodule) and
@@ -53,6 +54,6 @@ plane** around a root `docker-compose.yml` that declares only the shared network
 ## Where things are
 
 `frontend/owui/` = canonical OWUI plugin/skill exports (paste-deployed; `manifest.csv`
-maps file → OWUI id). `scripts/` = ops plane (recovery, checks, portal,
+maps file → OWUI id). `scripts/` = ops plane (recovery, checks,
 backups, bridges). `documentation/runbooks/` = operational procedures.
 `documentation/implementation-guide/README.md` = per-feature status index.

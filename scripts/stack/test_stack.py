@@ -30,11 +30,26 @@ import stack  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REAL_MANIFEST = REPO_ROOT / "stack.manifest.toml"
 
-# The order scripts/stack/stack.ps1 uses. Portal is deliberately absent: that
-# script says so in its header, and the manifest marks the plane `manual`.
+# The order scripts/stack/stack.ps1 uses - since the portal retired (2026-11-01) it
+# is also every plane the real manifest declares.
 PS1_ORDER = ["anchor", "inference", "frontend", "search", "coder", "ob1", "agent-org"]
 
-ALL_PLANES_BUT_ANCHOR = "inference,frontend,search,coder,ob1,agent-org,portal"
+ALL_PLANES_BUT_ANCHOR = "inference,frontend,search,coder,ob1,agent-org"
+
+# A synthetic manual plane for the tests that pin the `manual` mechanism.
+MANUAL_PLANE_BLOCK = """
+# A synthetic MANUAL plane: the driver's `manual` mechanism is still shipped, but no
+# real plane uses it since the portal retired (2026-11-01), so the tests that pin the
+# mechanism declare their own.
+[planes.handdriven]
+compose  = "handdriven/docker-compose.yml"
+requires = ["anchor"]
+manual   = "scripts/handdriven/on.ps1"
+[planes.handdriven.ports]
+[planes.handdriven.profiles.internet]
+description = "the edge tunnel; on.ps1 passes it"
+opt_in      = true
+"""
 
 
 class Recorder:
@@ -185,11 +200,13 @@ def test_driver_imports_only_the_standard_library():
 
 def test_real_manifest_parses_and_every_edge_names_a_real_plane():
     manifest = stack.Manifest.load(REAL_MANIFEST)  # _validate raises on an unknown name
-    assert manifest.order == PS1_ORDER + ["portal"]
+    assert manifest.order == PS1_ORDER
     assert list(manifest.products) == [
         "chat", "inference", "search", "open-brain",
-        "research", "pantry", "intake", "notebook-app", "coding-agent", "agent-org", "digest", "portal",
+        "research", "pantry", "intake", "notebook-app", "coding-agent", "agent-org", "digest",
     ]
+    # the portal plane and product retired 2026-11-01: no manual plane remains
+    assert not [p for p in manifest.order if manifest.manual(p)]
 
 
 def test_manifest_requires_edges_are_the_verified_set():
@@ -203,22 +220,21 @@ def test_manifest_requires_edges_are_the_verified_set():
         "coder": ["anchor", "inference"],
         "ob1": ["anchor", "inference", "search"],
         "agent-org": ["anchor", "inference"],
-        "portal": ["anchor", "frontend"],
     }
     assert {name: manifest.optional(name) for name in manifest.order} == {
         "anchor": [],
         "inference": [],
-        # Five planes: the tailnet serve routes entrypoint.sh raises at boot, each
+        # Four planes: the tailnet serve routes entrypoint.sh raises at boot, each
         # behind an ..._ENABLED that defaults TRUE. The first cut of the manifest
-        # listed only inference and search and was WRONG.
-        "frontend": ["inference", "search", "ob1", "portal", "agent-org"],
+        # listed only inference and search and was WRONG. (The wiki route went to
+        # the portal's caddy until 2026-11-01; it is an ob1 edge now.)
+        "frontend": ["inference", "search", "ob1", "agent-org"],
         "search": [],
         "coder": [],
         "ob1": ["frontend", "agent-org"],
         # agent-org -> ob1 is deliberately absent: AO_OPENBRAIN_MIRROR_ENABLED and
         # AO_GROUNDING_ENABLED both default false, so a default boot never reaches.
         "agent-org": [],
-        "portal": ["ob1", "inference"],
     }
 
 
@@ -247,7 +263,7 @@ def test_no_state_file_lists_frontend_enabled_and_the_rest_disabled(root):
     code, out, _ = run(root, "list")
     assert code == 0
     statuses = plane_statuses(out)
-    assert set(statuses) == set(PS1_ORDER + ["portal"])
+    assert set(statuses) == set(PS1_ORDER)
     assert statuses.pop("frontend") == "enabled"
     assert set(statuses.values()) == {"disabled"}
 
@@ -309,7 +325,7 @@ def test_full_stack_down_is_the_exact_reverse(root):
 def test_order_planes_breaks_ties_by_declaration_order():
     manifest = stack.Manifest.load(REAL_MANIFEST)
     everything = set(manifest.order)
-    assert stack.order_planes(manifest, everything) == PS1_ORDER + ["portal"]
+    assert stack.order_planes(manifest, everything) == PS1_ORDER
     # A subset keeps the same relative order.
     assert stack.order_planes(manifest, {"ob1", "anchor", "search", "inference"}) == [
         "anchor", "inference", "search", "ob1",
@@ -672,14 +688,24 @@ def test_enabling_research_drives_ob1_with_every_profile_the_live_set_needs(root
     ]
 
 
-def test_portal_is_declared_but_never_driven(root):
-    run(root, "init", "--planes", ALL_PLANES_BUT_ANCHOR)
+def _add_manual_plane(root):
+    with (root / stack.MANIFEST_NAME).open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(MANUAL_PLANE_BLOCK)
+    compose = root / "handdriven/docker-compose.yml"
+    compose.parent.mkdir(parents=True, exist_ok=True)
+    compose.write_text("# placeholder - these tests never invoke docker\n", encoding="utf-8")
+    (root / "handdriven/.env").write_text("", encoding="utf-8")
+
+
+def test_a_manual_plane_is_declared_but_never_driven(root):
+    _add_manual_plane(root)
+    run(root, "init", "--planes", ALL_PLANES_BUT_ANCHOR + ",handdriven")
     _, out, recorder = run(root, "up", "--dry-run")
-    assert not any("portal/docker-compose.yml" in line for line in docker_lines(out))
-    assert "portal-on.ps1" in out
-    code, out, _ = run(root, "restart", "portal")
+    assert not any("handdriven/docker-compose.yml" in line for line in docker_lines(out))
+    assert "on.ps1" in out
+    code, out, _ = run(root, "restart", "handdriven")
     assert code == stack.EXIT_REFUSED
-    assert "portal-on.ps1" in out
+    assert "on.ps1" in out
 
 
 # --------------------------------------------------------------------------
@@ -1545,8 +1571,9 @@ def test_down_all_is_the_exact_reverse(root):
 
 
 def test_up_all_never_starts_the_manual_plane(root):
+    _add_manual_plane(root)
     _code, out, _r = run(root, "up", "--all", "--dry-run")
-    assert "portal/docker-compose.yml" not in out
+    assert "handdriven/docker-compose.yml" not in out
 
 
 def test_up_one_plane_starts_only_that_plane_and_names_what_it_assumes(root):
@@ -1650,13 +1677,13 @@ opt_in      = true
 description = "the cloud lane; the operator starts it"
 opt_in      = true
 
-[planes.portal]
-compose  = "portal/docker-compose.yml"
+[planes.handdriven]
+compose  = "handdriven/docker-compose.yml"
 requires = ["anchor"]
-manual   = "scripts/portal/portal-on.ps1"
-[planes.portal.ports]
-[planes.portal.profiles.internet]
-description = "cloudflared; portal-on.ps1 passes it"
+manual   = "scripts/handdriven/on.ps1"
+[planes.handdriven.ports]
+[planes.handdriven.profiles.internet]
+description = "the edge tunnel; on.ps1 passes it"
 opt_in      = true
 """
 
@@ -1820,7 +1847,7 @@ def test_inventory_write_builds_the_file_from_the_manifest_the_sidecar_and_the_r
     assert data["projects"]["agent-org"]["compose"] == \
         "docker compose -f agent-org/docker/docker-compose.yml"
     assert data["projects"]["agent-org"]["profiles"] == ["workers", "cloud"]
-    # the MANUAL plane is deliberately not an inventory project
+    # a MANUAL plane is never an inventory project (and the retired portal is gone)
     assert "portal" not in data["projects"]
 
     # rows: service only where it differs, profile from the render, curated kept
@@ -1948,7 +1975,7 @@ def test_a_plane_with_no_project_refuses_so_a_new_plane_cannot_vanish(mini_root)
 
 
 def test_the_manual_plane_may_not_be_given_a_project(mini_root):
-    projects = dict(CURATED_PROJECTS, portal={"plane": "portal"})
+    projects = dict(CURATED_PROJECTS, handdriven={"plane": "handdriven"})
     curated_file(mini_root, projects=projects)
     code, out, _c = inventory(mini_root, "--write")
     assert code != 0
@@ -1978,7 +2005,6 @@ def test_the_shipped_sidecar_covers_every_non_manual_plane_and_only_those():
     curated = json.loads((REPO_ROOT / stack.CURATED_REL).read_text(encoding="utf-8"))
     claimed = {spec["plane"] for spec in curated["projects"].values()}
     assert claimed == {p for p in manifest.order if not manifest.manual(p)}
-    assert "portal" not in claimed
 
 
 def test_every_shipped_row_carries_a_critical_flag_and_a_known_project():
@@ -2938,7 +2964,7 @@ def test_every_shipped_example_value_of_a_required_key_is_refused_verbatim(root)
         expected = {k for k in manifest.keys(plane) if shipped.get(k, "").strip()}
         assert flagged == expected, plane
         checked += len(expected)
-    assert checked >= 7   # frontend, inference, search, coder, agent-org, portal carry some
+    assert checked >= 6   # frontend, inference, search, coder, agent-org carry some
 
 
 # --- health scoped to the planes this machine enables --------------------------
@@ -4581,9 +4607,10 @@ def test_recover_one_plane_names_the_enabled_planes_that_depend_on_it(root):
 
 
 def test_recover_refuses_the_manual_plane(root):
-    code, out = ops(root, OpsDaemon(RENDERS), "recover", "portal", "--dry-run")
+    _add_manual_plane(root)
+    code, out = ops(root, OpsDaemon(RENDERS), "recover", "handdriven", "--dry-run")
     assert code == stack.EXIT_REFUSED
-    assert "refused: portal is not driven by stack.py" in out
+    assert "refused: handdriven is not driven by stack.py" in out
 
 
 def test_recover_warns_about_a_placeholder_where_up_refuses_it(root):
@@ -5210,9 +5237,9 @@ DOCS_RENDER = {
         "ao-worker-1": {"container_name": "ao-worker-1", "profiles": ["workers"]},
         "ao-egress": {"container_name": "ao-egress", "profiles": ["cloud"]},
     }},
-    "portal/docker-compose.yml": {"name": "portal", "services": {
-        "caddy": {"container_name": "caddy"},
-        "cloudflared": {"container_name": "cloudflared", "profiles": ["internet"]},
+    "handdriven/docker-compose.yml": {"name": "handdriven", "services": {
+        "edge-proxy": {"container_name": "edge-proxy"},
+        "edge-tunnel": {"container_name": "edge-tunnel", "profiles": ["internet"]},
     }},
 }
 
@@ -5298,7 +5325,7 @@ def test_docs_write_fills_every_block_and_check_then_passes(docs_root):
     assert ("| **agent-org** (`agent-org`) | `agent-org/docker/docker-compose.yml` | 2 with no profile; "
             "3 with `workers`; 3 with `cloud`; 4 with every profile (`workers`, `cloud`) |") in text
     assert "| **anchor** (`ai-stack`) | `docker-compose.yml` | 0 with no profile | none |" in text
-    assert "by hand: `scripts/portal/portal-on.ps1`" in text
+    assert "by hand: `scripts/handdriven/on.ps1`" in text
     assert "| `workers` | 3 | `ao-worker-1` |" in text
     assert ("| `gateway` | `search-gateway` | *(none)* | `127.0.0.1:8085->8080` | `search_search-net` (internal) |"
             in text)
@@ -5567,7 +5594,6 @@ def test_the_product_menu_is_what_enable_resolves(tmp_path):
     assert set(rows) == {f"**{name}**" for name in manifest.products}
     # open-brain enables its `default = true` idea-refinery AND that profile's `requires`
     assert "ob1: `idea-refinery`, `research`, `wiki`" in rows["**open-brain**"]
-    assert "anchor, frontend, portal *(manual)*" in rows["**portal**"]
     # keys are the union over every plane started, not only the product's own
     assert ("`LITELLM_MASTER_KEY`" in rows["**coding-agent**"]
             and "`OPEN_TERMINAL_API_KEY`" in rows["**coding-agent**"])
@@ -5948,8 +5974,8 @@ def test_printable_quotes_a_value_a_shell_would_split():
     assert stack.printable(["docker", "ps"]) == "docker ps"
 
 
-def test_the_shared_names_are_the_four_the_docs_name():
-    assert SHARED_NAMES == ["agent-org", "inference", "portal", "search"]
+def test_the_shared_names_are_the_three_the_docs_name():
+    assert SHARED_NAMES == ["agent-org", "inference", "search"]
 
 
 @pytest.mark.parametrize("name", SHARED_NAMES)
@@ -6020,33 +6046,35 @@ def _raw_state(root):
 
 
 def test_disabling_a_product_that_was_never_enabled_changes_nothing(root):
-    """attempt 1: `disable portal` with state [frontend] removed Open WebUI."""
+    """attempt 1: `disable portal` with state [frontend] removed Open WebUI. (The portal
+    product retired 2026-11-01; pantry also carries frontend, so it stands in.)"""
     run(root, "init", "--planes", "frontend", "--force")
     before = _raw_state(root)
-    code, out, _ = run(root, "disable", "portal")
+    code, out, _ = run(root, "disable", "pantry")
     assert code == 0, out
-    assert "product portal is not enabled on this machine; nothing to do" in out
+    assert "product pantry is not enabled on this machine; nothing to do" in out
     assert _raw_state(root) == before
 
 
 def test_disabling_one_product_keeps_every_plane_another_product_needs(root):
-    """portal and coding-agent share frontend; disabling either keeps it."""
+    """pantry and coding-agent share frontend; disabling either keeps it. (The portal
+    product played pantry's part until it retired, 2026-11-01.)"""
     run(root, "init", "--planes", "inference", "--force")
     assert run(root, "enable", "coding-agent")[0] == 0
-    assert run(root, "enable", "portal")[0] == 0
-    code, out, _ = run(root, "disable", "portal")
+    assert run(root, "enable", "pantry")[0] == 0
+    code, out, _ = run(root, "disable", "pantry")
     assert code == 0, out
     planes = state_of(root)["planes"]
-    assert "portal" not in planes
+    assert "ob1" not in planes
     assert {"frontend", "coder", "inference"} <= set(planes)
     assert "frontend (product coding-agent)" in out
-    assert "removed planes: portal" in out
+    assert "removed planes: search, ob1" in out   # ob1 requires search
     # and the other way round
-    assert run(root, "enable", "portal")[0] == 0
+    assert run(root, "enable", "pantry")[0] == 0
     code, out, _ = run(root, "disable", "coding-agent")
     assert code == 0, out
     planes = state_of(root)["planes"]
-    assert "coder" not in planes and "frontend" in planes and "portal" in planes
+    assert "coder" not in planes and "frontend" in planes and "ob1" in planes
     assert "inference" in planes          # enabled directly by init
 
 

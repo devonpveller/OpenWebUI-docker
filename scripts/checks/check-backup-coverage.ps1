@@ -9,7 +9,7 @@
 #
 # Since 2026-10-04 (config-backup) it ALSO audits the gitignored FILES the
 # stack cannot run or be recovered without - every plane's .env, secrets/,
-# portal/config/authelia/users_database.yml, bind-mounted credential files -
+# bind-mounted credential files (the retired portal's users DB until 2026-11-01) -
 # through `scripts/backup/config_secrets_backup.py check`: any such file that is
 # not in the newest encrypted config-secrets archive, any required one that is
 # missing (or is an empty directory Docker made in its place), and a host with no
@@ -117,10 +117,8 @@ try {
     'little-coder-cohorts'   = 'little-coder-backup'
     'little-coder-polyglot'  = 'little-coder-backup'
     'little-coder-sessions'  = 'little-coder-backup'
-    'caddy-data'             = 'caddy-backup'
-    'caddy-config'           = 'caddy-backup'
-    'authelia-data'          = 'authelia-backup'
-    'tripwire-data'          = 'integrity-tripwire (state-only; bound to host config) - not separately backed up'
+    # (caddy-data / caddy-config / authelia-data / tripwire-data left with the portal
+    #  plane, retired 2026-11-01 - a project=portal volume was never in this inventory.)
     'openbrain-db-data'      = 'openbrain-db-backup (open-brain project since 2026-08-21; artifacts still in ./backups)'
     'openbrain-wiki-data'    = 'openbrain-wiki-backup (open-brain project since 2026-08-21; artifacts still in ./backups)'
     # Pre-existing map omissions (the backup containers already cover these; the map just
@@ -139,7 +137,7 @@ try {
 
   # ----- Pre-flight: ensure ./backups/<service>/ dirs exist ----------
   $expectedBackupDirs = @(
-    'caddy', 'authelia', 'openwebui', 'little-coder',
+    'openwebui', 'little-coder',
     'openbrain-db', 'openbrain-wiki', 'open-notebook',
     'tailscale', 'lm-models',
     'agent-bridge-db', 'mattermost-db',
