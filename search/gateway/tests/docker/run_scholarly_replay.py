@@ -3,11 +3,12 @@ academic class, reaches a scholarly index and returns the PubMed source the audi
 
     python tests/docker/run_scholarly_replay.py --gateway-image private-search-gateway:wt-rw-p5a-intake
         --research-image openbrain-research:wt-rw-p5a-intake --settings ../searxng --out <evidence dir>
+        --owner wt-<id>     # or REPLAY_OWNER=wt-<id>: the harness owner label every lab object carries
         [--expect-red]      # RED: the base images and the base settings.yml - the PubMed source must NOT come back
 
 The replay needs the real PubMed, so it needs the internet - and takes it ONLY through the search plane's own
 egress path: the LIVE plane's Mullvad proxy (`search-vpn`, http://vpn:8888), reached from ONE lab container.
-WHAT IT RUNS (labelled ai-stack.harness.owner=wt-rw-p5a-intake, no published port, removed at the end):
+WHAT IT RUNS (labelled ai-stack.harness.owner=<--owner>, no published port, removed at the end):
   net       a NEW --internal bridge on 10.243.77.0/24 (outside 192.168.0.0/16 and the daemon's pools)
   redis     redis:7-alpine, the lab gateway's cache (no password; lab net only)
   searxng   the pinned image the plane runs, with --settings (this checkout's search/searxng: the scholarly engines
@@ -26,6 +27,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -36,8 +39,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SUBNET = "10.243.77.0/24"
-OWNER = "wt-rw-p5a-intake"
-LABEL = f"ai-stack.harness.owner={OWNER}"
+# round 4 (reviewer N5): the owner label is the RUNNER's, not this item's - --owner or REPLAY_OWNER (main sets it)
+OWNER = ""
+LABEL = ""
 SEARXNG_IMAGE = "searxng/searxng:2026.9.11-61d660276"
 REDIS_IMAGE = "redis:7-alpine"
 LIVE_SEARCH_NET = "search_search-net"
@@ -207,7 +211,14 @@ def main() -> int:
     p.add_argument("--out", required=True)
     p.add_argument("--expect-red", action="store_true")
     p.add_argument("--keep", action="store_true", help="leave the lab up (debugging); remove it by its label after")
+    p.add_argument("--owner", default=os.environ.get("REPLAY_OWNER", ""),
+                   help="the harness owner label (wt-<id>) every lab object carries; default $REPLAY_OWNER")
     a = p.parse_args()
+    global OWNER, LABEL
+    if not re.fullmatch(r"wt-[a-z0-9][a-z0-9-]{0,62}", a.owner or ""):
+        print("refused: --owner (or REPLAY_OWNER) must be a wt-<id> owner label")
+        return 2
+    OWNER, LABEL = a.owner, f"ai-stack.harness.owner={a.owner}"
     for img in (a.gateway_image, a.research_image):
         if ":wt-" not in img:
             print(f"refused: {img} is not a :wt-* image")
