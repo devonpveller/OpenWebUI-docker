@@ -69,6 +69,9 @@ async def searxng_compat_search(
         safe_search=safesearch,
         language=lang,
         time_range=tr,  # type: ignore[arg-type]  # validated against the set above
+        # rw-p5a-intake: the research service's academic class sends general,science; anything
+        # outside models.ALLOWED_CATEGORIES is dropped by the model (OWUI's keeps today's default)
+        categories=categories,  # type: ignore[arg-type]  # a comma list; the model validates it
     )
 
     if caller is not None and caller.screened:

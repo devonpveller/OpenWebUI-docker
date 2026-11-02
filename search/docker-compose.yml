@@ -38,7 +38,11 @@ services:
   # since the 2026-08-20 Mullvad flip. ALL search-plane egress (engine
   # queries AND page fetches) now leaves via the vpn service below.
   vpn:
-    image: ${VPN_IMAGE:-qmcgaw/gluetun:latest}
+    # PINNED by digest, not :latest (rw-p5a-intake round 3, reviewer R1): this container's DNS-rebinding refusal
+    # closes the window between the research service's own check of an added link's name and the proxy's lookup,
+    # and a floating tag could swap it silently. The digest is the image the plane ran on 2026-11-02 (created
+    # 2026-06-11). search/.env VPN_IMAGE overrides; bump it deliberately.
+    image: ${VPN_IMAGE:-qmcgaw/gluetun@sha256:343ddffa6bf9be7740bdd27317df2a2ecfc7e6d12e5532f98d23f5052f15be11}
     container_name: search-vpn
     cap_add:
       - NET_ADMIN
