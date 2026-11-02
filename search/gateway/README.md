@@ -51,6 +51,13 @@ Open WebUI's keyless `searxng` engine and the research engine until step 5 moves
 both (Open WebUI to `WEB_SEARCH_ENGINE=external` -> `/v1/owui/search` and
 `WEB_LOADER_ENGINE=external` -> `/v1/web-loader`, each with its own key).
 
+**Categories (rw-p5a-intake).** `GET /search` and `POST /v1/search` take `categories` (a comma list, or a list
+in JSON): the gateway passes SearXNG `general` and `science` only and drops any other value (models.py
+`ALLOWED_CATEGORIES`), so OWUI's own `categories` keeps today's default. `science` is where the scholarly engines
+are (pubmed, europepmc, crossref, openalex, arxiv, google scholar - named enabled in
+`../searxng/settings.yml`); the research service's `academic` contract class asks for `general,science`. The
+categories are part of the cache key.
+
 ## Why these design choices (ai-stack specifics)
 
 - **OWUI → gateway via the SearXNG engine (Approach B)**, not the Tavily shim.

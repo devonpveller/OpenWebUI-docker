@@ -43,6 +43,10 @@ class SearxngProvider(SearchProvider):
             params["language"] = req.language
         if req.time_range:
             params["time_range"] = req.time_range
+        # rw-p5a-intake: the allowed categories (models.ALLOWED_CATEGORIES) only;
+        # none = SearXNG's default
+        if req.categories:
+            params["categories"] = ",".join(req.categories)
         return params
 
     async def search(self, req: SearchRequest) -> list[SearchResult]:

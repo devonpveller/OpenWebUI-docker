@@ -13,7 +13,7 @@ the id is cryptic the filename uses the friendly name instead — e.g. the
 
 | Folder | OWUI kind | Files |
 |--------|-----------|-------|
-| `tools/`   | Tools (model-callable)        | `superpowers_tool`, `fileshed`, `deep_research`, `github_chat_mcp_tools` (GitHub Repo Analyzer), `pantry` (Kitchen model, fronts `openbrain-pantry`) |
+| `tools/`   | Tools (model-callable)        | `superpowers_tool`, `fileshed`, `deep_research`, `github_chat_mcp_tools` (GitHub Repo Analyzer), `pantry` (Kitchen model, fronts `openbrain-pantry`), `research_intake` (the research workspace's add, fronts `openbrain-workbench` - rw-p5a-intake) |
 | `filters/` | Filter functions              | `context_window_manager` |
 | `pipes/`   | Pipe functions (custom models)| `server_status` (the AI-Stack unified status pipe), `little_coder`, `githelper`, `github_chat_mcp` |
 | `actions/` | Action functions (buttons)    | `copy_research_note`, `copy_sources` (`add_web_sources_to_knowledge` retired 2026-08-20 — wrote into the retired OWUI Knowledge layer; deactivated in webui.db, snapshot in `scripts/archive/owui-retired/`) |
@@ -26,8 +26,8 @@ file named `github-chat-mcp.md`). All 8 exported live from `webui.db`
 2026-08-20; the old partial root `skills/` folder (3 of 8, stale names) was
 retired the same day in favour of this complete set.
 
-`manifest.csv` lists `file, type, name, owui_id, sha256` for all 12 tool/function
-files + the 9 skills — 21 rows (`add_web_sources_to_knowledge`, `code_agent` and
+`manifest.csv` lists `file, type, name, owui_id, sha256` for all 13 tool/function
+files + the 9 skills — 22 rows (`research_intake` joined with rw-p5a-intake; `add_web_sources_to_knowledge`, `code_agent` and
 `code_agent_tools` left the manifest in August 2026; the memory-layer tool and
 filter left with mm-retire, 2026-09-30). The `sha256` column is the CR-normalized digest of the repo file,
 which is what `scripts/checks/check-owui-drift.ps1` compares against the live
@@ -54,6 +54,10 @@ centralized here:
   `smolcrawl/deep_research/`, and the v1.0.0 client snapshot at
   `smolcrawl/deep_research_thin_client.py`, were retired 2026-08-20 — this file
   is the only OWUI-side artifact.
+- `tools/research_intake.py` ← service: `openbrain-workbench` (`POST /workbench/intake/add`, the intake
+  panel's one add; research-workbench P5a). After pasting, set **`service_key`** to Open WebUI's entry
+  `owui=<key>` of the workbench's `WORKSPACE_SERVICE_KEYS` (never `MCP_ACCESS_KEY`); the add is filed under
+  the chatting user's Authentik subject. Tests: `tools/tests/test_research_intake.py`.
 - `pipes/server_status.py` (OWUI id `ai_stack_unified_pipe_function`) is the
   verbatim deploy snapshot of [`status-pipe/orchestrator.py`](../status-pipe/)
   (the unified status pipe subsystem — orchestrator + router + modules +
