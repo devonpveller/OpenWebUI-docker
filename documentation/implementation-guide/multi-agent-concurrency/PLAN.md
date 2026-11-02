@@ -354,7 +354,8 @@ RED cases are already documented history — cite, don't re-stage the damage).
 - **`.env` drift** between checkout and worktrees — mitigated by sync-on-turn
   (A3), same class as the ao-worker stale-token incident.
 - **Deploy verification isn't parallelizable:** anything that must be proven
-  through the real caddy/tailnet chain (`:8444`) happens post-merge in the deploy
+  through the real tailnet chain (`:8444`; via the portal Caddy until that
+  plane retired 2026-11-01) happens post-merge in the deploy
   step, serialized by nature. Parallel test envs cover pre-merge confidence, not
   prod verification.
 - **The bridge is still one process per persona** — worktrees parallelize sessions,

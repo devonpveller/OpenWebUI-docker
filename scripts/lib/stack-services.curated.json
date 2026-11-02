@@ -16,7 +16,7 @@
     "WHERE EACH FIELD COMES FROM (sl-driver-parity, 2026-09-19):",
     "  projects.*            stack.manifest.toml - the compose file, the --env-file and",
     "                        the runnable command line. A plane the manifest marks",
-    "                        `manual` (the portal) is deliberately absent: the watchdog",
+    "                        `manual` (none since the portal retired) is absent: the watchdog",
     "                        must not auto-repair a plane a human starts by hand.",
     "  container / service   the compose RENDER, with every declared profile switched on",
     "  profile               so profile-gated containers appear too. Rendering WITHOUT",

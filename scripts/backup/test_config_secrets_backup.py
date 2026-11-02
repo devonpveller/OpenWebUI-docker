@@ -57,6 +57,11 @@ needs_age = pytest.mark.skipif(_age_bins() is None,
 
 
 # ----------------------------------------------------------------------------- fixtures
+# FIXTURE WORLD. The fake repo below models the 2026-10-04 incident with a synthetic
+# plane named `portal` (an Authelia-style users DB bind-mounted as a FILE, an OAuth
+# token behind an off profile). The real portal plane was retired 2026-11-01 and its
+# entries left the shipped policy, so the `policy` fixture appends the two rules this
+# world needs (FIXTURE_POLICY_EXTRA); the mechanism under test is unchanged.
 
 GITIGNORE = """.env
 .env.bak*
@@ -90,6 +95,19 @@ COMPOSE = """services:
     profiles: [internet]
     volumes:
       - ./config/alerter/token.json:/app/token.json
+"""
+
+# The fixture world's own rules (see FIXTURE WORLD above); appended after the shipped
+# policy's tables, so TOML places them as further array-of-table entries.
+FIXTURE_POLICY_EXTRA = """
+[[include]]
+glob = "portal/config/*"
+why = "fixture: the synthetic plane's gitignored config"
+
+[[required]]
+path = "portal/config/authelia/users_database.yml"
+plane = "portal"
+why = "fixture: absent, Docker bind-mounts an empty DIRECTORY (the 2026-10-04 shape)"
 """
 
 UNTRACKED = {
@@ -147,6 +165,8 @@ def policy(tmp_path: Path) -> Path:
     with the fixture's own recipients path."""
     p = tmp_path / "policy.toml"
     shutil.copyfile(SHIPPED_POLICY, p)
+    with p.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(FIXTURE_POLICY_EXTRA)
     return p
 
 
@@ -208,11 +228,13 @@ def run_cli(root: Path, policy: Path, *args: str, tmp: Path, extra_env=None) -> 
 
 # ----------------------------------------------------------------------------- policy
 
-def test_shipped_policy_loads_and_requires_the_users_db():
+def test_shipped_policy_loads_and_requires_the_state_file():
     pol = csb.load_policy(SHIPPED_POLICY)
     assert pol.retain_count >= 1 and pol.age_sha256
-    assert {e["path"] for e in pol.required} >= {"portal/config/authelia/users_database.yml",
-                                                 ".stack/state.json"}
+    assert ".stack/state.json" in {e["path"] for e in pol.required}
+    # the retired portal plane's rules left the shipped policy (2026-11-01)
+    assert not [e for e in pol.required if e["path"].startswith("portal/")]
+    assert not [e for e in pol.include if str(e.get("glob", e.get("path", ""))).startswith("portal/")]
     assert "backups" in pol.prune_paths and "secrets" in pol.secret_dirs
 
 

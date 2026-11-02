@@ -70,11 +70,8 @@ function Invoke-Unit {
     -w /app denoland/deno:2.3.3 sh -c "deno check agent-memory*.ts index.ts && deno test agent-memory*.test.ts"
   if ($LASTEXITCODE -eq 0) { Pass "agent-memory policy: deno check + test" } else { Fail "agent-memory policy: deno check/test" }
 
-  Section "Caddy validate (portal route)"
-  docker run --rm -e PUBLIC_DOMAIN=example.com -e ACME_EMAIL=a@b.c `
-    -v "${rootFwd}/portal/config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.8.4-alpine `
-    caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile
-  if ($LASTEXITCODE -eq 0) { Pass "caddy validate" } else { Fail "caddy validate" }
+  # (The portal route's Caddyfile validate step left with the portal plane, retired
+  # 2026-11-01 and archived in scripts/archive/portal-caddy-authelia/.)
 
   Section "Schema migrations on a throwaway pgvector (fresh volume)"
   $tmp = (Join-Path $env:TEMP "ob-initdb") -replace '\\', '/'

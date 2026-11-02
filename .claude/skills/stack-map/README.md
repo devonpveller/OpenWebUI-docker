@@ -6,11 +6,11 @@ re-reading every compose file.
 
 ## What it does
 
-The workspace is **eight separate Docker Compose projects**, one per plane,
+The workspace is **seven separate Docker Compose projects**, one per plane,
 plus a driver and a recovery layer:
 
 - **`ai-stack`** — `docker-compose.yml`: the network ANCHOR, **zero services**.
-- **`frontend`, `inference`, `search`, `coder`, `portal`** —
+- **`frontend`, `inference`, `search`, `coder`** —
   `<plane>/docker-compose.yml`, each with its own `.env` and `README.md`.
 - **`open-brain`** — `OB1/docker/docker-compose.yml` (a pinned submodule; 30
   containers with every profile).

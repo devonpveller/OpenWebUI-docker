@@ -8,7 +8,7 @@
 # 127.7 GiB host with 24.3 GiB available and no alert fired (the 2026-07-05 OOM
 # pattern, which wedged WSL until a reboot). This test loads the watchdog's
 # FUNCTIONS only (never its main block) into a sandbox whose PROJECT_DIR is a
-# temp directory, exactly as test-watchdog-portal-alerts.ps1 does:
+# temp directory, exactly as the archived test-watchdog-portal-alerts.ps1 did:
 #   - the counters are STUBBED through $HostMemReader (a scriptblock whose TEXT
 #     runs as the reader in its own runspace; the sample travels in
 #     $HostMemReaderInput), and the clock through $WatchdogClock;

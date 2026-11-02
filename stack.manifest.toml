@@ -218,18 +218,13 @@ requires = ["anchor"]
 # ob1: frontend/docker-compose.yml:402 (OPEN_NOTEBOOK_HOST defaults to
 #   open_notebook, an ob1-plane service) with :404 OPEN_NOTEBOOK_ENABLED
 #   defaulting TRUE; ports at :403,:405-406. Consumed by frontend/entrypoint.sh:97 and :99
-#   (the open-notebook and open-notebook-api serve routes). The image's own
-#   fallback for the wiki route also points at ob1 (frontend/entrypoint.sh:66,
-#   QUARTZ_HOST=${QUARTZ_HOST:-openbrain-wiki-viewer}) before the compose file
-#   overrides it - see the portal edge below.
-# portal: frontend/docker-compose.yml:419 (QUARTZ_HOST defaults to `caddy`, a
-#   PORTAL-plane service) with :421 QUARTZ_ENABLED defaulting TRUE; the comment
-#   at :408-418 explains the route (Tailnet > the retired portal Caddy > the
-#   viewer on caddy:8446, which resolves because caddy and openwebui share
-#   ai-stack_app-net; /workbench answers 421 there since rw-identity-harden).
-#   Consumed by frontend/entrypoint.sh:101. Note this is the reverse of portal's HARD
-#   requires on frontend: the portal needs openwebui to serve its main vhost,
-#   and the frontend's tailnet wiki route needs the portal's caddy.
+#   (the open-notebook and open-notebook-api serve routes). The tailnet wiki
+#   route is an ob1 edge too: frontend/docker-compose.yml QUARTZ_HOST defaults to
+#   openbrain-wiki-viewer (port 8080, QUARTZ_ENABLED defaulting TRUE), the same
+#   fallback the image carries (frontend/entrypoint.sh:66); it resolves over
+#   ai-stack_app-net, which openwebui and the viewer both join. Consumed by
+#   frontend/entrypoint.sh:101. (Until edge-b5-portal-retire, 2026-11-01, it
+#   pointed at the retired portal's caddy:8446 - an edge to the portal plane.)
 # agent-org: frontend/entrypoint.sh:74,76 (MATTERMOST_HOST defaults to `mattermost`,
 #   MATTERMOST_ENABLED defaults TRUE) -> the serve route at frontend/entrypoint.sh:105,
 #   whose own comment says "agent-org compose project on llm-net, starts after
@@ -237,7 +232,7 @@ requires = ["anchor"]
 #   in frontend/docker-compose.yml - the compose file passes this service
 #   exactly one variable (:376-387). A reader of the compose file alone does
 #   not see this edge.
-optional = ["inference", "search", "ob1", "portal", "agent-org"]
+optional = ["inference", "search", "ob1", "agent-org"]
 host = [
   "Under the `gpu` profile only: image openwebui:local, a LOCAL CUDA build (frontend/docker-compose.yml:219-226, frontend/Dockerfile.openwebui-gpu), plus an NVIDIA container runtime for the device reservation at :349-355. The DEFAULT `stock` profile needs neither: it pulls ghcr.io/open-webui/open-webui:v0.11.0 and runs on any host with Docker",
   "Under the `tailscale` profile only: a Tailscale auth key (TAILSCALE_AUTH_KEY). That profile requires `gpu`, because the pair is hard-wired (frontend/docker-compose.yml:375, network_mode: service:openwebui names the gpu definition)",
@@ -587,48 +582,10 @@ description = "the cloud lane (the only component with internet egress); needs O
 opt_in      = true
 
 # --------------------------------------------------------------------------
-[planes.portal]
-# The internet-exposed auth front-end. MANUAL on purpose: exposing the stack
-# stays a human action, exactly as scripts/stack/stack.ps1's header says.
-# requires anchor: portal/docker-compose.yml:648-650 (app-net, external: true,
-#   name: ai-stack_app-net). RE-DERIVED 2026-09-19 (sl-env-split): these two
-#   read :603-605 and :601-602, which were ALREADY four lines short of the
-#   blocks they name at base 4934529 - :603 was `notify-net:`. Corrected to the
-#   real lines, then shifted by the +25 sl-env-split added to that file's
-#   header - and again by the -14 sl-compose-anchors then took out of it,
-#   which is the pair of numbers standing here now (re-derived 2026-10-16, edge-notify-subnet).
-# requires frontend: portal/docker-compose.yml:646-647 - caddy joins
-#   ai-stack_app-net "to reach openwebui:8080 and open_notebook", and
-#   config/caddy/Caddyfile:190 proxies openwebui:8080. Without the frontend the
-#   portal's primary vhost 502s.
-# optional ob1: config/caddy/Caddyfile:131 (openbrain-wiki-viewer:8080),
-#   :235/:243 (open_notebook) - those vhosts 502 while the rest of the portal
-#   serves. (No workbench route since rw-identity-harden: the viewer forwards
-#   /workbench/* itself.)
-# optional inference: config/caddy/Caddyfile:287 proxies llm-gateway-ui:8080,
-#   which joins ai-stack_app-net for exactly that (inference/compose/gateway.yml:173,
-#   networks at :182-184).
-compose  = "portal/docker-compose.yml"
-lease    = "portal"
-requires = ["anchor", "frontend"]
-optional = ["ob1", "inference"]
-manual   = "scripts/portal/portal-on.ps1 / scripts/portal/portal-off.ps1"
-host = [
-  "A Cloudflare tunnel (token) and a public domain; the portal publishes NO host ports - all ingress arrives through cloudflared",
-]
-keys = [
-  "CLOUDFLARE_TUNNEL_TOKEN",
-  "AUTHELIA_JWT_SECRET",
-  "AUTHELIA_SESSION_SECRET",
-  "AUTHELIA_STORAGE_ENCRYPTION_KEY",
-  "PUBLIC_DOMAIN",
-]
-
-[planes.portal.ports]
-
-[planes.portal.profiles.internet]
-description = "cloudflared + the tunnel watcher; passed by scripts/portal/portal-on.ps1, never by the driver (this plane is `manual`)"
-opt_in      = true
+# The PORTAL plane (caddy, authelia, cloudflared and their sidecars, the only
+# `manual` plane) was RETIRED 2026-11-01 (edge-b5-portal-retire): the internet
+# edge runs on the Proxmox nodes, outside this repo, and each service keeps its
+# own <SERVICE>_LAN_IP door. Its code is in scripts/archive/portal-caddy-authelia/.
 
 
 # ==========================================================================
@@ -644,13 +601,12 @@ opt_in      = true
 
 [modules.backup]
 path        = "backup"
-description = "the backup sidecar scripts (<service>-backup.sh, generic-tar-backup.sh, pg-backup.sh), the two restore helpers, and the shared backup image's Dockerfile; each plane's backup sidecar bind-mounts its script read-only at /scripts/backup.sh"
+description = "the backup sidecar scripts (<service>-backup.sh, generic-tar-backup.sh, pg-backup.sh) and the two restore helpers; each plane's backup sidecar bind-mounts its script read-only at /scripts/backup.sh"
 
 [modules.backup.consumers]
 frontend  = "bind mount: openwebui-backup.sh, generic-tar-backup.sh (tailscale-backup)"
 inference = "bind mount: llm-gateway-backup.sh, generic-tar-backup.sh (inference/compose/backups.yml)"
 coder     = "bind mount: little-coder-backup.sh"
-portal    = "build context: ../backup (Dockerfile; the caddy-backup and authelia-backup images); bind mount: caddy-backup.sh, authelia-backup.sh"
 agent-org = "bind mount: pg-backup.sh, generic-tar-backup.sh"
 
 
@@ -740,12 +696,6 @@ profiles    = { agent-org = ["workers"] }
 description = "the scheduled digest chain inside OB1 (gmail pull -> research -> podcast -> digest)"
 planes      = ["inference", "search", "ob1"]
 profiles    = { ob1 = ["research", "notebook"] }
-
-[products.portal]
-description = "the internet front-end (started by hand: portal-on.ps1)"
-planes      = ["portal", "frontend"]
-profiles    = { portal = ["internet"] }
-
 
 # ==========================================================================
 # LAN INGRESS - which ai-stack web ports may be published on the workstation's

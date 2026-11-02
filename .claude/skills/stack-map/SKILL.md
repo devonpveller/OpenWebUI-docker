@@ -15,7 +15,7 @@ version: 1.0.0
 
 ## Problem
 
-This workspace runs **eight separate Docker Compose projects** plus a recovery
+This workspace runs **seven separate Docker Compose projects** plus a recovery
 layer. New containers are added in waves (search gateway,
 little-coder plane, Open Brain), and it is easy to miss one — which silently
 breaks the recovery scripts and confuses anyone reasoning about the system.
@@ -34,7 +34,7 @@ Invoke when the user:
   the `scripts/recovery/emergency-recovery.ps1` script (verify the map first)
 - reports a container that "isn't covered" by recovery or backups
 
-## The eight compose projects
+## The seven compose projects
 
 Since Part K (2026-08-21) the workspace is **one compose project per plane**,
 around a root project that owns only the shared networks. The authoritative
@@ -44,11 +44,11 @@ it.
 1. **`ai-stack`** — `docker-compose.yml`: the network ANCHOR. **Zero
    services**; it owns `ai-stack_llm-net` / `app-net` / `default`, which every
    other project attaches to `external: true`.
-2. **`frontend`**, 3. **`inference`**, 4. **`search`**, 5. **`coder`**,
-   6. **`portal`** — `<plane>/docker-compose.yml`, each with
+2. **`frontend`**, 3. **`inference`**, 4. **`search`**, 5. **`coder`** —
+   `<plane>/docker-compose.yml`, each with
    its own `.env`, `.env.example` and `README.md`.
-7. **`open-brain`** — `OB1/docker/docker-compose.yml` (a pinned submodule).
-8. **`agent-org`** — `agent-org/docker/docker-compose.yml`.
+6. **`open-brain`** — `OB1/docker/docker-compose.yml` (a pinned submodule).
+7. **`agent-org`** — `agent-org/docker/docker-compose.yml`.
 
 Two concerns are not compose projects: the **driver**
 (`scripts/stack/stack.py`, which reads the manifest; `stack.ps1` is a shim) and
@@ -89,13 +89,15 @@ the **recovery stack** (`scripts/recovery/emergency-recovery.ps1`).
 | `inference` | `llm-gateway`, `llm-gateway-db`, `llm-gateway-ui`, `llm-gateway-backup`, and under `[local]`: `llama-cpp-upstream`, `llama-cpp-embed-upstream`, `llm-queue`, `lm-models-backup` |
 | `search` | `search-vpn`, `search-redis`, `searxng`, `search-gateway` |
 | `coder` | `open-terminal`, `little-coder`, `lc-egress`, `little-coder-backup` |
-| `portal` | `portal-init`, `caddy`, `authelia`, `portal-alerter`, `authelia-watcher`, `authelia-notif-bridge`, `integrity-tripwire`, `portal-cron`, `caddy-backup`, `authelia-backup`, and under `[internet]`: `cloudflared`, `tunnel-watcher` |
 | `open-brain` | 30 with every profile (`openbrain-*` fleet + backups + the Open Notebook trio) |
 | `agent-org` | `mattermost`, `mattermost-db`, `agent-bridge`, `agent-bridge-db`, 2 db backups, and the `[workers]` / `[cloud]` slices |
 | Driver / recovery (not compose projects) | `scripts/stack/stack.py` (+ the `stack.ps1` shim), `scripts/recovery/emergency-recovery.ps1` |
 
 Retired, and NOT to be re-added to this map: `watchtower`, `tor` (superseded by
-the Mullvad `vpn`), `search-mcpo`, `lc-mcpo`, `smolcrawl-pipelines`, and the
+the Mullvad `vpn`), `search-mcpo`, `lc-mcpo`, `smolcrawl-pipelines`, the whole
+`portal` project (Caddy, Authelia, cloudflared and their sidecars; retired 2026-11-01,
+archived in `scripts/archive/portal-caddy-authelia/`; the edge runs on the Proxmox
+nodes), and the
 bare `llama-cpp` / `llama-cpp-embed` container names — those are now network
 ALIASES on `llm-gateway`, not containers.
 
@@ -133,7 +135,7 @@ between the compose files, the recovery scripts, and the reference doc.
 
 ## Notes
 
-- The map is eight projects, not one — a plain `docker compose` command at the
+- The map is seven projects, not one — a plain `docker compose` command at the
   repo root touches the ANCHOR, which owns no services, so it starts nothing.
 - `modules/emergency-recovery/` is a separate OWUI guidance module and is
   currently stale (its config still references the disabled `ollama`

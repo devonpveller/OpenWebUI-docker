@@ -162,7 +162,7 @@ def is_blank(ln: str) -> bool:
 # ------------------------------------------------------------------ classification
 # A backslash ends a token: in `printf '%s /scripts/x.sh\n'` the path is followed by an
 # escape, and without this the token is `/scripts/x.sh\n` and matches nothing - silently
-# (the portal backups' rendered crontabs are written exactly that way).
+# (the retired portal backups' rendered crontabs were written exactly that way).
 _TOKEN = re.compile(r"""[^\s"'\[\],;&|()`=<>\\]+""")
 
 

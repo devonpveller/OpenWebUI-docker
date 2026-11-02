@@ -11,8 +11,9 @@ service and alerts #sysadmin (throttled) if any RUNNING backup's newest
 artifact is older than its cadence threshold. Read-only; never mutates.
 
 Services whose *-backup container isn't running are SKIPPED (not alerted) —
-that covers the profile-gated portal (caddy/authelia) and anything the operator
-intentionally stopped, so "portal is off" never pages.
+that covers profile-gated planes and anything the operator intentionally
+stopped, so "that plane is off" never pages. (The portal's caddy/authelia rows
+retired with the portal plane, 2026-11-01.)
 
 Throttled: won't re-post within alert_throttle_hours unless the stale set
 changed (so a persistent condition pings once, not every run).
@@ -55,8 +56,6 @@ _EXPECTED = [
     ("openbrain-wiki",   "openbrain-wiki-backup",   36),
     ("open-notebook",    "open-notebook-backup",    36),
     ("tailscale",        "tailscale-backup",        36),
-    ("caddy",            "caddy-backup",            36),
-    ("authelia",         "authelia-backup",         36),
     ("agent-bridge-db",  "agent-bridge-db-backup",  36),
     ("mattermost-db",    "mattermost-db-backup",    36),
     ("ao-worker-1-journals", "ao-worker-1-journals-backup", 36),
@@ -280,7 +279,7 @@ def _offsite_status() -> dict:
 
 
 # The HOST-JOB layer. Not every backup is a sidecar: the encrypted config +
-# secrets archive (every .env, secrets/, the Authelia users DB; config-backup,
+# secrets archive (every .env, secrets/; config-backup,
 # 2026-10-04) is a Windows scheduled task, scripts/backup/config_secrets_backup.py.
 # Like the NAS row it is never gated on a container, and like the NAS row a fresh
 # artifact is not enough: the job still writes an archive when a REQUIRED file is
@@ -406,7 +405,7 @@ def build_message(res: dict) -> str:
         else:
             lines.append(f"- **{s['name']}** — {age}")
     if res["skipped"]:
-        lines.append("\n_Skipped (backup container not running — e.g. portal off): "
+        lines.append("\n_Skipped (backup container not running — e.g. a profile that is off): "
                      + ", ".join(res["skipped"]) + "._")
     lines.append("\n@sysadmin: a *-backup container can be 'up (healthy)' yet silently "
                  "producing nothing. Investigate the named container's logs.")

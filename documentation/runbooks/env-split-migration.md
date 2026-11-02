@@ -10,6 +10,11 @@ Performing the migration is an operator step, and this runbook is it.
 **Audience:** the operator, on the deploy host, at a moment when a short
 inference/frontend outage is acceptable. Step 0 is what makes this reversible.
 
+**Since then (2026-11-01):** the portal plane (Caddy, Authelia, cloudflared and their
+sidecars) was retired and archived at `scripts/archive/portal-caddy-authelia/`. This
+record keeps its `portal/.env`, `portal-on.ps1` and `[planes.portal]` lines as they were
+on 2026-09-19; there is no portal plane to migrate now, so skip every portal step below.
+
 > ## DO STEPS 1-4 AT MERGE TIME, NOT "SOON"
 >
 > `development` is the LIVE-HOSTED line. Between this landing there and steps
