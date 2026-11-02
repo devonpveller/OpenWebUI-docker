@@ -71,7 +71,7 @@ jobs:
       # DIRECTORY now, because that is where compose looks.
       - run: cp .env.example .env
       - run: |
-          for p in frontend inference search coder portal; do
+          for p in frontend inference search coder; do
             cp "$p/.env.example" "$p/.env"
           done
       # --env-file is passed EXPLICITLY here even though compose would load
@@ -84,7 +84,6 @@ jobs:
       - run: docker compose -f frontend/docker-compose.yml --env-file frontend/.env.example --profile gpu --profile tailscale config -q
       - run: docker compose -f search/docker-compose.yml --env-file search/.env.example config -q
       - run: docker compose -f coder/docker-compose.yml --env-file coder/.env.example config -q
-      - run: docker compose -f portal/docker-compose.yml --env-file portal/.env.example --profile internet config -q
 
   powershell-parse:
     runs-on: ubuntu-latest
@@ -143,7 +142,7 @@ jobs:
       # sl-env-split (2026-09-19).
       - run: cp .env.example .env
       - run: |
-          for p in frontend inference search coder portal; do
+          for p in frontend inference search coder; do
             cp "$p/.env.example" "$p/.env"
           done
       - run: cp agent-org/docker/.env.example agent-org/docker/.env

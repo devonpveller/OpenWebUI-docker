@@ -23,7 +23,7 @@ $LOG_FILE = Join-Path $PROJECT_DIR "logs\tailscale-health.log"
 $SERVICE_NAME = "TailscaleHealthMonitor"
 
 # (rw-identity-harden: the 2026-06-05 WORKBENCH_KEY placeholder is gone - no compose file references
-# ${WORKBENCH_KEY} any more, since the portal caddy lost its /workbench route, so compose prints no
+# ${WORKBENCH_KEY} any more, since the (now retired) portal caddy lost its /workbench route, so compose prints no
 # "variable is not set" warning for it.)
 
 # Create logs directory if it doesn't exist
@@ -1299,16 +1299,15 @@ function Confirm-ClaudeSessionsBridge {
 # empty`, and the age sent the reader hunting for a dead cron instead of a
 # wrong mount. Get-BackupSkipReason reads it back out.
 #
-# NOTE (measured 2026-09-21, not fixed here): this list is THIRTEEN dirs and
-# scripts/sysadmin-mcp/check_backups.py's is FIFTEEN - the two ao-worker journal
+# NOTE (measured 2026-09-21, not fixed here; 13 and 15 then, before the
+# portal's caddy/authelia rows retired 2026-11-01): this list is ELEVEN dirs and
+# scripts/sysadmin-mcp/check_backups.py's is THIRTEEN - the two ao-worker journal
 # sidecars are watched there and not here. Adding them here would also add a
 # false STALE whenever the agent-org `workers` profile is down, because this
 # list has no container gate the way check_backups.py does; closing that
 # properly means gating per row, which is its own change.
 $ExpectedBackupRecency = @(
     @{ Dir = 'agent-bridge-db'; MaxAgeHours = 52 }
-    @{ Dir = 'authelia';        MaxAgeHours = 52 }
-    @{ Dir = 'caddy';           MaxAgeHours = 52 }
     @{ Dir = 'little-coder';    MaxAgeHours = 52 }
     @{ Dir = 'llm-gateway';     MaxAgeHours = 52 }
     @{ Dir = 'lm-models';       MaxAgeHours = 220 }  # weekly cron (Sun 01:00) + slack
@@ -2737,31 +2736,12 @@ function Invoke-ContainerLoopCheck {
 }
 # === END CONTAINER LOOPS ======================================================
 
-# === PORTAL ALERT DELIVERY (pa-channels, 2026-10-04) ==========================
-# portal-alerter sends every portal alert (integrity tripwire, Authelia
-# watchers, the notification bridge) to Telegram / Mattermost / email and
-# writes what happened to a delivery-state file in its /reports bind mount:
-# <repo>\reports\portal-digest\alerter-delivery-state.json. 09-29..10-04 every
-# tripwire alert died inside portal-alerter (0-byte Gmail OAuth files) and
-# NOTHING noticed: a failed alert path cannot report its own failure. So this
-# rule reads that file and pages through the WATCHDOG's own path (host Telegram
-# + the Mattermost mirror, via Send-LoopAlert) - never through portal-alerter.
-#   undelivered_since set            -> an alert reached NO channel
-#   a CONFIGURED channel with >= $PortalAlertChannelFailThreshold consecutive
-#   failed sends                      -> that channel keeps failing
-# A channel that is simply not configured (e.g. email before Gmail is
-# re-authorized) is not a failure. File only: no docker call, so it also runs
-# when the portal is off (no file, or an old one, is quiet unless it says a
-# delivery failed). Each key pages once per $LoopAlertCooldownHours and sends
-# its all-clear when the state clears (the next delivered alert, or
-# `alerter.ts --selftest` in the container). The file is written by a
-# container, so every value taken from it is cast or reduced to a short
-# identifier before it goes into a message.
-$PortalAlertChannelFailThreshold = 3
-
-function Get-PortalAlertStatePath {
-    return (Join-Path $PROJECT_DIR 'reports\portal-digest\alerter-delivery-state.json')
-}
+# (PORTAL ALERT DELIVERY, pa-channels 2026-10-04, is gone with the portal plane:
+# portal-alerter and its delivery-state file were retired 2026-11-01, edge-b5-portal-retire,
+# archived in scripts/archive/portal-caddy-authelia/.)
+#
+# Two helpers that section defined stay: the inference-shedding rule below uses
+# them on its own container-written state file.
 
 # A count from the container-written file, never trusted to fit an [int]: a
 # value past Int32 used to fail the cast and read as 0 (no page). Non-numbers
@@ -2783,60 +2763,6 @@ function ConvertTo-SafeAlertToken {
     return $s
 }
 
-function Test-PortalAlertDelivery {
-    [CmdletBinding()]
-    param()
-    $path = Get-PortalAlertStatePath
-    if (-not (Test-Path -LiteralPath $path)) {
-        Write-LogEntry "portal alert delivery: no state file yet ($path) - nothing to judge" "DEBUG"
-        return $true
-    }
-    $state = $null
-    try {
-        $state = [IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
-    } catch {
-        Write-LogEntry "portal alert delivery: state file unreadable ($($_.Exception.Message)) - skipped this pass" "WARN"
-        return $true
-    }
-    $ok = $true
-
-    $undeliveredKey = 'portal-alerts-undelivered'
-    if ($state.undelivered_since) {
-        $ok = $false
-        $count = 0
-        $count = ConvertTo-AlertCount $state.undelivered_count
-        $since = ConvertTo-SafeAlertToken ([string]$state.undelivered_since) 32
-        $ev = ConvertTo-SafeAlertToken ([string]$state.last_undelivered_event)
-        $msg = "portal-alerter: $count portal alert(s) since $since reached NO channel (last: $ev). Portal alerts are not reaching you - check 'docker logs portal-alerter' and the PORTAL_ALERT_* / Gmail OAuth settings in portal/.env. Clears on the next delivered alert."
-        Write-LogEntry "PORTAL ALERTS UNDELIVERED: $msg" "ERROR"
-        Send-LoopAlert -Key $undeliveredKey -Message $msg | Out-Null
-    } else {
-        Resolve-LoopAlert -Key $undeliveredKey -Message "portal-alerter is delivering portal alerts again." | Out-Null
-    }
-
-    foreach ($name in @('telegram', 'mattermost', 'email')) {
-        $key = "portal-alert-channel-$name"
-        $ch = $null
-        if ($state.channels) { $ch = $state.channels.$name }
-        $fails = 0
-        $configured = $false
-        if ($ch) {
-            $fails = ConvertTo-AlertCount $ch.consecutive_failures
-            $configured = ($ch.configured -eq $true)
-        }
-        if ($configured -and $fails -ge $PortalAlertChannelFailThreshold) {
-            $ok = $false
-            $at = ConvertTo-SafeAlertToken ([string]$ch.last_error_at) 32
-            $msg = "portal-alerter: its $name channel failed $fails sends in a row (last at $at). Other channels may still deliver; check 'docker logs portal-alerter' for the $name error."
-            Write-LogEntry "PORTAL ALERT CHANNEL FAILING: $msg" "ERROR"
-            Send-LoopAlert -Key $key -Message $msg | Out-Null
-        } else {
-            Resolve-LoopAlert -Key $key -Message "portal-alerter's $name channel is no longer failing." | Out-Null
-        }
-    }
-    return $ok
-}
-# === END PORTAL ALERT DELIVERY ================================================
 
 # === INFERENCE SHEDDING (ao-queue, 2026-10-07) ================================
 # gym-002 (2026-10-07): llm-queue held 126 of its 128 connections and refused
@@ -3830,9 +3756,7 @@ function Invoke-HealthCheck {
     Confirm-AuxiliaryContainer -Container "llm-gateway-ui" -RestartWaitSeconds 15 | Out-Null
 
     # --- remaining main-stack backup sidecars (cron loops; openwebui-backup
-    # is confirmed above; portal backups (caddy/authelia) are
-    # deliberately NOT here - the portal has its own lifecycle (portal-on/off)
-    # and must not be auto-started; OB/agent-org backups live in their own
+    # is confirmed above; OB/agent-org backups live in their own
     # Invoke-*Health blocks. Test-BackupRecency below watches everyone's OUTPUT.
     Confirm-AuxiliaryContainer -Container "little-coder-backup"  -RestartWaitSeconds 10 | Out-Null
     Confirm-AuxiliaryContainer -Container "llm-gateway-backup"   -RestartWaitSeconds 10 | Out-Null
@@ -3869,8 +3793,8 @@ function Invoke-HealthCheck {
     Confirm-BridgeFunctionalHealth -TaskName 'claude-sessions-bridge' -Port 48291 -Label 'claude-sessions bridge' `
         -HealthPath (Join-Path $PROJECT_DIR 'scripts\claude-sessions-bridge\state\health.json')
 
-    # --- backup OUTPUT recency (the 13 backups/<dir> trees in $ExpectedBackupRecency,
-    #     portal + OB included; counted 2026-09-21, and see that list's note on the
+    # --- backup OUTPUT recency (the 11 backups/<dir> trees in $ExpectedBackupRecency,
+    #     OB included; counted 2026-09-21 less the two portal rows retired 2026-11-01, and see that list's note on the
     #     two ao-worker journal dirs check_backups.py watches and this does not) ---
     # Non-fatal for the overall check, but logs ERROR + Mattermost-alerts:
     # a running sidecar that produces nothing is invisible to container checks.
@@ -3879,12 +3803,6 @@ function Invoke-HealthCheck {
     # it must stop the log claiming "All health checks passed".
     if (-not [bool](@(Test-BackupRecency) | Select-Object -Last 1)) {
         $script:HealthIssues += 'backup-stale'
-    }
-
-    # --- portal alert DELIVERY: portal-alerter's own outcome file. Pages through
-    #     this watchdog's path, never through portal-alerter (pa-channels).
-    if (-not [bool](@(Test-PortalAlertDelivery) | Select-Object -Last 1)) {
-        $script:HealthIssues += 'portal-alert-delivery'
     }
 
     # Honest summary. This used to print "All health checks passed" even when

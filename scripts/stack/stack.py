@@ -266,7 +266,7 @@ class Manifest:
 
         Every profile must carry exactly one of `default` (passed on every
         invocation), `opt_in` (something outside the driver turns it on:
-        COMPOSE_PROFILES in the plane env, portal-on.ps1, the operator) or
+        COMPOSE_PROFILES in the plane env, a product, the operator) or
         `pending` (not in the compose file yet). A profile with none of the
         three is a silent reduction waiting to happen: the driver will not pass
         it, and nobody declared that it should not.
@@ -1220,8 +1220,9 @@ def ensure_networks(manifest, state, root, console, runner, capture, plane, dry_
 def resolve_target(manifest: Manifest, name: str, kind: str = "auto") -> tuple[str, str]:
     """('plane'|'product', name).
 
-    PRODUCT wins a name collision (four names are both: inference, search,
-    agent-org, portal - planes & products in the manifest). A newcomer
+    PRODUCT wins a name collision (three names are both: inference, search,
+    agent-org - planes & products in the manifest; portal was the fourth until
+    it retired, 2026-11-01). A newcomer
     types `enable <name>` from the product menu and must get the product: its
     requires closure and its profiles (`enable inference` writes `local`). The
     plane used to win, which made the menu's own commands do something else -
@@ -4551,7 +4552,7 @@ def cmd_stats(manifest, state, root: Path, console: Console, runner, capture, ho
 #                                      which env_file (null everywhere since
 #                                      sl-env-split), the runnable command
 #                                      line - and which planes belong here at
-#                                      all: a `manual` plane (the portal) does
+#                                      all: a `manual` plane (none today) does
 #                                      not, because the watchdog must not
 #                                      auto-repair a plane whose whole point is
 #                                      that a human starts it.
@@ -5254,10 +5255,8 @@ DOCS_BLOCKS: dict[str, list[str]] = {
     "inference/README.md": ["plane-services:inference", "profile-counts:inference"],
     "search/README.md": ["plane-services:search", "profile-counts:search"],
     "coder/README.md": ["plane-services:coder", "profile-counts:coder"],
-    "portal/README.md": ["plane-services:portal", "profile-counts:portal"],
     ".claude/skills/stack-map/references/workspace-stacks.md": [
         "profiled-planes", "plane-table",
-        "plane-services:portal", "profile-counts:portal",
         "profile-counts:frontend", "plane-services:frontend",
         "plane-services:inference", "profile-counts:inference",
         "plane-services:search", "plane-services:coder",

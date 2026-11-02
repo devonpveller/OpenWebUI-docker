@@ -7,8 +7,6 @@
 # the NAS -- if one slot gets corrupted, the other is still good.
 #
 # Sources:
-#   ./backups/caddy/
-#   ./backups/authelia/
 #   ./backups/openwebui/      (existing -- pre-portal)
 #   ./backups/little-coder/   (existing -- pre-portal)
 # All of `./backups/` gets mirrored, so any future backup container
@@ -68,11 +66,10 @@
 #   ./logs/nas-sync-YYYY-MM-DD.log    (per-day)
 #
 # Failure alerting:
-#   On non-zero Robocopy exit codes (>= 8), the script POSTs a JSON alert
-#   to the portal-alerter at http://portal-alerter:8080/alert IF the alerter
-#   is reachable from the host -- the alerter delivers it on every channel it
-#   has (Telegram / Mattermost / Gmail copy); see Send-AlerterFailure for the
-#   independent Mattermost + Telegram fan-out this script also does.
+#   On non-zero Robocopy exit codes (>= 8) and every setup failure, the script
+#   sends the alert to Mattermost and Telegram (the sysadmin-mcp notifiers);
+#   see Send-AlerterFailure. (Until 2026-11-01 it also POSTed to the portal's
+#   alerter container, retired with the portal plane - edge-b5-portal-retire.)
 #
 # Exit codes:
 #   0  - sync succeeded (Robocopy exit 0-7 are "success or minor warnings")
@@ -154,15 +151,6 @@ function Write-LogLine {
   Add-Content -Path $logFile -Value $line
 }
 
-# Source the shared portal-alerter client. Provides Send-PortalAlert which
-# (a) builds the JSON body via ConvertTo-Json -- avoiding the double-escape
-# bug that the inline implementation had with UNC paths, and (b) actually
-# checks wget's exit code + the alerter's response body, so we know whether
-# the alerter delivered it on at least one of its channels (Telegram /
-# Mattermost / Gmail copy - not necessarily email). See
-# scripts/lib/portal-alerter-client.ps1.
-. (Join-Path $PSScriptRoot '..\lib\portal-alerter-client.ps1')
-
 # Resolve an interpreter for the sysadmin-mcp notifiers (Mattermost / Telegram).
 # Same resolution compact-vhdx.ps1 uses: PATH python, else the repo venv.
 $pyExe = (Get-Command python -ErrorAction SilentlyContinue).Source
@@ -177,7 +165,7 @@ function Send-AlerterFailure {
   <#
     ESCALATE ACROSS CHANNELS, and say which ones answered.
 
-    This used to POST to the portal-alerter and, if that failed, write one WARN
+    HISTORY. This used to POST to the portal's alerter container and, if that failed, write one WARN
     line to a log file nobody reads. On 2026-08-21 the alerter's Gmail OAuth
     refresh token died; it kept answering /health with ready:true and HTTP 200
     while returning 500 to every /alert. When the NAS backup-user password
@@ -187,22 +175,16 @@ function Send-AlerterFailure {
 
     One channel's failure must not end the escalation. Mattermost and Telegram
     are independent of the alerter (different process, different credentials,
-    different transport) and the sysadmin bridge already uses both.
+    different transport) and the sysadmin bridge already uses both. Since the
+    portal plane retired (2026-11-01) they are the only two channels.
   #>
   param([string]$Reason)
   $logLine = "nas-sync to $nasDest failed: $Reason"
   $delivered = @()
   $failed = @()
 
-  $result = Send-PortalAlert -Severity 'high' -Event 'nas-backup.failure' -LogLine $logLine
-  if ($result.Ok) { $delivered += 'portal-alerter' }
-  else {
-    $failed += "portal-alerter ($($result.Reason))"
-    Write-LogLine "alert dispatch FAILED via portal-alerter: $($result.Reason) - escalating" 'WARN'
-  }
-
-  # Fan out to the out-of-band channels REGARDLESS of the alerter's result. A
-  # backup failure is worth two notifications; missing it entirely is not.
+  # Both out-of-band channels, each independently: a backup failure is worth two
+  # notifications; missing it entirely is not.
   $msg = "[nas-backup] ALERT: $logLine"
   foreach ($ch in @(@{ n = 'mattermost'; p = $mmPost }, @{ n = 'telegram'; p = $tgNotify })) {
     if (-not $pyExe -or -not (Test-Path $ch.p)) {

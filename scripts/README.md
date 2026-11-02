@@ -12,7 +12,7 @@
 | `claude-sessions-bridge/` | Mattermost ⟷ headless Claude Code sessions (+ approval relay MCP, session tools, self-restart) | Scheduled Task `claude-sessions-bridge` (logon, lock :48291) |
 | `sysadmin-mcp/` | Sysadmin MCP server (disk/compaction/reclaim), Telegram out-of-band channel, scheduled disk/tmp/backup checks | `.mcp.json` stdio + 6 Scheduled Tasks (see its README) |
 | `mattermost-mcp/` | Dependency-free Mattermost MCP server + `mm.py` CLI | `.mcp.json` stdio |
-| `lib/` | Shared code: `mm_lib.py` (.env credential mechanics — the once-6×-copied line-walk), `portal-alerter-client.ps1`, `stack-services.json` (inventory; hand-maintained, drift-verified by `check-project-configs.ps1`. The generator CLEANUP-PLAN D-12 asked for moved to the `stack-layers` plan in the plan store) | imported |
+| `lib/` | Shared code: `mm_lib.py` (.env credential mechanics — the once-6×-copied line-walk), `stack-services.json` (inventory; hand-maintained, drift-verified by `check-project-configs.ps1`. The generator CLEANUP-PLAN D-12 asked for moved to the `stack-layers` plan in the plan store) | imported |
 | `archive/` | Retired code with provenance table — see `archive/README.md` | never |
 
 ## `recovery/`
@@ -46,8 +46,7 @@ were retired by the follow-up item (ac-legacy-recovery) rather than fixed.
 - `stack-watchdog.ps1` — the watchdog, every 10 minutes (Scheduled Task
   `StackWatchdog`, `PT10M`; renamed from check-tailscale-health 2026-08-21). Covers: tailnet serves,
   all seven compose projects in `scripts/lib/stack-services.json` (ai-stack,
-  frontend, inference, search, coder, open-brain, agent-org — the
-  portal is driven separately), Docker-engine restart, backup recency,
+  frontend, inference, search, coder, open-brain, agent-org), Docker-engine restart, backup recency,
   claude-bridge health, Telegram alerting, and a census of EVERY container
   (restart loops and orphaned network-namespace joiners; pages, never repairs;
   the fault line sent is credential-scrubbed), and host memory (available,
@@ -88,10 +87,11 @@ were retired by the follow-up item (ac-legacy-recovery) rather than fixed.
   2026-09-25 to `archive/legacy-recovery/`: its compose check validated only the
   service-less root anchor.)
 
-## `portal/`
+## `portal/` (retired)
 
-`portal-on.ps1` / `portal-off.ps1` / `portal-status.ps1`,
-`breach-killswitch.ps1`, `access-query.ps1`.
+The portal scripts (on/off/status, breach killswitch, access query) were
+retired 2026-11-01, archived at `scripts/archive/portal-caddy-authelia/`,
+with the rest of the Caddy/Authelia/cloudflared plane.
 
 ## `network/`
 

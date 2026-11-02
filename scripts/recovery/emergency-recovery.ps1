@@ -54,13 +54,10 @@ $ErrorActionPreference = "Stop"
 #           (openbrain-db/wiki backups live in the OB1 project; llm-gateway/
 #            lm-models backups live in the inference project -- 2026-08-21)
 #
-# PORTAL plane (caddy, authelia, cloudflared, portal-init, portal-alerter,
-# authelia-watcher, authelia-notif-bridge, integrity-tripwire, portal-cron,
-# tunnel-watcher, caddy-backup, authelia-backup) is PROFILE-GATED
-# (`profiles: [internet]`) -- it does NOT start with a plain `docker compose up -d`
-# and is deliberately NOT managed here. It is driven by scripts/portal-on.ps1 /
-# portal-off.ps1. Recovery never stops or starts it (see
-# Invoke-NuclearRecovery's detect-and-warn).
+# The former PORTAL plane (Caddy, Authelia, the workstation cloudflared and
+# their sidecars) is RETIRED (2026-11-01, edge-b5-portal-retire; archived in
+# scripts\archive\portal-caddy-authelia\). The internet edge runs on the Proxmox
+# nodes, outside this repo, so recovery neither manages nor looks for it.
 #
 # Open Brain (OB1) is a SEPARATE compose project (OB1\docker\docker-compose.yml,
 # project name "open-brain"). Its containers attach to the main stack's
@@ -150,7 +147,7 @@ $Script:OB1Project = "open-brain"
 # to the main stack's ai-stack_llm-net (external) for local inference, and it optionally
 # reaches OB1's openbrain-gateway (audit mirror). So it is shut down FIRST (before OB1)
 # and brought up LAST (after OB1). The `workers` + `cloud` profiles are gated
-# (profiles: [workers|cloud]) and -- like the Portal plane -- are NOT managed here; the
+# (profiles: [workers|cloud]) are NOT managed here; the
 # default plane (mattermost + agent-bridge + their DBs) is.
 $Script:AgentOrgCompose = "agent-org\docker\docker-compose.yml"
 
@@ -191,7 +188,6 @@ $Script:FrontendCompose = "frontend\docker-compose.yml"
 $Script:FrontendServices = @("openwebui", "tailscale", "openwebui-backup", "tailscale-backup")
 
 # Main compose services, low-level dependency first.
-# (Portal plane omitted on purpose -- profile-gated; see the header note.)
 # The root ai-stack project owns NO services since K.5b (2026-08-21) -- it is
 # the pure network anchor. The former aux trio (surrealdb, open_notebook,
 # open-notebook-backup) lives in the OB1 project now.
@@ -244,7 +240,7 @@ $Script:OB1OptionalServiceProfile = @{
 $Script:OB1Services = @($Script:OB1Services | Where-Object { $_ -ne 'open_notebook' })
 
 # agent-org services, default plane only (workers/cloud profiles are gated + excluded,
-# same treatment as the profile-gated Portal). Low-level dependency first; the two
+# operator-started, never recovery's). Low-level dependency first; the two
 # pg_dump backup sidecars last (they depend_on the healthy DBs).
 $Script:AgentOrgServices = @(
     "mattermost-db", "mattermost", "agent-bridge-db", "agent-bridge",
@@ -294,7 +290,7 @@ function Confirm-FrontendProfiles {
     # property of the HOST and belongs in that host's frontend/.env; this checks
     # that it is there. (scripts\backup\restore-from-snapshot.ps1 DOES pass
     # them, because its catalog entries describe one host's deployment by
-    # design, as the portal and agent-org entries there already did.)
+    # design, as its agent-org entries there already did.)
     #
     # Non-fatal by design - recovery must still run, loudly degraded rather
     # than refused. cmd /c so compose's stderr cannot become a PS 5.1
@@ -1290,15 +1286,6 @@ function Wait-ForHealthy {
     return $false
 }
 
-function Test-PortalRunning {
-    # The internet portal is its OWN compose project (portal\docker-compose.yml,
-    # driven by scripts\portal\portal-on.ps1). This was a bare
-    # `docker compose ps caddy` - the root anchor - so it never saw the portal.
-    # By container name instead.
-    $h = Get-ContainerHealth "caddy"
-    return ($h.Found -and $h.State -eq "running")
-}
-
 function Invoke-EmergencyRecovery {
     Write-Log "INFO" "========================================="
     Write-Log "INFO" "EMERGENCY TAILSCALE NETWORK RECOVERY"
@@ -1504,18 +1491,6 @@ function Invoke-NuclearRecovery {
     Write-Log "WARN" "All diagnostics failed - proceeding with nuclear recovery..."
     Write-Log "WARN" "This will destroy and rebuild containers..."
 
-    # Detect whether the internet portal (its own compose project) is running.
-    # Recovery does not manage it: nothing below stops or starts it. But caddy
-    # holds an endpoint on the anchor's ai-stack_app-net (external in
-    # portal\docker-compose.yml), and docker will not remove a network that
-    # still has endpoints. (Recovery no longer removes anchor networks at all.)
-    $portalWasUp = $false
-    try { $portalWasUp = Test-PortalRunning }
-    catch {}
-    if ($portalWasUp) {
-        Write-Log "WARN" "Internet portal (caddy) is running. Recovery does not stop or restart it; it stays attached to ai-stack_app-net, which recovery never removes."
-    }
-
     # Bring OB1 down FIRST: it depends on the planes torn down after it.
     if (Test-OB1Available) {
         Write-Log "INFO" "Tearing down Open Brain (OB1) stack..."
@@ -1569,10 +1544,6 @@ function Invoke-NuclearRecovery {
 
     # agent-org -- separate compose project, downstream of OB1.
     Start-AgentOrgStack
-
-    if ($portalWasUp) {
-        Write-Log "WARN" "Portal was running before recovery and was left alone. Check it (scripts\portal\portal-status.ps1); scripts\portal\portal-on.ps1 brings it back if it went down (recovery never starts it)."
-    }
 
     # Test connectivity
     if (Test-NetworkConnectivity "tailscale") {

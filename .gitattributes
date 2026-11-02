@@ -27,6 +27,8 @@ docker-compose*.yaml text eol=lf
 # PowerShell scripts can use CRLF on Windows
 *.ps1 text eol=crlf
 
+# HISTORY: the portal plane was retired 2026-11-01 and archived; nothing runs this file
+# now. The pin stays so the archived copy's bytes do not drift.
 # Authelia REWRITES this tracked file on every start. portal/docker-compose.yml
 # binds it as a FILE (`./config/authelia/.healthcheck.env:/app/.healthcheck.env`),
 # so it cannot simply be untracked and ignored: docker would create a DIRECTORY
@@ -46,7 +48,7 @@ docker-compose*.yaml text eol=lf
 # Pinning eol=lf makes the checked-out bytes the bytes Authelia writes, so the
 # main checkout stays clean. It stays `text` rather than `-text` so a real
 # content change (a port, a scheme) is still a readable diff.
-portal/config/authelia/.healthcheck.env text eol=lf
+scripts/archive/portal-caddy-authelia/portal/config/authelia/.healthcheck.env text eol=lf
 
 # Binary files should not be modified
 *.png binary

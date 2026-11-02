@@ -532,7 +532,7 @@ issues `/project` (clone via real git) before waking — plus add the repo's hos
 `ao-git-egress` allowlist.
 
 Recovery scripts are unchanged for the pool by design: the `workers`/`cloud` profiles are gated
-(like the Portal) and operator-driven, so they're excluded from the recovery inventory (the
+(like the Portal was, until it retired 2026-11-01) and operator-driven, so they're excluded from the recovery inventory (the
 default plane is what recovery manages). Stack-map §3 already lists the pool containers.
 
 ### Intake clarify-loop + readiness→risk + tailnet reachability (2026-07-02, from live feedback)
