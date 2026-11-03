@@ -423,12 +423,15 @@ COMMIT;
 ProbeMatch "G8d service_role STILL cannot write the corpus (200's door stays closed)" `
            "permission denied for table agent_memories" $r.Out
 
-# openbrain-idea-refinery's only corpus write is UPDATE idea_revisions, and ob_app must keep it.
+# The app role's one UPDATE of idea_revisions is the research stamp (research_job_id: research_idea_queue /
+# idea_research_now). rw-p8a4-ideas (slot 370, review RV2): a revision's text is history - an app-role UPDATE of its
+# summary is refused by trg_idea_revisions_write_guard; ob_app keeps the stamp. (Before slot 370 the refinery's drain
+# rewrote revisions; at OB1 3ef8d89 it no longer writes idea_revisions at all.)
 $r = Sql -Role "ob_app" -Password $appPw -Query @"
-UPDATE public.idea_revisions SET summary = 'seeded-ops-updated' WHERE summary = 'seeded-ops';
-SELECT 'updated|' || count(*) FROM public.idea_revisions WHERE summary = 'seeded-ops-updated';
+UPDATE public.idea_revisions SET research_job_id = 'h1-drill-job' WHERE summary = 'seeded-ops';
+SELECT 'stamped|' || count(*) FROM public.idea_revisions WHERE summary = 'seeded-ops' AND research_job_id = 'h1-drill-job';
 "@
-Probe "G8e ob_app keeps UPDATE idea_revisions (openbrain-idea-refinery's write path)" "updated|1" $r.Out
+Probe "G8e ob_app keeps UPDATE idea_revisions.research_job_id (the research stamp)" "stamped|1" $r.Out
 
 # ------------------------------------------------------------------------------------------
 # 6. GRANTS - the other ways to the same rows
