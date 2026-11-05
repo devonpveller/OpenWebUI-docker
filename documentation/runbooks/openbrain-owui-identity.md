@@ -124,36 +124,59 @@ To paste the lane key into Open WebUI, put it on the clipboard without printing 
      `openbrain-ops-gateway` :8062; both are loopback-only on this host, so normally none).
    - If one exists: drop those headers on that route, or keep it off forward-auth, before the deploy.
 6. **Back up Open WebUI's tool connections and model bindings.**
-   - Admin, Settings, External Tools: export, or `GET /api/v1/configs/tool_servers` as the admin, saved to a file.
+   - Admin, Settings, External Tools: export, or `GET /api/v1/configs/tool_servers` as the admin. The export holds
+     connection credentials (the `x-brain-key` values), so save it ONLY as
+     `secrets/owui-tool-servers.pre-rw-mcp-identity.json` in the ai-stack checkout (gitignored). Never anywhere else:
+     not `backup/`, not a temp folder, not the plan store, not a chat. Write the response straight to that file; never
+     print it.
    - The model configs: `backup/models/`.
    - Note every model bound to the `open-brain` / `open-brain-extensions` OpenAPI tool servers: this is the re-binding
      list.
 
-## Deploy (in PD1's window; never restart openwebui alone)
+## Deploy (one window, with PD1 and PD2; never restart openwebui alone)
 
-1. **Tag what runs now (F4), BEFORE any rebuild**, then build the new images on their own, as a deliberate deploy:
+The steps are numbered as in the test plan's "Live deploy". **The order is fixed: PD1's slot 440, then this item's
+recreate, then PD2's slot 470, all in one writers-stopped window** (review F1):
+- Before 440 runs, the thoughts that exist today carry no owner (`thoughts.user_id` NULL), and a NULL-owned row reads as
+  shared. **Never add the native connections (step 6) before 440 has run**: a second user would read the operator's
+  existing thoughts. The new images start fine without 440 (`thoughts.user_id` already exists on live), so nothing
+  else stops this mistake.
+- 470 refuses an unstamped capture. The openbrain-mcp that runs before step 5 writes unstamped thoughts, so **470 goes
+  live only after step 5**.
+
+1. The pre-checks above, each with its "if it fails".
+2. **Tag what runs now, BEFORE any rebuild**, then build the new images on their own, as a deliberate deploy:
    `docker tag openbrain-mcp-server:local openbrain-mcp-server:pre-rw-mcp-identity`, and the same for
    `openbrain-ext-server` and `openbrain-workbench`.
-2. Create the two keys and set the provider values (above).
-3. At :x8, after the StackWatchdog's :x7 pass, recreate the three servers:
+3. Create the two keys and set the provider values (above).
+4. **PD1's slot 440** (`rw-inlet-owner`, `OB1/docker/init-inlet-owner.sql`), as its own deploy section says, with the
+   database writers stopped (stopped, not paused). It stamps every existing thought with its owner.
+5. At :x8, after the StackWatchdog's :x7 pass, recreate the three servers:
    `docker compose -f OB1/docker/docker-compose.yml up -d --no-deps --force-recreate openbrain-mcp openbrain-ext openbrain-workbench`.
    - The openbrain-ext recreate attaches it to `ai-stack_llm-net`.
    - Check both MCP servers' logs for `lanes: ... owui on (N signing key(s))`, and that every health check is healthy.
-4. In Open WebUI, Admin, Settings, External Tools, add two native MCP connections (Streamable HTTP):
+   - **Then PD2's slot 470** (`rw-inlet-stamp`), as its own deploy section says, still in this window. The recreated
+     openbrain-mcp stamps both of its thought inserts, so 470 accepts them.
+6. In Open WebUI, Admin, Settings, External Tools, add two native MCP connections (Streamable HTTP):
    - URL `http://openbrain-mcp:8000/`, Auth **OAuth** (system), custom header `x-brain-key`, ID `open-brain`, shared with
      the users who should have it;
    - the same for `http://openbrain-ext:8000/`, ID `open-brain-ext`.
-5. Verify as the operator: your own rows, and `contract_ideas` shows your ideas. Verify as a second user: shared rows plus
+7. Verify as the operator: your own rows, and `contract_ideas` shows your ideas. Verify as a second user: shared rows plus
    their own. Then disable the two mcpo OpenAPI connections, and re-bind the models from pre-check 6.
-6. **F6: take the full key off the Open WebUI side.**
+8. **Take the full key off the Open WebUI side** (round 2, F6).
    - Run `python -I OB1/docker/mcpo/swap-ext-key.py --env OB1/docker/.env --config OB1/docker/mcpo-ext.config.json`. It
      reads the key NAMES, writes the personal key in place of the full one, and prints names only.
    - Then `docker compose -f OB1/docker/docker-compose.yml up -d --no-deps --force-recreate openbrain-mcpo-ext`.
    - Check: the config no longer holds `MCP_ACCESS_KEY` (compare without printing), and mcpo-ext stays healthy. It is
      inert, and is retired in a later item under the container rule.
-7. Claude Code through openbrain-gateway: one `search_thoughts` and one capture, as the operator.
+9. Claude Code through openbrain-gateway: one `search_thoughts` and one capture, as the operator.
 
 ## Rollback (rehearsed: `run-mcp-identity-deploy-lab.ps1`)
+
+**If 470 is live, decide first** (review F1): revert 470 (PD2's own rollback) BEFORE step 3 below, or accept that
+openbrain-mcp's captures are refused until you do. The openbrain-mcp this rollback brings back writes unstamped
+thoughts, and 470 refuses them. This fails closed: a capture is refused, never written as someone else. Leave 440 in
+place (the owners it stamped are correct for the old images too).
 
 1. `docker tag openbrain-mcp-server:pre-rw-mcp-identity openbrain-mcp-server:local`, and the same for
    `openbrain-ext-server` and `openbrain-workbench`.
@@ -162,14 +185,17 @@ To paste the lane key into Open WebUI, put it on the clipboard without printing 
 3. `docker compose -f OB1/docker/docker-compose.yml up -d --no-deps --force-recreate openbrain-mcp openbrain-ext openbrain-workbench`.
    - openbrain-ext comes back off `ai-stack_llm-net`. If it does not, run `docker network disconnect ai-stack_llm-net openbrain-ext`.
 4. `python -I OB1/docker/mcpo/swap-ext-key.py --env OB1/docker/.env --config OB1/docker/mcpo-ext.config.json --restore`.
-   The pre openbrain-ext accepts only the full key. Then recreate `openbrain-mcpo-ext` alone, as in deploy step 6.
-5. Open WebUI: restore the tool connections from the backup (`POST /api/v1/configs/tool_servers` with the saved file, or
-   re-enable the mcpo connections and delete the two native ones), and re-bind the models from the list. No restart.
+   The pre openbrain-ext accepts only the full key. Then recreate `openbrain-mcpo-ext` alone, as in deploy step 8.
+5. Open WebUI: restore the tool connections from pre-check 6's export, read from
+   `secrets/owui-tool-servers.pre-rw-mcp-identity.json` and nowhere else (`POST /api/v1/configs/tool_servers` with that
+   file, or re-enable the mcpo connections and delete the two native ones). Re-bind the models from the list. No
+   restart.
 6. Check:
    - the running images are the `:pre-rw-mcp-identity` ids (`docker inspect -f '{{.Image}}'`);
    - the OWUI key is 401;
    - the personal and full lanes answer;
-   - mcpo-ext lists its tools.
+   - mcpo-ext lists its tools;
+   - after the rollback has been checked, delete the export in `secrets/` (it holds the old credentials).
 
 ## Rotation
 
@@ -196,7 +222,7 @@ Between steps 2 and 3, OWUI requests are 401.
 
 ### MCP_ACCESS_KEY / MCP_PERSONAL_ACCESS_KEY
 
-Unchanged by this design. After deploy step 6, the OWUI side holds the personal key only.
+Unchanged by this design. After deploy step 8, the OWUI side holds the personal key only.
 
 ## Troubleshooting
 
@@ -206,6 +232,10 @@ Unchanged by this design. After deploy step 6, the OWUI side holds the personal 
   `system_oauth`, or the user has no SSO session (signed in another way, or the token refresh failed). Sign out and
   back in through SSO.
 - **403:** a client or proxy added a user header, or a request carries two different keys (pre-check 5).
+- **403 on every Open WebUI tool call, with a valid SSO session:** `ENABLE_FORWARD_USER_INFO_HEADERS` is on in Open
+  WebUI (frontend `.env`). It makes Open WebUI add `X-OpenWebUI-User-*` headers to every tool call, and the servers
+  refuse any user header they did not verify (fail closed). Turn it off; it is set neither in the frontend compose nor in its `.env`
+  today (checked 2026-11-05).
 - **The contract tools return "the research workspace is not configured for this lane":** `OB_WORKBENCH_MCP_KEY` is
   unset, or not in `WORKSPACE_SERVICE_KEYS` as `mcp=`.
 - **The StackWatchdog (every 10 min, at :x7)** may restart a container in the middle of a change. Make recreates at
