@@ -70,6 +70,24 @@ docker exec openbrain-db psql -U postgres -d openbrain -c "SELECT count(*) FROM 
 The count should match (roughly) what was in the dump (look in the
 `.dump`'s metadata via `pg_restore -l /in/<dump>` to see object counts).
 
+**Slot 470 (rw-inlet-stamp: every personal row carries its owner).** Its guards are ALWAYS triggers on `thoughts` and
+`sources`, and they refuse an unowned personal row for every role, superusers included. There is no setting that turns
+them off. What this means for a restore (measured in `OB1/docker/inlet-stamp-lab`, cases [8b] and [8c]):
+- **A dump taken after 470** restores in place as above with every row. `pg_dump` keeps the trigger state, and the data
+  is loaded before the triggers are created. Then re-apply the slots, because `--no-acl` drops every grant and
+  `--no-owner` gives 470's prune view to postgres. Run `init-inlet-owner.sql`, then `init-inlet-stamp.sql` (both
+  re-runnable, "nothing to do"), and check
+  `SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'trg_inlet_stamp%' AND tgenabled = 'A'` = 2.
+- **A dump taken BEFORE 470** (or before 440) does NOT restore into a database that has 470. pg_restore exits non-zero
+  and reports the errors: `cannot drop table public.thoughts because other objects depend on it`, then `COPY failed for
+  table "thoughts": ERROR: inlet stamp: ...`. The old rows are left in place and the dump's rows are not loaded. It is
+  never silent. Use this order instead:
+  1. take 470 off: `psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -f /tmp/revert-inlet-stamp.sql`;
+  2. run the pg_restore above;
+  3. re-apply 440 (`init-inlet-owner.sql`, which gives the dump's unowned rows their owner), then 470
+     (`init-inlet-stamp.sql`).
+  The lab shows every row of the dump restored and the guards ALWAYS-enabled afterwards.
+
 ---
 
 ## openbrain-wiki (volume tar)
