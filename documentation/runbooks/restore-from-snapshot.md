@@ -70,6 +70,19 @@ docker exec openbrain-db psql -U postgres -d openbrain -c "SELECT count(*) FROM 
 The count should match (roughly) what was in the dump (look in the
 `.dump`'s metadata via `pg_restore -l /in/<dump>` to see object counts).
 
+**The REST door after a restore or a fresh volume** (rw-rest-door-auth, slot 450). PostgREST logs in as
+`ob_rest_authenticator`; its password is set out of band, like `ob_app_memory`'s, and it is a cluster role,
+so a `pg_restore` into the existing cluster keeps it. Two cases need the operator:
+- a FRESH `openbrain-db` volume (initdb runs slot 450 and creates the role with no password), or slot 450
+  re-applied after `revert-rest-door-auth.sql`: `openbrain-postgrest` restart-loops on `password
+  authentication failed` until
+  `powershell -NoProfile -File OB1\docker\rest-door\mint-rest-tokens.ps1 -EnvFile OB1\docker\.env -NoMint -SetAuthenticatorPassword -Container openbrain-db`
+  then `docker restart openbrain-postgrest`;
+- the restore above uses `--no-acl`, so every grant in the dump is dropped - slot 450's door grants and its
+  EXECUTE-from-PUBLIC revoke among them (as every other slot's grants). Re-apply the grant slots, slot 450 last:
+  `docker exec -i openbrain-db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < OB1/docker/init-rest-door-auth.sql`
+  (idempotent). Until then the door's callers are refused (no grant), never served more.
+
 ---
 
 ## openbrain-wiki (volume tar)

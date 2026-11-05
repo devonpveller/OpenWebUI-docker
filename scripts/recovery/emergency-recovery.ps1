@@ -201,6 +201,12 @@ $Script:MainStackServices = @()
 # in docker-compose.scheduled.yml; compose includes it so a single
 # `docker compose up -d` brings everything. They depend on openbrain-rest
 # (PostgREST proxy) so they sort after it.
+# rw-rest-door-auth (slot 450): PostgREST logs in as ob_rest_authenticator, whose password is set OUT OF BAND
+# (like ob_app_memory's). On a FRESH openbrain-db volume (initdb runs slot 450), or after revert-rest-door-auth.sql
+# and a re-apply, the role has no password and openbrain-postgrest restart-loops ("password authentication failed")
+# until the operator runs, once the db is up:
+#   powershell -NoProfile -File OB1\docker\rest-door\mint-rest-tokens.ps1 -EnvFile OB1\docker\.env -NoMint -SetAuthenticatorPassword -Container openbrain-db
+# then `docker restart openbrain-postgrest`. A restart or recreate of the existing volume keeps the password.
 $Script:OB1Services = @(
     "openbrain-db", "openbrain-mcp", "openbrain-ext",
     "openbrain-gateway", "openbrain-ops-gateway",
