@@ -88,7 +88,9 @@ so a `pg_restore` into the existing cluster keeps it. Two cases need the operato
 
   `init-pantry.sql` gives `ob_pantry` back its own grants; slot 450 gives back every stand-in grant it made in place
   of PUBLIC's (from its archive `rest_door.regrants`, restored as data: NOTICE `N archived stand-in grant(s) given
-  back`) and the door roles' grants. Until then the door's callers are refused (no grant), never served more. (The
+  back`) and the door roles' grants. It gives a stand-in back only to a function the restore RECREATED (the archive
+  keeps the function's oid): a stand-in someone revoked on purpose from the same function stays revoked, and an
+  archive row whose role or function no longer exists is skipped and pruned. Until then the door's callers are refused (no grant), never served more. (The
   rw-rest-door-auth lab's case 9 runs exactly this and checks every pre-450 (role, function) pair; the `intake`
   schema's own grants belong to `integrations/intake/sql/init-intake.sql`.)
 
