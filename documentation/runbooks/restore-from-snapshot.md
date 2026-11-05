@@ -78,10 +78,19 @@ so a `pg_restore` into the existing cluster keeps it. Two cases need the operato
   authentication failed` until
   `powershell -NoProfile -File OB1\docker\rest-door\mint-rest-tokens.ps1 -EnvFile OB1\docker\.env -NoMint -SetAuthenticatorPassword -Container openbrain-db`
   then `docker restart openbrain-postgrest`;
-- the restore above uses `--no-acl`, so every grant in the dump is dropped - slot 450's door grants and its
-  EXECUTE-from-PUBLIC revoke among them (as every other slot's grants). Re-apply the grant slots, slot 450 last:
-  `docker exec -i openbrain-db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < OB1/docker/init-rest-door-auth.sql`
-  (idempotent). Until then the door's callers are refused (no grant), never served more.
+- the restore above uses `--no-acl`, so every explicit grant in the dump is dropped (objects are recreated under
+  the current default privileges: service_role's survive, PUBLIC no longer holds functions once slot 450 ran).
+  Re-apply the slots that grant, each idempotent, slot 450 LAST (from `OB1\docker`):
+
+      Get-Content -Raw init-grants.sql | docker exec -i openbrain-db psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain
+      Get-Content -Raw init-pantry.sql | docker exec -i openbrain-db psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain
+      Get-Content -Raw init-rest-door-auth.sql | docker exec -i openbrain-db psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain
+
+  `init-pantry.sql` gives `ob_pantry` back its own grants; slot 450 gives back every stand-in grant it made in place
+  of PUBLIC's (from its archive `rest_door.regrants`, restored as data: NOTICE `N archived stand-in grant(s) given
+  back`) and the door roles' grants. Until then the door's callers are refused (no grant), never served more. (The
+  rw-rest-door-auth lab's case 9 runs exactly this and checks every pre-450 (role, function) pair; the `intake`
+  schema's own grants belong to `integrations/intake/sql/init-intake.sql`.)
 
 ---
 
