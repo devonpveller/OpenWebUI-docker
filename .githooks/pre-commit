@@ -558,18 +558,21 @@ run_gate ob1-fork-owned './scripts/checks/check-ob1-fork-owned.ps1' '' no \
 # three blob hashes AT THE STAGED PIN and refuses any difference, including a missing copy when the
 # others exist. Skips when no OB1 gitlink is staged, when the pin has none of the three (a pin from before
 # the item), or when this checkout's OB1 does not hold the pinned commit (it is then reported SKIPPED).
+# git exports GIT_DIR / GIT_INDEX_FILE (and more) to a hook; a `git -C OB1` that inherits them reads THIS repository,
+# not OB1, so every OB1 call runs in a subshell with them unset.
+_mi_ob1() { ( unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES; git -C OB1 "$@" ); }
 _mi_pin=
 if [ -n "$(git diff --cached --name-only -- OB1 2>/dev/null)" ]; then
     _mi_pin=$(git ls-files -s -- OB1 2>/dev/null | awk '$1 == "160000" { print $2 }')
 fi
 if [ -n "$_mi_pin" ]; then
-    if [ ! -e OB1/.git ] || ! git -C OB1 cat-file -e "$_mi_pin^{commit}" 2>/dev/null; then
+    if [ ! -e OB1/.git ] || ! _mi_ob1 cat-file -e "$_mi_pin^{commit}" 2>/dev/null; then
         echo "SKIPPED ob1-mcp-identity-copies: OB1 is not checked out here or does not hold the pinned commit $_mi_pin"
         GATES_SKIPPED="$GATES_SKIPPED ob1-mcp-identity-copies"
     else
         _mi_seen=; _mi_missing=; _mi_hashes=
         for _mi_p in integrations/kubernetes-deployment/mcp-identity.ts docker/extensions-server/mcp-identity.ts docker/workbench/src/identity/mcp_identity.ts; do
-            _mi_h=$(git -C OB1 rev-parse --verify --quiet "$_mi_pin:$_mi_p" 2>/dev/null)
+            _mi_h=$(_mi_ob1 rev-parse --verify --quiet "$_mi_pin:$_mi_p" 2>/dev/null)
             if [ -n "$_mi_h" ]; then _mi_seen=yes; _mi_hashes="$_mi_hashes$_mi_h $_mi_p
 "; else _mi_missing="$_mi_missing $_mi_p"; fi
         done
