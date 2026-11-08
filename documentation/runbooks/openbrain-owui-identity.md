@@ -117,6 +117,17 @@ To paste the lane key into Open WebUI, put it on the clipboard without printing 
 4. **`WORKSPACE_DEFAULT_SUB` is the operator's real sub.** Compare it, without printing either value, with the `sub`
    Open WebUI holds for the operator's own account (`oauth.oidc.sub`).
    - If they differ: stop. The operator would otherwise be served as a second user.
+   - It must also be **non-blank and equal to the `-v owner_sub` value PD1's 440 is run with** (and records in
+     `public.inlet_owner`): compare without printing either. Every OB1 service reads the one `WORKSPACE_DEFAULT_SUB` from
+     `OB1/docker/.env`, so openbrain-mcp, openbrain-ext and the workbench agree by construction. Only the psql argument
+     can differ.
+   - Why this item changes the check: before it, openbrain-mcp read a blank value as the placeholder `operator`. Now a
+     blank value gives the full lane (Claude Code, the agent lanes) NO identity: shared reads only, and every write
+     refused. A value that is not a usable subject (including the literal `operator`) stops the server at start. Both
+     fail closed.
+   - If the value differs from 440's owner, the operator's own lanes read as a different subject, so every thought 440
+     stamped private disappears from the operator's view, and new captures land under the other subject. Fix the .env
+     (or the psql argument) before step 4; never after.
 5. **The Proxmox edge in front of a gateway door.** openbrain-gateway forwards every client header except
    `authorization` and `x-brain-key`. A Traefik route in front of a gateway door that adds `X-authentik-*` or
    `Remote-User` (forward-auth `authResponseHeaders`) would make the full lane answer 403.
@@ -150,7 +161,8 @@ recreate, then PD2's slot 470, all in one writers-stopped window** (review F1):
    `openbrain-ext-server` and `openbrain-workbench`.
 3. Create the two keys and set the provider values (above).
 4. **PD1's slot 440** (`rw-inlet-owner`, `OB1/docker/init-inlet-owner.sql`), as its own deploy section says, with the
-   database writers stopped (stopped, not paused). It stamps every existing thought with its owner.
+   database writers stopped (stopped, not paused). It stamps every existing thought with its owner. Run it with
+   `-v owner_sub=` set to exactly openbrain-mcp's `WORKSPACE_DEFAULT_SUB` (pre-check 4).
 5. At :x8, after the StackWatchdog's :x7 pass, recreate the three servers:
    `docker compose -f OB1/docker/docker-compose.yml up -d --no-deps --force-recreate openbrain-mcp openbrain-ext openbrain-workbench`.
    - The openbrain-ext recreate attaches it to `ai-stack_llm-net`.
