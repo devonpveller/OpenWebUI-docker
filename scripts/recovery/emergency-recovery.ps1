@@ -202,7 +202,7 @@ $Script:MainStackServices = @()
 # `docker compose up -d` brings everything. They depend on openbrain-rest
 # (PostgREST proxy) so they sort after it.
 $Script:OB1Services = @(
-    "openbrain-db", "openbrain-mcp", "openbrain-ext",
+    "openbrain-db", "openbrain-mcp", "openbrain-ext",   # rw-mcp-identity: openbrain-ext is on ai-stack_llm-net too (Open WebUI reaches it natively), so it starts after the anchor networks like openbrain-mcp
     "openbrain-gateway", "openbrain-ops-gateway",
     "openbrain-mcpo", "openbrain-mcpo-ext", "openbrain-postgrest",
     "openbrain-rest", "openbrain-entity-worker",

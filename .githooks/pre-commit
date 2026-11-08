@@ -20,6 +20,7 @@
 #   5c. OB1 deno recipes - and must type-check the Deno recipe 5b cannot see
 #   5d. OB1 int. images  - and its integration images must build and resolve
 #   5e. OB1 fork-owned   - and no upstream merge in it may touch intake's fork-owned surface
+#   5f. OB1 mcp-identity - and its three copies of the MCP token check must be identical
 
 echo "Running pre-commit validations..."
 
@@ -546,6 +547,50 @@ run_gate ob1-integration-images './scripts/checks/check-ob1-integration-images.p
 # or Python is missing.
 run_gate ob1-fork-owned './scripts/checks/check-ob1-fork-owned.ps1' '' no \
     "Pre-commit validation failed (an upstream OB1 merge touches the fork-owned intake surface)!"
+
+# --- 5f. OB1 mcp-identity copies on gitlink bumps (inline, needs no host) ---
+# rw-mcp-identity (review F2, 2026-11-05): the per-user MCP token check is ONE file kept in three places,
+# because each image builds from its own directory: openbrain-mcp
+# (integrations/kubernetes-deployment/mcp-identity.ts), openbrain-ext
+# (docker/extensions-server/mcp-identity.ts) and the workbench, which verifies the forwarded user token
+# itself (docker/workbench/src/identity/mcp_identity.ts). If one copy changes and the others do not, the
+# three services disagree about who a token names. So on a staged OB1 gitlink bump this gate compares the
+# three blob hashes AT THE STAGED PIN and refuses any difference, including a missing copy when the
+# others exist. Skips when no OB1 gitlink is staged, when the pin has none of the three (a pin from before
+# the item), or when this checkout's OB1 does not hold the pinned commit (it is then reported SKIPPED).
+# git exports GIT_DIR / GIT_INDEX_FILE (and more) to a hook; a `git -C OB1` that inherits them reads THIS repository,
+# not OB1, so every OB1 call runs in a subshell with them unset.
+_mi_ob1() { ( unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES; git -C OB1 "$@" ); }
+_mi_pin=
+if [ -n "$(git diff --cached --name-only -- OB1 2>/dev/null)" ]; then
+    _mi_pin=$(git ls-files -s -- OB1 2>/dev/null | awk '$1 == "160000" { print $2 }')
+fi
+if [ -n "$_mi_pin" ]; then
+    if [ ! -e OB1/.git ] || ! _mi_ob1 cat-file -e "$_mi_pin^{commit}" 2>/dev/null; then
+        echo "SKIPPED ob1-mcp-identity-copies: OB1 is not checked out here or does not hold the pinned commit $_mi_pin"
+        GATES_SKIPPED="$GATES_SKIPPED ob1-mcp-identity-copies"
+    else
+        _mi_seen=; _mi_missing=; _mi_hashes=
+        for _mi_p in integrations/kubernetes-deployment/mcp-identity.ts docker/extensions-server/mcp-identity.ts docker/workbench/src/identity/mcp_identity.ts; do
+            _mi_h=$(_mi_ob1 rev-parse --verify --quiet "$_mi_pin:$_mi_p" 2>/dev/null)
+            if [ -n "$_mi_h" ]; then _mi_seen=yes; _mi_hashes="$_mi_hashes$_mi_h $_mi_p
+"; else _mi_missing="$_mi_missing $_mi_p"; fi
+        done
+        if [ -n "$_mi_seen" ]; then
+            _mi_n=$(printf '%s' "$_mi_hashes" | awk 'NF { print $1 }' | sort -u | wc -l | tr -d ' ')
+            if [ -n "$_mi_missing" ] || [ "$_mi_n" != 1 ]; then
+                echo "ob1-mcp-identity-copies: the three copies of the MCP token check differ at the staged OB1 pin $_mi_pin:"
+                printf '%s' "$_mi_hashes" | sed 's/^/  /'
+                [ -n "$_mi_missing" ] && echo "  missing:$_mi_missing"
+                echo "  Copy the changed file over the other two inside OB1 (they must be byte-identical), commit there, push, and bump again."
+                echo "Pre-commit validation failed (OB1's mcp-identity copies drifted)!"
+                print_summary
+                exit 1
+            fi
+            GATES_RAN="$GATES_RAN ob1-mcp-identity-copies"
+        fi
+    fi
+fi
 
 # --- 6. ATTESTATION -------------------------------------------------------
 # Record that these checks actually ran, because otherwise nobody can tell.
