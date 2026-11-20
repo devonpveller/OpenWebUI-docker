@@ -423,6 +423,7 @@ def test_file_context_default_apply_is_idempotent_and_restorable(tmp_path):
     assert stored == {"capabilities": {"vision": True, "file_context": True}, "tags": []}
     rc2, out2 = run(["--db", db, "--file-context-default", "--apply", "--restore-file", tmp_path / "fc2.json"])
     assert rc2 == 0 and "nothing to change" in out2 and not (tmp_path / "fc2.json").exists()
+    assert "stop getting attached files" not in out2 and "active, file_context unset" not in out2  # already applied: no warning
     assert snapshot(db) == after
     rc3, _ = run(["--db", db, "--restore", rf, "--apply"])
     assert rc3 == 0 and snapshot(db) == before

@@ -48,7 +48,7 @@ WITHOUT `--no-deps` (`:3553`), which starts `openwebui` too - on the already-reb
 `Status: Disabled`). The agent never runs this; the operator does.
 
 `<backup dir>` below is a Windows folder with about 3 GB free, outside every repo. `<repo>` is the
-checkout root (`D:\Open WebUIi-stack`: it contains a space, so every bind mount below is quoted and must stay quoted). Order matters: **build first (openwebui still serving), then stop, then back up the
+checkout root (on this host the path contains a space, so every bind mount below is quoted and must stay quoted; the identity gate forbids a literal drive path in this repo). Order matters: **build first (openwebui still serving), then stop, then back up the
 quiet database**, so a rollback loses nothing written during the build.
 
 1. **Keep the old image:** `docker tag openwebui:local openwebui:pre-0134-v0.11.0` (a

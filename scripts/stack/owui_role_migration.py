@@ -300,14 +300,14 @@ def plan_file_context(conn: sqlite3.Connection) -> tuple[list[dict], list[str]]:
         notes.append("models.default_metadata already sets capabilities.file_context to false "
                      "(an operator choice): not changed")
         return [], notes
+    if cur is True:  # already applied: do not warn about rows the default already covers
+        return [], notes
     if active or inactive:
         notes.append(f"{len(active)} active model row(s) and {inactive} inactive one(s) have no file_context of "
                      "their own: on 0.13.4 they stop getting attached files injected unless the default below is set; "
                      "models with no row at all are affected the same way")
         for a in active:
             notes.append(f"  active, file_context unset: {a}")
-    if cur is True:
-        return [], notes
     new = dict(value)
     new["capabilities"] = {**(caps or {}), "file_context": True}
     changes.append({"what": "default", "table": "config", "keycol": "key", "key": "models.default_metadata",
