@@ -48,13 +48,30 @@ no chat should be mid-stream, confirm `frontend/.env` has `OAUTH_SCOPES` with
 3. **Build:** `docker compose -f frontend/docker-compose.yml --profile gpu build openwebui`
    (the torch swap downloads the cu121 wheels; about 4-5 minutes). The build fails loudly
    if the builtin.py timestamp patch does not apply.
-4. **Recreate openwebui, wait healthy, then tailscale** (never openwebui alone):
+4. **Keep attached files injected (owui-0134).** On 0.11.0 a model with no `file_context`
+   capability got attached files injected (`middleware.py:2925`, default True); on 0.13.4 it does
+   not (`utils/tools.py:618-623`: default is false unless `legacy` or no session), and the same
+   holds for a model with no row at all. One idempotent config cell restores 0.11.0: a global
+   default `capabilities.file_context = true` in `models.default_metadata` (a model's own value,
+   true or false, still wins). `function_calling` needs no step: unset means native on BOTH
+   versions (`middleware.py:2907` on 0.11.0). First a dry run on the backup (safe, lists the active
+   rows it applies to by id and name, no secrets):
+   `python scripts/stack/owui_role_migration.py --db <backup dir>\webui.db.pre-0134 --file-context-default`
+   Then, with `openwebui` STOPPED (`docker compose -f frontend/docker-compose.yml --profile gpu stop openwebui`;
+   tailscale stays down until step 5), apply it to the volume file from a throwaway container
+   (no network, the old image's python; the script is stdlib only):
+   `docker run --rm --network none -v frontend_openwebui-data:/data -v <repo>\scripts\stack:/s:ro --entrypoint python openwebui:pre-0134-v0.11.0 /s/owui_role_migration.py --db /data/webui.db --file-context-default --apply --restore-file /data/fc-restore-0134.json`
+   A second run prints "nothing to change". **Revert** (OWUI stopped): the same command with
+   `--restore /data/fc-restore-0134.json --apply`, or (OWUI running) clear it in Admin Settings >
+   Models > default metadata; a rollback to the backup `webui.db` undoes it too. Then move
+   `/data/fc-restore-0134.json` out of the volume (it holds only the one cell's before/after text).
+5. **Recreate openwebui, wait healthy, then tailscale** (never openwebui alone):
    `docker compose -f frontend/docker-compose.yml --profile gpu up -d --no-deps openwebui`,
    wait for `healthy` (the first start runs the migrations on a 1.1 GB database; the lab
    took about 1 minute with no GPU), then
    `docker compose -f frontend/docker-compose.yml --profile gpu up -d --no-deps tailscale`
    and verify the 8 tailnet serve routes.
-5. **Verify:** `scripts/checks/check-owui-drift.ps1` (only the `deep_research` row differs,
+6. **Verify:** `scripts/checks/check-owui-drift.ps1` (only the `deep_research` row differs,
    as before the upgrade); sign in through SSO in a browser; open a chat on a model bound
    to `open-brain` and call a tool; `python scripts/stack/stack.py labels` dry run reports
    nothing to change; Admin > Settings > Integrations still lists the three tool servers.

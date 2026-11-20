@@ -1232,7 +1232,15 @@ restore (dry run included), naming the cell - put it back by hand or leave it, t
 restore again. A config value is rewritten only if `json.dumps` reproduces its stored text
 (how Open WebUI 0.11 writes it). Open WebUI reads `rag.embedding_model` once at startup, so
 run it with Open WebUI **stopped**. Other config keys that still name an old id are listed,
-not changed. Stdlib only, so it runs inside the `openwebui` image against the data volume.
+not changed.
+
+**Second step, `--file-context-default` (owui-0134, 0.11.0 -> 0.13.4).** Same machinery (dry
+run by default, restore file, exclusive lock, `--restore`), a different plan: it sets
+`capabilities.file_context = true` in the config row `models.default_metadata`, so a model with
+no `file_context` of its own keeps getting attached files injected as on 0.11.0 (0.13.4's default
+is false). It lists the active model rows (id and name, ASCII-escaped) the default applies to, and
+leaves an operator's explicit global false and a missing row alone. Runbook step:
+`documentation/runbooks/UPDATE-MANAGEMENT.md`, "0.11.0 -> 0.13.4". Stdlib only, so it runs inside the `openwebui` image against the data volume.
 
 ---
 

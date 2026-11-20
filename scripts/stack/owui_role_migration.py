@@ -66,6 +66,17 @@ USAGE
   python owui_role_migration.py --db webui.db --restore r.json      # dry run
   python owui_role_migration.py --db webui.db --restore r.json --apply
 
+SECOND STEP (owui-0134, Open WebUI 0.11.0 -> 0.13.4): --file-context-default
+  Same machinery (dry run by default, restore file, exclusive lock, --restore), a different plan:
+  it sets capabilities.file_context = true in the config row `models.default_metadata`.
+  Why: on 0.11.0 a model with no `file_context` capability injected attached files
+  (middleware.py:2925, default True); on 0.13.4 the default is False unless the model is
+  `legacy` or the call has no session (utils/tools.py:618-623), so every unset model, and every
+  model with no row at all, would stop getting attached files injected. The global default
+  (merged under each model's own capabilities, utils/models.py:394-408) restores 0.11.0's
+  behaviour for exactly those models; a model's own file_context value, true or false, wins.
+  Revert: --restore r.json --apply.
+
 Exit codes: 0 done / nothing to do, 1 refused (nothing written), 2 usage error.
 Stdlib only (runs inside the openwebui image or any python3 >= 3.8).
 """
@@ -246,6 +257,65 @@ def plan(conn: sqlite3.Connection) -> tuple[list[dict], list[str]]:
     return changes, notes
 
 
+def plan_file_context(conn: sqlite3.Connection) -> tuple[list[dict], list[str]]:
+    """owui-0134: the cell that makes an unset `file_context` mean what it meant on 0.11.0 (true)."""
+    _check_schema(conn)
+    changes: list[dict] = []
+    notes: list[str] = []
+    got = _config_json(conn, "models.default_metadata")
+    if got is None:
+        return [], ["config 'models.default_metadata' has no row: not changed (Open WebUI creates it on "
+                    "its first start; run again then, or set the same default in Admin Settings > Models)"]
+    raw, value = got
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise Refused("config 'models.default_metadata' is not a JSON object; refusing")
+    caps = value.get("capabilities")
+    if caps is not None and not isinstance(caps, dict):
+        raise Refused("models.default_metadata.capabilities is not a JSON object; refusing")
+    cur = (caps or {}).get("file_context")
+    # which rows this changes (information only: the cell is one global default)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(model)")}
+    if not {"name", "meta", "params", "is_active"} <= cols:
+        raise Refused("the `model` table lacks name/meta/params/is_active; refusing")
+    active: list[str] = []
+    inactive = 0
+    for mid, name, meta, params, act in conn.execute(
+            "SELECT id, name, meta, params, is_active FROM model ORDER BY id"):
+        try:
+            mj = json.loads(meta) if meta else {}
+            pj = json.loads(params) if params else {}
+        except ValueError:
+            notes.append(f"model {mid!r}: meta/params is not JSON: skipped in the list below")
+            continue
+        own = (mj.get("capabilities") or {}) if isinstance(mj, dict) else {}
+        if "file_context" in own or (isinstance(pj, dict) and pj.get("function_calling") == "legacy"):
+            continue
+        if act:
+            active.append(f"{mid} ({name})".encode("ascii", "backslashreplace").decode("ascii"))  # emoji in names must not crash a cp1252 console
+        else:
+            inactive += 1
+    if cur is False:
+        notes.append("models.default_metadata already sets capabilities.file_context to false "
+                     "(an operator choice): not changed")
+        return [], notes
+    if active or inactive:
+        notes.append(f"{len(active)} active model row(s) and {inactive} inactive one(s) have no file_context of "
+                     "their own: on 0.13.4 they stop getting attached files injected unless the default below is set; "
+                     "models with no row at all are affected the same way")
+        for a in active:
+            notes.append(f"  active, file_context unset: {a}")
+    if cur is True:
+        return [], notes
+    new = dict(value)
+    new["capabilities"] = {**(caps or {}), "file_context": True}
+    changes.append({"what": "default", "table": "config", "keycol": "key", "key": "models.default_metadata",
+                    "column": "value", "before": _typed(raw), "after": _typed(json.dumps(new)),
+                    "show": (raw, json.dumps(new))})
+    return changes, notes
+
+
 def role_rows_note(conn: sqlite3.Connection) -> str | None:
     have = {r[0] for r in conn.execute(
         "SELECT id FROM model WHERE id IN ('local-large','local-large:nothink','local-embed')")}
@@ -379,17 +449,25 @@ def _abandon(conn: sqlite3.Connection) -> None:
 # migrate / restore
 # ---------------------------------------------------------------------------
 
-def _report_plan(changes: list[dict], notes: list[str], rnote: str | None, apply: bool, out) -> None:
+def _report_plan(changes: list[dict], notes: list[str], rnote: str | None, apply: bool, out,
+                 done_msg: str = "nothing to change: every reference this script owns already names a role.") -> None:
     for n in notes + ([rnote] if rnote else []):
         print(f"  note: {n}", file=out)
     if not changes:
-        print("  nothing to change: every reference this script owns already names a role.", file=out)
+        print("  " + done_msg, file=out)
         return
     print(table(changes, f"  {len(changes)} cell(s) {'to change' if apply else 'would change'}:"), file=out)
 
 
-def migrate(db: str, apply: bool, restore_file: str | None, lock_timeout: float = 2.0, out=None) -> int:
+FC_DONE = "nothing to change: models.default_metadata already carries capabilities.file_context = true (or an operator's false)."
+
+
+def migrate(db: str, apply: bool, restore_file: str | None, lock_timeout: float = 2.0, out=None,
+            planner=None) -> int:
     out = out or sys.stdout
+    planner = planner or plan
+    done_msg = FC_DONE if planner is plan_file_context else "nothing to change: every reference this script owns already names a role."
+    rnote = (lambda c: None) if planner is plan_file_context else role_rows_note
     if apply and not restore_file:
         raise Refused("--apply needs --restore-file PATH (a new file the rollback reads)")
     if apply and restore_file and os.path.exists(restore_file):
@@ -398,14 +476,14 @@ def migrate(db: str, apply: bool, restore_file: str | None, lock_timeout: float 
     print(f"owui_role_migration: {mode}\n  database: {db}", file=out)
     if not apply:
         with _read_view(db, out) as ro:
-            changes, notes = plan(ro)
-            _report_plan(changes, notes, role_rows_note(ro), False, out)
+            changes, notes = planner(ro)
+            _report_plan(changes, notes, rnote(ro), False, out, done_msg)
         return 0
     conn = _open_exclusive(db, lock_timeout)
     wrote_file = False
     try:
-        changes, notes = plan(conn)
-        _report_plan(changes, notes, role_rows_note(conn), True, out)
+        changes, notes = planner(conn)
+        _report_plan(changes, notes, rnote(conn), True, out, done_msg)
         if not changes:
             _finish(conn, commit=False)
             return 0
@@ -510,6 +588,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--apply", action="store_true", help="write (default: dry run, read-only)")
     ap.add_argument("--restore-file", help="with --apply: the NEW file that records every changed cell")
     ap.add_argument("--restore", metavar="RESTORE_FILE", help="put back the cells a restore file recorded")
+    ap.add_argument("--file-context-default", action="store_true",
+                    help="owui-0134: plan the models.default_metadata file_context=true cell instead of the role moves")
     ap.add_argument("--lock-timeout", type=float, default=2.0,
                     help="seconds to wait for the exclusive lock before refusing (default 2)")
     args = ap.parse_args(argv)
@@ -518,7 +598,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.restore_file:
                 ap.error("--restore and --restore-file do not combine")
             return restore(args.db, args.restore, args.apply, args.lock_timeout)
-        return migrate(args.db, args.apply, args.restore_file, args.lock_timeout)
+        return migrate(args.db, args.apply, args.restore_file, args.lock_timeout,
+                       planner=plan_file_context if args.file_context_default else None)
     except Refused as e:
         print(f"REFUSED: {e}", file=sys.stderr)
         return 1

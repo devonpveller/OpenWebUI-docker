@@ -372,3 +372,71 @@ def test_same_is_storage_class_exact():
     assert not m._same("local-large", b"local-large") and not m._same(None, "")
     for v in ("x", b"x", 1, 1.5, None):                     # a restore file round-trips each class
         assert m._same(m._untyped(m._typed(v)), v)
+
+# ---- owui-0134: --file-context-default (0.11.0 injected attached files by default; 0.13.4 does not) ----
+
+def fc_db(tmp_path, default="{}", present=True):
+    cfg = {"ui.default_models": "general"}
+    if present:
+        cfg["models.default_metadata"] = json.loads(default)
+    db = make_db(tmp_path, presets=[("a", None), ("b", None), ("c", None), ("d", None), ("e", None)], config=cfg)
+    c = sqlite3.connect(db)
+    for mid, meta, params, act in (
+            ("b", {"capabilities": {"file_context": True}}, {"function_calling": "native"}, 1),
+            ("c", {"capabilities": {"file_context": False}}, {}, 1),
+            ("d", {"capabilities": {"vision": True}}, {"function_calling": "legacy"}, 1),
+            ("e", {"capabilities": {"vision": True}}, {}, 0)):
+        c.execute("UPDATE model SET meta=?, params=?, is_active=? WHERE id=?",
+                  (json.dumps(meta), json.dumps(params), act, mid))
+    c.commit()
+    c.close()
+    return db
+
+
+def test_file_context_default_dry_run_lists_exactly_the_models_that_would_change(tmp_path):
+    db = fc_db(tmp_path)
+    c = sqlite3.connect(db)
+    c.execute("UPDATE model SET name=? WHERE id='a'", ("A 🎤",))   # an emoji name must not crash a cp1252 console
+    c.commit()
+    c.close()
+    before = hashlib.sha256(db.read_bytes()).hexdigest()
+    rc, out = run(["--db", db, "--file-context-default"])
+    assert rc == 0 and "DRY RUN" in out
+    assert r"active, file_context unset: a (A \U0001f3a4)" in out   # no capabilities, not legacy: changes
+    for untouched in ("(B)", "(C)", "(D)", "(E)"):                    # own value / legacy / inactive: not listed
+        assert untouched not in out, untouched
+    assert "1 active model row(s) and 1 inactive one(s)" in out         # e is inactive and unset: counted
+    assert "config.models.default_metadata" in out and '"file_context": true' in out
+    assert hashlib.sha256(db.read_bytes()).hexdigest() == before
+
+
+def test_file_context_default_apply_is_idempotent_and_restorable(tmp_path):
+    db = fc_db(tmp_path, default='{"capabilities": {"vision": true}, "tags": []}')
+    before = snapshot(db)
+    rf = tmp_path / "fc.json"
+    rc, out = run(["--db", db, "--file-context-default", "--apply", "--restore-file", rf])
+    assert rc == 0 and "written" in out
+    after = snapshot(db)
+    changed = [k for k in after if after[k] != before[k]]
+    assert changed == [("config", "models.default_metadata")]   # no model row touched
+    stored = json.loads(after[("config", "models.default_metadata")][3])
+    assert stored == {"capabilities": {"vision": True, "file_context": True}, "tags": []}
+    rc2, out2 = run(["--db", db, "--file-context-default", "--apply", "--restore-file", tmp_path / "fc2.json"])
+    assert rc2 == 0 and "nothing to change" in out2 and not (tmp_path / "fc2.json").exists()
+    assert snapshot(db) == after
+    rc3, _ = run(["--db", db, "--restore", rf, "--apply"])
+    assert rc3 == 0 and snapshot(db) == before
+
+
+def test_file_context_default_leaves_an_operator_false_and_a_missing_row_alone(tmp_path):
+    db = fc_db(tmp_path, default='{"capabilities": {"file_context": false}}')
+    before = snapshot(db)
+    rc, out = run(["--db", db, "--file-context-default"])
+    assert rc == 0 and "already sets capabilities.file_context to false" in out and "nothing to change" in out
+    rc, _o = run(["--db", db, "--file-context-default", "--apply", "--restore-file", tmp_path / "x.json"])
+    assert rc == 0 and snapshot(db) == before
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    rc, out = run(["--db", fc_db(sub, present=False), "--file-context-default"])
+    assert rc == 0 and "has no row" in out
+
