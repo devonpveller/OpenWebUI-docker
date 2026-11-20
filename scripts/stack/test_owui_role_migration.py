@@ -1,7 +1,8 @@
 """Tests for owui_role_migration.py (model-roles, item mr-consumers).
 
-Hermetic: every test builds a throwaway SQLite database with Open WebUI 0.11.0's
-own `model` and `config` DDL (copied from a live 0.11.0 webui.db, read-only) and
+Hermetic: every test builds a throwaway SQLite database with Open WebUI 0.13.4's
+own `model` and `config` DDL (the 0.13.4 `model` table adds a nullable version_id column;
+copied from a live 0.11.0 webui.db migrated to 0.13.4 in a disposable lab, 2026-11-20) and
 the shapes the live rows have. The real proof is the webui.db COPY in the item's
 test plan.
 """
@@ -28,6 +29,7 @@ MODEL_DDL = """CREATE TABLE "model" (
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL,
 	is_active BOOLEAN DEFAULT 1 NOT NULL,
+	version_id TEXT,
 	CONSTRAINT pk_model PRIMARY KEY (id)
 )"""
 CONFIG_DDL = """CREATE TABLE config (
@@ -52,7 +54,7 @@ def make_db(tmp_path: Path, *, presets=None, config=None, wal=False) -> Path:
         ("gemma-preset", "gemma3:4b"), ("qwen36-27b", None), ("bge-m3", None),
     ]
     for i, (pid, base) in enumerate(rows):
-        c.execute("INSERT INTO model VALUES (?,?,?,?,?,?,?,?,?)",
+        c.execute("INSERT INTO model (id,user_id,base_model_id,name,meta,params,created_at,updated_at,is_active) VALUES (?,?,?,?,?,?,?,?,?)",
                   (pid, "u1", base, pid.title(), '{"description": "x"}', '{"temperature": 0.7}',
                    1700000000 + i, 1700000100 + i, 1))
     cfg = config if config is not None else {

@@ -27,6 +27,46 @@ the pattern to copy is
 - Re-verify the `frontend/owui/` plugin snapshots against `webui.db` after the upgrade
   (see `frontend/owui/README.md` "Deployment sync status").
 
+### 0.11.0 -> 0.13.4: deploy and rollback
+
+Plan, lab evidence and the test plan: `owui-0.13.4-upgrade/` in the plan store. This is
+an operator-window deploy (a rebuild of `openwebui:local` is a deliberate deploy, never a
+side effect). The migrations (0.11.1 .. 0.13.1) are one-way and a failed one now stops
+startup instead of half-starting, so the **database backup is the rollback**.
+
+Before: hold the `frontend` lease (`lease.ps1 -Acquire -Name frontend`), tell the operator
+no chat should be mid-stream, confirm `frontend/.env` has `OAUTH_SCOPES` with
+`offline_access` and `WEBUI_SECRET_KEY` set (names only - never print values).
+
+1. **Back up webui.db** (a consistent copy, WAL-safe; about 1.2 GB, check free space):
+   `docker exec openwebui python -c "import sqlite3;s=sqlite3.connect('file:/app/backend/data/webui.db?mode=ro',uri=True);d=sqlite3.connect('/app/backend/data/webui.db.pre-0134');s.backup(d);d.close()"`
+   then `docker cp openwebui:/app/backend/data/webui.db.pre-0134 <backup dir>\webui.db.pre-0134`
+   and remove the in-volume copy. Keep the file until the 0.13.4 line has been live and
+   verified for a week.
+2. **Keep the old image:** `docker tag openwebui:local openwebui:pre-0134-v0.11.0` (a
+   retag, not a rebuild).
+3. **Build:** `docker compose -f frontend/docker-compose.yml --profile gpu build openwebui`
+   (the torch swap downloads the cu121 wheels; about 4-5 minutes). The build fails loudly
+   if the builtin.py timestamp patch does not apply.
+4. **Recreate openwebui, wait healthy, then tailscale** (never openwebui alone):
+   `docker compose -f frontend/docker-compose.yml --profile gpu up -d --no-deps openwebui`,
+   wait for `healthy` (the first start runs the migrations on a 1.1 GB database; the lab
+   took about 1 minute with no GPU), then
+   `docker compose -f frontend/docker-compose.yml --profile gpu up -d --no-deps tailscale`
+   and verify the 8 tailnet serve routes.
+5. **Verify:** `scripts/checks/check-owui-drift.ps1` (only the `deep_research` row differs,
+   as before the upgrade); sign in through SSO in a browser; open a chat on a model bound
+   to `open-brain` and call a tool; `python scripts/stack/stack.py labels` dry run reports
+   nothing to change; Admin > Settings > Integrations still lists the three tool servers.
+   Expect one-time: the image-generation settings are converted into an image connection
+   on first start (log line `Migrated image generation settings`).
+
+**Rollback** (the migrations cannot be reversed in place): stop `openwebui`; put the
+backup over `webui.db` in the `openwebui-data` volume (chats and settings made on 0.13.4
+are lost with it); `docker tag openwebui:pre-0134-v0.11.0 openwebui:local`; revert the
+compose / Dockerfile pin commit; `up -d --no-deps openwebui`, wait healthy, then
+`up -d --no-deps tailscale`.
+
 ## Inference plane (llama.cpp / llama-swap / LiteLLM)
 
 - Model swaps follow the written-plan pattern:

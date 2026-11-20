@@ -1065,7 +1065,7 @@ refusal writes nothing (what it refuses while reading is listed once, under
 **Refuses** below). Then it writes only a row whose name (roles
 only - an old name keeps its own) or visibility differs, and sends that row's meta,
 params, access grants and active flag back exactly as it read them, `meta.hidden`
-aside (Open WebUI 0.11.0 replaces a row's grants with the list an update carries,
+aside (Open WebUI 0.11.0 and 0.13.4 replace a row's grants with the list an update carries,
 and fails an update that carries none). Each change is printed (`created as`,
 `renamed 'old' -> 'new'`, `now hidden from the picker`, `unchanged`).
 
@@ -1142,7 +1142,7 @@ Open WebUI has no conditional update) is overwritten. One case repeats on every 
 managed row whose stored `meta` Open WebUI cannot parse answers **404** to the read,
 so the sync plans a create (for an old name, only when Open WebUI lists it; one it
 does not list is left alone) and Open WebUI rejects it (HTTP 401 `Something went
-wrong`, measured on a disposable 0.11.0) - repair or delete that row in Open WebUI (Admin Settings >
+wrong`, measured on a disposable 0.11.0; the drill is clean on 0.13.4) - repair or delete that row in Open WebUI (Admin Settings >
 Models), then run `labels` again.
 
 ### `init` [`--planes a,b`] [`--product X`] [`--context plane=name`] [`--headless`] [`--force`]
@@ -1260,10 +1260,10 @@ tests plus `inventory --check` itself, which the pre-commit hook and the
 
 `labels` and the model-role label generator (`test_model_labels.py`) run
 against a scratch copy of the real inference config and a `FakeOwui` that
-answers the four Open WebUI admin-API calls as 0.11.0 does; their real proof is
-the disposable Open WebUI in item `mr-gateway`'s test plan.
+answers the four Open WebUI admin-API calls as 0.11.0 and 0.13.4 do; their real proof is
+the disposable Open WebUI in item `mr-gateway`'s test plan (`drill_model_roles.py --phase all --owui-image <image>`, 0 failures on 0.13.4, 2026-11-20).
 `owui_role_migration.py` (`test_owui_role_migration.py`) runs against throwaway SQLite
-databases built with Open WebUI 0.11.0's own `model` and `config` DDL; its real proof is a
+databases built with Open WebUI 0.13.4's own `model` and `config` DDL (0.13.4 adds a nullable `model.version_id`); its real proof is a
 copy of a live `webui.db` in item `mr-consumers`' test plan.
 
 `recover`, `backup`, `restore` and `stats` run against `OpsDaemon`, a scripted
