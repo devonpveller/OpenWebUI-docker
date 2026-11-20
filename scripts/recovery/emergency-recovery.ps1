@@ -208,7 +208,7 @@ $Script:MainStackServices = @()
 #   powershell -NoProfile -File OB1\docker\rest-door\mint-rest-tokens.ps1 -EnvFile OB1\docker\.env -NoMint -SetAuthenticatorPassword -Container openbrain-db
 # then `docker restart openbrain-postgrest`. A restart or recreate of the existing volume keeps the password.
 $Script:OB1Services = @(
-    "openbrain-db", "openbrain-mcp", "openbrain-ext",
+    "openbrain-db", "openbrain-mcp", "openbrain-ext",   # rw-mcp-identity: openbrain-ext is on ai-stack_llm-net too (Open WebUI reaches it natively), so it starts after the anchor networks like openbrain-mcp
     "openbrain-gateway", "openbrain-ops-gateway",
     "openbrain-mcpo", "openbrain-mcpo-ext", "openbrain-postgrest",
     "openbrain-rest", "openbrain-entity-worker",

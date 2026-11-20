@@ -70,6 +70,24 @@ docker exec openbrain-db psql -U postgres -d openbrain -c "SELECT count(*) FROM 
 The count should match (roughly) what was in the dump (look in the
 `.dump`'s metadata via `pg_restore -l /in/<dump>` to see object counts).
 
+**Slot 470 (rw-inlet-stamp: every personal row carries its owner).** Its guards are ALWAYS triggers on `thoughts` and
+`sources`, and they refuse an unowned personal row for every role, superusers included. There is no setting that turns
+them off. What this means for a restore (measured in `OB1/docker/inlet-stamp-lab`, cases [8b] and [8c]):
+- **A dump taken after 470** restores in place as above with every row. `pg_dump` keeps the trigger state, and the data
+  is loaded before the triggers are created. Then re-apply the slots, because `--no-acl` drops every grant and
+  `--no-owner` gives 470's prune view to postgres. Run `init-inlet-owner.sql`, then `init-inlet-stamp.sql` (both
+  re-runnable, "nothing to do"), and check
+  `SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'trg_inlet_stamp%' AND tgenabled = 'A'` = 2.
+- **A dump taken BEFORE 470** (or before 440) does NOT restore into a database that has 470. pg_restore exits non-zero
+  and reports the errors: `cannot drop table public.thoughts because other objects depend on it`, then `COPY failed for
+  table "thoughts": ERROR: inlet stamp: ...`. The old rows are left in place and the dump's rows are not loaded. It is
+  never silent. Use this order instead:
+  1. take 470 off: `psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -f /tmp/revert-inlet-stamp.sql`;
+  2. run the pg_restore above;
+  3. re-apply 440 (`init-inlet-owner.sql`, which gives the dump's unowned rows their owner), then 470
+     (`init-inlet-stamp.sql`).
+  The lab shows every row of the dump restored and the guards ALWAYS-enabled afterwards.
+
 **The REST door after a restore or a fresh volume** (rw-rest-door-auth, slot 450). PostgREST logs in as
 `ob_rest_authenticator`; its password is set out of band, like `ob_app_memory`'s, and it is a cluster role,
 so a `pg_restore` into the existing cluster keeps it. Two cases need the operator:
@@ -80,19 +98,35 @@ so a `pg_restore` into the existing cluster keeps it. Two cases need the operato
   then `docker restart openbrain-postgrest`;
 - the restore above uses `--no-acl`, so every explicit grant in the dump is dropped (objects are recreated under
   the current default privileges: service_role's survive, PUBLIC no longer holds functions once slot 450 ran).
-  Re-apply the slots that grant, each idempotent, slot 450 LAST (from `OB1\docker`):
+  Re-apply the slots that grant, each idempotent, in this order and slot 450 LAST (from `OB1\docker`; 440 and 470
+  as the slot-470 paragraph above says, with the slot-440 owner variable it gives):
 
       Get-Content -Raw init-grants.sql | docker exec -i openbrain-db psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain
       Get-Content -Raw init-pantry.sql | docker exec -i openbrain-db psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain
+      # init-inlet-owner.sql, then init-inlet-stamp.sql (the slot-470 paragraph above)
       Get-Content -Raw init-rest-door-auth.sql | docker exec -i openbrain-db psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain
 
   `init-pantry.sql` gives `ob_pantry` back its own grants; slot 450 gives back every stand-in grant it made in place
   of PUBLIC's (from its archive `rest_door.regrants`, restored as data: NOTICE `N archived stand-in grant(s) given
-  back`) and the door roles' grants. It gives a stand-in back only to a function the restore RECREATED (the archive
-  keeps the function's oid): a stand-in someone revoked on purpose from the same function stays revoked, and an
-  archive row whose role or function no longer exists is skipped and pruned. Until then the door's callers are refused (no grant), never served more. (The
-  rw-rest-door-auth lab's case 9 runs exactly this and checks every pre-450 (role, function) pair; the `intake`
-  schema's own grants belong to `integrations/intake/sql/init-intake.sql`.)
+  back`) and the door roles' grants, 440's and 470's map lines included (a re-run of 440 or 470 recreates their
+  functions and views, which takes the door's grants on them away until 450 runs again - hence 450 last). It gives a
+  stand-in back only to a function or role object that CHANGED since (the archive keeps both oids): a stand-in
+  someone revoked on purpose from the same function and the same role stays revoked. An archive row whose FUNCTION no
+  longer exists is skipped and pruned. An archive row whose ROLE does not exist is KEPT and granted to no one (NOTICE
+  `N archived stand-in(s) name a role that does not exist (yet)`): create the out-of-chain roles first when you can
+  (`ob_app_memory` and the other login roles, the out-of-band way), and if one is created only later, run
+  `init-rest-door-auth.sql` once more after it - that run gives its stand-ins back. Until then the door's callers are
+  refused (no grant), never served more. (The rw-rest-door-auth lab's case 9 runs exactly this and checks every
+  pre-450 (role, function) pair; case 11 the kept and the pruned rows; the `intake` schema's own grants belong to
+  `integrations/intake/sql/init-intake.sql`.)
+- **A deliberate REVOKE does not survive a restore** (rw-rest-door-auth delta review D2). A restore recreates every
+  function (a new oid), so slot 450's re-run gives an archived stand-in back even if it was revoked on purpose before.
+  To make such a revoke permanent, delete its archive row in the same sitting as the REVOKE:
+
+      DELETE FROM rest_door.regrants WHERE signature = '<function signature, as oid::regprocedure prints it>' AND role_name = '<role>';
+
+  The same holds for a LATER slot that drops and recreates a pre-450 function to narrow its grants: that slot must
+  delete the function's `rest_door.regrants` rows (by signature), or 450's next run gives the old stand-ins back.
 
 ---
 
