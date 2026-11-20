@@ -88,6 +88,14 @@ them off. What this means for a restore (measured in `OB1/docker/inlet-stamp-lab
      (`init-inlet-stamp.sql`).
   The lab shows every row of the dump restored and the guards ALWAYS-enabled afterwards.
 
+**Slot 480 (rw-owner-private-view: the workbench's own role).** `openbrain-workbench` logs in as `ob_workbench`, a member of
+`ob_app_memory`; it is the only role that may run the owner-scoped private reads and PD1's two owner reads. A `--no-acl`
+restore drops those grants, and every 440 re-run grants PD1's reads back to `ob_app_memory`. So after the re-apply above,
+run `init-owner-private-view.sql` LAST of the inlet slots (after 440 and 470; re-runnable, it names any drift in a NOTICE
+and fixes it), then check with `OB1/docker/workbench/check-owner-private-view-deploy.ps1` (read-only; exits non-zero on
+drift). A restore into a fresh cluster loses the role's password: set it again from `OB_WORKBENCH_DB_PASSWORD`
+(`\password ob_workbench`, it prompts), or the workbench cannot connect.
+
 ---
 
 ## openbrain-wiki (volume tar)
