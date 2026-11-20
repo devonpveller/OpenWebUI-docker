@@ -335,6 +335,8 @@ keys     = ["OPEN_TERMINAL_API_KEY"]
 # OB1/docker/docker-compose.yml:15-16) and the Open Notebook trio.
 # No env_file key: compose's project directory is OB1/docker, so it loads
 # OB1/docker/.env natively - which is how every plane works since sl-env-split.
+# rw-mcp-identity: openbrain-ext joins ai-stack_llm-net as well (Open WebUI's native MCP connection reaches it
+#   by name; llm-net is internal, and openbrain-ext holds no LiteLLM key). No new product, profile or port.
 # requires anchor: OB1/docker/docker-compose.yml:1268-1286 (ai-stack_llm-net,
 #   ai-stack_app-net, ai-stack_default - the last aliased `search-gw-net`).
 # requires inference: OB1/docker/docker-compose.yml:116,120 (openbrain-mcp),
