@@ -440,3 +440,23 @@ def test_file_context_default_leaves_an_operator_false_and_a_missing_row_alone(t
     rc, out = run(["--db", fc_db(sub, present=False), "--file-context-default"])
     assert rc == 0 and "has no row" in out
 
+def test_a_rerun_with_the_same_restore_file_is_a_no_op_not_a_refusal(tmp_path):
+    """The runbook runs the same --apply command twice (the second must say "nothing to change", exit 0)
+    and the first run's restore file must survive untouched; a restore file is still never overwritten
+    when there IS something to write (test_apply_refuses_without_a_restore_file_or_onto_an_existing_one)."""
+    db = fc_db(tmp_path)
+    rf = tmp_path / "fc.json"
+    argv = ["--db", db, "--file-context-default", "--apply", "--restore-file", rf]
+    assert run(argv)[0] == 0
+    kept, snap = rf.read_bytes(), snapshot(db)
+    rc, out = run(argv)
+    assert rc == 0 and "nothing to change" in out
+    assert rf.read_bytes() == kept and snapshot(db) == snap
+    # the same holds for the role-migration plan once it has been applied
+    db2 = make_db(tmp_path / "r") if (tmp_path / "r").mkdir() is None else None
+    rf2 = tmp_path / "r" / "roles.json"
+    assert run(["--db", db2, "--apply", "--restore-file", rf2])[0] == 0
+    kept2 = rf2.read_bytes()
+    rc, out = run(["--db", db2, "--apply", "--restore-file", rf2])
+    assert rc == 0 and "nothing to change" in out and rf2.read_bytes() == kept2
+

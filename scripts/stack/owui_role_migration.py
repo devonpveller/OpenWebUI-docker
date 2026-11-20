@@ -470,8 +470,6 @@ def migrate(db: str, apply: bool, restore_file: str | None, lock_timeout: float 
     rnote = (lambda c: None) if planner is plan_file_context else role_rows_note
     if apply and not restore_file:
         raise Refused("--apply needs --restore-file PATH (a new file the rollback reads)")
-    if apply and restore_file and os.path.exists(restore_file):
-        raise Refused(f"{restore_file} already exists; refusing to overwrite a restore file")
     mode = "APPLY" if apply else "DRY RUN (nothing written; --apply to write)"
     print(f"owui_role_migration: {mode}\n  database: {db}", file=out)
     if not apply:
@@ -484,9 +482,11 @@ def migrate(db: str, apply: bool, restore_file: str | None, lock_timeout: float 
     try:
         changes, notes = planner(conn)
         _report_plan(changes, notes, rnote(conn), True, out, done_msg)
-        if not changes:
+        if not changes:  # idempotent: a re-run with the same --restore-file is a no-op (exit 0), the file is left alone
             _finish(conn, commit=False)
             return 0
+        if os.path.exists(restore_file):  # only when there IS something to write: never overwrite a restore file
+            raise Refused(f"{restore_file} already exists; refusing to overwrite a restore file")
         record = {
             "format": RESTORE_FORMAT,
             "database": os.path.abspath(db),

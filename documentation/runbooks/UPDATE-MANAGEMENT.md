@@ -48,7 +48,7 @@ WITHOUT `--no-deps` (`:3553`), which starts `openwebui` too - on the already-reb
 `Status: Disabled`). The agent never runs this; the operator does.
 
 `<backup dir>` below is a Windows folder with about 3 GB free, outside every repo. `<repo>` is the
-checkout root. Order matters: **build first (openwebui still serving), then stop, then back up the
+checkout root (`D:\Open WebUIi-stack`: it contains a space, so every bind mount below is quoted and must stay quoted). Order matters: **build first (openwebui still serving), then stop, then back up the
 quiet database**, so a rollback loses nothing written during the build.
 
 1. **Keep the old image:** `docker tag openwebui:local openwebui:pre-0134-v0.11.0` (a
@@ -78,10 +78,14 @@ quiet database**, so a rollback loses nothing written during the build.
    Then, with `openwebui` stopped (step 3), apply it to the volume file from a throwaway container
    (no network, the old image's python; the script is stdlib only):
    `docker run --rm --network none -v frontend_openwebui-data:/data -v "<repo>\scripts\stack:/s:ro" --entrypoint python openwebui:pre-0134-v0.11.0 /s/owui_role_migration.py --db /data/webui.db --file-context-default --apply --restore-file /data/fc-restore-0134.json`
-   A second run prints "nothing to change". **Revert** (OWUI stopped): the same command with
+   Running the SAME command again is safe: with nothing left to write it prints `nothing to change`
+   and exits 0 without touching the restore file (it still refuses to overwrite a restore file when
+   there IS a cell to write, so a stale file from an earlier deploy stops a fresh apply - see
+   step 7 and Rollback step 3). **Revert** (OWUI stopped): the same command with
    `--restore /data/fc-restore-0134.json --apply`, or (OWUI running) clear it in Admin Settings >
-   Models > default metadata; a rollback to the backup `webui.db` undoes it too. Then move
-   `/data/fc-restore-0134.json` out of the volume (it holds only the one cell's before/after text).
+   Models > default metadata; a rollback to the backup `webui.db` undoes it too. The restore file
+   (`/data/fc-restore-0134.json`, only the one cell's before/after text) stays in the volume until
+   step 7 has passed.
 6. **Recreate openwebui, wait healthy, then tailscale** (never openwebui alone):
    `docker compose -f frontend/docker-compose.yml --profile gpu up -d --no-deps openwebui`,
    wait for `healthy` (the first start runs the migrations on a 1.1 GB database; the lab
@@ -93,11 +97,24 @@ quiet database**, so a rollback loses nothing written during the build.
    to `open-brain` and call a tool; `python scripts/stack/stack.py labels` dry run reports
    nothing to change; Admin > Settings > Integrations still lists the three tool servers.
    Expect one-time: the image-generation settings are converted into an image connection
-   on first start (log line `Migrated image generation settings`).
-8. **Operator only - re-enable the watchdog and read its log:** `schtasks /change /tn "\StackWatchdog" /enable`
-   (`schtasks /query /tn "\StackWatchdog" /fo list` shows `Ready`). After its next pass (:x7),
-   `Select-String '\[FIX\]' logs\tailscale-health.log | Select-Object -Last 10` must show no new
-   openwebui / tailscale line from the window.
+   on first start (log line `Migrated image generation settings`). When verify has passed, archive
+   the restore file out of the volume (kept, not deleted; otherwise a later deploy's step 5 would
+   refuse to write over it): `docker run --rm --network none -v frontend_openwebui-data:/data -v "<backup dir>:/b" --entrypoint sh openwebui:pre-0134-v0.11.0 -c "mv /data/fc-restore-0134.json /b/fc-restore-0134.json.applied && echo moved"`
+8. **Operator only - re-enable the watchdog and read its log.** `schtasks /change /tn "\StackWatchdog" /enable`
+   (`schtasks /query /tn "\StackWatchdog" /fo list` shows `Ready`; the task name is the one the repo's
+   docs use, `check-openbrain-health.ps1:9`, `scripts/README.md:67`, `stack-watchdog.ps1:1813`; note
+   `scripts/checks/install-service.ps1` installs a Windows SERVICE of the same name, which is not what
+   runs here, so the `/query` must find a task). After its next pass (:x7), from the repo root, with the
+   time you disabled it as the last argument (the log is ASCII with a stray UTF-16 BOM, so PowerShell's
+   `Get-Content` / `Select-String` mis-decode it; this reads it as latin-1):
+   `python -c "import sys,re;t0=sys.argv[1];p=re.compile(r'\[(WARN|ERROR)\].*(Tailscale|OpenWebUI|\[FIX\])');[print(l.rstrip()) for l in open(r'logs\tailscale-health.log',encoding='latin-1') if len(l)>19 and l[:19]>=t0 and p.search(l)]" "2026-11-20 14:30:00"`
+   The watchdog writes `yyyy-MM-dd HH:mm:ss [LEVEL] message` (`Write-LogEntry`); its own recoveries are
+   `[WARN] Tailscale container ...` (`stack-watchdog.ps1:3545`, `:3549`, `:3552`), `[WARN] OpenWebUI (GPU-enabled)
+   is not healthy ...` (`:3465`) and `[ERROR] OpenWebUI failed to become healthy ...` (`:3489`), and the Open Brain
+   restarts are `[WARN] OpenBrain [FIX] ...`; the filter catches all of them and ignores unrelated WARN/ERROR
+   lines (Open Brain drift, backups). It must print nothing dated inside the window (the task was off); a line
+   from the first pass after the re-enable is worth reading. Checked read-only 2026-11-20 against the live
+   log: it finds the `07:48:51 [WARN] Tailscale container is RUNNING but health=unhealthy` recovery.
 
 **Rollback** (the migrations cannot be reversed in place; chats and settings made on 0.13.4 are
 lost with it). The operator disables `\StackWatchdog` first (above). Then, in this order:
@@ -110,11 +127,15 @@ lost with it). The operator disables `\StackWatchdog` first (above). Then, in th
    (`integrity_check` is slower and also fine; it must print `[('ok',)]`; the head must be
    `f0bd01a18a3d`, 0.11.0's; the last line must list only `webui.db`):
    `docker run --rm --network none -v frontend_openwebui-data:/data -v "<backup dir>:/b:ro" --entrypoint python openwebui:pre-0134-v0.11.0 -c "import os,shutil,sqlite3;[os.remove('/data/'+f) for f in ('webui.db-wal','webui.db-shm') if os.path.exists('/data/'+f)];shutil.copyfile('/b/webui.db.pre-0134','/data/webui.db');c=sqlite3.connect('file:/data/webui.db?mode=ro&immutable=1',uri=True);print('quick_check',c.execute('pragma quick_check').fetchall());print('head',c.execute('select version_num from alembic_version').fetchall());print('left',sorted(f for f in os.listdir('/data') if f.startswith('webui.db')))"`
-3. `docker tag openwebui:pre-0134-v0.11.0 openwebui:local`; revert the compose / Dockerfile pin commit
+3. **Move the file-context restore file out of the volume** (it describes a cell the restored database no
+   longer has, and a left-over `/data/fc-restore-0134.json` makes a later redeploy's step 5 refuse to
+   write; it is kept in the backup dir, not deleted):
+   `docker run --rm --network none -v frontend_openwebui-data:/data -v "<backup dir>:/b" --entrypoint sh openwebui:pre-0134-v0.11.0 -c "if [ -f /data/fc-restore-0134.json ]; then mv /data/fc-restore-0134.json /b/fc-restore-0134.json.rolled-back && echo moved; else echo none; fi"`
+4. `docker tag openwebui:pre-0134-v0.11.0 openwebui:local`; revert the compose / Dockerfile pin commit
    (the stock profile shares this volume: never start an image newer or older than the database).
-4. `docker compose -f frontend/docker-compose.yml --profile gpu up -d --no-deps openwebui`, wait
+5. `docker compose -f frontend/docker-compose.yml --profile gpu up -d --no-deps openwebui`, wait
    `healthy`, then `docker compose -f frontend/docker-compose.yml --profile gpu up -d --no-deps tailscale`.
-5. Operator re-enables `\StackWatchdog` and checks the log, as in deploy step 8.
+6. Operator re-enables `\StackWatchdog` and checks the log, as in deploy step 8.
 
 ## Inference plane (llama.cpp / llama-swap / LiteLLM)
 
