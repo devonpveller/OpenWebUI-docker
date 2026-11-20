@@ -96,7 +96,7 @@ not a role (the old concrete names) are hidden. So the picker lists each real mo
 once per mode, by its derived label, and follows a model swap with no hand edit (a
 local-small on its own file gets its own label, so it is shown). An admin un-hiding
 one of these rows is reverted on the next run. Measured against a disposable Open
-WebUI 0.11.0: `meta.hidden` lives only on a row, and a served id with NO row is
+WebUI 0.11.0 (re-measured unchanged on 0.13.4, 2026-11-20): `meta.hidden` lives only on a row, and a served id with NO row is
 listed (not hidden) to admins - normal users do not see it at all - so such an id
 gets a hidden row created for it, but only when Open WebUI actually lists it
 (GET /api/models); an id it does not list gets no row. A hidden role still answers
@@ -1485,7 +1485,7 @@ def sync_owui(labels: list[RoleLabel], base_url: str, api_key: str, request: Req
         # access grants too. Open WebUI 0.11.0's update REPLACES a row's grants with the
         # list it is sent, and an update WITHOUT the field fails (HTTP 500: its router
         # re-validates `access_grants=None` against `list`; measured against a disposable
-        # 0.11.0 by the mr-gateway drill). A row whose grants were not returned is refused
+        # 0.11.0 by the mr-gateway drill; same on 0.13.4, 2026-11-20). A row whose grants were not returned is refused
         # rather than rewritten with none.
         if not isinstance(row.get("access_grants"), list):
             raise OwuiError(f"the {rid} row came back without its access grants, so writing it would "

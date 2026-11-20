@@ -6,7 +6,7 @@ gives them, and the few tests that ask the REAL compose CLI (no daemon; DOCKER_H
 dead) skip where there is none. The Open WebUI
 sync is driven through FakeOwui, an in-memory stand-in for the four admin-API
 calls it makes (GET /health, GET /api/v1/models/model, POST .../create, POST
-.../model/update) that behaves the way Open WebUI 0.11.0's routers/models.py
+.../model/update) that behaves the way Open WebUI 0.11.0's (and 0.13.4's, re-drilled 2026-11-20) routers/models.py
 does for them (read on the live container, read-only, 2026-09-28). The same
 sync is run against a REAL disposable Open WebUI by the item's drill; this file
 pins the logic.
