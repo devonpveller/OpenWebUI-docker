@@ -38,17 +38,35 @@ Before: hold the `frontend` lease (`lease.ps1 -Acquire -Name frontend`), tell th
 no chat should be mid-stream, confirm `frontend/.env` has `OAUTH_SCOPES` with
 `offline_access` and `WEBUI_SECRET_KEY` set (names only - never print values).
 
-1. **Back up webui.db** (a consistent copy, WAL-safe; about 1.2 GB, check free space):
-   `docker exec openwebui python -c "import sqlite3;s=sqlite3.connect('file:/app/backend/data/webui.db?mode=ro',uri=True);d=sqlite3.connect('/app/backend/data/webui.db.pre-0134');s.backup(d);d.close()"`
-   then `docker cp openwebui:/app/backend/data/webui.db.pre-0134 <backup dir>\webui.db.pre-0134`
-   and remove the in-volume copy. Keep the file until the 0.13.4 line has been live and
-   verified for a week.
-2. **Keep the old image:** `docker tag openwebui:local openwebui:pre-0134-v0.11.0` (a
+**Operator only - disable the watchdog for the whole window (deploy AND rollback).** While
+`openwebui` is stopped, the 10-minute `\StackWatchdog` (`scripts/checks/stack-watchdog.ps1`) would
+alert on the unhealthy openwebui after 180 s (`:3464-3491`), recreate tailscale (`:3546`), or, in its
+"tailscale not running" branch, run `docker compose -f frontend\docker-compose.yml up -d tailscale`
+WITHOUT `--no-deps` (`:3553`), which starts `openwebui` too - on the already-rebuilt 0.13.4
+`openwebui:local`, in the middle of the file-context step or the restore. From an elevated prompt:
+`schtasks /change /tn "\StackWatchdog" /disable` (confirm with `schtasks /query /tn "\StackWatchdog" /fo list`:
+`Status: Disabled`). The agent never runs this; the operator does.
+
+`<backup dir>` below is a Windows folder with about 3 GB free, outside every repo. `<repo>` is the
+checkout root. Order matters: **build first (openwebui still serving), then stop, then back up the
+quiet database**, so a rollback loses nothing written during the build.
+
+1. **Keep the old image:** `docker tag openwebui:local openwebui:pre-0134-v0.11.0` (a
    retag, not a rebuild).
-3. **Build:** `docker compose -f frontend/docker-compose.yml --profile gpu build openwebui`
+2. **Build** (users are still served): `docker compose -f frontend/docker-compose.yml --profile gpu build openwebui`
    (the torch swap downloads the cu121 wheels; about 4-5 minutes). The build fails loudly
-   if the builtin.py timestamp patch does not apply.
-4. **Keep attached files injected (owui-0134).** On 0.11.0 a model with no `file_context`
+   if the builtin.py timestamp patch does not apply. `openwebui:local` is now 0.13.4 but the
+   running container is untouched.
+3. **Stop tailscale, then openwebui** (netns order: tailscale shares openwebui's namespace, so it
+   must not be left running in a dead one; the tailnet is down from here until step 7):
+   `docker compose -f frontend/docker-compose.yml --profile gpu stop tailscale`, then
+   `docker compose -f frontend/docker-compose.yml --profile gpu stop openwebui`.
+4. **Back up the quiet webui.db** (SQLite's backup API from a throwaway container on the data volume;
+   no network, the old image's python; it folds in any WAL; about 1.2 GB; the last line must print
+   `quick_check [('ok',)]`):
+   `docker run --rm --network none -v frontend_openwebui-data:/data -v "<backup dir>:/b" --entrypoint python openwebui:pre-0134-v0.11.0 -c "import sqlite3;s=sqlite3.connect('/data/webui.db');d=sqlite3.connect('/b/webui.db.pre-0134');s.backup(d);d.close();s.close();c=sqlite3.connect('file:/b/webui.db.pre-0134?mode=ro&immutable=1',uri=True);print('quick_check',c.execute('pragma quick_check').fetchall())"`
+   Keep the file until the 0.13.4 line has been live and verified for a week.
+5. **Keep attached files injected (owui-0134).** On 0.11.0 a model with no `file_context`
    capability got attached files injected (`middleware.py:2925`, default True); on 0.13.4 it does
    not (`utils/tools.py:618-623`: default is false unless `legacy` or no session), and the same
    holds for a model with no row at all. One idempotent config cell restores 0.11.0: a global
@@ -56,33 +74,47 @@ no chat should be mid-stream, confirm `frontend/.env` has `OAUTH_SCOPES` with
    true or false, still wins). `function_calling` needs no step: unset means native on BOTH
    versions (`middleware.py:2907` on 0.11.0). First a dry run on the backup (safe, lists the active
    rows it applies to by id and name, no secrets):
-   `python scripts/stack/owui_role_migration.py --db <backup dir>\webui.db.pre-0134 --file-context-default`
-   Then, with `openwebui` STOPPED (`docker compose -f frontend/docker-compose.yml --profile gpu stop openwebui`;
-   tailscale stays down until step 5), apply it to the volume file from a throwaway container
+   `python scripts/stack/owui_role_migration.py --db "<backup dir>\webui.db.pre-0134" --file-context-default`
+   Then, with `openwebui` stopped (step 3), apply it to the volume file from a throwaway container
    (no network, the old image's python; the script is stdlib only):
-   `docker run --rm --network none -v frontend_openwebui-data:/data -v <repo>\scripts\stack:/s:ro --entrypoint python openwebui:pre-0134-v0.11.0 /s/owui_role_migration.py --db /data/webui.db --file-context-default --apply --restore-file /data/fc-restore-0134.json`
+   `docker run --rm --network none -v frontend_openwebui-data:/data -v "<repo>\scripts\stack:/s:ro" --entrypoint python openwebui:pre-0134-v0.11.0 /s/owui_role_migration.py --db /data/webui.db --file-context-default --apply --restore-file /data/fc-restore-0134.json`
    A second run prints "nothing to change". **Revert** (OWUI stopped): the same command with
    `--restore /data/fc-restore-0134.json --apply`, or (OWUI running) clear it in Admin Settings >
    Models > default metadata; a rollback to the backup `webui.db` undoes it too. Then move
    `/data/fc-restore-0134.json` out of the volume (it holds only the one cell's before/after text).
-5. **Recreate openwebui, wait healthy, then tailscale** (never openwebui alone):
+6. **Recreate openwebui, wait healthy, then tailscale** (never openwebui alone):
    `docker compose -f frontend/docker-compose.yml --profile gpu up -d --no-deps openwebui`,
    wait for `healthy` (the first start runs the migrations on a 1.1 GB database; the lab
    took about 1 minute with no GPU), then
    `docker compose -f frontend/docker-compose.yml --profile gpu up -d --no-deps tailscale`
    and verify the 8 tailnet serve routes.
-6. **Verify:** `scripts/checks/check-owui-drift.ps1` (only the `deep_research` row differs,
+7. **Verify:** `scripts/checks/check-owui-drift.ps1` (only the `deep_research` row differs,
    as before the upgrade); sign in through SSO in a browser; open a chat on a model bound
    to `open-brain` and call a tool; `python scripts/stack/stack.py labels` dry run reports
    nothing to change; Admin > Settings > Integrations still lists the three tool servers.
    Expect one-time: the image-generation settings are converted into an image connection
    on first start (log line `Migrated image generation settings`).
+8. **Operator only - re-enable the watchdog and read its log:** `schtasks /change /tn "\StackWatchdog" /enable`
+   (`schtasks /query /tn "\StackWatchdog" /fo list` shows `Ready`). After its next pass (:x7),
+   `Select-String '\[FIX\]' logs\tailscale-health.log | Select-Object -Last 10` must show no new
+   openwebui / tailscale line from the window.
 
-**Rollback** (the migrations cannot be reversed in place): stop `openwebui`; put the
-backup over `webui.db` in the `openwebui-data` volume (chats and settings made on 0.13.4
-are lost with it); `docker tag openwebui:pre-0134-v0.11.0 openwebui:local`; revert the
-compose / Dockerfile pin commit; `up -d --no-deps openwebui`, wait healthy, then
-`up -d --no-deps tailscale`.
+**Rollback** (the migrations cannot be reversed in place; chats and settings made on 0.13.4 are
+lost with it). The operator disables `\StackWatchdog` first (above). Then, in this order:
+
+1. Stop tailscale, then openwebui:
+   `docker compose -f frontend/docker-compose.yml --profile gpu stop tailscale` then `... stop openwebui`.
+2. **Restore the backup, WITHOUT 0.13.4's WAL.** 0.13.4 runs SQLite in WAL mode, so `webui.db-wal` /
+   `webui.db-shm` may sit beside the file; copying only `webui.db` would let SQLite replay 0.13.4
+   frames onto the restored 0.11.0 file. This deletes them, copies the backup in, and checks it
+   (`integrity_check` is slower and also fine; it must print `[('ok',)]`; the head must be
+   `f0bd01a18a3d`, 0.11.0's; the last line must list only `webui.db`):
+   `docker run --rm --network none -v frontend_openwebui-data:/data -v "<backup dir>:/b:ro" --entrypoint python openwebui:pre-0134-v0.11.0 -c "import os,shutil,sqlite3;[os.remove('/data/'+f) for f in ('webui.db-wal','webui.db-shm') if os.path.exists('/data/'+f)];shutil.copyfile('/b/webui.db.pre-0134','/data/webui.db');c=sqlite3.connect('file:/data/webui.db?mode=ro&immutable=1',uri=True);print('quick_check',c.execute('pragma quick_check').fetchall());print('head',c.execute('select version_num from alembic_version').fetchall());print('left',sorted(f for f in os.listdir('/data') if f.startswith('webui.db')))"`
+3. `docker tag openwebui:pre-0134-v0.11.0 openwebui:local`; revert the compose / Dockerfile pin commit
+   (the stock profile shares this volume: never start an image newer or older than the database).
+4. `docker compose -f frontend/docker-compose.yml --profile gpu up -d --no-deps openwebui`, wait
+   `healthy`, then `docker compose -f frontend/docker-compose.yml --profile gpu up -d --no-deps tailscale`.
+5. Operator re-enables `\StackWatchdog` and checks the log, as in deploy step 8.
 
 ## Inference plane (llama.cpp / llama-swap / LiteLLM)
 

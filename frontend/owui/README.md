@@ -32,7 +32,8 @@ files + the 9 skills — 22 rows (`research_intake` joined with rw-p5a-intake; `
 filter left with mm-retire, 2026-09-30). The `sha256` column is the CR-normalized digest of the repo file,
 which is what `scripts/checks/check-owui-drift.ps1` compares against the live
 row. Functions are
-async-compatible with OWUI **0.11.0** (re-verified 2026-08-20 against v0.11.0
+async-compatible with OWUI **0.13.4** (every manifest plugin loads on 0.13.4: owui-0134 lab,
+2026-11-20; earlier re-verified 2026-08-20 against v0.11.0
 source: `Files/Groups/Chats/Notes/Knowledges` model methods are still `async`,
 so the 2026-06 async port carries forward unchanged).
 
