@@ -9,7 +9,7 @@ each turned on by ONE variable in the plane's OWN .env:
     agent-org  MATTERMOST_LAN_IP   mattermost                    <ip>:8065 -> 8065
     inference  LITELLM_UI_LAN_IP   llm-gateway-ui                <ip>:8445 -> 8080
     ob1        WIKI_VIEWER_LAN_IP  openbrain-wiki-viewer         <ip>:8812 -> 8080  (rw-p2b-workspace:
-               the wiki and /workspace; the viewer forwards /workbench/* with the key server-side,
+               the wiki (/workspace is gone, 404); the viewer forwards /workbench/* with the key server-side,
                so the workbench itself is never on the LAN)
 
 The check renders each plane with `docker compose config --format json` under every
@@ -91,7 +91,7 @@ LAN = {
         "var": "LITELLM_UI_LAN_IP",
         "bindings": {("llm-gateway-ui", "8445", "8080")},
     },
-    # research-workbench P2b: the viewer is the front end (the wiki, /workspace); never a backend
+    # research-workbench P2b: the viewer is the front end (the wiki); never a backend
     "ob1": {
         "var": "WIKI_VIEWER_LAN_IP",
         "bindings": {("openbrain-wiki-viewer", "8812", "8080")},

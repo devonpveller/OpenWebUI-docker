@@ -118,7 +118,8 @@ each blank as shipped, add ONE binding on the named host LAN address (never
 `LITELLM_UI_LAN_IP` (inference/.env) -> `<ip>:8445->8080` on `llm-gateway-ui`
 (switched in by `inference/compose/gateway-lan-on.yml`; `llm-gateway` itself
 never gets a port); `WIKI_VIEWER_LAN_IP` (OB1/docker/.env) -> `<ip>:8812->8080`
-on `openbrain-wiki-viewer` (rw-p2b-workspace: the wiki and `/workspace`; the
+on `openbrain-wiki-viewer` (rw-p2b-workspace: the wiki; `/workspace` was removed by
+rwr-remove-workspace and answers 404; the
 viewer forwards `/workbench/*` to the workbench with the key server-side, so the
 workbench and every other Open Brain service stay off the LAN). The loopback bindings stay. The B1 LAN firewall guard goes
 on first. `python scripts/checks/check_lan_bindings.py` renders every profile
