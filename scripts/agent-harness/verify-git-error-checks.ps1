@@ -344,6 +344,23 @@ $rb = Invoke-SubmitIn $fb "sb1"
 Check "F6b: an UNATTESTED commit on a branch in another repository is found and -Submit refuses (exit 4)" (($rb.code -eq 4) -and ($rb.out -match 'pre-commit hooks never validated') -and ((Get-ItemState $fb "sb1") -ne "ready-to-test")) ("exit=" + $rb.code + " state=" + (Get-ItemState $fb "sb1") + " | " + (First-Line $rb.out))
 
 # ======================================================================================
+Step "F7  remove-worktree.ps1: a worktree whose registered branch is already GONE is refused, then removable with -Force"
+# ======================================================================================
+# An absent branch is an EXPECTED state (detached HEAD, branch deleted), not a git error: its
+# commits cannot be listed, so the work counts as unmerged. Without -Force it is refused with a
+# message pointing at -Force; with -Force it is removed (exit 0). A real git error stays fatal (F2).
+$fg = New-ScratchRepo "gone"
+$rn = Invoke-Under $fg.repo $fg.state $nw @("-Id", "gw1") ""
+$gwDir = Join-Path $fg.repo ".claude\worktrees\wt-gw1"
+Check "F7 setup: new-worktree created and registered the worktree" (($rn.code -eq 0) -and (Test-Path $gwDir)) ("exit=" + $rn.code)
+Invoke-Git -GitArgs @("-C", $gwDir, "checkout", "-q", "--detach") | Out-Null
+Invoke-Git -GitArgs @("-C", $fg.repo, "branch", "-D", "work/gw1") | Out-Null
+$r1 = Invoke-Under $fg.repo $fg.state $rw @("-Id", "gw1") ""
+Check "F7 branch gone, NO -Force: refused (non-zero), the message says to use -Force, the worktree is still there" (($r1.code -ne 0) -and ($r1.out -match '-Force') -and (Test-Path $gwDir)) ("exit=" + $r1.code + " | " + (First-Line $r1.out))
+$r2 = Invoke-Under $fg.repo $fg.state $rw @("-Id", "gw1", "-Force") ""
+Check "F7 branch gone, WITH -Force: removed, exit 0 (it exited 1 before -Force was read)" (($r2.code -eq 0) -and -not (Test-Path $gwDir)) ("exit=" + $r2.code + " | " + (First-Line $r2.out))
+
+# ======================================================================================
 $failed = @($results | Where-Object { -not $_.pass })
 Write-Host ""
 Write-Host ("{0} check(s), {1} failed" -f $results.Count, $failed.Count) -ForegroundColor $(if ($failed.Count) { "Red" } else { "Green" })

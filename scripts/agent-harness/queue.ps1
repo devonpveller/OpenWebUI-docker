@@ -855,21 +855,19 @@ function Resolve-ItemShas($items) {
     #    so the mapping is positional and a non-oid line means "no gitlink".
     $link = @{}
     $present = @($shas | Where-Object { $exists[$_] })
-    for ($start = 0; $start -lt $present.Count; $start += 200) {
-        $chunk = @($present[$start..([Math]::Min($start + 199, $present.Count - 1))])
-        $rp = @(Invoke-GitCapture (@("rev-parse") + @($chunk | ForEach-Object { $_ + ":OB1" })))
-        # Expected branch: a commit whose tree has no OB1 entry makes rev-parse exit non-zero
-        # while still echoing the argument, so a non-zero exit WITH output is "no gitlink".
-        # A non-zero exit with NO output is git failing outright - report it, do not read it as
-        # "no gitlink" for every commit in the chunk.
-        if ($LASTEXITCODE -ne 0 -and $rp.Count -eq 0) {
-            foreach ($id in @($out.Keys)) { $out[$id] = @("UNCHECKED: git rev-parse <sha>:OB1 failed (exit $LASTEXITCODE), so no OB1 gitlink was resolved") }
+    # One rev-parse PER commit: a single batched call stops at the first commit whose tree has no
+    # OB1 entry, which hid the gitlink of every commit after it. --verify --quiet exits 1 for
+    # "no OB1 entry here" (expected, silent); any other non-zero exit is git failing outright and is
+    # reported, not read as "no gitlink".
+    foreach ($ps in $present) {
+        $rp = @(Invoke-GitCapture @("rev-parse", "--verify", "--quiet", ($ps + ":OB1")))
+        $rpExit = $LASTEXITCODE
+        if ($rpExit -ne 0 -and $rpExit -ne 1) {
+            foreach ($id in @($out.Keys)) { $out[$id] = @("UNCHECKED: git rev-parse --verify --quiet <sha>:OB1 failed (exit $rpExit), so no OB1 gitlink was resolved") }
             return $out
         }
-        for ($i = 0; $i -lt $chunk.Count; $i++) {
-            $l = if ($i -lt $rp.Count) { ([string]$rp[$i]).Trim() } else { "" }
-            if ($l -match '^[0-9a-f]{40}$') { $link[$chunk[$i]] = $l }
-        }
+        $l = if ($rp.Count -gt 0) { ([string]$rp[0]).Trim() } else { "" }
+        if ($rpExit -eq 0 -and $l -match '^[0-9a-f]{40}$') { $link[$ps] = $l }
     }
     # 3. which clone each item is asked about, then one cat-file per clone
     $registry = Get-WorktreeRegistry

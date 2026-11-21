@@ -120,8 +120,18 @@ if (-not (Test-Path $path)) {
 $dirty = Invoke-GitCapture @("-C", $path, "status", "--porcelain")
 if ($LASTEXITCODE -ne 0) { Fail "git -C $path status --porcelain failed (exit $LASTEXITCODE); refusing to remove a worktree whose state is unknown" }
 $unmerged = @()
+# Does the registered branch still exist? show-ref --verify --quiet exits 0 = present, 1 = ABSENT
+# (expected: a detached HEAD, a branch already deleted), anything else is git failing. An absent
+# branch's commits cannot be listed, so its work is treated as UNMERGED: refused without -Force,
+# removed with it. Only a real git error is fatal.
+$branchExit = Invoke-GitQuiet @('show-ref','--verify','--quiet',"refs/heads/$branch")
+if ($branchExit -ne 0 -and $branchExit -ne 1) { Fail "git show-ref --verify --quiet refs/heads/$branch failed (exit $branchExit); refusing to remove a worktree whose branch state is unknown" }
+$branchGone = ($branchExit -eq 1)
 $refExit = Invoke-GitQuiet @('rev-parse','--verify','--quiet',"refs/heads/$MergedInto")
-if ($refExit -eq 0) {
+if ($branchGone) {
+    Write-Host ("  note: branch '{0}' no longer exists - its commits cannot be listed, so the work is treated as unmerged (use -Force to remove the worktree anyway)" -f $branch) -ForegroundColor Yellow
+    $unmerged = @("(branch $branch is gone; unmerged work cannot be ruled out)")
+} elseif ($refExit -eq 0) {
     $unmerged = Invoke-GitCapture @("-C", $path, "log", "--oneline", "$MergedInto..$branch")
     if ($LASTEXITCODE -ne 0) { Fail "git -C $path log --oneline $MergedInto..$branch failed (exit $LASTEXITCODE); refusing to remove a worktree whose unmerged commits are unknown" }
 } else {

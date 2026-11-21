@@ -123,9 +123,9 @@ function Invoke-Audit {
         if ($journalTracked.Count -eq 0) { Write-Host "  journal/ tracks NO files - the journal is missing from this store checkout"; $bad++ }
         $ahead = 0
         try { $ahead = [int](git rev-list --count 'origin/main..main' 2>$null) } catch { $ahead = 0 }
-        # Expected branch: a store with no origin/main (no remote yet) cannot be "ahead" of it;
-        # keep that reading, but say so rather than leave a failed git call looking like "pushed".
-        if ($LASTEXITCODE -ne 0) { $ahead = 0; Write-Host "  note: git rev-list --count origin/main..main failed (exit $LASTEXITCODE) - cannot tell whether main is pushed" }
+        # A failed call must not read as "pushed": count it as a problem (a store with no origin/main
+        # is exactly the state this audit exists to flag - nothing is on a remote).
+        if ($LASTEXITCODE -ne 0) { $ahead = 0; Write-Host "  FAIL: git rev-list --count origin/main..main failed (exit $LASTEXITCODE) - cannot tell whether main is pushed"; $bad++ }
         if ($ahead -gt 0) { Write-Host "  main is $ahead commit(s) ahead of origin/main - push it"; $bad++ }
         $dirty = git status --porcelain -- implementation-guide journal
         if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL: git status --porcelain failed (exit $LASTEXITCODE) - an empty result would read as clean"; $bad++ }
