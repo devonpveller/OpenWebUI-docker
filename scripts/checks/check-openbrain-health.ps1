@@ -781,14 +781,12 @@ if ((Get-CState $viewer) -eq 'running') {
 # ---- 5c. The research workbench's own app (rwr-app-container; profile `wiki`) -
 # Stateless static app + the /workbench/* forwarder; its Docker HEALTHCHECK fetches /__health in-container
 # (200 {"status":"ok"} once the build is present). It carries NO user data and the probe prints none.
-# ABSENT = a quiet skip (the image is built and the container created in the deploy window, and a host
-# without the `wiki` profile never has it). running+healthy -> OK; starting -> WARN; unhealthy -> fault;
-# not running -> the same liveness repair as the containers above.
+# ABSENT is a FAULT (round 2), exactly as for the viewer above: the app is in the `wiki` profile with the viewer, so
+# a host that runs the viewer must run it; a quiet skip would let a lost container read OK. running+healthy -> OK;
+# starting -> WARN; unhealthy -> fault; not running/absent -> Confirm-ObContainer (repair or fault).
 $wbApp = 'openbrain-workbench-app'
 $wbAppState = Get-CState $wbApp
-if ($wbAppState -eq 'absent') {
-  if (-not $Quiet) { Write-Ob $wbApp ok 'not deployed (wiki profile off, or not yet built) -- skipped' }
-} elseif ($wbAppState -eq 'running') {
+if ($wbAppState -eq 'running') {
   $ah = Invoke-ObDocker @('inspect', '--format', '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}', $wbApp)
   $avh = 'unknown'
   if ($ah.Ok) { $avh = ((@($ah.Lines) | Select-Object -First 1) -as [string]).Trim() }
