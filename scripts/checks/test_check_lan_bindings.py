@@ -202,7 +202,7 @@ class LiveProfilesAndScrub(unittest.TestCase):
         self.assertEqual(c.native_render_verdict("inference", "docker-compose.yml", d, ("gpu",))[1], "REFUSED")
 
     def test_live_rows_cover_every_renders_profile_set(self):
-        for plane in c.LAN:
+        for plane in {c.plane_of(k) for k in c.LAN}:
             want = {tuple(pr) for (pl, pr, _b) in c.RENDERS if pl == plane and pr}
             self.assertTrue(want <= set(c.live_rows(plane)), plane)
         self.assertIn(("gpu",), c.live_rows("frontend"))
@@ -267,7 +267,16 @@ def viewer_render(*ports, workbench_ports=None):
     return {"name": "open-brain", "services": {"openbrain-wiki-viewer": viewer, "openbrain-workbench": wb}}
 
 
+def app_render(*app_ports, viewer_ports=None):
+    """rwr-app-container: the research workbench's own app beside the viewer and the workbench."""
+    out = viewer_render(*(viewer_ports or []))
+    out["services"]["openbrain-workbench-app"] = {
+        "image": "app", "ports": [port("127.0.0.1", 8820, 8080), *app_ports]}
+    return out
+
+
 OB1_BASE = {("openbrain-wiki-viewer", "127.0.0.1", "8812", "8080"), ("openbrain-workbench", "127.0.0.1", "8814", "8000")}
+OB1_APP_BASE = OB1_BASE | {("openbrain-workbench-app", "127.0.0.1", "8820", "8080")}
 
 
 class Ob1Viewer(unittest.TestCase):
@@ -309,6 +318,72 @@ class Ob1Viewer(unittest.TestCase):
         self.assertIn(("ob1", ("wiki",)), rows)
         self.assertEqual(c.COMPOSE["ob1"], ("OB1/docker/docker-compose.yml", "OB1/docker/.env.example"))
 
+
+class Ob1WorkbenchApp(unittest.TestCase):
+    """WORKBENCH_APP_LAN_IP (rwr-app-container): a second ob1 door. Inert while unset; exactly the
+    app's :8820 on one address when set; the viewer's port is NOT bound by it (and the reverse)."""
+
+    def test_two_ob1_doors_one_plane(self):
+        self.assertEqual(c.doors_of("ob1"), ["ob1", "ob1-app"])
+        self.assertEqual(c.plane_of("ob1-app"), "ob1")
+        self.assertEqual(c.LAN["ob1-app"]["var"], "WORKBENCH_APP_LAN_IP")
+        self.assertEqual(c.COMPOSE[c.plane_of("ob1-app")][0], "OB1/docker/docker-compose.yml")
+
+    def test_unset_is_inert(self):
+        self.assertEqual(c.check_render("ob1-app", "t", app_render(), OB1_APP_BASE, None), [])
+
+    def test_set_binds_exactly_the_app_port(self):
+        self.assertEqual(c.check_render("ob1-app", "t", app_render(port(IP, 8820, 8080)), OB1_APP_BASE, IP), [])
+
+    def test_app_lan_port_while_unset_is_refused(self):
+        out = c.check_render("ob1-app", "t", app_render(port(IP, 8820, 8080)), OB1_APP_BASE, None)
+        self.assertTrue(any("non-loopback" in p for p in out), out)
+
+    def test_setting_the_app_var_must_not_bind_the_viewer(self):
+        out = c.check_render("ob1-app", "t", app_render(port(IP, 8820, 8080), viewer_ports=[port(IP, 8812, 8080)]),
+                             OB1_APP_BASE, IP)
+        self.assertTrue(any("non-loopback" in p for p in out), out)
+
+    def test_setting_the_viewer_var_must_not_bind_the_app(self):
+        out = c.check_render("ob1", "t", app_render(port(IP, 8820, 8080), viewer_ports=[port(IP, 8812, 8080)]),
+                             OB1_APP_BASE, IP)
+        self.assertTrue(any("non-loopback" in p for p in out), out)
+
+    def test_another_app_port_and_a_wildcard_are_refused(self):
+        out = c.check_render("ob1-app", "t", app_render(port(IP, 8080, 8080)), OB1_APP_BASE, IP)
+        self.assertTrue(any("non-loopback" in p for p in out), out)
+        out = c.check_render("ob1-app", "t", app_render(port("0.0.0.0", 8820, 8080)), OB1_APP_BASE, IP)
+        self.assertTrue(any("WILDCARD" in p for p in out), out)
+
+    def test_live_verdicts(self):
+        self.assertEqual(c.judge_live_ports("ob1", app_render())[1], "inert (loopback only)")
+        self.assertEqual(c.judge_live_ports("ob1", app_render(port(IP, 8820, 8080)))[0], [])
+        probs, verdict = c.judge_live_ports("ob1", app_render(port(IP, 8821, 8080)))
+        self.assertEqual(verdict, "REFUSED")
+        self.assertFalse(any(IP in p for p in probs), "a verdict never prints the value")
+
+    def test_the_app_is_in_its_own_profile_render_not_the_wiki_one(self):
+        rows = {pr: b for (pl, pr, b) in c.RENDERS if pl == "ob1"}
+        app = ("openbrain-workbench-app", "127.0.0.1", "8820", "8080")
+        self.assertNotIn(app, rows[("wiki",)])
+        self.assertIn(app, rows[("wiki", "workbench-app")])
+        self.assertEqual(rows[("wiki", "workbench-app")] - {app}, rows[("wiki",)])
+        self.assertIn(("wiki", "workbench-app"), c.live_rows("ob1"))
+
+    def test_app_moving_profile_is_caught(self):
+        """The round-4 regression: the app moved out of `wiki` into `workbench-app`. A wiki render
+        without it must pass its baseline; the OLD baseline (app expected in wiki) must refuse it."""
+        wiki_render = viewer_render()  # no app service
+        wiki_base = [b for (pl, pr, b) in c.RENDERS if pl == "ob1" and pr == ("wiki",)][0]
+        self.assertEqual([p for p in c.check_render("ob1", "t", wiki_render, wiki_base & OB1_BASE, None)], [])
+        stale = OB1_APP_BASE  # what the pre-fix check expected of the wiki render
+        out = c.check_render("ob1", "t", wiki_render, stale, None)
+        self.assertTrue(any("loopback bindings changed" in p for p in out), out)
+        # and the app-profile render: app present, loopback only when unset; set binds only its port
+        self.assertEqual(c.check_render("ob1-app", "t", app_render(), OB1_APP_BASE, None), [])
+        self.assertEqual(c.check_render("ob1-app", "t", app_render(port(IP, 8820, 8080)), OB1_APP_BASE, IP), [])
+        # door ob1-app set against the wiki render (app absent): nothing may be bound
+        self.assertEqual(c.check_render("ob1-app", "t", wiki_render, OB1_BASE, IP), [])
 
 if __name__ == "__main__":
     unittest.main()

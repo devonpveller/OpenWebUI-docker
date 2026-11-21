@@ -67,8 +67,10 @@ Today's ports:
 
 - **Published, or going live:** Open WebUI 3000 (live), Mattermost 8065 and LiteLLM UI
   8445.
-- **Listed but not published:** wiki-viewer 8812 and workbench 8814. They are guarded
-  ahead of time, and a block rule on a port that only listens on loopback changes
+- **Listed but not published:** wiki-viewer 8812, workbench 8814 and the research workbench's
+  own app 8820 (`openbrain-workbench-app`, `WORKBENCH_APP_LAN_IP`, rwr-app-container; the
+  operator runs `-Apply` for 8820 before setting the variable and adding the Traefik route).
+  They are guarded ahead of time, and a block rule on a port that only listens on loopback changes
   nothing.
 
 **Rules the guard owns.** A rule is the guard's if its Name OR its DisplayName starts
@@ -147,7 +149,7 @@ curl -m 5 -sS -o /dev/null -w '%{http_code}\n' http://<host_ip>:3000/   # expect
 nc -vz -w 5 <host_ip> 8065                                               # expect a timeout
 ```
 
-Repeat for 8065, 8445, 8812 and 8814. Then from the Traefik host (`<node>`), which must
+Repeat for 8065, 8445, 8812, 8814 and 8820. Then from the Traefik host (`<node>`), which must
 connect:
 
 ```sh
