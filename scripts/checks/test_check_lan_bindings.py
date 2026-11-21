@@ -261,7 +261,7 @@ class RenderWithoutLiveEnv(unittest.TestCase):
 
 def viewer_render(*ports, workbench_ports=None):
     """research-workbench P2b (rw-p2b-workspace): the ob1 plane's front end - the wiki viewer, which
-    serves /workspace and forwards /workbench/* with the key server-side - and its backend."""
+    serves the wiki and forwards /workbench/* with the key server-side - and its backend."""
     wb = {"image": "workbench", "ports": list(workbench_ports or [port("127.0.0.1", 8814, 8000)])}
     viewer = {"image": "viewer", "ports": [port("127.0.0.1", 8812, 8080), *ports]}
     return {"name": "open-brain", "services": {"openbrain-wiki-viewer": viewer, "openbrain-workbench": wb}}
