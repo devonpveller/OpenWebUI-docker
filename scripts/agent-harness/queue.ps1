@@ -2178,8 +2178,23 @@ if ($Submit) {
     $harnessRepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
     $attestScript = Join-Path $harnessRepoRoot "scripts\checks\check-hook-attestation.ps1"
     if (Test-Path $attestScript) {
-        $attestOut = & $attestScript -Branch $Branch -Base $line -RepoRoot $harnessRepoRoot -Json
+        # The SCRIPT is found beside queue.ps1; the REPOSITORY it attests is the one that holds
+        # the branch - the same one `rev-parse $Branch` just resolved it in (the working
+        # directory's). Attesting the repo that merely holds queue.ps1 asked a repository that
+        # may not contain the branch at all.
+        $attestRoot = (Invoke-GitCapture @("rev-parse", "--show-toplevel") | Select-Object -First 1)
+        if ($LASTEXITCODE -ne 0 -or -not $attestRoot) { Die "git rev-parse --show-toplevel failed (exit $LASTEXITCODE); cannot tell which repository to attest '$Branch' in. Nothing has been recorded." }
+        $attestRoot = [System.IO.Path]::GetFullPath([string]$attestRoot)
+        $attestOut = & $attestScript -Branch $Branch -Base $line -RepoRoot $attestRoot -Json
         $attestExit = $LASTEXITCODE
+        # Exit 2 = the checker COULD NOT RUN (a git call failed, or the branch/base does not
+        # resolve). That is not a pass: a check that cannot run says nothing about the commits.
+        if ($attestExit -ne 0 -and $attestExit -ne 1) {
+            Die (("scripts\checks\check-hook-attestation.ps1 -Branch {0} -Base {1} -RepoRoot {2} exited {3}: it could not run, so " +
+                  "nobody has checked that the pre-commit hooks ran on '{0}'. Its message is printed just above " +
+                  "(a failed git command, or a branch/base that does not resolve in that repository). " +
+                  "Nothing has been recorded.") -f $Branch, $line, $attestRoot, $attestExit) 4
+        }
         if ($attestExit -eq 1) {
             $report = $null
             try { $report = $attestOut | ConvertFrom-Json } catch { }

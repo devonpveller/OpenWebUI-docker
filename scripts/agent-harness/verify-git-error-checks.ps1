@@ -294,6 +294,56 @@ $rfShow = Invoke-Attest "work/x" ":.githooks/pre-merge-commit"
 Check "F5 FORCED show of the pre-merge-commit hook at the fork point: exit 2, command named (it used to read as 'no merge gate')" (($rfShow.code -eq 2) -and ($rfShow.out -match 'pre-merge-commit failed \(exit')) ("exit=" + $rfShow.code + " | " + (First-Line $rfShow.out))
 
 # ======================================================================================
+Step "F6  queue.ps1 -Submit: attestation runs in the repository that HOLDS the branch, and exit 2 refuses"
+# ======================================================================================
+# -Submit ran check-hook-attestation against the repository that holds queue.ps1, not the one
+# the submitted branch lives in, and ignored the checker's exit 2 ("could not run"). A branch in
+# any other repository therefore went unattested, silently.
+function New-SubmitFixture([string]$name, [bool]$attestingHookUnattestedCommit) {
+    $f = New-ScratchRepo $name
+    Push-Location $f.repo
+    try {
+        Invoke-Git checkout -q -b work/qd | Out-Null
+        if ($attestingHookUnattestedCommit) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $f.repo ".githooks") | Out-Null
+            Set-Content -Path (Join-Path $f.repo ".githooks/pre-commit") -Encoding ascii -Value @("#!/bin/sh", "echo x >> hook-attest.log")
+        }
+        Set-Content -Path (Join-Path $f.repo "WORK.md") -Encoding ascii -Value "the work"
+        Invoke-Git add -A | Out-Null
+        Invoke-Git commit -q -m "the work" | Out-Null
+        Invoke-Git checkout -q base | Out-Null
+    } finally { Pop-Location }
+    if ($attestingHookUnattestedCommit) {
+        # a ledger in THIS repository's git dir, so the checker is active here and finds the commit unattested
+        Set-Content -Path (Join-Path $f.repo ".git\hook-attest.log") -Encoding ascii -Value @("0000000000000000000000000000000000000000 0000000000000000000000000000000000000000 1 hook")
+    }
+    return $f
+}
+function Invoke-SubmitIn($f, [string]$Id, [string]$Fail = "") {
+    Invoke-Under $f.repo $f.state $q @("-Propose", "-Id", $Id, "-Anchor", $anchorFile, "-Developer", "qdev") "" | Out-Null
+    Invoke-Under $f.repo $f.state $q @("-ConfirmAnchor", "-Id", $Id, "-By", "qoperator") "" | Out-Null
+    return (Invoke-Under $f.repo $f.state $q @("-Submit", "-Id", $Id, "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $plan) $Fail)
+}
+function Get-ItemState($f, [string]$Id) {
+    $ip = Join-Path $f.state ("queue\" + $Id + ".json")
+    if (Test-Path $ip) { return (Get-Content -Raw -Path $ip | ConvertFrom-Json).state }
+    return "(no item)"
+}
+# (a) the checker cannot run (exit 2): -Submit refuses, naming it, and records nothing
+$fa = New-SubmitFixture "submit-a" $false
+$ra = Invoke-SubmitIn $fa "sa1" "rev-parse --verify --quiet work/qd^{commit}"
+Check "F6a FORCED: the attestation checker exits 2 -> -Submit REFUSES (non-zero), it used to submit" ($ra.code -ne 0) ("exit=" + $ra.code + " | " + (First-Line $ra.out))
+Check "F6a FORCED: the refusal names check-hook-attestation and says it could not run" ($ra.out -match 'check-hook-attestation\.ps1 -Branch work/qd .* exited 2: it could not run') (First-Line $ra.out)
+Check "F6a FORCED: nothing was recorded (item not ready-to-test)" ((Get-ItemState $fa "sa1") -ne "ready-to-test") ("state=" + (Get-ItemState $fa "sa1"))
+$fac = New-SubmitFixture "submit-ac" $false
+$rac = Invoke-SubmitIn $fac "sa2"
+Check "F6a CONTROL: with no failure forced the same -Submit succeeds (ready-to-test)" (($rac.code -eq 0) -and ((Get-ItemState $fac "sa2") -eq "ready-to-test")) ("exit=" + $rac.code + " state=" + (Get-ItemState $fac "sa2") + " | " + (First-Line $rac.out))
+# (b) the branch lives in a repository other than the one holding queue.ps1: it is attested THERE
+$fb = New-SubmitFixture "submit-b" $true
+$rb = Invoke-SubmitIn $fb "sb1"
+Check "F6b: an UNATTESTED commit on a branch in another repository is found and -Submit refuses (exit 4)" (($rb.code -eq 4) -and ($rb.out -match 'pre-commit hooks never validated') -and ((Get-ItemState $fb "sb1") -ne "ready-to-test")) ("exit=" + $rb.code + " state=" + (Get-ItemState $fb "sb1") + " | " + (First-Line $rb.out))
+
+# ======================================================================================
 $failed = @($results | Where-Object { -not $_.pass })
 Write-Host ""
 Write-Host ("{0} check(s), {1} failed" -f $results.Count, $failed.Count) -ForegroundColor $(if ($failed.Count) { "Red" } else { "Green" })
