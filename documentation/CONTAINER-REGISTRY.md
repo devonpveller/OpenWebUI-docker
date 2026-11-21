@@ -129,6 +129,7 @@ ai-stack service through its own blank-by-default `<SERVICE>_LAN_IP` door.
 | `openbrain-wiki` | Wiki compiler (+ git vault commits; push severed on purpose): demand-driven - boot, change-watch, on demand; no daily compile (research-workbench P1c) |
 | `openbrain-wiki-viewer` | The wiki + workbench UI, rendered live from `wiki_pages` the moment it listens; no Quartz in the image since research-workbench P1c (the client bundle is a frozen committed asset, `OB1/docker/wiki-viewer/bundle/`; no builder, no `/srv` volume); Docker healthcheck on `/__health` (:8812; tailnet :8444 direct to `openbrain-wiki-viewer:8080` over app-net since the portal retired 2026-11-01) |
 | `openbrain-workbench` | Browser write/read API for the workbench (:8814) — NOT the MCP contract |
+| `openbrain-workbench-app` | The research workbench's own front end (rwr-app-container; the new app of the research-workbench redesign, built by rwr-app-scaffold): a static app plus the `/workbench/*` forwarder to `openbrain-workbench` with the door key injected server-side (`WORKSPACE_DOOR_KEY`, else the workbench key; the viewer's own forwarder module, so the same Host / Origin guard). Its OWN compose profile `workbench-app` (requires `wiki`), **enabled at the end of its first deploy, once healthy** (`stack.py enable workbench-app`), not before: until then no plane `up`, recovery run or reboot builds or starts it (compose builds a `build:` service whose image is missing), and health 5c reads "not enabled", not a fault. `obnet` only (no `ai-stack_*` network, no LiteLLM key, no inference path); loopback `:8820`, plus the opt-in `WORKBENCH_APP_LAN_IP:8820` door the operator points the Proxmox Traefik at (ships inert). **Stateless: no volume, no database, so no backup** (nothing to restore - redeploy the image). Docker healthcheck on `/__health`; the deploy is a gated `ob1-deploy.ps1 -Service openbrain-workbench-app` window (first-deploy steps below), not part of this item. Carries no user data, so nothing private reaches the status pipe, this registry or the health output. |
 | `openbrain-research` | The shared research engine (:8818; queue, GROUNDED synthesis, OWUI async callback) — replaced smolcrawl's in-repo harness |
 | `openbrain-curator` | Research-package ingest inlet (persists via openbrain-mcp) |
 | `openbrain-pantry` | Household pantry / meal planner HTTP service (pantry-meal-planner). Profile `pantry`, OFF until `stack.py enable pantry`; no host port (`obnet` + `llm-net`); no LLM call; tables in `openbrain-db` as the least-privilege `ob_pantry` role. Why: the OWUI Kitchen model's `pantry` tool does stock/cook/restock arithmetic here, never in the model |
@@ -136,6 +137,29 @@ ai-stack service through its own blank-by-default `<SERVICE>_LAN_IP` door.
 | `openbrain-intake-dbrelay` | TCP relay from `intake-net` to `openbrain-db:5432` (profile `intake`). Why: gives the screen a database route without putting it on the internet-capable `obnet`, and without changing `openbrain-db` |
 | `openbrain-intake-llmrelay` | TCP relay from `intake-net` (where it is aliased `llama-cpp`) to `llm-gateway:8080` on `ai-stack_llm-net` (profile `intake`). Why: the second opinion's route to LiteLLM without putting the screen on `ai-stack_llm-net`, where every other caller (llm-gateway-db, openwebui, open-terminal, ...) would be reachable |
 | `openbrain-intake-callrelay` | TCP relay from `search_intake-callers` (the search plane's internal network; its only other member is `search-gateway`) to `openbrain-intake:8000` on `intake-net` (profile `intake`; intake-gate-relay). Why: the search gate can hand pages to the screen without the screen gaining a second network or the gateway joining `intake-net`; the gateway reaches that one port and nothing else |
+
+#### First deploy of `openbrain-workbench-app` (one sitting, `open-brain` lease held)
+
+The image does not exist until this runs, and the service's profile stays off until the app is healthy (step 7), so nothing builds it early and a failed or abandoned deploy leaves nothing enabled. In order, with no `stack.py up`, recovery run or reboot in between:
+
+1. Merge, then take the lease: `.\scripts\agent-harness\lease.ps1 -Acquire -Name open-brain -Owner <you>`.
+2. Check OB1 out at the merged pin in the main checkout: `git -C OB1 fetch; git -C OB1 checkout <pin>`.
+3. `git -C OB1 status --porcelain -- docker/workbench-app docker/wiki-viewer/lib` must print nothing. `ob1-deploy.ps1` checks only the service's own `build.context`; the image also copies from the named context `viewerlib` (`wiki-viewer/lib`), so a dirty tree there would ship labelled as the pin.
+4. `ob1-deploy.ps1` renders with the plane's own `COMPOSE_PROFILES` (from `OB1/docker/.env`), which does not carry the new profile, so add it for this shell only and clear it afterwards (`wiki` must stay in the list: the app depends on `openbrain-workbench`). Edit no `.env`:
+
+   ```powershell
+   $line = (Select-String -Path OB1/docker/.env -Pattern '^COMPOSE_PROFILES=').Line
+   $env:COMPOSE_PROFILES = ($line -replace '^COMPOSE_PROFILES=', '').Trim('"') + ',workbench-app'
+   try {
+     powershell -NoProfile -File scripts/stack/ob1-deploy.ps1 -Service openbrain-workbench-app -WhatIfOnly   # dry run: read the plan
+     powershell -NoProfile -File scripts/stack/ob1-deploy.ps1 -Service openbrain-workbench-app              # builds with the OB1_SHA label, up, watches
+   } finally { Remove-Item Env:COMPOSE_PROFILES -ErrorAction SilentlyContinue }
+   ```
+5. Verify it is healthy: `docker inspect -f '{{.State.Health.Status}}' openbrain-workbench-app` says `healthy`, and `curl -s http://127.0.0.1:8820/__health` returns 200.
+6. If it is not healthy, stop here: nothing is enabled, so recovery and `stack.py up` still leave it alone. `docker rm -f openbrain-workbench-app` and fix before retrying.
+7. Only now enable it: `python scripts/stack/stack.py enable workbench-app` (adds `workbench-app` and `wiki` to `.stack/state.json`; from here recovery and the driver start it, and health 5c treats an absent app as a fault).
+8. Final checks: `scripts/checks/check-openbrain-health.ps1` shows `openbrain-workbench-app` healthy (5c); `python scripts/checks/check_lan_bindings.py --live-env` says ob1 is inert (loopback only).
+9. Release the lease: `.\scripts\agent-harness\lease.ps1 -Release -Name open-brain -Owner <you>`.
 
 ### Scheduled slice
 
