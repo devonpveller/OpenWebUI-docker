@@ -147,8 +147,10 @@ _OB1 = {("openbrain-chunk-worker", "127.0.0.1", "8817", "8000"), ("openbrain-ent
         ("openbrain-grounding-backfiller", "127.0.0.1", "8819", "8000"), ("openbrain-ops-gateway", "127.0.0.1", "8062", "8061"),
         ("openbrain-rest", "127.0.0.1", "3001", "80"), ("openbrain-suggestion-worker", "127.0.0.1", "8813", "8000")}
 _OB1_WIKI = _OB1 | {("openbrain-wiki", "127.0.0.1", "8811", "8000"), ("openbrain-wiki-viewer", "127.0.0.1", "8812", "8080"),
-                    ("openbrain-workbench", "127.0.0.1", "8814", "8000"),
-                    ("openbrain-workbench-app", "127.0.0.1", "8820", "8080")}
+                    ("openbrain-workbench", "127.0.0.1", "8814", "8000")}
+# rwr-app-container: the app sits in its OWN opt-in profile `workbench-app` (needs the workbench,
+# so it renders alongside `wiki`); it is NOT in the `wiki` render.
+_OB1_APP = _OB1_WIKI | {("openbrain-workbench-app", "127.0.0.1", "8820", "8080")}
 
 # (plane, profiles, today's loopback bindings). Measured on development e5b501cf with
 # compose v5.3.0, 2026-10-16. The frontend's stock and gpu definitions share a
@@ -166,6 +168,7 @@ RENDERS = [
     ("inference", ("local",), _INF_LOCAL),
     ("ob1", (), _OB1),
     ("ob1", ("wiki",), _OB1_WIKI),
+    ("ob1", ("wiki", "workbench-app"), _OB1_APP),
 ]
 
 LOOPBACK = "127.0.0.1"

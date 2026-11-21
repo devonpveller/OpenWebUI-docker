@@ -715,6 +715,21 @@ function Wait-OB1ViewerHealth {
     return $false
 }
 
+function Wait-OB1WebHealth {
+    # Bounded health report for the OB1 web front ends: the wiki viewer always, and (rwr-app-container)
+    # the research workbench's own app (stateless; /__health on its loopback port) only when its OWN
+    # opt-in profile `workbench-app` is enabled on this host (`stack.py enable workbench-app`, done by
+    # its first deploy). Until then nothing starts it and there is nothing to wait for. Enabled but
+    # unhealthy = a WARN from Wait-OB1ViewerHealth, never a failure. One helper, so the lifted
+    # Start-/Reset-OB1Stack functions make a single call (verify-pantry-profile.ps1 allowlists commands
+    # per function). Returns the viewer's result.
+    $viewer = Wait-OB1ViewerHealth
+    if (Test-OB1ProfileEnabled $Script:OB1WorkbenchAppProfile) {
+        $null = Wait-OB1ViewerHealth -Name "openbrain-workbench-app" -HealthUrl "http://127.0.0.1:8820/__health" -Label "Workbench app" -TimeoutSeconds 60
+    }
+    return $viewer
+}
+
 function Test-OB1PantryEnabled {
     # Kept for pantry-wire's callers: Test-OB1ProfileEnabled for `pantry`.
     return (Test-OB1ProfileEnabled $Script:OB1PantryProfile)
@@ -883,14 +898,8 @@ function Start-OB1Stack {
             Write-Log "WARN" "Open Brain (OB1) stack started WITH $($looping.Count) container(s) in a restart loop: $($looping -join ', ')"
         }
         # Bounded report on the viewer's healthcheck; never fails the recovery.
-        Wait-OB1ViewerHealth | Out-Null
-        # rwr-app-container: the research workbench's own app (stateless; /__health on its loopback port).
-        # It is in its OWN profile `workbench-app`, so the `up` above starts it ONLY when that profile is
-        # enabled on this host (`stack.py enable workbench-app`, done by its first deploy): until then
-        # nothing here builds or starts it, and there is nothing to wait for. Enabled but unhealthy = a WARN, never a failure.
-        if (Test-OB1ProfileEnabled $Script:OB1WorkbenchAppProfile) {
-            Wait-OB1ViewerHealth -Name "openbrain-workbench-app" -HealthUrl "http://127.0.0.1:8820/__health" -Label "Workbench app" -TimeoutSeconds 60 | Out-Null
-        }
+        # Viewer, plus the research workbench app when its opt-in profile is enabled (see Wait-OB1WebHealth).
+        Wait-OB1WebHealth | Out-Null
         # mcpo-resilience: "up" and "no restart loop" do not mean the OWUI tool proxies loaded tools.
         $noTools = Confirm-McpoTools
         if ($noTools.Count -eq 0) { Write-Log "SUCCESS" "OWUI tool proxies verified: both serve tools" }
@@ -931,14 +940,8 @@ function Reset-OB1Stack {
             Write-Log "WARN" "OB1 stack recreated WITH $($looping.Count) container(s) in a restart loop: $($looping -join ', ')"
         }
         # Bounded report on the viewer's healthcheck; never fails the recovery.
-        Wait-OB1ViewerHealth | Out-Null
-        # rwr-app-container: the research workbench's own app (stateless; /__health on its loopback port).
-        # It is in its OWN profile `workbench-app`, so the `up` above starts it ONLY when that profile is
-        # enabled on this host (`stack.py enable workbench-app`, done by its first deploy): until then
-        # nothing here builds or starts it, and there is nothing to wait for. Enabled but unhealthy = a WARN, never a failure.
-        if (Test-OB1ProfileEnabled $Script:OB1WorkbenchAppProfile) {
-            Wait-OB1ViewerHealth -Name "openbrain-workbench-app" -HealthUrl "http://127.0.0.1:8820/__health" -Label "Workbench app" -TimeoutSeconds 60 | Out-Null
-        }
+        # Viewer, plus the research workbench app when its opt-in profile is enabled (see Wait-OB1WebHealth).
+        Wait-OB1WebHealth | Out-Null
         # mcpo-resilience: same check as Start-OB1Stack.
         $noTools = Confirm-McpoTools
         if ($noTools.Count -eq 0) { Write-Log "SUCCESS" "OWUI tool proxies verified: both serve tools" }

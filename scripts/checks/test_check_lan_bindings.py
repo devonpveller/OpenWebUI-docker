@@ -362,10 +362,28 @@ class Ob1WorkbenchApp(unittest.TestCase):
         self.assertEqual(verdict, "REFUSED")
         self.assertFalse(any(IP in p for p in probs), "a verdict never prints the value")
 
-    def test_the_wiki_profile_baseline_lists_the_app_loopback(self):
-        base = [b for (pl, pr, b) in c.RENDERS if pl == "ob1" and pr == ("wiki",)][0]
-        self.assertIn(("openbrain-workbench-app", "127.0.0.1", "8820", "8080"), base)
+    def test_the_app_is_in_its_own_profile_render_not_the_wiki_one(self):
+        rows = {pr: b for (pl, pr, b) in c.RENDERS if pl == "ob1"}
+        app = ("openbrain-workbench-app", "127.0.0.1", "8820", "8080")
+        self.assertNotIn(app, rows[("wiki",)])
+        self.assertIn(app, rows[("wiki", "workbench-app")])
+        self.assertEqual(rows[("wiki", "workbench-app")] - {app}, rows[("wiki",)])
+        self.assertIn(("wiki", "workbench-app"), c.live_rows("ob1"))
 
+    def test_app_moving_profile_is_caught(self):
+        """The round-4 regression: the app moved out of `wiki` into `workbench-app`. A wiki render
+        without it must pass its baseline; the OLD baseline (app expected in wiki) must refuse it."""
+        wiki_render = viewer_render()  # no app service
+        wiki_base = [b for (pl, pr, b) in c.RENDERS if pl == "ob1" and pr == ("wiki",)][0]
+        self.assertEqual([p for p in c.check_render("ob1", "t", wiki_render, wiki_base & OB1_BASE, None)], [])
+        stale = OB1_APP_BASE  # what the pre-fix check expected of the wiki render
+        out = c.check_render("ob1", "t", wiki_render, stale, None)
+        self.assertTrue(any("loopback bindings changed" in p for p in out), out)
+        # and the app-profile render: app present, loopback only when unset; set binds only its port
+        self.assertEqual(c.check_render("ob1-app", "t", app_render(), OB1_APP_BASE, None), [])
+        self.assertEqual(c.check_render("ob1-app", "t", app_render(port(IP, 8820, 8080)), OB1_APP_BASE, IP), [])
+        # door ob1-app set against the wiki render (app absent): nothing may be bound
+        self.assertEqual(c.check_render("ob1-app", "t", wiki_render, OB1_BASE, IP), [])
 
 if __name__ == "__main__":
     unittest.main()
