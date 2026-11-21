@@ -149,8 +149,11 @@ Section "the tree under test - the RECORDED GITLINK, not a working copy that nev
 # OB1/docker, so if the submodule working copy is dirty or on a different commit than the
 # parent records, the run is testing something a merge would not ship.
 $recorded = (git ls-tree HEAD OB1) -replace '^\S+\s+\S+\s+(\S+)\s.*$', '$1'
+if ($LASTEXITCODE -ne 0) { Fail "git ls-tree HEAD OB1 failed (exit $LASTEXITCODE)"; throw "gitlink unreadable" }
 $actual   = (git -C OB1 rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0) { Fail "git -C OB1 rev-parse HEAD failed (exit $LASTEXITCODE)"; throw "OB1 HEAD unreadable" }
 $dirty    = @(git -C OB1 status --porcelain)
+if ($LASTEXITCODE -ne 0) { Fail "git -C OB1 status --porcelain failed (exit $LASTEXITCODE)"; throw "OB1 status unreadable" }
 if ($recorded -eq $actual -and $dirty.Count -eq 0) {
     Pass "OB1 working copy is clean and equals the recorded gitlink ($($actual.Substring(0,8)))"
 } else {

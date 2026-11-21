@@ -73,6 +73,8 @@ $Root = $Root.Trim()
 if (-not $Store) {
     $storeDirs = @(Split-Path $Root -Parent)
     $common = (git rev-parse --git-common-dir 2>$null)
+    # Expected branch: outside a git checkout there is no common dir to widen the search with.
+    if ($LASTEXITCODE -ne 0) { $common = $null }
     if ($common) {
         $common = $common.Trim()
         if (-not [System.IO.Path]::IsPathRooted($common)) { $common = Join-Path $Root $common }
@@ -106,20 +108,27 @@ function Invoke-Audit {
     Push-Location $Store
     try {
         $untracked = git ls-files --others --exclude-standard -- implementation-guide | ForEach-Object { ($_ -split '/')[1] } | Sort-Object -Unique
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL: git ls-files --others --exclude-standard -- implementation-guide failed (exit $LASTEXITCODE) - an empty list would read as clean"; $bad++ }
         if ($untracked) { Write-Host "  UNTRACKED plan directories (unversioned, one clean from gone):"; $untracked | ForEach-Object { Write-Host "    $_" }; $bad++ }
         # THE JOURNAL (since 2026-09-25, ac-journal-move): notes, evidence, archive and test
         # plans live under journal/ here, and are held to the same rule as plans - versioned
         # and pushed. An EMPTY journal is a problem too, not a clean result: the move put
         # hundreds of files there, so zero means this is the wrong checkout or they were lost.
         $journalUntracked = @(git ls-files --others --exclude-standard -- journal)
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL: git ls-files --others --exclude-standard -- journal failed (exit $LASTEXITCODE) - an empty list would read as clean"; $bad++ }
         if ($journalUntracked.Count -gt 0) { Write-Host ("  UNTRACKED journal files ({0}):" -f $journalUntracked.Count); $journalUntracked | ForEach-Object { Write-Host "    $_" }; $bad++ }
         $journalTracked = @(git ls-files -- journal)
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL: git ls-files -- journal failed (exit $LASTEXITCODE)"; $bad++ }
         Write-Host ("  journal/: {0} tracked file(s)" -f $journalTracked.Count)
         if ($journalTracked.Count -eq 0) { Write-Host "  journal/ tracks NO files - the journal is missing from this store checkout"; $bad++ }
         $ahead = 0
         try { $ahead = [int](git rev-list --count 'origin/main..main' 2>$null) } catch { $ahead = 0 }
+        # Expected branch: a store with no origin/main (no remote yet) cannot be "ahead" of it;
+        # keep that reading, but say so rather than leave a failed git call looking like "pushed".
+        if ($LASTEXITCODE -ne 0) { $ahead = 0; Write-Host "  note: git rev-list --count origin/main..main failed (exit $LASTEXITCODE) - cannot tell whether main is pushed" }
         if ($ahead -gt 0) { Write-Host "  main is $ahead commit(s) ahead of origin/main - push it"; $bad++ }
         $dirty = git status --porcelain -- implementation-guide journal
+        if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL: git status --porcelain failed (exit $LASTEXITCODE) - an empty result would read as clean"; $bad++ }
         if ($dirty) { Write-Host "  modified but uncommitted plan or journal files present"; $bad++ }
     } finally { Pop-Location }
 
@@ -160,6 +169,7 @@ function Invoke-Migrate([string]$feature) {
     Push-Location $Store
     try {
         git add -- "implementation-guide/$feature"
+        if ($LASTEXITCODE -ne 0) { throw "git add -- implementation-guide/$feature failed (exit $LASTEXITCODE) in $Store" }
         $msgFile = Join-Path $env:TEMP ("plan-store-" + $feature + ".txt")
         @(
             "$feature`: plan set moved into the plan store from the code repo",
@@ -171,8 +181,12 @@ function Invoke-Migrate([string]$feature) {
             "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
         ) | Set-Content -Path $msgFile -Encoding ASCII
         git commit -F $msgFile | Out-Host
+        if ($LASTEXITCODE -ne 0) { Remove-Item $msgFile -ErrorAction SilentlyContinue; throw "git commit -F failed (exit $LASTEXITCODE) in $Store" }
         Remove-Item $msgFile -ErrorAction SilentlyContinue
-        if (-not $NoPush) { git push origin main | Out-Host }
+        if (-not $NoPush) {
+            git push origin main | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "git push origin main failed (exit $LASTEXITCODE) in $Store" }
+        }
     } finally { Pop-Location }
 
     Write-Host ""

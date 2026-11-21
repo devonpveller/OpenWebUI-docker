@@ -45,12 +45,17 @@ function Check($label, $ok, $detail = "") {
 # named Git calls itself (call-depth overflow), and functions leak into invoked scripts -
 # a helper named `Git` once shadowed the real binary INSIDE new-worktree.ps1.
 function Invoke-DrillGit {
+    # A drill whose git setup silently failed asserts against a repository that is not the one
+    # it thinks it built: a guard that cannot fail. A failing git call stops the drill here.
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    try { & git.exe @args | Out-Null } finally { $ErrorActionPreference = $prev }
+    try { & git.exe @args | Out-Null; $rc = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
+    if ($rc -ne 0) { throw ("drill git setup failed: git " + ($args -join " ") + " (exit $rc)") }
 }
 function Get-DrillGit {
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    try { return (& git.exe @args) } finally { $ErrorActionPreference = $prev }
+    try { $out = (& git.exe @args); $rc = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
+    if ($rc -ne 0) { throw ("drill git read failed: git " + ($args -join " ") + " (exit $rc)") }
+    return $out
 }
 function Get-QueueBoard {
     # THE BOARD AS TEXT, FROM A CHILD PROCESS. queue.ps1 prints through Write-Host, which in

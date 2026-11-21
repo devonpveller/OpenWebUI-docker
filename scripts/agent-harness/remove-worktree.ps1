@@ -94,7 +94,9 @@ if (-not $rows.ContainsKey($Id)) {
     # could not). Reconstruct from `git worktree list` instead of refusing.
     $wtPath = ""
     $current = ""
-    foreach ($row in (Invoke-GitCapture @("worktree", "list", "--porcelain"))) {
+    $wtRows = Invoke-GitCapture @("worktree", "list", "--porcelain")
+    if ($LASTEXITCODE -ne 0) { Fail "git worktree list --porcelain failed (exit $LASTEXITCODE); cannot recover a path for '$Id'" }
+    foreach ($row in $wtRows) {
         if ($row -like "worktree *") { $current = $row.Substring(9) }
         if ($row -eq "branch refs/heads/work/$Id") { $wtPath = $current }
     }
@@ -113,14 +115,19 @@ if (-not (Test-Path $path)) {
 }
 
 # --- what would be lost? ----------------------------------------------------------
+# A failed status or log reads as an EMPTY result, which is the "safe to remove" answer - so
+# each failure is fatal here and names its command.
 $dirty = Invoke-GitCapture @("-C", $path, "status", "--porcelain")
+if ($LASTEXITCODE -ne 0) { Fail "git -C $path status --porcelain failed (exit $LASTEXITCODE); refusing to remove a worktree whose state is unknown" }
 $unmerged = @()
 $refExit = Invoke-GitQuiet @('rev-parse','--verify','--quiet',"refs/heads/$MergedInto")
 if ($refExit -eq 0) {
     $unmerged = Invoke-GitCapture @("-C", $path, "log", "--oneline", "$MergedInto..$branch")
+    if ($LASTEXITCODE -ne 0) { Fail "git -C $path log --oneline $MergedInto..$branch failed (exit $LASTEXITCODE); refusing to remove a worktree whose unmerged commits are unknown" }
 } else {
     Write-Host ("  note: no local '{0}' branch to compare against - treating all commits as unmerged" -f $MergedInto) -ForegroundColor Yellow
     $unmerged = Invoke-GitCapture @("-C", $path, "log", "--oneline", "-n", "20", $branch)
+    if ($LASTEXITCODE -ne 0) { Fail "git -C $path log --oneline -n 20 $branch failed (exit $LASTEXITCODE); refusing to remove a worktree whose unmerged commits are unknown" }
 }
 
 Write-Host ("Worktree {0} ({1})" -f $Id, $path) -ForegroundColor Cyan
@@ -210,7 +217,11 @@ if ($removeExit -ne 0) {
     #
     # So: ask git whether it STILL TRACKS this worktree. If it does, the removal really
     # failed and we stop. If it does not, finish the job and be honest about the leftover.
-    $tracked = @(Invoke-GitCapture @("worktree", "list", "--porcelain") |
+    $trackedRows = @(Invoke-GitCapture @("worktree", "list", "--porcelain"))
+    # An empty list from a FAILED git would read as "git no longer tracks it" and deregister
+    # a worktree that is still live.
+    if ($LASTEXITCODE -ne 0) { Fail "git worktree list --porcelain failed (exit $LASTEXITCODE); cannot tell whether git still tracks $path" }
+    $tracked = @($trackedRows |
                  Where-Object { $_ -like "worktree *" } |
                  ForEach-Object { $_.Substring(9) })
     # git reports forward slashes here and the registry stores backslashes; compare

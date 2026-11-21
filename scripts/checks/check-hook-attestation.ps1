@@ -58,13 +58,22 @@ function Invoke-GitLines {
     # PS 5.1 trap: with $ErrorActionPreference='Stop', a native command writing to stderr
     # raises NativeCommandError even on exit 0. Flip the preference around the call - the
     # house pattern (see scripts/agent-harness/git-io.ps1).
-    param([string[]]$GitArgs)
+    # -Required: a non-zero git exit is fatal (exit 2, the "cannot run" code) and names the
+    # command, because an empty result from a FAILED call reads as "no commits / all clean".
+    # Without it the caller is asking a question whose answer may legitimately be "no"
+    # (a file absent at a ref) and reads the empty result itself.
+    param([string[]]$GitArgs, [switch]$Required)
     # -C rather than a working-directory change, so this script never mutates its caller's
     # location (see the note below the param block).
     if ($script:GitDir) { $GitArgs = @("-C", $script:GitDir) + $GitArgs }
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { return @(& git @GitArgs 2>$null) } finally { $ErrorActionPreference = $prev }
+    try { $out = @(& git @GitArgs 2>$null); $rc = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
+    if ($rc -ne 0 -and $Required) {
+        Write-Host ("git " + ($GitArgs -join " ") + " failed (exit $rc) - cannot attest this branch") -ForegroundColor Red
+        exit 2
+    }
+    return $out
 }
 $script:GitDir = $RepoRoot
 
@@ -222,7 +231,7 @@ $mergeGateActive = [bool]($mergeHook -match '\S')
 # Commits on the branch that are NOT on the base - i.e. the work being submitted.
 $revArgs = @("rev-list", "$Base..$Branch")
 if (-not $mergeGateActive) { $revArgs = @("rev-list", "--no-merges", "$Base..$Branch") }
-$revs = Invoke-GitLines $revArgs
+$revs = Invoke-GitLines $revArgs -Required
 $unattested = @()
 $gatedBy = @()
 $checked = 0
@@ -230,10 +239,10 @@ $checked = 0
 foreach ($sha in $revs) {
     if (-not $sha) { continue }
     $checked++
-    $tree = (Invoke-GitLines @("rev-parse", "$sha^{tree}") | Select-Object -First 1)
+    $tree = (Invoke-GitLines -Required @("rev-parse", "$sha^{tree}") | Select-Object -First 1)
     # Parents are read for EVERY commit, not only the unattested ones. An ATTESTED merge is
     # exactly the commit whose hook hash raises the question the report block below answers.
-    $parents = (Invoke-GitLines @("log", "-1", "--format=%P", $sha) | Select-Object -First 1)
+    $parents = (Invoke-GitLines -Required @("log", "-1", "--format=%P", $sha) | Select-Object -First 1)
     $isMerge = (@(($parents -split '\s+') | Where-Object { $_ }).Count -gt 1)
     if ($tree -and $attested.ContainsKey($tree)) {
         $gatedBy += [pscustomobject]@{ Sha = $sha; Tree = $tree; Hooks = @($hookOf[$tree]); IsMerge = $isMerge }
@@ -252,7 +261,7 @@ foreach ($sha in $revs) {
     # whose own .githooks/pre-commit cannot attest, and that hook is read from the BRANCH,
     # not from the environment. A branch that can attest has no excuse for a commit that
     # is not attested.
-    $subject = (Invoke-GitLines @("log", "-1", "--format=%s", $sha) | Select-Object -First 1)
+    $subject = (Invoke-GitLines -Required @("log", "-1", "--format=%s", $sha) | Select-Object -First 1)
     $unattested += [pscustomobject]@{ Sha = $sha; Tree = $tree; Subject = $subject; IsMerge = $isMerge }
 }
 

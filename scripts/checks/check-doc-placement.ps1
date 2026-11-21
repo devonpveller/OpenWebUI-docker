@@ -69,7 +69,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if (-not $Root) { $Root = (git rev-parse --show-toplevel 2>$null) }
+if (-not $Root) {
+    $Root = (git rev-parse --show-toplevel 2>$null)
+    # Expected branch: outside a git checkout the root falls back to the cwd just below.
+    if ($LASTEXITCODE -ne 0) { $Root = $null }
+}
 if (-not $Root) { $Root = (Get-Location).Path }
 $Root = $Root.Trim()
 
@@ -193,7 +197,9 @@ try {
             foreach ($p in $trackedJournal) { Write-Host ("  " + $p + "  ->  " + (Get-JournalTarget $p)) -ForegroundColor Red }
         }
 
-        $untracked = Split-Nul ((& git ls-files -z --others --exclude-standard) -join "`0")
+        $untrackedOut = & git ls-files -z --others --exclude-standard
+        if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: git ls-files -z --others --exclude-standard failed (exit $LASTEXITCODE) - the untracked half of this audit did not run." -ForegroundColor Red; exit 1 }
+        $untracked = Split-Nul ($untrackedOut -join "`0")
         $misplaced = @()
         foreach ($p in $untracked) {
             if (Get-JournalTarget $p) { $misplaced += $p; continue }
@@ -221,8 +227,12 @@ try {
 
     # Journal rules count renames and copies INTO the journal places; the
     # implementation-guide rules keep their original added-only scope.
-    $stagedA   = Split-Nul ((& git diff --cached --name-only -z --diff-filter=A) -join "`0")
-    $stagedACR = Split-Nul ((& git diff --cached --name-only -z -M --diff-filter=ACR) -join "`0")
+    $stagedAOut = & git diff --cached --name-only -z --diff-filter=A
+    if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: git diff --cached --name-only -z --diff-filter=A failed (exit $LASTEXITCODE) - an empty list here would read as nothing staged." -ForegroundColor Red; exit 1 }
+    $stagedACROut = & git diff --cached --name-only -z -M --diff-filter=ACR
+    if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: git diff --cached --name-only -z -M --diff-filter=ACR failed (exit $LASTEXITCODE) - an empty list here would read as nothing staged." -ForegroundColor Red; exit 1 }
+    $stagedA   = Split-Nul ($stagedAOut -join "`0")
+    $stagedACR = Split-Nul ($stagedACROut -join "`0")
 } finally {
     Pop-Location
 }
