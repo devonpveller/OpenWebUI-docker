@@ -249,6 +249,51 @@ $rc = Invoke-Under $fc.repo $fc.state $docPlace @("-All", "-Root", $fc.repo) ""
 Check "F4b CONTROL: with no failure forced the audit does not report a git failure" ($rc.out -notmatch 'failed \(exit') ("exit=" + $rc.code + " | " + (First-Line $rc.out))
 
 # ======================================================================================
+Step "F5  check-hook-attestation.ps1: a git FAILURE is not 'this branch does not attest' / 'no merge gate'"
+# ======================================================================================
+# The guard decides whether a branch's commits must carry attestations. Reading the branch's
+# pre-commit hook (and the fork point's pre-merge-commit hook) used to treat ANY empty result as
+# "file absent", so a failing git, or an unknown branch, switched the guard off and exited 0.
+$fh = New-ScratchRepo "attest"
+Push-Location $fh.repo
+try {
+    New-Item -ItemType Directory -Force -Path (Join-Path $fh.repo ".githooks") | Out-Null
+    Set-Content -Path (Join-Path $fh.repo ".githooks/pre-merge-commit") -Encoding ascii -Value @("#!/bin/sh", "echo gate")
+    Invoke-Git add -A | Out-Null
+    Invoke-Git commit -q -m "base carries a merge hook" | Out-Null
+    Invoke-Git checkout -q -b work/x | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $fh.repo ".githooks") | Out-Null
+    Set-Content -Path (Join-Path $fh.repo ".githooks\pre-commit") -Encoding ascii -Value @("#!/bin/sh", "echo x >> hook-attest.log")
+    Set-Content -Path (Join-Path $fh.repo "WORK.md") -Encoding ascii -Value "unattested work"
+    Invoke-Git add -A | Out-Null
+    Invoke-Git commit -q -m "unattested commit" | Out-Null
+    Invoke-Git checkout -q base | Out-Null
+} finally { Pop-Location }
+$ledger = Join-Path $Root "attest-ledger.log"
+Set-Content -Path $ledger -Encoding ascii -Value @("0000000000000000000000000000000000000000 0000000000000000000000000000000000000000 1 hook")
+$ha = Join-Path $C "check-hook-attestation.ps1"
+function Invoke-Attest([string]$Branch, [string]$Fail = "") {
+    $prevL = $env:AI_STACK_ATTEST_LEDGER
+    $env:AI_STACK_ATTEST_LEDGER = $ledger
+    try { return (Invoke-Under $fh.repo $fh.state $ha @("-Branch", $Branch, "-Base", "base", "-RepoRoot", $fh.repo, "-AllowLedgerOverride") $Fail) }
+    finally { $env:AI_STACK_ATTEST_LEDGER = $prevL }
+}
+$rc = Invoke-Attest "work/x"
+Check "F5 CONTROL: the unattested commit is REFUSED (exit 1) - the guard is active" (($rc.code -eq 1) -and ($rc.out -match 'UNATTESTED|not attested|unattested')) ("exit=" + $rc.code + " | " + (First-Line $rc.out))
+$rf = Invoke-Attest "work/x" "show work/x:.githooks/pre-commit"
+Check "F5 FORCED show of the branch hook: exit 2 and the command is named (it used to print INACTIVE, exit 0)" (($rf.code -eq 2) -and ($rf.out -match 'show work/x:\.githooks/pre-commit failed \(exit')) ("exit=" + $rf.code + " | " + (First-Line $rf.out))
+$rf = Invoke-Attest "work/x" "ls-tree --name-only work/x"
+Check "F5 FORCED ls-tree (hook existence probe): exit 2, command named" (($rf.code -eq 2) -and ($rf.out -match 'ls-tree --name-only work/x .* failed \(exit')) ("exit=" + $rf.code + " | " + (First-Line $rf.out))
+$ru = Invoke-Attest "work/no-such-branch"
+Check "F5 UNKNOWN BRANCH: exit 2 naming the git rev-parse that could not resolve it (it used to print INACTIVE, exit 0)" (($ru.code -eq 2) -and ($ru.out -match 'rev-parse --verify --quiet work/no-such-branch.*failed \(exit')) ("exit=" + $ru.code + " | " + (First-Line $ru.out))
+$rf = Invoke-Attest "work/x" "merge-base base work/x"
+Check "F5 FORCED merge-base: exit 2, command named (it used to silently drop the merge gate and exit 1 on the wrong list)" (($rf.code -eq 2) -and ($rf.out -match 'git merge-base base work/x failed \(exit')) ("exit=" + $rf.code + " | " + (First-Line $rf.out))
+# the merge hook read: base carries a pre-merge-commit hook (committed in the fixture), so the
+# fork point of work/x has one and the merge gate is active; its read is forced to fail.
+$rfShow = Invoke-Attest "work/x" ":.githooks/pre-merge-commit"
+Check "F5 FORCED show of the pre-merge-commit hook at the fork point: exit 2, command named (it used to read as 'no merge gate')" (($rfShow.code -eq 2) -and ($rfShow.out -match 'pre-merge-commit failed \(exit')) ("exit=" + $rfShow.code + " | " + (First-Line $rfShow.out))
+
+# ======================================================================================
 $failed = @($results | Where-Object { -not $_.pass })
 Write-Host ""
 Write-Host ("{0} check(s), {1} failed" -f $results.Count, $failed.Count) -ForegroundColor $(if ($failed.Count) { "Red" } else { "Green" })

@@ -69,6 +69,7 @@ function Invoke-GitLines {
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try { $out = @(& git @GitArgs 2>$null); $rc = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
+    $script:GitExit = $rc
     if ($rc -ne 0 -and $Required) {
         Write-Host ("git " + ($GitArgs -join " ") + " failed (exit $rc) - cannot attest this branch") -ForegroundColor Red
         exit 2
@@ -182,7 +183,14 @@ if (Test-Path $ledgerPath) {
 #
 # Reading the hook out of the BRANCH (not the working tree) also means this cannot be
 # defeated by editing the file locally without committing it.
-$branchHook = (Invoke-GitLines @("show", "${Branch}:.githooks/pre-commit")) -join "`n"
+# "File absent" and "git failed" are different answers and only the first means INACTIVE. An
+# unknown branch or a failing git must stop the check (exit 2, naming the command), not read as
+# "this branch's hook does not attest" and switch the guard off. So: resolve both refs, ask
+# ls-tree whether the file exists at the ref (exit 0 either way), and only then read it.
+[void](Invoke-GitLines -Required @("rev-parse", "--verify", "--quiet", "${Branch}^{commit}"))
+[void](Invoke-GitLines -Required @("rev-parse", "--verify", "--quiet", "${Base}^{commit}"))
+$hookListed = @(Invoke-GitLines -Required @("ls-tree", "--name-only", $Branch, "--", ".githooks/pre-commit"))
+$branchHook = if ($hookListed.Count -gt 0) { (Invoke-GitLines -Required @("show", "${Branch}:.githooks/pre-commit")) -join "`n" } else { "" }
 if ($branchHook -notmatch 'hook-attest\.log') {
     if ($Json) {
         [pscustomobject]@{ branch = $Branch; base = $Base; checked = 0; ledger = $ledgerPath
@@ -225,7 +233,19 @@ if (-not (Test-Path $ledgerPath)) {
 # every merge on the branch. It is committed history: not a date, not an environment
 # variable, nothing the submitting party can arrange afterwards.
 $forkPoint = (Invoke-GitLines @("merge-base", $Base, $Branch) | Select-Object -First 1)
-$mergeHook = if ($forkPoint) { (Invoke-GitLines @("show", "${forkPoint}:.githooks/pre-merge-commit")) -join "`n" } else { "" }
+# merge-base exits 1 when the two refs share no ancestor (expected: no fork point, so no merge
+# hook to find); any other non-zero exit is git failing and must not silently turn the merge
+# gate off.
+if ($script:GitExit -ne 0 -and $script:GitExit -ne 1) {
+    Write-Host ("git merge-base $Base $Branch failed (exit " + $script:GitExit + ") - cannot attest this branch") -ForegroundColor Red
+    exit 2
+}
+if ($script:GitExit -eq 1) { $forkPoint = $null }
+$mergeHook = ""
+if ($forkPoint) {
+    $mergeHookListed = @(Invoke-GitLines -Required @("ls-tree", "--name-only", $forkPoint, "--", ".githooks/pre-merge-commit"))
+    if ($mergeHookListed.Count -gt 0) { $mergeHook = (Invoke-GitLines -Required @("show", "${forkPoint}:.githooks/pre-merge-commit")) -join "`n" }
+}
 $mergeGateActive = [bool]($mergeHook -match '\S')
 
 # Commits on the branch that are NOT on the base - i.e. the work being submitted.
