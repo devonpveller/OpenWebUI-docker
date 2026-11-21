@@ -114,7 +114,8 @@ $Script:OB1Profiles = @(
     '--profile', 'idea-refinery',
     '--profile', 'pantry',
     '--profile', 'intake',
-    '--profile', 'notebook-app'
+    '--profile', 'notebook-app',
+    '--profile', 'workbench-app'
 )
 # PANTRY (pantry-wire, 2026-10-04) IS IN THAT LIST FOR TEARDOWN AND STATUS ONLY.
 # `openbrain-pantry` (compose profile `pantry`, opt_in, OFF by default) must be
@@ -137,7 +138,13 @@ $Script:OB1IntakeProfile = 'intake'
 # named by every stop / down / ps, started only when enabled - so a recovery never brings a
 # retired app back, while surrealdb and open-notebook-backup (profile `notebook`) still start.
 $Script:OB1NotebookAppProfile = 'notebook-app'
-$Script:OB1OptInProfiles = @($Script:OB1PantryProfile, $Script:OB1IntakeProfile, $Script:OB1NotebookAppProfile)
+# WORKBENCH-APP (rwr-app-container round 3): openbrain-workbench-app ALONE, in its own profile so no
+# whole-plane `up` (this script, `stack.py up ob1`, a reboot) builds its `:local` image as a side effect
+# before the gated first deploy (ob1-deploy.ps1 -Service openbrain-workbench-app) - compose BUILDS a
+# build: service whose image is missing. Named by every stop / down / ps; started here only when
+# `stack.py enable workbench-app` (or COMPOSE_PROFILES) turned it on, which the first deploy does.
+$Script:OB1WorkbenchAppProfile = 'workbench-app'
+$Script:OB1OptInProfiles = @($Script:OB1PantryProfile, $Script:OB1IntakeProfile, $Script:OB1NotebookAppProfile, $Script:OB1WorkbenchAppProfile)
 # The project name that file declares (`name: open-brain`). Wait-ForRestartLoops
 # filters `docker ps` by it, so it sees the same containers compose does.
 $Script:OB1Project = "open-brain"
@@ -226,7 +233,8 @@ $Script:OB1OptionalServices = @(
     "openbrain-intake-dbrelay", # intake's only route to openbrain-db (profile 'intake'; obnet + intake-net)
     "openbrain-intake-llmrelay", # intake's only route to llm-gateway (profile 'intake'; intake-net + llm-net)
     "openbrain-intake-callrelay", # the search gate's only way IN to intake (profile 'intake'; intake-net + search_intake-callers, which the SEARCH plane owns - started before OB1 below)
-    "open_notebook"              # the Open Notebook app (profile 'notebook-app'; retired by the operator 2026-10-31 - off unless enabled)
+    "open_notebook",             # the Open Notebook app (profile 'notebook-app'; retired by the operator 2026-10-31 - off unless enabled)
+    "openbrain-workbench-app"    # the research workbench's own front end (profile 'workbench-app'; off until its first deploy; starts after openbrain-workbench via depends_on: service_healthy)
 )
 # Which profile starts each optional service.
 $Script:OB1OptionalServiceProfile = @{
@@ -236,6 +244,7 @@ $Script:OB1OptionalServiceProfile = @{
     "openbrain-intake-llmrelay" = 'intake'
     "openbrain-intake-callrelay" = 'intake'
     "open_notebook"              = 'notebook-app'
+    "openbrain-workbench-app"    = 'workbench-app'
 }
 # open_notebook is listed in $Script:OB1Services above (the Open Notebook trio line) for history;
 # since intake-gate-relay round 2 it is an OPTIONAL service (above), so it leaves the fixed list.
@@ -662,22 +671,23 @@ function Wait-OB1ViewerHealth {
         [string]$Name = "openbrain-wiki-viewer",
         [int]$TimeoutSeconds = 150,
         [int]$PollSeconds = 5,
-        [string]$HealthUrl = "http://127.0.0.1:8812/__health"
+        [string]$HealthUrl = "http://127.0.0.1:8812/__health",
+        [string]$Label = "Wiki viewer"
     )
     $elapsed = 0
     $h = $null
     while ($true) {
         $h = Get-ContainerHealth $Name
         if (-not $h.Found) {
-            Write-Log "WARN" "Wiki viewer: $($h.Reason) - not waiting on it"
+            Write-Log "WARN" "${Label}: $($h.Reason) - not waiting on it"
             return $false
         }
         if ($h.Health -eq "healthy") {
-            Write-Log "SUCCESS" "Wiki viewer healthy (/__health ok)"
+            Write-Log "SUCCESS" "$Label healthy (/__health ok)"
             return $true
         }
         if ($h.State -eq "running" -and -not $h.Health) {
-            Write-Log "SUCCESS" "Wiki viewer running (no healthcheck in this image)"
+            Write-Log "SUCCESS" "$Label running (no healthcheck in this image)"
             return $true
         }
         if ($h.Health -eq "unhealthy" -or $elapsed -ge $TimeoutSeconds) { break }
@@ -703,8 +713,23 @@ function Wait-OB1ViewerHealth {
     }
     catch { $why = "/__health not readable ($($_.Exception.Message))" }
     finally { if ($resp) { $resp.Close() } }
-    Write-Log "WARN" "Wiki viewer not healthy after ${elapsed}s ($($h.Reason)) - $why. It still serves pages; recovery continues (check: scripts\checks\check-openbrain-health.ps1)"
+    Write-Log "WARN" "$Label not healthy after ${elapsed}s ($($h.Reason)) - $why. It is reported, not gated: recovery continues (check: scripts\checks\check-openbrain-health.ps1)"
     return $false
+}
+
+function Wait-OB1WebHealth {
+    # Bounded health report for the OB1 web front ends: the wiki viewer always, and (rwr-app-container)
+    # the research workbench's own app (stateless; /__health on its loopback port) only when its OWN
+    # opt-in profile `workbench-app` is enabled on this host (`stack.py enable workbench-app`, done by
+    # its first deploy). Until then nothing starts it and there is nothing to wait for. Enabled but
+    # unhealthy = a WARN from Wait-OB1ViewerHealth, never a failure. One helper, so the lifted
+    # Start-/Reset-OB1Stack functions make a single call (verify-pantry-profile.ps1 allowlists commands
+    # per function). Returns the viewer's result.
+    $viewer = Wait-OB1ViewerHealth
+    if (Test-OB1ProfileEnabled $Script:OB1WorkbenchAppProfile) {
+        $null = Wait-OB1ViewerHealth -Name "openbrain-workbench-app" -HealthUrl "http://127.0.0.1:8820/__health" -Label "Workbench app" -TimeoutSeconds 60
+    }
+    return $viewer
 }
 
 function Test-OB1PantryEnabled {
@@ -875,7 +900,8 @@ function Start-OB1Stack {
             Write-Log "WARN" "Open Brain (OB1) stack started WITH $($looping.Count) container(s) in a restart loop: $($looping -join ', ')"
         }
         # Bounded report on the viewer's healthcheck; never fails the recovery.
-        Wait-OB1ViewerHealth | Out-Null
+        # Viewer, plus the research workbench app when its opt-in profile is enabled (see Wait-OB1WebHealth).
+        Wait-OB1WebHealth | Out-Null
         # mcpo-resilience: "up" and "no restart loop" do not mean the OWUI tool proxies loaded tools.
         $noTools = Confirm-McpoTools
         if ($noTools.Count -eq 0) { Write-Log "SUCCESS" "OWUI tool proxies verified: both serve tools" }
@@ -916,7 +942,8 @@ function Reset-OB1Stack {
             Write-Log "WARN" "OB1 stack recreated WITH $($looping.Count) container(s) in a restart loop: $($looping -join ', ')"
         }
         # Bounded report on the viewer's healthcheck; never fails the recovery.
-        Wait-OB1ViewerHealth | Out-Null
+        # Viewer, plus the research workbench app when its opt-in profile is enabled (see Wait-OB1WebHealth).
+        Wait-OB1WebHealth | Out-Null
         # mcpo-resilience: same check as Start-OB1Stack.
         $noTools = Confirm-McpoTools
         if ($noTools.Count -eq 0) { Write-Log "SUCCESS" "OWUI tool proxies verified: both serve tools" }

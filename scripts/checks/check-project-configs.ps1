@@ -230,7 +230,8 @@ if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0 -or $hcRuleStaged.Coun
             # SIX since intake I5 (2026-10-18): `--profile intake` carries rows 32-34,
             # openbrain-intake, openbrain-intake-dbrelay and openbrain-intake-llmrelay, and
             # since intake-gate-relay row 35, openbrain-intake-callrelay. SEVEN since its round 2:
-            # `--profile notebook-app` carries open_notebook (retired; its own profile).
+            # `--profile notebook-app` carries open_notebook (retired; its own profile). EIGHT since
+            # rwr-app-container round 3: `--profile workbench-app` carries openbrain-workbench-app.
             # FIVE since pantry-wire (2026-10-04): `--profile pantry` carries the 31st row,
             # openbrain-pantry. Dropping it would leave that row in the inventory with no
             # render to check it against - the coverage assertion below then fails, which is
@@ -240,7 +241,7 @@ if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0 -or $hcRuleStaged.Coun
                                      A = @('--profile', 'research', '--profile', 'wiki',
                                            '--profile', 'notebook', '--profile', 'idea-refinery',
                                            '--profile', 'pantry', '--profile', 'intake',
-                                           '--profile', 'notebook-app') }
+                                           '--profile', 'notebook-app', '--profile', 'workbench-app') }
             }
 
             # A project with inventory rows but NO render target is unverified, and until

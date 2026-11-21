@@ -591,9 +591,9 @@ Reset-Fake; $global:LGT.Admin = $false
 $realCopy = New-Fixture 'real' ([IO.File]::ReadAllText($realManifest)) $GoodHost -RawManifest
 $r = Invoke-Guard @('-Apply', '-WhatIf', '-ManifestPath', $realCopy)
 $creates = @(([regex]::Matches($r.Out, '(?m)^\s*CREATE\s+(\S+).*tcp/(\d+)')) | ForEach-Object { $_.Groups[2].Value } | Sort-Object { [int]$_ })
-$ok = ($r.Code -eq 0) -and ((Get-Mutations).Count -eq 0) -and (($creates -join ' ') -eq '3000 8065 8445 8812 8814') -and
+$ok = ($r.Code -eq 0) -and ((Get-Mutations).Count -eq 0) -and (($creates -join ' ') -eq '3000 8065 8445 8812 8814 8820') -and
     ($r.Out -match '0\.0\.0\.0-192\.0\.2\.10') -and ($r.Out -match '192\.0\.2\.14-255\.255\.255\.255') -and ($r.Out -match '::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')
-Write-Case 'T12' 'the repo manifest [lan_ingress.ports]: -WhatIf lists exactly 3000 8065 8445 8812 8814 + the expected ranges' $ok ("exit=$($r.Code) creates=$($creates -join ' ')`n$($r.Out)")
+Write-Case 'T12' 'the repo manifest [lan_ingress.ports]: -WhatIf lists exactly 3000 8065 8445 8812 8814 8820 + the expected ranges' $ok ("exit=$($r.Code) creates=$($creates -join ' ')`n$($r.Out)")
 
 # ---------------------------------------------------------------- T13 non-contiguous nodes
 # This one keeps the addresses IN THE MANIFEST and has no host file: the other supported layout.

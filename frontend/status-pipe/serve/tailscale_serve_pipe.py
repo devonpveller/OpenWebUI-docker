@@ -167,6 +167,10 @@ _STACK_ROSTER: List[str] = [
     "openbrain-db", "openbrain-mcp", "openbrain-ext", "openbrain-mcpo",
     "openbrain-mcpo-ext", "openbrain-postgrest", "openbrain-rest",
     "openbrain-entity-worker", "openbrain-wiki", "openbrain-wiki-viewer",
+    # rwr-app-container: the research workbench's own front end (profile `wiki`; obnet only). The
+    # status pipe runs inside OWUI with no docker CLI, so this row only shows it as "registered"
+    # (a name the service lookup knows) - it carries no Docker state, health or user data.
+    "openbrain-workbench-app",
 ]
 
 

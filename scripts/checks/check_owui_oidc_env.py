@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """The Open WebUI OIDC provider settings reach both openwebui definitions, inert when unset.
 
-Work item edge-b3-oidc (cluster-transition PLAN.md 5.1). Open WebUI 0.11.0 registers its
-OIDC login provider once at startup, only from the environment variables below; values
-saved in the admin UI are not used for that. frontend/docker-compose.yml passes them
+Work item edge-b3-oidc (cluster-transition PLAN.md 5.1). Open WebUI 0.11.0 (and 0.13.4,
+lab-proved 2026-11-20 with a different client id saved in the DB) registers its
+OIDC login provider once at startup, only from the environment variables below while
+ENABLE_OAUTH_PERSISTENT_CONFIG is false; values saved in the admin UI are not used for that. frontend/docker-compose.yml passes them
 through from frontend/.env under the same names.
 
 Renders `docker compose config --format json` for frontend under the stock and the gpu

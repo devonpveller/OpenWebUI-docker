@@ -21,7 +21,7 @@ keep every running container starting; the registry is gone, and it is NOT
 expressed here as the same set - `idea-refinery` is `default` and `requires`
 `research`, so `up` passes both, which against the pinned gitlink renders
 <!-- stack:count:ob1:default -->**23** services with `idea-refinery` + `research` (the driver's default)<!-- /stack:count:ob1:default -->, against
-<!-- stack:count:ob1:all -->**35** services with every profile (`idea-refinery`, `research`, `wiki`, `notebook`, `notebook-app`, `pantry`, `intake`)<!-- /stack:count:ob1:all -->. `wiki` and `notebook`
+<!-- stack:count:ob1:all -->**36** services with every profile (`idea-refinery`, `research`, `wiki`, `workbench-app`, `notebook`, `notebook-app`, `pantry`, `intake`)<!-- /stack:count:ob1:all -->. `wiki` and `notebook`
 come from `enable research` or `COMPOSE_PROFILES` in `OB1/docker/.env` (see
 `[declared, not rendered]` below).
 It forwards its arguments and exits with the driver's code; it holds no plane
@@ -841,7 +841,7 @@ still drift, so the exemption cannot launder a typo.
 every run until it happened: declare the full profile set once, or `up` starts
 fewer containers than are running. At the pinned gitlink the bare OB1 render is
 <!-- stack:count:ob1:bare -->**20** services with no profile<!-- /stack:count:ob1:bare -->, all four profiles render
-<!-- stack:count:ob1:all -->**35** services with every profile (`idea-refinery`, `research`, `wiki`, `notebook`, `notebook-app`, `pantry`, `intake`)<!-- /stack:count:ob1:all -->, and a driver with no ob1
+<!-- stack:count:ob1:all -->**36** services with every profile (`idea-refinery`, `research`, `wiki`, `workbench-app`, `notebook`, `notebook-app`, `pantry`, `intake`)<!-- /stack:count:ob1:all -->, and a driver with no ob1
 entry in its state passes `idea-refinery` + `research` only, which RENDERS
 <!-- stack:count:ob1:default -->**23** services with `idea-refinery` + `research` (the driver's default)<!-- /stack:count:ob1:default -->. Either
 `python scripts/stack/stack.py enable research`, which merges all four into
@@ -1065,7 +1065,7 @@ refusal writes nothing (what it refuses while reading is listed once, under
 **Refuses** below). Then it writes only a row whose name (roles
 only - an old name keeps its own) or visibility differs, and sends that row's meta,
 params, access grants and active flag back exactly as it read them, `meta.hidden`
-aside (Open WebUI 0.11.0 replaces a row's grants with the list an update carries,
+aside (Open WebUI 0.11.0 and 0.13.4 replace a row's grants with the list an update carries,
 and fails an update that carries none). Each change is printed (`created as`,
 `renamed 'old' -> 'new'`, `now hidden from the picker`, `unchanged`).
 
@@ -1142,7 +1142,7 @@ Open WebUI has no conditional update) is overwritten. One case repeats on every 
 managed row whose stored `meta` Open WebUI cannot parse answers **404** to the read,
 so the sync plans a create (for an old name, only when Open WebUI lists it; one it
 does not list is left alone) and Open WebUI rejects it (HTTP 401 `Something went
-wrong`, measured on a disposable 0.11.0) - repair or delete that row in Open WebUI (Admin Settings >
+wrong`, measured on a disposable 0.11.0; the drill is clean on 0.13.4) - repair or delete that row in Open WebUI (Admin Settings >
 Models), then run `labels` again.
 
 ### `init` [`--planes a,b`] [`--product X`] [`--context plane=name`] [`--headless`] [`--force`]
@@ -1232,7 +1232,15 @@ restore (dry run included), naming the cell - put it back by hand or leave it, t
 restore again. A config value is rewritten only if `json.dumps` reproduces its stored text
 (how Open WebUI 0.11 writes it). Open WebUI reads `rag.embedding_model` once at startup, so
 run it with Open WebUI **stopped**. Other config keys that still name an old id are listed,
-not changed. Stdlib only, so it runs inside the `openwebui` image against the data volume.
+not changed.
+
+**Second step, `--file-context-default` (owui-0134, 0.11.0 -> 0.13.4).** Same machinery (dry
+run by default, restore file, exclusive lock, `--restore`), a different plan: it sets
+`capabilities.file_context = true` in the config row `models.default_metadata`, so a model with
+no `file_context` of its own keeps getting attached files injected as on 0.11.0 (0.13.4's default
+is false). It lists the active model rows (id and name, ASCII-escaped) the default applies to, and
+leaves an operator's explicit global false and a missing row alone. Runbook step:
+`documentation/runbooks/UPDATE-MANAGEMENT.md`, "0.11.0 -> 0.13.4". Stdlib only, so it runs inside the `openwebui` image against the data volume.
 
 ---
 
@@ -1260,10 +1268,10 @@ tests plus `inventory --check` itself, which the pre-commit hook and the
 
 `labels` and the model-role label generator (`test_model_labels.py`) run
 against a scratch copy of the real inference config and a `FakeOwui` that
-answers the four Open WebUI admin-API calls as 0.11.0 does; their real proof is
-the disposable Open WebUI in item `mr-gateway`'s test plan.
+answers the four Open WebUI admin-API calls as 0.11.0 and 0.13.4 do; their real proof is
+the disposable Open WebUI in item `mr-gateway`'s test plan (`drill_model_roles.py --phase all --owui-image <image>`, 0 failures on 0.13.4, 2026-11-20).
 `owui_role_migration.py` (`test_owui_role_migration.py`) runs against throwaway SQLite
-databases built with Open WebUI 0.11.0's own `model` and `config` DDL; its real proof is a
+databases built with Open WebUI 0.13.4's own `model` and `config` DDL (0.13.4 adds a nullable `model.version_id`); its real proof is a
 copy of a live `webui.db` in item `mr-consumers`' test plan.
 
 `recover`, `backup`, `restore` and `stats` run against `OpsDaemon`, a scripted
