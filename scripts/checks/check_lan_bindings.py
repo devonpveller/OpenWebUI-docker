@@ -10,7 +10,7 @@ door: ob1 has two, each rendered and judged on its own):
     agent-org  MATTERMOST_LAN_IP   mattermost                    <ip>:8065 -> 8065
     inference  LITELLM_UI_LAN_IP   llm-gateway-ui                <ip>:8445 -> 8080
     ob1        WIKI_VIEWER_LAN_IP  openbrain-wiki-viewer         <ip>:8812 -> 8080  (rw-p2b-workspace:
-               the wiki and /workspace; the viewer forwards /workbench/* with the key server-side,
+               the wiki (/workspace is gone, 404); the viewer forwards /workbench/* with the key server-side,
                so the workbench itself is never on the LAN)
     ob1        WORKBENCH_APP_LAN_IP openbrain-workbench-app      <ip>:8820 -> 8080  (rwr-app-container:
                the research workbench's own app; same forwarder, same rule)
@@ -94,7 +94,7 @@ LAN = {
         "var": "LITELLM_UI_LAN_IP",
         "bindings": {("llm-gateway-ui", "8445", "8080")},
     },
-    # research-workbench P2b: the viewer is the front end (the wiki, /workspace); never a backend
+    # research-workbench P2b: the viewer is the front end (the wiki); never a backend
     "ob1": {
         "var": "WIKI_VIEWER_LAN_IP",
         "bindings": {("openbrain-wiki-viewer", "8812", "8080")},
