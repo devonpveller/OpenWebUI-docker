@@ -354,8 +354,8 @@
         "project": "open-brain",
         "critical": false,
         "host_health": "http://127.0.0.1:8820/__health",
-        "profile": "wiki",
-        "note": "the research workbench's own front end (rwr-app-container): a static app plus the /workbench/* forwarder to openbrain-workbench. STATELESS - no volume, so no backup sidecar and no check_backups row; the browser door (loopback 8820, opt-in WORKBENCH_APP_LAN_IP) ships inert. obnet only: no LiteLLM key, no inference path."
+        "profile": "workbench-app",
+        "note": "the research workbench's own front end (rwr-app-container; its OWN compose profile `workbench-app`, OFF until its first deploy): a static app plus the /workbench/* forwarder to openbrain-workbench. STATELESS - no volume, so no backup sidecar and no check_backups row; the browser door (loopback 8820, opt-in WORKBENCH_APP_LAN_IP) ships inert. obnet only: no LiteLLM key, no inference path."
       },
       {
         "container": "openbrain-extract",

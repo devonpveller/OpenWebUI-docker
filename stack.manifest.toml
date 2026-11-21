@@ -464,8 +464,21 @@ description = "the research engine: openbrain-research + openbrain-curator; the 
 opt_in      = true
 
 [planes.ob1.profiles.wiki]
-description = "the wiki compiler, the wiki viewer (live renderer, frozen Quartz bundle), the workbench, the workbench app (the research workbench's own front end) and the wiki backup (a SURFACE); the `open-brain` and `research` products enable it, and --headless drops it"
+description = "the wiki compiler, the wiki viewer (live renderer, frozen Quartz bundle), the workbench and the wiki backup (a SURFACE); the `open-brain` and `research` products enable it, and --headless drops it"
 opt_in      = true
+
+[planes.ob1.profiles.workbench-app]
+# rwr-app-container round 3 (reviewer finding 1): openbrain-workbench-app ALONE, in its own profile instead
+# of `wiki`. Its image is `build:`-only (openbrain-workbench-app:local) and compose BUILDS a build: service
+# whose image is missing, so while it rode `wiki` any whole-plane `up` (recovery, `stack.py up ob1`, a
+# reboot) built a `:local` image as a side effect, outside the gated deploy. Now NOTHING enables it until the
+# first deploy runs `stack.py enable workbench-app` (the product below). `requires` wiki: its depends_on
+# (openbrain-workbench) is in `wiki`, and compose refuses the project without it (same shape as notebook-app).
+# No other product names it (scripts/stack/test_stack.py holds that), so `enable open-brain` / `research`
+# never turns it on.
+description = "the research workbench's own front end: openbrain-workbench-app (:8820, stateless); OFF until its first deploy - `stack.py enable workbench-app` turns it on"
+opt_in      = true
+requires    = ["wiki"]
 
 [planes.ob1.profiles.notebook]
 description = "the Open Notebook DATA side: surrealdb + open-notebook-backup (the app itself is `notebook-app`); a SURFACE of the `research` product, and an engine PROFILE of `digest`"
@@ -677,6 +690,15 @@ profiles    = { ob1 = ["intake"] }
 description = "the Open Notebook APP (open_notebook UI + API) - retired by the operator 2026-10-31; enabling this runs it again"
 planes      = ["inference", "search", "ob1"]
 profiles    = { ob1 = ["notebook", "notebook-app"] }
+
+[products.workbench-app]
+# rwr-app-container round 3: the driver command for the ONE workbench-app switch (profile `workbench-app`,
+# which requires `wiki`; `stack.py enable workbench-app` adds both). Run by the first deploy, then
+# `ob1-deploy.ps1 -Service openbrain-workbench-app` (documentation/CONTAINER-REGISTRY.md, first deploy).
+# `disable workbench-app` takes the app back out and leaves `wiki` with whatever else asked for it.
+description = "the research workbench's own front end (openbrain-workbench-app); enabling it is the first-deploy step - nothing else turns it on"
+planes      = ["ob1"]
+profiles    = { ob1 = ["wiki", "workbench-app"] }
 
 [products.coding-agent]
 description = "little-coder, the coding agent; its surface is Open WebUI"
