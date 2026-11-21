@@ -51,6 +51,13 @@ function Invoke-DrillGit {
     try { & git.exe @args | Out-Null; $rc = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
     if ($rc -ne 0) { throw ("drill git setup failed: git " + ($args -join " ") + " (exit $rc)") }
 }
+function Invoke-DrillGitRc {
+    # For a git call whose non-zero exit IS the expectation (a rebase that must conflict): the
+    # exit code is returned and asserted by the caller instead of thrown.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try { & git.exe @args 2>&1 | Out-Null; $rc = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
+    return $rc
+}
 function Get-DrillGit {
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     try { $out = (& git.exe @args); $rc = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
@@ -593,7 +600,8 @@ Check "the merged row carries no [needs hand-off] and no [UNDEPLOYED] in -List" 
 Step 8 "the second item's rebase CONFLICTS - the later merger adapts"
 & $queue -Claim -Id drill-b -Role reviewer -By wt-reviewer | Out-Null
 $testedAt = (Get-Content -Raw -Path (Join-Path $QueueDir "drill-b.json") | ConvertFrom-Json).tested_at_sha
-Invoke-DrillGit -C $wtB rebase drill/verify-d   # expected to conflict
+$rebaseRc = Invoke-DrillGitRc -C $wtB rebase drill/verify-d   # expected to conflict
+Check "the rebase exited non-zero (it conflicted)" ($rebaseRc -ne 0) ("exit=" + $rebaseRc)
 $conflicted = @(Get-DrillGit -C $wtB diff --name-only --diff-filter=U)
 Check "rebase produced a real conflict" ($conflicted -contains "DRILL-NOTE.md") ("files: " + ($conflicted -join ","))
 Set-Content -Path (Join-Path $wtB "DRILL-NOTE.md") -Encoding ascii -Value @(
