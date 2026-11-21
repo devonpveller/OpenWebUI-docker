@@ -203,7 +203,7 @@ def test_real_manifest_parses_and_every_edge_names_a_real_plane():
     assert manifest.order == PS1_ORDER
     assert list(manifest.products) == [
         "chat", "inference", "search", "open-brain",
-        "research", "pantry", "intake", "notebook-app", "coding-agent", "agent-org", "digest",
+        "research", "pantry", "intake", "notebook-app", "workbench-app", "coding-agent", "agent-org", "digest",
     ]
     # the portal plane and product retired 2026-11-01: no manual plane remains
     assert not [p for p in manifest.order if manifest.manual(p)]
@@ -452,7 +452,7 @@ def test_the_ob1_profiles_are_no_longer_pending(root):
     """The three OB1 profiles exist in the compose file, so nothing may mark them pending."""
     manifest = stack.Manifest.load(REAL_MANIFEST)
     assert set(manifest.profiles("ob1")) == {"idea-refinery", "research", "wiki", "notebook", "pantry",
-                                              "intake", "notebook-app"}
+                                              "intake", "notebook-app", "workbench-app"}
     assert manifest.pending_profiles("ob1") == []
     # Only idea-refinery is `default`: `default` means "passed on every
     # invocation", and --headless has to be able to drop wiki and notebook.
@@ -2319,9 +2319,13 @@ def test_the_shipped_manifest_accounts_for_the_three_ob1_profiles_as_opt_in():
     manifest = stack.Manifest.load(REAL_MANIFEST)
     assert manifest.default_profiles("ob1") == ["idea-refinery"]
     assert sorted(manifest.opt_in_profiles("ob1")) == ["intake", "notebook", "notebook-app", "pantry", "research",
-                                                       "wiki"]
+                                                       "wiki", "workbench-app"]
     # intake-gate-relay round 2: the retired app needs the data side it depends on
     assert manifest.profile_requires("ob1", "notebook-app") == ["notebook"]
+    # rwr-app-container round 3: the app has its OWN profile (so no plane `up` builds its image early);
+    # it needs `wiki` for the workbench it fronts, and it is not a default profile
+    assert manifest.profile_requires("ob1", "workbench-app") == ["wiki"]
+    assert "workbench-app" not in manifest.default_profiles("ob1")
     assert manifest.pending_profiles("ob1") == []
     assert manifest.unaccounted_profiles("ob1") == []
     # and the requires edge sl-ob1-profiles added is still enforced
@@ -7643,3 +7647,31 @@ def test_every_message_naming_the_enable_command_names_a_real_product():
     assert "notebook-app" in manifest.products
     text = (REPO_ROOT / "scripts/stack/stack.py").read_text(encoding="utf-8")
     assert "enable notebook-app" in text
+
+
+# --- rwr-app-container round 3: openbrain-workbench-app is its own profile, not part of `wiki` ---
+def test_workbench_app_profile_is_in_no_other_product_and_not_in_wiki_surface():
+    import tomllib
+    data = tomllib.loads(Path(REAL_MANIFEST).read_text(encoding="utf-8"))
+    named = [n for n, p in data["products"].items() if "workbench-app" in (p.get("profiles") or {}).get("ob1", [])]
+    assert named == ["workbench-app"], named   # `enable research` / `open-brain` never turns it on
+    for n, p in data["products"].items():
+        assert "workbench-app" not in (p.get("surfaces") or {}).get("ob1", []), n
+
+
+def test_enable_workbench_app_turns_it_on_and_nothing_else_does(root):
+    code, out, _r = run(root, "enable", "research")   # research enables `wiki`, never the app
+    assert code == 0, out
+    assert "workbench-app" not in state_of(root)["planes"]["ob1"]["profiles"]
+    code, out, _r = run(root, "up", "--dry-run")
+    assert "--profile workbench-app" not in _ob1_line(out)
+    code, out, _r = run(root, "enable", "workbench-app")
+    assert code == 0, out
+    profiles = state_of(root)["planes"]["ob1"]["profiles"]
+    assert "workbench-app" in profiles and "wiki" in profiles
+    code, out, _r = run(root, "up", "--dry-run")
+    assert "--profile workbench-app" in _ob1_line(out)
+    code, out, _r = run(root, "disable", "workbench-app")
+    assert code == 0, out
+    profiles = state_of(root)["planes"]["ob1"]["profiles"]
+    assert "workbench-app" not in profiles and "wiki" in profiles
