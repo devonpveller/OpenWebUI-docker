@@ -341,7 +341,7 @@ plane (`OWUI_LAN_IP`, `MATTERMOST_LAN_IP`, `LITELLM_UI_LAN_IP`,
 `WIKI_VIEWER_LAN_IP`, `WORKBENCH_APP_LAN_IP`, each in its plane's `.env`, blank as shipped) that adds a
 binding on ONE named host address beside the loopback one, for Open WebUI
 `:3000`, Mattermost `:8065`, the LiteLLM Admin UI `:8445` and the wiki viewer
-`:8812` (the wiki and the research workspace at `/workspace`; it forwards
+`:8812` (the wiki; the old `/workspace` app is removed and answers 404; it forwards
 `/workbench/*` to the workbench with the key server-side, so no Open Brain
 backend is ever on the LAN), and the research workbench's own app `:8820` (same forwarder, same rule) - never the gateway itself. It is meant for a reverse
 proxy on the LAN: scope it with the LAN firewall guard first, and put
