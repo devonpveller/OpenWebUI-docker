@@ -167,6 +167,10 @@ _STACK_ROSTER: List[str] = [
     "openbrain-db", "openbrain-mcp", "openbrain-ext", "openbrain-mcpo",
     "openbrain-mcpo-ext", "openbrain-postgrest", "openbrain-rest",
     "openbrain-entity-worker", "openbrain-wiki", "openbrain-wiki-viewer",
+    # rwr-app-container: the research workbench's own front end (profile `wiki`; obnet only, so no
+    # in-container probe from here - its row shows the Docker state and healthcheck, nothing else, and
+    # no user data).
+    "openbrain-workbench-app",
 ]
 
 

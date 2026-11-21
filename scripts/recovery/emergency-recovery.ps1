@@ -208,7 +208,7 @@ $Script:OB1Services = @(
     "openbrain-rest", "openbrain-entity-worker",
     "openbrain-suggestion-worker", "openbrain-curator", "openbrain-research", "openbrain-chunk-worker",
     "openbrain-grounding-backfiller",
-    "openbrain-wiki", "openbrain-wiki-viewer", "openbrain-workbench", "openbrain-extract",
+    "openbrain-wiki", "openbrain-wiki-viewer", "openbrain-workbench", "openbrain-workbench-app", "openbrain-extract",   # rwr-app-container: the research workbench's own front end starts AFTER the workbench it forwards to (depends_on: service_healthy)
     "openbrain-cron", "openbrain-gmail-pull", "openbrain-gmail-prune", "openbrain-digest",
     "openbrain-podcast",
     "openbrain-db-backup", "openbrain-wiki-backup",   # backup sidecars (moved from ai-stack 2026-08-21; output still lands in ai-stack/backups/)
@@ -660,22 +660,23 @@ function Wait-OB1ViewerHealth {
         [string]$Name = "openbrain-wiki-viewer",
         [int]$TimeoutSeconds = 150,
         [int]$PollSeconds = 5,
-        [string]$HealthUrl = "http://127.0.0.1:8812/__health"
+        [string]$HealthUrl = "http://127.0.0.1:8812/__health",
+        [string]$Label = "Wiki viewer"
     )
     $elapsed = 0
     $h = $null
     while ($true) {
         $h = Get-ContainerHealth $Name
         if (-not $h.Found) {
-            Write-Log "WARN" "Wiki viewer: $($h.Reason) - not waiting on it"
+            Write-Log "WARN" "${Label}: $($h.Reason) - not waiting on it"
             return $false
         }
         if ($h.Health -eq "healthy") {
-            Write-Log "SUCCESS" "Wiki viewer healthy (/__health ok)"
+            Write-Log "SUCCESS" "$Label healthy (/__health ok)"
             return $true
         }
         if ($h.State -eq "running" -and -not $h.Health) {
-            Write-Log "SUCCESS" "Wiki viewer running (no healthcheck in this image)"
+            Write-Log "SUCCESS" "$Label running (no healthcheck in this image)"
             return $true
         }
         if ($h.Health -eq "unhealthy" -or $elapsed -ge $TimeoutSeconds) { break }
@@ -701,7 +702,7 @@ function Wait-OB1ViewerHealth {
     }
     catch { $why = "/__health not readable ($($_.Exception.Message))" }
     finally { if ($resp) { $resp.Close() } }
-    Write-Log "WARN" "Wiki viewer not healthy after ${elapsed}s ($($h.Reason)) - $why. It still serves pages; recovery continues (check: scripts\checks\check-openbrain-health.ps1)"
+    Write-Log "WARN" "$Label not healthy after ${elapsed}s ($($h.Reason)) - $why. It is reported, not gated: recovery continues (check: scripts\checks\check-openbrain-health.ps1)"
     return $false
 }
 
@@ -874,6 +875,8 @@ function Start-OB1Stack {
         }
         # Bounded report on the viewer's healthcheck; never fails the recovery.
         Wait-OB1ViewerHealth | Out-Null
+        # rwr-app-container: the research workbench's own app (stateless; /__health on its loopback port). Absent until deployed = a WARN, never a failure.
+        Wait-OB1ViewerHealth -Name "openbrain-workbench-app" -HealthUrl "http://127.0.0.1:8820/__health" -Label "Workbench app" -TimeoutSeconds 60 | Out-Null
         # mcpo-resilience: "up" and "no restart loop" do not mean the OWUI tool proxies loaded tools.
         $noTools = Confirm-McpoTools
         if ($noTools.Count -eq 0) { Write-Log "SUCCESS" "OWUI tool proxies verified: both serve tools" }
@@ -915,6 +918,8 @@ function Reset-OB1Stack {
         }
         # Bounded report on the viewer's healthcheck; never fails the recovery.
         Wait-OB1ViewerHealth | Out-Null
+        # rwr-app-container: the research workbench's own app (stateless; /__health on its loopback port). Absent until deployed = a WARN, never a failure.
+        Wait-OB1ViewerHealth -Name "openbrain-workbench-app" -HealthUrl "http://127.0.0.1:8820/__health" -Label "Workbench app" -TimeoutSeconds 60 | Out-Null
         # mcpo-resilience: same check as Start-OB1Stack.
         $noTools = Confirm-McpoTools
         if ($noTools.Count -eq 0) { Write-Log "SUCCESS" "OWUI tool proxies verified: both serve tools" }

@@ -778,6 +778,31 @@ if ((Get-CState $viewer) -eq 'running') {
   Confirm-ObContainer $viewer | Out-Null
 }
 
+# ---- 5c. The research workbench's own app (rwr-app-container; profile `wiki`) -
+# Stateless static app + the /workbench/* forwarder; its Docker HEALTHCHECK fetches /__health in-container
+# (200 {"status":"ok"} once the build is present). It carries NO user data and the probe prints none.
+# ABSENT = a quiet skip (the image is built and the container created in the deploy window, and a host
+# without the `wiki` profile never has it). running+healthy -> OK; starting -> WARN; unhealthy -> fault;
+# not running -> the same liveness repair as the containers above.
+$wbApp = 'openbrain-workbench-app'
+$wbAppState = Get-CState $wbApp
+if ($wbAppState -eq 'absent') {
+  if (-not $Quiet) { Write-Ob $wbApp ok 'not deployed (wiki profile off, or not yet built) -- skipped' }
+} elseif ($wbAppState -eq 'running') {
+  $ah = Invoke-ObDocker @('inspect', '--format', '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}', $wbApp)
+  $avh = 'unknown'
+  if ($ah.Ok) { $avh = ((@($ah.Lines) | Select-Object -First 1) -as [string]).Trim() }
+  switch ($avh) {
+    'healthy'   { Write-Ob $wbApp ok 'healthy (/__health ok)' }
+    'starting'  { Write-Ob $wbApp warn 'health: starting (healthcheck start_period) - re-check shortly' }
+    'unhealthy' { Write-Ob $wbApp down 'unhealthy: /__health is not answering 200 (the build is missing or the server is stuck)'; $script:Faults++ }
+    'none'      { Write-Ob $wbApp warn 'running, but this container has no healthcheck' }
+    default     { Write-Ob $wbApp warn "NO DATA (docker inspect health: $($ah.Why)) - no action"; $script:Faults++ }
+  }
+} else {
+  Confirm-ObContainer $wbApp | Out-Null
+}
+
 # ---- 6. Idea Refinery drain (profile-gated 'idea-refinery'; nightly batch) --
 # Liveness only: no host port (obnet-internal) so no functional /health probe from
 # the host, and it's idle between the 03:00-UTC cron fire + on-demand /run. States:

@@ -388,6 +388,7 @@ keys = ["MCP_ACCESS_KEY", "POSTGRES_PASSWORD", "OPS_GATEWAY_KEY", "OPENBRAIN_GAT
 "8817" = "openbrain-chunk-worker"
 "8818" = "openbrain-research"
 "8819" = "openbrain-grounding-backfiller"
+"8820" = "openbrain-workbench-app (the research workbench's own front end; stateless)"
 
 [planes.ob1.profiles.idea-refinery]
 # requires research: openbrain-idea-refinery's ONLY engine is openbrain-research
@@ -463,7 +464,7 @@ description = "the research engine: openbrain-research + openbrain-curator; the 
 opt_in      = true
 
 [planes.ob1.profiles.wiki]
-description = "the wiki compiler, the wiki viewer (live renderer, frozen Quartz bundle), the workbench and the wiki backup (a SURFACE); the `open-brain` and `research` products enable it, and --headless drops it"
+description = "the wiki compiler, the wiki viewer (live renderer, frozen Quartz bundle), the workbench, the workbench app (the research workbench's own front end) and the wiki backup (a SURFACE); the `open-brain` and `research` products enable it, and --headless drops it"
 opt_in      = true
 
 [planes.ob1.profiles.notebook]
@@ -729,8 +730,9 @@ profiles    = { ob1 = ["research", "notebook"] }
 # ==========================================================================
 
 [lan_ingress.ports]
-openwebui             = { plane = "frontend",  port = 3000 }
-mattermost            = { plane = "agent-org", port = 8065 }
-llm-gateway-ui        = { plane = "inference", port = 8445 }
-openbrain-wiki-viewer = { plane = "ob1",       port = 8812 }
-openbrain-workbench   = { plane = "ob1",       port = 8814 }
+openwebui               = { plane = "frontend",  port = 3000 }
+mattermost              = { plane = "agent-org", port = 8065 }
+llm-gateway-ui          = { plane = "inference", port = 8445 }
+openbrain-wiki-viewer   = { plane = "ob1",       port = 8812 }
+openbrain-workbench     = { plane = "ob1",       port = 8814 }
+openbrain-workbench-app = { plane = "ob1",       port = 8820 }

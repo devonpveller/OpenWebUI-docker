@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """The opt-in LAN bindings stay inert until set, and bind exactly what is listed when set.
 
-Work item edge-b2-pub (cluster-transition PLAN.md 5.1, Track B item B2). Four host
+Work item edge-b2-pub (cluster-transition PLAN.md 5.1, Track B item B2). Five host
 ports may be published on the host's LAN address so the Proxmox Traefik can reach them,
-each turned on by ONE variable in the plane's OWN .env:
+each turned on by ONE variable in the plane's OWN .env (a plane may carry more than one
+door: ob1 has two, each rendered and judged on its own):
 
     frontend   OWUI_LAN_IP         openwebui / openwebui-stock   <ip>:3000 -> 8080
     agent-org  MATTERMOST_LAN_IP   mattermost                    <ip>:8065 -> 8065
@@ -11,6 +12,8 @@ each turned on by ONE variable in the plane's OWN .env:
     ob1        WIKI_VIEWER_LAN_IP  openbrain-wiki-viewer         <ip>:8812 -> 8080  (rw-p2b-workspace:
                the wiki and /workspace; the viewer forwards /workbench/* with the key server-side,
                so the workbench itself is never on the LAN)
+    ob1        WORKBENCH_APP_LAN_IP openbrain-workbench-app      <ip>:8820 -> 8080  (rwr-app-container:
+               the research workbench's own app; same forwarder, same rule)
 
 The check renders each plane with `docker compose config --format json` under every
 profile combination that matters, three times - variable unset, set to "" and set to a
@@ -96,7 +99,29 @@ LAN = {
         "var": "WIKI_VIEWER_LAN_IP",
         "bindings": {("openbrain-wiki-viewer", "8812", "8080")},
     },
+    # rwr-app-container: the research workbench's own front end. A second ob1 DOOR: its key is
+    # "ob1-app", its plane "ob1"; every door is rendered and judged on its own, so setting one
+    # variable can never bind the other door's port.
+    "ob1-app": {
+        "plane": "ob1",
+        "var": "WORKBENCH_APP_LAN_IP",
+        "bindings": {("openbrain-workbench-app", "8820", "8080")},
+    },
 }
+
+
+def plane_of(key: str) -> str:
+    """The compose plane a LAN door belongs to (a door key is its plane unless it says otherwise)."""
+    return LAN[key].get("plane", key)
+
+
+def doors_of(plane: str) -> list:
+    return [k for k in LAN if plane_of(k) == plane]
+
+
+def plane_bindings(plane: str) -> set:
+    """Every (service, published, target) any door of the plane may bind on the LAN."""
+    return {b for k in doors_of(plane) for b in LAN[k]["bindings"]}
 # Planes whose compose file has a live `env_file: .env`, which compose refuses to render without.
 # (inference/frontend must NOT get a scratch project directory: their includes and paths are
 # relative to the real one.)
@@ -122,7 +147,8 @@ _OB1 = {("openbrain-chunk-worker", "127.0.0.1", "8817", "8000"), ("openbrain-ent
         ("openbrain-grounding-backfiller", "127.0.0.1", "8819", "8000"), ("openbrain-ops-gateway", "127.0.0.1", "8062", "8061"),
         ("openbrain-rest", "127.0.0.1", "3001", "80"), ("openbrain-suggestion-worker", "127.0.0.1", "8813", "8000")}
 _OB1_WIKI = _OB1 | {("openbrain-wiki", "127.0.0.1", "8811", "8000"), ("openbrain-wiki-viewer", "127.0.0.1", "8812", "8080"),
-                    ("openbrain-workbench", "127.0.0.1", "8814", "8000")}
+                    ("openbrain-workbench", "127.0.0.1", "8814", "8000"),
+                    ("openbrain-workbench-app", "127.0.0.1", "8820", "8080")}
 
 # (plane, profiles, today's loopback bindings). Measured on development e5b501cf with
 # compose v5.3.0, 2026-10-16. The frontend's stock and gpu definitions share a
@@ -161,13 +187,16 @@ def _scratch_project(plane: str, example: str) -> str:
     return _SCRATCH[plane].name
 
 
-def render(plane: str, profiles, lan_value) -> dict:
-    """`docker compose config --format json` for one plane; lan_value None = unset."""
+def render(key: str, profiles, lan_value) -> dict:
+    """`docker compose config --format json` for one plane; lan_value None = unset.
+
+    `key` is a LAN door: its variable is the one set (the plane's other doors stay unset)."""
+    plane = plane_of(key)
     compose, example = COMPOSE[plane]
     env = {k: v for k, v in os.environ.items() if k not in ALL_VARS and k != "COMPOSE_PROFILES"}
     env["COMPOSE_PROFILES"] = ",".join(profiles)
     if lan_value is not None:
-        env[LAN[plane]["var"]] = lan_value
+        env[LAN[key]["var"]] = lan_value
     cmd = ["docker", "compose", "-f", compose, "--env-file", example]
     for profile in profiles:
         cmd += ["--profile", profile]
@@ -186,7 +215,8 @@ def render(plane: str, profiles, lan_value) -> dict:
 
 
 def check_render(plane: str, label: str, data: dict, baseline: set, lan_ip) -> list:
-    """Refusals for ONE render. lan_ip None/'' = the variable is off."""
+    """Refusals for ONE render. lan_ip None/'' = the variable is off. `plane` is a LAN door key:
+    only THAT door's bindings may be on the LAN (the plane's other doors are unset in this render)."""
     problems = []
     seen_lan = set()
     loopback = set()
@@ -271,7 +301,7 @@ def judge_live_ports(plane: str, data: dict) -> tuple:
     (service, published, target) on one specific IPv4 unicast address; a wildcard host_ip (0.0.0.0, ::,
     or none on a published port) or anything else non-loopback is refused. Values are never returned.
     """
-    allowed = LAN[plane]["bindings"]
+    allowed = plane_bindings(plane)
     problems, lan = [], []
     for name, spec in (data.get("services") or {}).items():
         for p in (spec or {}).get("ports") or []:
@@ -331,6 +361,7 @@ def live_rows(plane: str) -> list:
     """The profile rows to judge for a plane: the .env's own selection (None), then every RENDERS
     row that names profiles. Services without a profile appear in every row, so the empty row adds
     nothing."""
+    plane = plane_of(plane) if plane in LAN else plane
     return [None] + [tuple(profiles) for (pl, profiles, _b) in RENDERS if pl == plane and profiles]
 
 
@@ -422,27 +453,28 @@ def main(argv=None) -> int:
     rendered = 0
     lan_seen = {plane: set() for plane in LAN}
     for plane, profiles, baseline in RENDERS:
-        label = f"{plane} [{','.join(profiles) or 'no profile'}]"
-        try:
-            unset = render(plane, profiles, None)
-            empty = render(plane, profiles, "")
-            setd = render(plane, profiles, args.ip)
-        except (RuntimeError, ValueError) as exc:
-            print(f"RENDER FAILED {label}: {exc}")
-            return 2
-        rendered += 3
-        problems += check_render(plane, label + " unset", unset, baseline, None)
-        problems += check_render(plane, label + " empty", empty, baseline, "")
-        problems += check_render(plane, label + " set", setd, baseline, args.ip)
-        problems += compare_unset_set(label, unset, setd, plane, args.ip)
-        if json.dumps(unset, sort_keys=True) != json.dumps(empty, sort_keys=True):
-            problems.append(f"{label}: {LAN[plane]['var']}='' renders differently from unset")
-        lan_seen[plane] |= {svc for (svc, _p, _t) in LAN[plane]["bindings"]
-                            if svc in (setd.get("services") or {})}
-        lan = sorted(f"{b[1]}:{b[2]}->{b[3]} ({b[0]})" for name, spec in (setd.get("services") or {}).items()
-                     for b in (_binding(name, p) for p in (spec or {}).get("ports") or [] if p.get("published"))
-                     if b[1] != LOOPBACK)
-        print(f"  {label}: loopback {len(baseline)} unchanged; LAN when set: {', '.join(lan) or 'none'}")
+        for door in doors_of(plane):
+            label = f"{plane} [{','.join(profiles) or 'no profile'}]" + (f" door {door}" if door != plane else "")
+            try:
+                unset = render(door, profiles, None)
+                empty = render(door, profiles, "")
+                setd = render(door, profiles, args.ip)
+            except (RuntimeError, ValueError) as exc:
+                print(f"RENDER FAILED {label}: {exc}")
+                return 2
+            rendered += 3
+            problems += check_render(door, label + " unset", unset, baseline, None)
+            problems += check_render(door, label + " empty", empty, baseline, "")
+            problems += check_render(door, label + " set", setd, baseline, args.ip)
+            problems += compare_unset_set(label, unset, setd, door, args.ip)
+            if json.dumps(unset, sort_keys=True) != json.dumps(empty, sort_keys=True):
+                problems.append(f"{label}: {LAN[door]['var']}='' renders differently from unset")
+            lan_seen[door] |= {svc for (svc, _p, _t) in LAN[door]["bindings"]
+                               if svc in (setd.get("services") or {})}
+            lan = sorted(f"{b[1]}:{b[2]}->{b[3]} ({b[0]})" for name, spec in (setd.get("services") or {}).items()
+                         for b in (_binding(name, p) for p in (spec or {}).get("ports") or [] if p.get("published"))
+                         if b[1] != LOOPBACK)
+            print(f"  {label}: loopback {len(baseline)} unchanged; LAN when set: {', '.join(lan) or 'none'}")
     problems += override_fail_closed_problems(args.ip)
     print("  gateway-lan-on.yml hand-passed: checked (unset/empty must refuse to render, set must bind the one address)")
     for plane, spec in LAN.items():
