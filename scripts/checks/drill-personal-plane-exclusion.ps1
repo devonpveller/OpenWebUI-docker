@@ -741,7 +741,9 @@ if (-not $GITLINK) {
     exit 1
 }
 $obHead = (& git -C $OB1WORK rev-parse HEAD 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL  git -C $OB1WORK rev-parse HEAD failed (exit $LASTEXITCODE): $obHead" -ForegroundColor Red; exit 1 }
 $obDirty = (& git -C $OB1WORK status --porcelain 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL  git -C $OB1WORK status --porcelain failed (exit $LASTEXITCODE): $obDirty" -ForegroundColor Red; exit 1 }
 Write-Host "        gitlink  $GITLINK"
 Write-Host "        OB1 HEAD $obHead"
 if ($obHead -ne $GITLINK) {

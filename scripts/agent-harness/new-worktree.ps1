@@ -158,7 +158,7 @@ if ($missing.Count) { Write-Host ("           absent in main checkout (skipped):
 # committed, and applies to every worktree. Idempotent.
 $excludeFile = Join-Path $commonDir "info\exclude"
 $excluded = @()
-$untracked = @(& git -C $Path status --porcelain --untracked-files=all |
+$untracked = @(Invoke-Git @("-C", $Path, "status", "--porcelain", "--untracked-files=all") |
     Where-Object { $_ -match '^\?\? ' } |
     ForEach-Object { ($_ -replace '^\?\? ', '').Trim('"') })
 if ($untracked.Count) {
@@ -181,7 +181,7 @@ if ($excluded.Count) {
 # dies as "$'\r': command not found". .gitattributes should prevent it - verify, do
 # not assume (this exact trap cost a wiki build day).
 $crlf = @()
-foreach ($rel in (& git -C $Path ls-files "*.sh")) {
+foreach ($rel in (Invoke-Git @("-C", $Path, "ls-files", "*.sh"))) {
     $full = Join-Path $Path ($rel -replace "/", "\")
     if (-not (Test-Path $full)) { continue }
     $raw = Get-Content -Raw -Path $full -ErrorAction SilentlyContinue

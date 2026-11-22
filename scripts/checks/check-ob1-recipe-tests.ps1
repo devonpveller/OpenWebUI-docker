@@ -60,7 +60,10 @@ function Fail([string]$msg) {
 # silently answered with the PARENT's HEAD. Found by this gate's own first
 # live run (2026-09-03): it refused a correct commit claiming the OB1 tree was
 # at the parent's SHA. Interactive runs never see this - only hook runs do.
-function Git-InOB1([string[]]$GitArgs) {
+function Git-InOB1([string[]]$GitArgs, [switch]$Probe) {
+    # Default: a failing git call is FATAL and names the command. -Probe is for the callers
+    # whose question has an expected "no" (a ref or object that may be absent): they read
+    # $LASTEXITCODE themselves and handle that case explicitly.
     $saved = @{}
     foreach ($k in 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE') {
         $saved[$k] = [Environment]::GetEnvironmentVariable($k)
@@ -73,21 +76,27 @@ function Git-InOB1([string[]]$GitArgs) {
         # 2026-09-03): the raw exception fired before the friendly Fail. Relax the
         # preference for the native call only; this assignment is function-scoped.
         $ErrorActionPreference = 'Continue'
-        & git -C (Join-Path $Root 'OB1') @GitArgs 2>$null
+        $out = @(& git -C (Join-Path $Root 'OB1') @GitArgs 2>$null); $script:Ob1Exit = $LASTEXITCODE
     }
     finally {
         foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
     }
+    if ($script:Ob1Exit -ne 0 -and -not $Probe) {
+        Fail ("git -C OB1 " + ($GitArgs -join ' ') + " failed (exit " + $script:Ob1Exit + ")")
+    }
+    return $out
 }
 
 if (-not $Root) {
     $Root = (& git rev-parse --show-toplevel 2>$null)
+    if ($LASTEXITCODE -ne 0) { Fail "git rev-parse --show-toplevel failed (exit $LASTEXITCODE) - not inside a git repository and no -Root given" }
     if (-not $Root) { Fail "not inside a git repository and no -Root given" }
 }
 $Root = (Resolve-Path $Root).Path
 
 # --- 1. Is an OB1 gitlink bump staged? -------------------------------------
 $staged = @(& git -C $Root diff --cached --name-only)
+if ($LASTEXITCODE -ne 0) { Fail "git -C $Root diff --cached --name-only failed (exit $LASTEXITCODE)" }
 if ($staged -notcontains 'OB1') {
     Write-Host "[check-ob1-recipe-tests] no OB1 gitlink staged - skipped."
     exit 0
@@ -96,6 +105,7 @@ if ($staged -notcontains 'OB1') {
 # --- 2. The tree on disk must BE the tree being pinned ---------------------
 # `git ls-files -s OB1` reads the INDEX: "160000 <sha> 0\tOB1".
 $lsLine = (& git -C $Root ls-files -s OB1) | Select-Object -First 1
+if ($LASTEXITCODE -ne 0) { Fail "git -C $Root ls-files -s OB1 failed (exit $LASTEXITCODE)" }
 if (-not $lsLine -or $lsLine -notmatch '^160000\s+([0-9a-f]{40})\s') {
     Fail "could not read the staged OB1 gitlink from the index (got '$lsLine')"
 }
@@ -218,7 +228,7 @@ $countTests = {
     #     codepage and back into git as an argument, and a mojibaked name is a
     #     FAILED lookup (the -1 sentinel: loud, but still not a count). A blob
     #     id is 40 ASCII hex characters and no codepage can mangle it.
-    $entries = @(Git-InOB1 @('-c', 'core.quotepath=false', 'ls-tree', '-r', $sha, 'recipes'))
+    $entries = @(Git-InOB1 -Probe @('-c', 'core.quotepath=false', 'ls-tree', '-r', $sha, 'recipes'))
     if ($LASTEXITCODE -ne 0) { return $blind }
     $blobs = @()
     foreach ($e in $entries) {
@@ -239,7 +249,7 @@ $countTests = {
         # A blank id here would make `git show` print HEAD and exit 0 - a lookup
         # that failed while looking like it worked. Refuse to guess.
         if ($b -notmatch '^[0-9a-f]{40}$') { return $blind }
-        $lines = @(Git-InOB1 @('show', $b))
+        $lines = @(Git-InOB1 -Probe @('show', $b))
         if ($LASTEXITCODE -ne 0) { return $blind }
         $cases += @($lines | Where-Object { $_ -match '^\s*(await\s+)?(t\.)?(test|it)\s*\(' }).Count
     }
@@ -249,6 +259,8 @@ $new = & $countTests $stagedSha
 $newShort = $stagedSha.Substring(0, 7)
 
 $oldPin = (& git -C $Root rev-parse -q --verify 'HEAD:OB1' 2>$null)
+# Expected branch: HEAD with no OB1 gitlink (the first pin) exits non-zero; no shrink floor to apply.
+if ($LASTEXITCODE -ne 0) { $oldPin = $null }
 if ($oldPin -and $oldPin -match '^[0-9a-f]{40}$') {
     $old = & $countTests $oldPin
     $oldShort = $oldPin.Substring(0, 7)

@@ -107,7 +107,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if (-not $Root) { $Root = (git rev-parse --show-toplevel 2>$null) }
+if (-not $Root) {
+    $Root = (git rev-parse --show-toplevel 2>$null)
+    # Expected branch: outside a git checkout the root falls back to the cwd just below.
+    if ($LASTEXITCODE -ne 0) { $Root = $null }
+}
 if (-not $Root) { $Root = (Get-Location).Path }
 $Root = $Root.Trim()
 $RootFull = $Root
@@ -488,10 +492,19 @@ if ($All) {
 }
 
 # --- staged mode: what this commit leaves in a compose file it touches ---------------
+# Continue around the native call only: under 'Stop', PS 5.1 turns git's stderr into a
+# terminating NativeCommandError before the exit code below can be read and reported.
+$prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
 $staged = @(git diff --cached --name-only --diff-filter=ACMR 2>$null) |
           Where-Object { $_ -match '(^|/)(docker-)?compose[^/]*\.ya?ml$' -or
                          $_ -match '(^|/)compose/[^/]+\.ya?ml$' -or
                          $_ -match '\.override\.ya?ml$' }
+$stagedExit = $LASTEXITCODE
+$ErrorActionPreference = $prevEap
+if ($stagedExit -ne 0) {
+    Write-Host "env_file scope: FAIL - git diff --cached --name-only --diff-filter=ACMR failed (exit $LASTEXITCODE); an empty list would read as 'no compose files staged'." -ForegroundColor Red
+    exit 1
+}
 if (-not $staged -or -not $staged.Count) {
     Write-Host "env_file scope: no compose files staged - skipped." -ForegroundColor DarkGray
     exit 0
