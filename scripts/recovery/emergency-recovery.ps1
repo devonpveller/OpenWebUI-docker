@@ -204,6 +204,8 @@ $Script:MainStackServices = @()
 # there is no root-project backup group left.)
 
 # Open Brain (OB1) services, low-level dependency first.
+# rw-owner-private-view (slot 480): openbrain-workbench logs in as ob_workbench (OB_WORKBENCH_DB_PASSWORD in
+# OB1/docker/.env); a blank value or a role without its password keeps the workbench from connecting.
 # The trailing block (cron + 3 HTTP-triggered scheduled services) lives
 # in docker-compose.scheduled.yml; compose includes it so a single
 # `docker compose up -d` brings everything. They depend on openbrain-rest
