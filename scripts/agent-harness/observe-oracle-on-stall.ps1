@@ -111,8 +111,18 @@ $queue = Join-Path $PSScriptRoot "queue.ps1"
 $harness = $PSScriptRoot
 
 function Say($t, $c = "Cyan") { Write-Host ""; Write-Host $t -ForegroundColor $c }
-function GitCap { $p = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-                  try { return @(& git.exe @args) } finally { $ErrorActionPreference = $p } }
+function GitCap {
+    # Checked: a failing git call here used to hand back an empty result and the run went on
+    # to commit an artifact record built from nothing. It now refuses, naming the command.
+    $p = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try { $out = @(& git.exe @args) } finally { $ErrorActionPreference = $p }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ("REFUSED: git {0} failed (git exit {1})" -f ($args -join " "), $LASTEXITCODE) -ForegroundColor Red
+        Remove-ProbeBranch
+        exit 3
+    }
+    return $out
+}
 
 # EVERY EXTERNAL CALL GOES THROUGH ONE OF THESE. Not style: the shipped defect was six
 # `| Out-Null`s with no return-code check, and a list of call sites somebody has to remember
@@ -130,7 +140,18 @@ $script:BranchCreated = $false
 function Remove-ProbeBranch {
     if (-not $script:BranchCreated -or $KeepBranch) { return }
     $p = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    try { & git.exe branch -D $Branch 2>&1 | Out-Null } finally { $ErrorActionPreference = $p }
+    try {
+        & git.exe branch -D $Branch 2>&1 | Out-Null
+        $delExit = $LASTEXITCODE
+        if ($delExit -ne 0) {
+            # Expected branch: the probe branch may already be gone (a refused run, a manual
+            # delete). Only a branch that STILL EXISTS after a failed delete is a leftover.
+            & git.exe rev-parse --verify --quiet "refs/heads/$Branch" 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host ("WARNING: git branch -D {0} failed (exit {1}); the probe branch is still there - delete it by hand." -f $Branch, $delExit) -ForegroundColor Yellow
+            }
+        }
+    } finally { $ErrorActionPreference = $p }
     $script:BranchCreated = $false
 }
 
