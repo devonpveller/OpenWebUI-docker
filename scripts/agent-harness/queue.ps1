@@ -855,13 +855,19 @@ function Resolve-ItemShas($items) {
     #    so the mapping is positional and a non-oid line means "no gitlink".
     $link = @{}
     $present = @($shas | Where-Object { $exists[$_] })
-    for ($start = 0; $start -lt $present.Count; $start += 200) {
-        $chunk = @($present[$start..([Math]::Min($start + 199, $present.Count - 1))])
-        $rp = @(Invoke-GitCapture (@("rev-parse") + @($chunk | ForEach-Object { $_ + ":OB1" })))
-        for ($i = 0; $i -lt $chunk.Count; $i++) {
-            $l = if ($i -lt $rp.Count) { ([string]$rp[$i]).Trim() } else { "" }
-            if ($l -match '^[0-9a-f]{40}$') { $link[$chunk[$i]] = $l }
+    # One rev-parse PER commit: a single batched call stops at the first commit whose tree has no
+    # OB1 entry, which hid the gitlink of every commit after it. --verify --quiet exits 1 for
+    # "no OB1 entry here" (expected, silent); any other non-zero exit is git failing outright and is
+    # reported, not read as "no gitlink".
+    foreach ($ps in $present) {
+        $rp = @(Invoke-GitCapture @("rev-parse", "--verify", "--quiet", ($ps + ":OB1")))
+        $rpExit = $LASTEXITCODE
+        if ($rpExit -ne 0 -and $rpExit -ne 1) {
+            foreach ($id in @($out.Keys)) { $out[$id] = @("UNCHECKED: git rev-parse --verify --quiet <sha>:OB1 failed (exit $rpExit), so no OB1 gitlink was resolved") }
+            return $out
         }
+        $l = if ($rp.Count -gt 0) { ([string]$rp[0]).Trim() } else { "" }
+        if ($rpExit -eq 0 -and $l -match '^[0-9a-f]{40}$') { $link[$ps] = $l }
     }
     # 3. which clone each item is asked about, then one cat-file per clone
     $registry = Get-WorktreeRegistry
@@ -1146,10 +1152,12 @@ function Get-DockerignoreKeep([string]$Sha, [string]$Ctx, [string]$DfPath) {
     # Existence is asked with ls-tree first: `git show` of an absent path writes `fatal:` to stderr.
     if ($DfPath) {
         $alt = @(Invoke-GitCapture @("ls-tree", "--name-only", $Sha, "$DfPath.dockerignore") | Where-Object { ([string]$_).Trim() })
+        if ($LASTEXITCODE -ne 0) { Die "git ls-tree --name-only $Sha $DfPath.dockerignore failed (exit $LASTEXITCODE); cannot derive deploy surfaces" }
         if ($alt.Count -gt 0) { return $null }
     }
     $ignPath = "$Ctx/.dockerignore"
     $hit = @(Invoke-GitCapture @("ls-tree", "--name-only", $Sha, $ignPath) | Where-Object { ([string]$_).Trim() })
+    if ($LASTEXITCODE -ne 0) { Die "git ls-tree --name-only $Sha $ignPath failed (exit $LASTEXITCODE); cannot derive deploy surfaces" }
     if ($hit.Count -eq 0) { return $null }
     $lines = @(Invoke-GitCapture @("show", "$Sha`:$ignPath"))
     if ($LASTEXITCODE -ne 0) { return $null }
@@ -1174,11 +1182,13 @@ function Get-DeploySurfaces($item, [string]$Sha) {
     # question is asked of the MERGED tree (`git show <sha>:<path>`), never of a working directory.
     $notes = @(); $skipped = @()
     $head = (Invoke-GitCapture @("rev-list", "--parents", "-n", "1", $Sha) | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0) { Die "git rev-list --parents -n 1 $Sha failed (exit $LASTEXITCODE); cannot derive deploy surfaces" }
     $parts = @(([string]$head).Trim() -split '\s+' | Where-Object { $_ })
     if ($parts.Count -lt 2) { return @{ surfaces = @(); notes = @("'$Sha' has no parent - nothing to derive a deploy surface from"); skipped = @(); line_before = "" } }
     $lineBefore = $parts[1]
     if ($parts.Count -lt 3) { $notes += ("'{0}' is not a merge commit; surfaces derived from its single parent {1}" -f $Sha.Substring(0, 7), $lineBefore.Substring(0, 7)) }
     $changed = @(Invoke-GitCapture @("diff-tree", "-r", "--name-only", "--no-commit-id", $lineBefore, $Sha) | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($LASTEXITCODE -ne 0) { Die "git diff-tree $lineBefore $Sha failed (exit $LASTEXITCODE); cannot derive deploy surfaces" }
     $images = @(); $pastes = @()
     # (1) an OB1 gitlink move
     if ($changed -contains "OB1") {
@@ -1199,6 +1209,7 @@ function Get-DeploySurfaces($item, [string]$Sha) {
             }
             if ($old) { $ob1Changed = @(Invoke-GitCapture @("-C", $clone, "diff-tree", "-r", "--name-only", "--no-commit-id", $old, $new)) }
             else { $ob1Changed = @(Invoke-GitCapture @("-C", $clone, "ls-tree", "-r", "--name-only", $new)) }
+            if ($LASTEXITCODE -ne 0) { Die "git -C $clone diff-tree/ls-tree for OB1 $new failed (exit $LASTEXITCODE); cannot derive deploy surfaces" }
             $ob1Changed = @($ob1Changed | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
             $dirs = @($ob1Changed | ForEach-Object { if ($_ -match '^integrations/([^/]+)/') { $matches[1] } } | Where-Object { $_ } | Select-Object -Unique)
             $svcs = @()
@@ -1223,6 +1234,7 @@ function Get-DeploySurfaces($item, [string]$Sha) {
                 # An operator taught to ignore a `fatal:` is being taught the wrong lesson. ls-tree
                 # exits 0 either way and prints the path only when it is there.
                 $dfHit = @(Invoke-GitCapture @("-C", $clone, "ls-tree", "--name-only", $new, "integrations/$d/Dockerfile") | Where-Object { ([string]$_).Trim() })
+                if ($LASTEXITCODE -ne 0) { Die "git -C $clone ls-tree $new integrations/$d/Dockerfile failed (exit $LASTEXITCODE); cannot derive deploy surfaces" }
                 if ($dfHit.Count -eq 0) { $notes += ("OB1 integrations/{0} changed but has no Dockerfile at {1} - not an image" -f $d, $new.Substring(0, 7)); continue }
                 $svc = @($pathSvcs | Where-Object { $_.rp -eq "integrations/$d" } | Select-Object -First 1)
                 if ($svc.Count -gt 0) { $images += ("image:" + $svc[0].name); $notes += ("image:{0} derived by the integrations rule: OB1 integrations/{1} changed and has a Dockerfile" -f $svc[0].name, $d) }
@@ -1292,6 +1304,7 @@ function Get-DeploySurfaces($item, [string]$Sha) {
     }
     # (3) a :local-tagged service of this repository whose build context changed
     $tree = @(Invoke-GitCapture @("ls-tree", "-r", "--name-only", $Sha) | ForEach-Object { ([string]$_).Trim() })
+    if ($LASTEXITCODE -ne 0) { Die "git ls-tree -r --name-only $Sha failed (exit $LASTEXITCODE); cannot derive deploy surfaces" }
     # A plane may split its services into fragments under a `compose/` directory (inference/compose/
     # queue.yml declares llm-queue:local); those names do not match docker-compose*.yml, so the rule
     # never saw them (harness-gaps: merge 93d9b09 changed llm-queue's source and derived no surface).
@@ -2163,8 +2176,23 @@ if ($Submit) {
     $harnessRepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
     $attestScript = Join-Path $harnessRepoRoot "scripts\checks\check-hook-attestation.ps1"
     if (Test-Path $attestScript) {
-        $attestOut = & $attestScript -Branch $Branch -Base $line -RepoRoot $harnessRepoRoot -Json
+        # The SCRIPT is found beside queue.ps1; the REPOSITORY it attests is the one that holds
+        # the branch - the same one `rev-parse $Branch` just resolved it in (the working
+        # directory's). Attesting the repo that merely holds queue.ps1 asked a repository that
+        # may not contain the branch at all.
+        $attestRoot = (Invoke-GitCapture @("rev-parse", "--show-toplevel") | Select-Object -First 1)
+        if ($LASTEXITCODE -ne 0 -or -not $attestRoot) { Die "git rev-parse --show-toplevel failed (exit $LASTEXITCODE); cannot tell which repository to attest '$Branch' in. Nothing has been recorded." }
+        $attestRoot = [System.IO.Path]::GetFullPath([string]$attestRoot)
+        $attestOut = & $attestScript -Branch $Branch -Base $line -RepoRoot $attestRoot -Json
         $attestExit = $LASTEXITCODE
+        # Exit 2 = the checker COULD NOT RUN (a git call failed, or the branch/base does not
+        # resolve). That is not a pass: a check that cannot run says nothing about the commits.
+        if ($attestExit -ne 0 -and $attestExit -ne 1) {
+            Die (("scripts\checks\check-hook-attestation.ps1 -Branch {0} -Base {1} -RepoRoot {2} exited {3}: it could not run, so " +
+                  "nobody has checked that the pre-commit hooks ran on '{0}'. Its message is printed just above " +
+                  "(a failed git command, or a branch/base that does not resolve in that repository). " +
+                  "Nothing has been recorded.") -f $Branch, $line, $attestRoot, $attestExit) 4
+        }
         if ($attestExit -eq 1) {
             $report = $null
             try { $report = $attestOut | ConvertFrom-Json } catch { }
@@ -2346,6 +2374,12 @@ if ($Claim) {
         # recorded sha. `submitted_sha` is a RECORD of an attempt, not an instruction -
         # reading it as one is how a tester ends up re-testing an already-failed commit.
         $tip = (Invoke-GitCapture @("rev-parse", "--short", $item.branch) | Select-Object -First 1)
+        if ($LASTEXITCODE -ne 0) {
+            # Expected branch: the item's branch may be gone or unresolvable here. The claim
+            # itself stands (this line is only an instruction to the tester); say so plainly.
+            Write-Host ("  note: git rev-parse --short {0} failed (exit {1}); the branch tip could not be resolved here." -f $item.branch, $LASTEXITCODE) -ForegroundColor Yellow
+            $tip = "(unresolved)"
+        }
         Write-Host ("  Test {0} at its CURRENT tip: {1} (attempt {2})" -f $item.branch, $tip, $item.attempt)
         if ($claimOb1) {
             $ct = $claimOb1.target; $cr = $claimOb1.round

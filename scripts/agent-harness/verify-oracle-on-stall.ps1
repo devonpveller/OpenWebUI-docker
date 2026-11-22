@@ -96,12 +96,24 @@ function Check($label, $ok, $detail = "") {
         -ForegroundColor $(if ($ok) { "Green" } else { "Red" })
 }
 function Invoke-DrillGit {
+    # A drill whose git setup silently failed asserts against a repository that is not the one
+    # it thinks it built: a guard that cannot fail. A failing git call stops the drill here.
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    try { & git.exe @args | Out-Null } finally { $ErrorActionPreference = $prev }
+    try { & git.exe @args | Out-Null; $rc = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
+    if ($rc -ne 0) { throw ("drill git setup failed: git " + ($args -join " ") + " (exit $rc)") }
+}
+function Test-DrillRef([string]$Ref) {
+    # The expected-"no" probe: does this ref exist? A non-zero exit is the answer, not a failure,
+    # so it is read here explicitly rather than thrown by Get-DrillGit.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try { & git.exe rev-parse --verify --quiet $Ref 2>&1 | Out-Null; $rc = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
+    return ($rc -eq 0)
 }
 function Get-DrillGit {
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    try { return (& git.exe @args) } finally { $ErrorActionPreference = $prev }
+    try { $out = (& git.exe @args); $rc = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
+    if ($rc -ne 0) { throw ("drill git read failed: git " + ($args -join " ") + " (exit $rc)") }
+    return $out
 }
 
 Set-Location $repo
@@ -169,17 +181,16 @@ try {
     # The refs are per-run, so nothing of this drill's can already exist. If one does, the
     # token collided or a previous run of THIS token is live - either way, stop guessing.
     foreach ($b in @($STALL_BRANCH, $MOVE_BRANCH, $GONE_BRANCH)) {
-        Get-DrillGit rev-parse --verify --quiet "refs/heads/$b" | Out-Null
-        Check "ref '$b' does not already exist (per-run names are the isolation)" ($LASTEXITCODE -ne 0)
+        Check "ref '$b' does not already exist (per-run names are the isolation)" (-not (Test-DrillRef "refs/heads/$b"))
     }
 
     Step 2 "the anchor gate, then submission - the real tool, on real branches"
     $planFile = Join-Path $scratch "oracle-drill-plan.md"
     Set-Content -Path $planFile -Encoding ascii -Value @(
         "# Drill test plan",
-        "Case 1: the stall detector fires on a converging-nowhere item. Pass: it fires. Fail: silence.",
-        "Case 2: it stays silent on a progressing item. Pass: silence. Fail: it fires.",
-        "Case 3: a verdict against a vanished branch is refused. Pass: refused. Fail: recorded.")
+        "## Case 1 - the stall detector fires on a converging-nowhere item. Pass: it fires. Fail: silence.",
+        "## Case 2 - it stays silent on a progressing item. Pass: silence. Fail: it fires.",
+        "## Case 3 - a verdict against a vanished branch is refused. Pass: refused. Fail: recorded.")
     $anchorFile = Join-Path $scratch "oracle-drill-anchor.json"
     Set-Content -Path $anchorFile -Encoding ascii -Value @(
         "{",
@@ -318,8 +329,7 @@ finally {
     # --- cleanup ---------------------------------------------------------------------
     Set-Location $repo
     foreach ($b in @($STALL_BRANCH, $MOVE_BRANCH, $GONE_BRANCH)) {
-        Get-DrillGit rev-parse --verify --quiet "refs/heads/$b" | Out-Null
-        if ($LASTEXITCODE -eq 0) { Invoke-DrillGit branch -D $b }
+        if (Test-DrillRef "refs/heads/$b") { Invoke-DrillGit branch -D $b }
     }
     if ($prevState) { $env:AI_STACK_WORKTREE_STATE = $prevState }
     else { Remove-Item Env:\AI_STACK_WORKTREE_STATE -ErrorAction SilentlyContinue }

@@ -21,7 +21,11 @@ param(
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Set-Location $root
-if (-not $Landing) { $Landing = Join-Path (Split-Path -Parent (Split-Path -Parent (git rev-parse --git-common-dir))) 'documentation-plans-ai-stack\implementation-guide\pantry-meal-planner\LANDING.md' }
+if (-not $Landing) {
+    $commonDir = (git rev-parse --git-common-dir)
+    if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: git rev-parse --git-common-dir failed (exit $LASTEXITCODE); cannot locate LANDING.md - pass -Landing" -ForegroundColor Red; exit 1 }
+    $Landing = Join-Path (Split-Path -Parent (Split-Path -Parent $commonDir)) 'documentation-plans-ai-stack\implementation-guide\pantry-meal-planner\LANDING.md'
+}
 $label = "ai-stack.harness.owner=$Id"
 $rand = -join ((48..57 + 97..102) | Get-Random -Count 5 | ForEach-Object { [char]$_ })
 $net = "lt-net-$rand"; $dbN = "lt-db-$rand"; $pN = "lt-pantry-$rand"; $oN = "lt-owui-$rand"
@@ -137,6 +141,7 @@ try {
   try { $o6 = @(Invoke-Expression ($b6 -join "`n")); $o6 | ForEach-Object { "$_" } | Out-String | Write-Host } catch { Assert 'step 3 pin and no-recreate guard' 'the snippet runs (its throw guard did not fire)' $false $_.Exception.Message }
   "pin=$pin"
   $wantPin = ("" + (git rev-parse "HEAD:OB1")).Trim()
+  if ($LASTEXITCODE -ne 0) { Assert 'step 3 pin' 'git rev-parse HEAD:OB1 succeeds' $false ("git rev-parse HEAD:OB1 failed (exit $LASTEXITCODE)") }
   Assert 'step 3 pin' 'the OB1 pin read by `git ls-tree` is the 40-hex gitlink of HEAD' (($pin -match '^[0-9a-f]{40}$') -and ($pin -eq $wantPin)) ("pin=$pin want=$wantPin")
   Assert 'step 3 guard' 'the openbrain-db identity is unchanged across the step (the throw line did not fire)' (($null -ne $db1) -and ($null -ne $db2) -and ($db1.Id -eq $db2.Id) -and ($db1.StartedAt -eq $db2.StartedAt))
   Show 'block 7 (step 3 checks; stand-in service: healthy by --health-cmd, answers /health, 401 elsewhere)'
