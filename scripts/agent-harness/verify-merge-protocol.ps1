@@ -45,12 +45,24 @@ function Check($label, $ok, $detail = "") {
 # named Git calls itself (call-depth overflow), and functions leak into invoked scripts -
 # a helper named `Git` once shadowed the real binary INSIDE new-worktree.ps1.
 function Invoke-DrillGit {
+    # A drill whose git setup silently failed asserts against a repository that is not the one
+    # it thinks it built: a guard that cannot fail. A failing git call stops the drill here.
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    try { & git.exe @args | Out-Null } finally { $ErrorActionPreference = $prev }
+    try { & git.exe @args | Out-Null; $rc = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
+    if ($rc -ne 0) { throw ("drill git setup failed: git " + ($args -join " ") + " (exit $rc)") }
+}
+function Invoke-DrillGitRc {
+    # For a git call whose non-zero exit IS the expectation (a rebase that must conflict): the
+    # exit code is returned and asserted by the caller instead of thrown.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try { & git.exe @args 2>&1 | Out-Null; $rc = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
+    return $rc
 }
 function Get-DrillGit {
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    try { return (& git.exe @args) } finally { $ErrorActionPreference = $prev }
+    try { $out = (& git.exe @args); $rc = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
+    if ($rc -ne 0) { throw ("drill git read failed: git " + ($args -join " ") + " (exit $rc)") }
+    return $out
 }
 function Get-QueueBoard {
     # THE BOARD AS TEXT, FROM A CHILD PROCESS. queue.ps1 prints through Write-Host, which in
@@ -588,7 +600,8 @@ Check "the merged row carries no [needs hand-off] and no [UNDEPLOYED] in -List" 
 Step 8 "the second item's rebase CONFLICTS - the later merger adapts"
 & $queue -Claim -Id drill-b -Role reviewer -By wt-reviewer | Out-Null
 $testedAt = (Get-Content -Raw -Path (Join-Path $QueueDir "drill-b.json") | ConvertFrom-Json).tested_at_sha
-Invoke-DrillGit -C $wtB rebase drill/verify-d   # expected to conflict
+$rebaseRc = Invoke-DrillGitRc -C $wtB rebase drill/verify-d   # expected to conflict
+Check "the rebase exited non-zero (it conflicted)" ($rebaseRc -ne 0) ("exit=" + $rebaseRc)
 $conflicted = @(Get-DrillGit -C $wtB diff --name-only --diff-filter=U)
 Check "rebase produced a real conflict" ($conflicted -contains "DRILL-NOTE.md") ("files: " + ($conflicted -join ","))
 Set-Content -Path (Join-Path $wtB "DRILL-NOTE.md") -Encoding ascii -Value @(

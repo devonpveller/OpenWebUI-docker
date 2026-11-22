@@ -322,6 +322,20 @@ $r = Invoke-Andon -Config $cfgA2own -Only "policy-declared-unread" -Repo $repoA2
 $ev = @(Get-CondEvidence $r "policy-declared-unread")
 Check "RED: a dead knob in the ANDON block is caught by the andon board's own condition" (($ev -contains "andon.raise.ledger")) ($ev -join ", ")
 
+# andon-clear: `pipeline.convergence` (declared, never read) was removed from the shipped config
+# so this condition could read ok. The condition must stay able to fire for the SAME shape: put the
+# removed knob back, and add a knob nobody has heard of - both are named, and the shipped config
+# (cfgA2ok above) is the control that reads ok without them.
+$cfgA2new = New-DrillConfig "a2-new-unread-knob" {
+    param($c)
+    $c.pipeline | Add-Member -NotePropertyName convergence -NotePropertyValue ([pscustomobject]@{ max_class1_rounds = 3 }) -Force
+    $c.pipeline | Add-Member -NotePropertyName brand_new_unread_knob -NotePropertyValue 7 -Force
+}
+$r = Invoke-Andon -Config $cfgA2new -Only "policy-declared-unread" -Repo $repoA2
+$ev = @(Get-CondEvidence $r "policy-declared-unread")
+Check "RED: a NEW unread knob fires the condition (status fire)" ((Get-CondStatus $r "policy-declared-unread") -eq "fire") ("status=" + (Get-CondStatus $r "policy-declared-unread"))
+Check "RED: it names both the re-added pipeline.convergence and the brand new knob" (($ev -contains "pipeline.convergence") -and ($ev -contains "pipeline.brand_new_unread_knob")) ($ev -join ", ")
+
 # ====================================================================================
 Step "A3  git-error-swallowed: RED on a swallowing function, GREEN on a checking one"
 # ====================================================================================
@@ -402,7 +416,10 @@ $repoReal = (Resolve-Path (Join-Path $HarnessDir "..\..")).Path
 $cfgA3real = New-DrillConfig "a3-real" { param($c) }
 $r = Invoke-Andon -Config $cfgA3real -Only "git-error-swallowed" -Repo $repoReal
 $ev = @(Get-CondEvidence $r "git-error-swallowed")
-Check "RED on the REAL repo: it names Invoke-DrillGit, the incident's own function" (($ev -join ";") -like "*Invoke-DrillGit*") ($ev -join "; ")
+# andon-clear: Invoke-DrillGit (the incident's function) now checks git's exit code, so the shipped
+# repository is GREEN on this condition. The RED half of the claim - a swallowing function IS named -
+# is proven on the fixtures above; what this asserts is that no call site in the real repo swallows.
+Check "GREEN on the REAL repo: no call site swallows git (the incident's Invoke-DrillGit now checks)" ((Get-CondStatus $r "git-error-swallowed") -eq "ok") ((Get-CondStatus $r "git-error-swallowed") + " " + ($ev -join "; "))
 
 # ====================================================================================
 Step "A4  work-branch-on-remote: RED once a work branch is pushed, GREEN before"
@@ -555,8 +572,8 @@ Set-Content -Path $anchorFile -Encoding ascii -Value @(
 $planFile = Join-Path $Root "plan.md"
 Set-Content -Path $planFile -Encoding ascii -Value @(
     "# Drill test plan",
-    "Case 1: DELIVERABLE.md exists on work/dfdrill. Pass: it does. Fail: absent.",
-    "Case 2: it holds one line. Pass: one. Fail: zero or contradictory lines.")
+    "## Case 1 - DELIVERABLE.md exists on work/dfdrill. Pass: it does. Fail: absent.",
+    "## Case 2 - it holds one line. Pass: one. Fail: zero or contradictory lines.")
 
 # ====================================================================================
 Step "B  a CLEAN unattended run lands, with a COMPLETE audit trail"
@@ -580,7 +597,7 @@ Check "the item records the gate kind as 'auto'" ($it.gates.anchor.kind -eq "aut
 $r = Invoke-Queue $fixB @("-Claim", "-Id", "dfd", "-Role", "tester", "-By", "wt-tester")
 Check "a tester who is not the developer may claim it" ($r.code -eq 0) ("exit=" + $r.code)
 $evFile = Join-Path $Root "evidence.md"
-Set-Content -Path $evFile -Encoding ascii -Value @("Case 1: file present. Case 2: one line. Both pass.")
+Set-Content -Path $evFile -Encoding ascii -Value @("## Case 1 - file present   PASS", "## Case 2 - one line   PASS")
 $r = Invoke-Queue $fixB @("-Pass", "-Id", "dfd", "-By", "wt-tester", "-Evidence", $evFile, "-PlanAdequate")
 $it = Get-QueueItem $fixB "dfd"
 Check "PRE-REVIEW GATE auto-passed with NO human" ($r.code -eq 0 -and $it.state -eq "ready-review") ("exit=" + $r.code + " state=" + $it.state)

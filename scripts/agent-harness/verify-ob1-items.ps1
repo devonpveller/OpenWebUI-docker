@@ -70,11 +70,21 @@ function New-Baseline {
     $dst = Join-Path $Root "baseline\scripts\agent-harness"
     New-Item -ItemType Directory -Force -Path $dst | Out-Null
     Get-ChildItem -LiteralPath $src -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $dst -Force }
-    $chkSrc = Join-Path $src "..\checks\check-hook-attestation.ps1"
-    if (Test-Path $chkSrc) {
-        $chkDst = Join-Path $Root "baseline\scripts\checks"
-        New-Item -ItemType Directory -Force -Path $chkDst | Out-Null
-        Copy-Item -LiteralPath $chkSrc -Destination $chkDst -Force
+    # The baseline is a SNAPSHOT of the harness at $BaselineRef, so its attestation checker is that
+    # ref's too. (It used to be the CURRENT checker beside the old queue.ps1; once the checker
+    # honestly reports that it cannot run - the old queue attests the wrong repository - that
+    # mixed pairing printed a message the baseline never printed, and C1 compared a harness
+    # that had never existed.) The current checker is the fallback only if the ref has none.
+    $chkDst = Join-Path $Root "baseline\scripts\checks"
+    New-Item -ItemType Directory -Force -Path $chkDst | Out-Null
+    $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try { $chkText = & git.exe -C $src show ("{0}:scripts/checks/check-hook-attestation.ps1" -f $BaselineRef) 2>$null; $chkExit = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    if ($chkExit -eq 0) {
+        [System.IO.File]::WriteAllText((Join-Path $chkDst "check-hook-attestation.ps1"), ((@($chkText) -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    } else {
+        $chkSrc = Join-Path $src "..\checks\check-hook-attestation.ps1"
+        if (Test-Path $chkSrc) { Copy-Item -LiteralPath $chkSrc -Destination $chkDst -Force }
     }
     foreach ($f in @("queue.ps1", "oracle_on_stall.py")) {
         $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"

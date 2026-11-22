@@ -43,7 +43,10 @@ function Fail([string]$msg) {
 
 # Under a hook git exports GIT_DIR / GIT_INDEX_FILE for the PARENT repo, and they override -C.
 # Clear them for queries aimed at the submodule (same helper as 5c).
-function Git-InOB1([string[]]$GitArgs) {
+function Git-InOB1([string[]]$GitArgs, [switch]$Probe) {
+    # Default: a failing git call is FATAL and names the command. -Probe is for the callers
+    # whose question has an expected "no" (a ref or object that may be absent): they read
+    # $LASTEXITCODE themselves and handle that case explicitly.
     $saved = @{}
     foreach ($k in 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE') {
         $saved[$k] = [Environment]::GetEnvironmentVariable($k)
@@ -51,21 +54,27 @@ function Git-InOB1([string[]]$GitArgs) {
     }
     try {
         $ErrorActionPreference = 'Continue'
-        & git -C (Join-Path $Root 'OB1') @GitArgs 2>$null
+        $out = @(& git -C (Join-Path $Root 'OB1') @GitArgs 2>$null); $script:Ob1Exit = $LASTEXITCODE
     }
     finally {
         foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
     }
+    if ($script:Ob1Exit -ne 0 -and -not $Probe) {
+        Fail ("git -C OB1 " + ($GitArgs -join ' ') + " failed (exit " + $script:Ob1Exit + ")")
+    }
+    return $out
 }
 
 if (-not $Root) {
     $Root = (& git rev-parse --show-toplevel 2>$null)
+    if ($LASTEXITCODE -ne 0) { Fail "git rev-parse --show-toplevel failed (exit $LASTEXITCODE) - not inside a git repository and no -Root given" }
     if (-not $Root) { Fail "not inside a git repository and no -Root given" }
 }
 $Root = (Resolve-Path $Root).Path
 
 # --- 1. Is an OB1 gitlink bump staged? -------------------------------------
 $staged = @(& git -C $Root diff --cached --name-only)
+if ($LASTEXITCODE -ne 0) { Fail "git -C $Root diff --cached --name-only failed (exit $LASTEXITCODE)" }
 if ($staged -notcontains 'OB1') {
     Write-Host "$Tag no OB1 gitlink staged - skipped."
     exit 0
@@ -73,11 +82,14 @@ if ($staged -notcontains 'OB1') {
 
 # --- 2. Disk must be the staged pin ----------------------------------------
 $lsLine = (& git -C $Root ls-files -s OB1) | Select-Object -First 1
+if ($LASTEXITCODE -ne 0) { Fail "git -C $Root ls-files -s OB1 failed (exit $LASTEXITCODE)" }
 if (-not $lsLine -or $lsLine -notmatch '^160000\s+([0-9a-f]{40})\s') {
     Fail "could not read the staged OB1 gitlink from the index (got '$lsLine')"
 }
 $newSha = $Matches[1]
 $oldLine = (& git -C $Root ls-tree HEAD OB1 2>$null) | Select-Object -First 1
+# Expected branch: a repository with no HEAD commit yet has no old pin - not an error here.
+if ($LASTEXITCODE -ne 0) { $oldLine = $null }
 $oldSha = $null
 if ($oldLine -match '^160000\s+commit\s+([0-9a-f]{40})\s') { $oldSha = $Matches[1] }
 if (-not (Test-Path (Join-Path $Root 'OB1\.git'))) {

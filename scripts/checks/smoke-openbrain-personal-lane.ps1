@@ -111,11 +111,14 @@ try {
         tar -xf $tar -C $tree
         if ($LASTEXITCODE -ne 0) { Fail "tar extract failed"; throw "no tree" }
         $sha = (git -C $ob1Live rev-parse --short $Ob1Rev | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) { Fail "git -C $ob1Live rev-parse --short $Ob1Rev failed"; throw "no tree" }
         Pass "exported OB1 $Ob1Rev ($sha)"
     } else {
         $tree = $ob1Live
         $sha = (git -C $ob1Live rev-parse --short HEAD | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) { Fail "git -C $ob1Live rev-parse --short HEAD failed"; throw "no tree" }
         $dirty = (git -C $ob1Live status --porcelain -- integrations/kubernetes-deployment docker | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) { Fail "git -C $ob1Live status --porcelain failed"; throw "no tree" }
         Pass ("OB1 working tree at $sha" + $(if ($dirty) { " (DIRTY: uncommitted changes are under test)" } else { "" }))
     }
 

@@ -166,7 +166,10 @@ function Fail([string]$msg) {
 # Interactive runs never see it - only hook runs do - which is why this gate's
 # verdicts are proven with a real `git commit` in the test plan, not only by
 # invoking this file by hand.
-function Git-InOB1([string[]]$GitArgs) {
+function Git-InOB1([string[]]$GitArgs, [switch]$Probe) {
+    # Default: a failing git call is FATAL and names the command. -Probe is for the callers
+    # whose question has an expected "no" (a ref or object that may be absent): they read
+    # $LASTEXITCODE themselves and handle that case explicitly.
     $saved = @{}
     foreach ($k in 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE') {
         $saved[$k] = [Environment]::GetEnvironmentVariable($k)
@@ -177,11 +180,15 @@ function Git-InOB1([string[]]$GitArgs) {
         # moment a redirected native command writes to stderr. Relax it for the
         # native call only; function-scoped.
         $ErrorActionPreference = 'Continue'
-        & git -C (Join-Path $Root 'OB1') @GitArgs 2>$null
+        $out = @(& git -C (Join-Path $Root 'OB1') @GitArgs 2>$null); $script:Ob1Exit = $LASTEXITCODE
     }
     finally {
         foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
     }
+    if ($script:Ob1Exit -ne 0 -and -not $Probe) {
+        Fail ("git -C OB1 " + ($GitArgs -join ' ') + " failed (exit " + $script:Ob1Exit + ")")
+    }
+    return $out
 }
 
 # Run a native command capturing stdout+stderr as plain strings and its exit
@@ -205,6 +212,7 @@ function Invoke-Native([string]$Exe, [string[]]$CmdArgs) {
 
 if (-not $Root) {
     $Root = (& git rev-parse --show-toplevel 2>$null)
+    if ($LASTEXITCODE -ne 0) { Fail "git rev-parse --show-toplevel failed (exit $LASTEXITCODE) - not inside a git repository and no -Root given" }
     if (-not $Root) { Fail "not inside a git repository and no -Root given" }
 }
 $Root = (Resolve-Path $Root).Path
@@ -218,11 +226,13 @@ if ($byPin -and -not ($OldPin -and $NewPin)) {
 
 if (-not $byPin) {
     $staged = @(& git -C $Root diff --cached --name-only)
+    if ($LASTEXITCODE -ne 0) { Fail "git -C $Root diff --cached --name-only failed (exit $LASTEXITCODE)" }
     if ($staged -notcontains 'OB1') {
         Write-Host "$Tag no OB1 gitlink staged - skipped."
         exit 0
     }
     $lsLine = (& git -C $Root ls-files -s OB1) | Select-Object -First 1
+    if ($LASTEXITCODE -ne 0) { Fail "git -C $Root ls-files -s OB1 failed (exit $LASTEXITCODE)" }
     if (-not $lsLine -or $lsLine -notmatch '^160000\s+([0-9a-f]{40})\s') {
         Fail "could not read the staged OB1 gitlink from the index (got '$lsLine')"
     }
@@ -238,11 +248,11 @@ if (-not (Test-Path (Join-Path $ob1Dir '.git'))) {
 }
 
 if ($byPin) {
-    $newSha = (Git-InOB1 @('rev-parse', '-q', '--verify', "$NewPin^{commit}"))
+    $newSha = (Git-InOB1 -Probe @('rev-parse', '-q', '--verify', "$NewPin^{commit}"))
     if (-not $newSha -or $newSha -notmatch '^[0-9a-f]{40}$') {
         Fail "-NewPin '$NewPin' is not a commit in the OB1 clone at $ob1Dir."
     }
-    $oldSha = (Git-InOB1 @('rev-parse', '-q', '--verify', "$OldPin^{commit}"))
+    $oldSha = (Git-InOB1 -Probe @('rev-parse', '-q', '--verify', "$OldPin^{commit}"))
     if (-not $oldSha -or $oldSha -notmatch '^[0-9a-f]{40}$') {
         Fail "-OldPin '$OldPin' is not a commit in the OB1 clone at $ob1Dir."
     }
@@ -262,6 +272,8 @@ else {
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $oldSha = (& git -C $Root rev-parse -q --verify 'HEAD:OB1' 2>$null)
+    # Expected branch: HEAD with no OB1 gitlink (the first pin) exits non-zero; handled just below.
+    if ($LASTEXITCODE -ne 0) { $oldSha = $null }
     $ErrorActionPreference = $prevEap
     if (-not $oldSha -or $oldSha -notmatch '^[0-9a-f]{40}$') {
         Write-Host ("$Tag HEAD has no OB1 gitlink (first pin) - comparing against the empty " +
@@ -279,7 +291,7 @@ $oldKnown = $true
 if (-not $byPin -and $oldSha -ne $EmptyTree) {
     # HEAD:OB1 is a parent-repo fact; whether the OB1 clone HAS that commit is
     # a separate question (by-pin mode already answered it with rev-parse).
-    $null = Git-InOB1 @('cat-file', '-e', "$oldSha^{commit}")
+    $null = Git-InOB1 -Probe @('cat-file', '-e', "$oldSha^{commit}")
     if ($LASTEXITCODE -ne 0) { $oldKnown = $false }
 }
 if (-not $oldKnown) {
@@ -300,7 +312,7 @@ foreach ($p in $changed) {
 }
 $candidates = @()
 foreach ($svc in @($svcNames.Keys | Sort-Object)) {
-    $null = Git-InOB1 @('cat-file', '-e', "${newSha}:integrations/$svc/Dockerfile")
+    $null = Git-InOB1 -Probe @('cat-file', '-e', "${newSha}:integrations/$svc/Dockerfile")
     if ($LASTEXITCODE -eq 0) { $candidates += $svc }
 }
 if ($candidates.Count -eq 0) {
@@ -321,7 +333,7 @@ Write-Host ("$Tag OB1 $old7..$new7 touches image-bearing integration(s): " +
 # all 4 file(s)" and only the build half caught the missing COPY. The unary
 # comma wraps the array so it survives the unroll.
 function Read-AtPin([string]$RelPath) {
-    $lines = @(Git-InOB1 @('show', "${newSha}:$RelPath"))
+    $lines = @(Git-InOB1 -Probe @('show', "${newSha}:$RelPath"))
     if ($LASTEXITCODE -ne 0) { return $null }
     return ,$lines
 }
@@ -576,7 +588,7 @@ foreach ($plan in $plans) {
         $zip = Join-Path $tmp 'ctx.zip'
         # The build context is the tree AT THE PIN, never the working tree: in by-pin
         # mode disk may be elsewhere, and in hook mode disk == pin is already proven.
-        $null = Git-InOB1 @('archive', '--format=zip', '-o', $zip, $newSha, "integrations/$svc")
+        $null = Git-InOB1 -Probe @('archive', '--format=zip', '-o', $zip, $newSha, "integrations/$svc")
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path $zip)) {
             $verdict = "git archive of integrations/$svc at $new7 failed - cannot assemble a build context."
         }
