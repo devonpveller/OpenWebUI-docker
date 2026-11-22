@@ -74,7 +74,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 # ------------------------------------------------------------------------------------------
 # Anything not in here that connects as a superuser is a finding, not a footnote.
 $explained = @{
-    "openbrain-postgrest" = "PostgREST authenticator. Switches role to PGRST_DB_ANON_ROLE (service_role) for every request, so its statements ARE bound; the connection itself is still superuser and moving it to a dedicated authenticator role is promotion step 5."
+    "openbrain-postgrest" = "PostgREST, logged in as ob_rest_authenticator (rw-rest-door-auth, slot 450): a NOINHERIT login that is a member of the seven ob_rest_* caller roles only. No anonymous role: each request switches to the role its verified JWT names, so its statements ARE bound to that caller's grants; the connection is no longer the superuser."
     "openbrain-db-backup" = "pg_dump. A non-BYPASSRLS dumper silently omits every row its policies hide, which would turn the backup into a partial one WITHOUT failing. This one must stay superuser."
     "openbrain-ext"       = "BLOCKED, not exempt. Its 15 extension/CRM tables are governed only by auth.uid() = user_id against a stub that returns NULL, so a non-superuser role reads them as EMPTY, silently. See H1-APP-ROLE-PROMOTION.md."
     "(local)"             = "Operator psql over the unix socket (docker exec). DDL, health probes, restores and the promotion itself. Not an application."
