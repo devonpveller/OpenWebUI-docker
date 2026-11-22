@@ -73,6 +73,8 @@
 #   - openbrain-idea-refinery  running (Idea Refinery drain; profile-gated, liveness only)
 #   - openbrain-pantry      /health {"ok":true,"db":true} via docker exec (NO host port);
 #                           profile-gated 'pantry', OFF by default: ABSENT is a skip, never a fault
+#   - openbrain-workbench-app  /__health via the Docker healthcheck; its OWN profile 'workbench-app', OFF until
+#                           its first deploy: ABSENT + profile off = "not enabled" (info), ABSENT + profile on = fault
 #   - openbrain-intake      /healthz {"ok":true,"db":true,"judge_route":true} via docker exec (NO
 #                           host port; db goes through openbrain-intake-dbrelay, the judge route
 #                           through openbrain-intake-llmrelay); profile-gated 'intake'
@@ -776,6 +778,55 @@ if ((Get-CState $viewer) -eq 'running') {
   }
 } else {
   Confirm-ObContainer $viewer | Out-Null
+}
+
+# ---- 5c. The research workbench's own app (rwr-app-container; its OWN profile `workbench-app`) -
+# Stateless static app + the /workbench/* forwarder; its Docker HEALTHCHECK fetches /__health in-container
+# (200 {"status":"ok"} once the build is present). It carries NO user data and the probe prints none.
+# The app is in its OWN compose profile (round 3), OFF until its first deploy enables it
+# (`stack.py enable workbench-app`), so no plane `up` builds it early. Therefore:
+#   running            -> checked like the viewer (healthy ok / starting warn / unhealthy fault), profile or not;
+#   absent + profile ON  -> Confirm-ObContainer: a FAULT (the host says it runs the app; a lost container must not read OK);
+#   absent + profile OFF -> "not enabled" (info, never a fault): the state between the merge and the first deploy.
+# Enabled = the two sources the driver unions: .stack\state.json (planes.ob1.profiles) and COMPOSE_PROFILES in OB1\docker\.env.
+function Test-ObProfileEnabled {
+  param([string]$ProfileName)
+  try {
+    $st = Join-Path $RepoRoot '.stack\state.json'
+    if (Test-Path $st) {
+      $j = Get-Content -Raw -Path $st | ConvertFrom-Json
+      if (@($j.planes.ob1.profiles) -contains $ProfileName) { return $true }
+    }
+  } catch { }
+  try {
+    $ef = Join-Path $RepoRoot 'OB1\docker\.env'
+    if (Test-Path $ef) {
+      foreach ($line in Get-Content -Path $ef) {
+        if ($line -match '^\s*COMPOSE_PROFILES\s*=\s*(.*)$') {
+          if ((($Matches[1].Trim().Trim('"').Trim("'")) -split '\s*,\s*') -contains $ProfileName) { return $true }
+        }
+      }
+    }
+  } catch { }
+  return $false   # unreadable = not enabled: the safe default for an opt-in service
+}
+$wbApp = 'openbrain-workbench-app'
+$wbAppState = Get-CState $wbApp
+if ($wbAppState -eq 'running') {
+  $ah = Invoke-ObDocker @('inspect', '--format', '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}', $wbApp)
+  $avh = 'unknown'
+  if ($ah.Ok) { $avh = ((@($ah.Lines) | Select-Object -First 1) -as [string]).Trim() }
+  switch ($avh) {
+    'healthy'   { Write-Ob $wbApp ok 'healthy (/__health ok)' }
+    'starting'  { Write-Ob $wbApp warn 'health: starting (healthcheck start_period) - re-check shortly' }
+    'unhealthy' { Write-Ob $wbApp down 'unhealthy: /__health is not answering 200 (the build is missing or the server is stuck)'; $script:Faults++ }
+    'none'      { Write-Ob $wbApp warn 'running, but this container has no healthcheck' }
+    default     { Write-Ob $wbApp warn "NO DATA (docker inspect health: $($ah.Why)) - no action"; $script:Faults++ }
+  }
+} elseif ($wbAppState -eq 'absent' -and -not (Test-ObProfileEnabled 'workbench-app')) {
+  if (-not $Quiet) { Write-Ob $wbApp ok 'not enabled (profile workbench-app is off until its first deploy: stack.py enable workbench-app) -- skipped' }
+} else {
+  Confirm-ObContainer $wbApp | Out-Null
 }
 
 # ---- 6. Idea Refinery drain (profile-gated 'idea-refinery'; nightly batch) --

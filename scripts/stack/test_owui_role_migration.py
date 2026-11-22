@@ -1,7 +1,8 @@
 """Tests for owui_role_migration.py (model-roles, item mr-consumers).
 
-Hermetic: every test builds a throwaway SQLite database with Open WebUI 0.11.0's
-own `model` and `config` DDL (copied from a live 0.11.0 webui.db, read-only) and
+Hermetic: every test builds a throwaway SQLite database with Open WebUI 0.13.4's
+own `model` and `config` DDL (the 0.13.4 `model` table adds a nullable version_id column;
+copied from a live 0.11.0 webui.db migrated to 0.13.4 in a disposable lab, 2026-11-20) and
 the shapes the live rows have. The real proof is the webui.db COPY in the item's
 test plan.
 """
@@ -28,6 +29,7 @@ MODEL_DDL = """CREATE TABLE "model" (
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL,
 	is_active BOOLEAN DEFAULT 1 NOT NULL,
+	version_id TEXT,
 	CONSTRAINT pk_model PRIMARY KEY (id)
 )"""
 CONFIG_DDL = """CREATE TABLE config (
@@ -52,7 +54,7 @@ def make_db(tmp_path: Path, *, presets=None, config=None, wal=False) -> Path:
         ("gemma-preset", "gemma3:4b"), ("qwen36-27b", None), ("bge-m3", None),
     ]
     for i, (pid, base) in enumerate(rows):
-        c.execute("INSERT INTO model VALUES (?,?,?,?,?,?,?,?,?)",
+        c.execute("INSERT INTO model (id,user_id,base_model_id,name,meta,params,created_at,updated_at,is_active) VALUES (?,?,?,?,?,?,?,?,?)",
                   (pid, "u1", base, pid.title(), '{"description": "x"}', '{"temperature": 0.7}',
                    1700000000 + i, 1700000100 + i, 1))
     cfg = config if config is not None else {
@@ -370,3 +372,92 @@ def test_same_is_storage_class_exact():
     assert not m._same("local-large", b"local-large") and not m._same(None, "")
     for v in ("x", b"x", 1, 1.5, None):                     # a restore file round-trips each class
         assert m._same(m._untyped(m._typed(v)), v)
+
+# ---- owui-0134: --file-context-default (0.11.0 injected attached files by default; 0.13.4 does not) ----
+
+def fc_db(tmp_path, default="{}", present=True):
+    cfg = {"ui.default_models": "general"}
+    if present:
+        cfg["models.default_metadata"] = json.loads(default)
+    db = make_db(tmp_path, presets=[("a", None), ("b", None), ("c", None), ("d", None), ("e", None)], config=cfg)
+    c = sqlite3.connect(db)
+    for mid, meta, params, act in (
+            ("b", {"capabilities": {"file_context": True}}, {"function_calling": "native"}, 1),
+            ("c", {"capabilities": {"file_context": False}}, {}, 1),
+            ("d", {"capabilities": {"vision": True}}, {"function_calling": "legacy"}, 1),
+            ("e", {"capabilities": {"vision": True}}, {}, 0)):
+        c.execute("UPDATE model SET meta=?, params=?, is_active=? WHERE id=?",
+                  (json.dumps(meta), json.dumps(params), act, mid))
+    c.commit()
+    c.close()
+    return db
+
+
+def test_file_context_default_dry_run_lists_exactly_the_models_that_would_change(tmp_path):
+    db = fc_db(tmp_path)
+    c = sqlite3.connect(db)
+    c.execute("UPDATE model SET name=? WHERE id='a'", ("A 🎤",))   # an emoji name must not crash a cp1252 console
+    c.commit()
+    c.close()
+    before = hashlib.sha256(db.read_bytes()).hexdigest()
+    rc, out = run(["--db", db, "--file-context-default"])
+    assert rc == 0 and "DRY RUN" in out
+    assert r"active, file_context unset: a (A \U0001f3a4)" in out   # no capabilities, not legacy: changes
+    for untouched in ("(B)", "(C)", "(D)", "(E)"):                    # own value / legacy / inactive: not listed
+        assert untouched not in out, untouched
+    assert "1 active model row(s) and 1 inactive one(s)" in out         # e is inactive and unset: counted
+    assert "config.models.default_metadata" in out and '"file_context": true' in out
+    assert hashlib.sha256(db.read_bytes()).hexdigest() == before
+
+
+def test_file_context_default_apply_is_idempotent_and_restorable(tmp_path):
+    db = fc_db(tmp_path, default='{"capabilities": {"vision": true}, "tags": []}')
+    before = snapshot(db)
+    rf = tmp_path / "fc.json"
+    rc, out = run(["--db", db, "--file-context-default", "--apply", "--restore-file", rf])
+    assert rc == 0 and "written" in out
+    after = snapshot(db)
+    changed = [k for k in after if after[k] != before[k]]
+    assert changed == [("config", "models.default_metadata")]   # no model row touched
+    stored = json.loads(after[("config", "models.default_metadata")][3])
+    assert stored == {"capabilities": {"vision": True, "file_context": True}, "tags": []}
+    rc2, out2 = run(["--db", db, "--file-context-default", "--apply", "--restore-file", tmp_path / "fc2.json"])
+    assert rc2 == 0 and "nothing to change" in out2 and not (tmp_path / "fc2.json").exists()
+    assert "stop getting attached files" not in out2 and "active, file_context unset" not in out2  # already applied: no warning
+    assert snapshot(db) == after
+    rc3, _ = run(["--db", db, "--restore", rf, "--apply"])
+    assert rc3 == 0 and snapshot(db) == before
+
+
+def test_file_context_default_leaves_an_operator_false_and_a_missing_row_alone(tmp_path):
+    db = fc_db(tmp_path, default='{"capabilities": {"file_context": false}}')
+    before = snapshot(db)
+    rc, out = run(["--db", db, "--file-context-default"])
+    assert rc == 0 and "already sets capabilities.file_context to false" in out and "nothing to change" in out
+    rc, _o = run(["--db", db, "--file-context-default", "--apply", "--restore-file", tmp_path / "x.json"])
+    assert rc == 0 and snapshot(db) == before
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    rc, out = run(["--db", fc_db(sub, present=False), "--file-context-default"])
+    assert rc == 0 and "has no row" in out
+
+def test_a_rerun_with_the_same_restore_file_is_a_no_op_not_a_refusal(tmp_path):
+    """The runbook runs the same --apply command twice (the second must say "nothing to change", exit 0)
+    and the first run's restore file must survive untouched; a restore file is still never overwritten
+    when there IS something to write (test_apply_refuses_without_a_restore_file_or_onto_an_existing_one)."""
+    db = fc_db(tmp_path)
+    rf = tmp_path / "fc.json"
+    argv = ["--db", db, "--file-context-default", "--apply", "--restore-file", rf]
+    assert run(argv)[0] == 0
+    kept, snap = rf.read_bytes(), snapshot(db)
+    rc, out = run(argv)
+    assert rc == 0 and "nothing to change" in out
+    assert rf.read_bytes() == kept and snapshot(db) == snap
+    # the same holds for the role-migration plan once it has been applied
+    db2 = make_db(tmp_path / "r") if (tmp_path / "r").mkdir() is None else None
+    rf2 = tmp_path / "r" / "roles.json"
+    assert run(["--db", db2, "--apply", "--restore-file", rf2])[0] == 0
+    kept2 = rf2.read_bytes()
+    rc, out = run(["--db", db2, "--apply", "--restore-file", rf2])
+    assert rc == 0 and "nothing to change" in out and rf2.read_bytes() == kept2
+

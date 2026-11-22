@@ -2,7 +2,7 @@
 """ENABLE_OAUTH_PERSISTENT_CONFIG is exposed on both openwebui definitions, off by default.
 
 Work item edge-b3-oauth (cluster-transition PLAN.md 5.1, Track B item B3). Open WebUI
-0.11.0 keeps UI-entered `oauth.*` settings only when ENABLE_OAUTH_PERSISTENT_CONFIG=true.
+0.11.0 (and 0.13.4) keeps UI-entered `oauth.*` settings only when ENABLE_OAUTH_PERSISTENT_CONFIG=true.
 frontend/docker-compose.yml passes it through from OWUI_OAUTH_PERSISTENT_CONFIG.
 
 Renders `docker compose config --format json` for frontend under the stock and the gpu

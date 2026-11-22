@@ -194,10 +194,10 @@ description = "llama.cpp upstreams + llm-queue + the model-store backup + Kokoro
 # --------------------------------------------------------------------------
 [planes.frontend]
 # Open WebUI + the tailscale netns companion. NEVER restart openwebui alone.
-# requires anchor: frontend/docker-compose.yml:554-562 (ai-stack_default,
+# requires anchor: frontend/docker-compose.yml:579-587 (ai-stack_default,
 # ai-stack_llm-net, ai-stack_app-net, all external: true). NOTE it is the `gpu`
 # profile that attaches to them; under `stock` the plane uses only its own
-# frontend_owui-net (:565) and needs no anchor network at all.
+# frontend_owui-net (:590) and needs no anchor network at all.
 compose  = "frontend/docker-compose.yml"
 lease    = "frontend"
 requires = ["anchor"]
@@ -207,17 +207,17 @@ requires = ["anchor"]
 # OTHER planes, and every one of the toggles defaults TRUE, so a default boot
 # reaches into four planes besides this one. The route table is
 # frontend/entrypoint.sh:93-105; the variables are :54-77, overridden for
-# the two that differ by frontend/docker-compose.yml:396-421.
-# inference: frontend/docker-compose.yml:396,399 (LLAMA_CPP_HOST /
+# the two that differ by frontend/docker-compose.yml:417-442.
+# inference: frontend/docker-compose.yml:417,420 (LLAMA_CPP_HOST /
 #   LLAMA_CPP_EMBED_HOST default to the gateway aliases) behind the
-#   LLAMA_CPP_ENABLED toggle at :398 - OWUI serves without it. Also
+#   LLAMA_CPP_ENABLED toggle at :419 - OWUI serves without it. Also
 #   frontend/entrypoint.sh:70,72 (LITELLM_UI_HOST defaults to llm-gateway-ui, enabled
 #   true) -> the serve route at frontend/entrypoint.sh:103.
-# search: frontend/docker-compose.yml:338 (SEARXNG_QUERY_URL defaults to
+# search: frontend/docker-compose.yml:359 (SEARXNG_QUERY_URL defaults to
 #   http://gateway:8080/search) - web search is off without it, chat is not.
-# ob1: frontend/docker-compose.yml:402 (OPEN_NOTEBOOK_HOST defaults to
-#   open_notebook, an ob1-plane service) with :404 OPEN_NOTEBOOK_ENABLED
-#   defaulting TRUE; ports at :403,:405-406. Consumed by frontend/entrypoint.sh:97 and :99
+# ob1: frontend/docker-compose.yml:423 (OPEN_NOTEBOOK_HOST defaults to
+#   open_notebook, an ob1-plane service) with :425 OPEN_NOTEBOOK_ENABLED
+#   defaulting TRUE; ports at :424,:426-427. Consumed by frontend/entrypoint.sh:97 and :99
 #   (the open-notebook and open-notebook-api serve routes). The tailnet wiki
 #   route is an ob1 edge too: frontend/docker-compose.yml QUARTZ_HOST defaults to
 #   openbrain-wiki-viewer (port 8080, QUARTZ_ENABLED defaulting TRUE), the same
@@ -234,8 +234,8 @@ requires = ["anchor"]
 #   not see this edge.
 optional = ["inference", "search", "ob1", "agent-org"]
 host = [
-  "Under the `gpu` profile only: image openwebui:local, a LOCAL CUDA build (frontend/docker-compose.yml:219-226, frontend/Dockerfile.openwebui-gpu), plus an NVIDIA container runtime for the device reservation at :349-355. The DEFAULT `stock` profile needs neither: it pulls ghcr.io/open-webui/open-webui:v0.11.0 and runs on any host with Docker",
-  "Under the `tailscale` profile only: a Tailscale auth key (TAILSCALE_AUTH_KEY). That profile requires `gpu`, because the pair is hard-wired (frontend/docker-compose.yml:375, network_mode: service:openwebui names the gpu definition)",
+  "Under the `gpu` profile only: image openwebui:local, a LOCAL CUDA build (frontend/docker-compose.yml:220-227, frontend/Dockerfile.openwebui-gpu), plus an NVIDIA container runtime for the device reservation at :370-376. The DEFAULT `stock` profile needs neither: it pulls ghcr.io/open-webui/open-webui:v0.13.4 and runs on any host with Docker",
+  "Under the `tailscale` profile only: a Tailscale auth key (TAILSCALE_AUTH_KEY). That profile requires `gpu`, because the pair is hard-wired (frontend/docker-compose.yml:396, network_mode: service:openwebui names the gpu definition)",
   "OPT-IN, off by default: OWUI_LAN_IP in frontend/.env publishes openwebui (stock and gpu) on <that LAN address>:3000 beside 127.0.0.1:3000, for the Proxmox Traefik (edge-b2-pub). One specific IP, never 0.0.0.0; apply the B1 LAN firewall guard first; recreate openwebui, wait healthy, then tailscale",
   "OPT-IN, off by default: OWUI_OAUTH_PERSISTENT_CONFIG=true in frontend/.env sets ENABLE_OAUTH_PERSISTENT_CONFIG on openwebui (stock and gpu) so SSO settings entered in the admin UI are kept in webui.db (edge-b3-oauth). Preconditions (Authentik roles mapping, a second local admin) are in frontend/.env.example; recreate openwebui, wait healthy, then tailscale",
 ]
@@ -265,16 +265,16 @@ keys = ["WEBUI_SECRET_KEY"]
 # runs (without it only openwebui-backup starts). stack.py validates the name.
 opt_in      = true
 stands_in_for = ["gpu"]
-description = "Open WebUI alone on the pinned upstream image - no GPU, no local build, no tailscale, no anchor network (frontend/docker-compose.yml:162-214). The fresh-clone deployment; mutually exclusive with `gpu`, whose container_name it shares"
+description = "Open WebUI alone on the pinned upstream image - no GPU, no local build, no tailscale, no anchor network (frontend/docker-compose.yml:163-215). The fresh-clone deployment; mutually exclusive with `gpu`, whose container_name it shares"
 
 [planes.frontend.profiles.gpu]
 opt_in      = true
-description = "the CUDA local build + the NVIDIA device reservation (frontend/docker-compose.yml:219-226, 349-355), the llm-net/app-net seams and the status-pipe mount"
+description = "the CUDA local build + the NVIDIA device reservation (frontend/docker-compose.yml:220-227, 370-376), the llm-net/app-net seams and the status-pipe mount"
 
 [planes.frontend.profiles.tailscale]
 # `requires gpu` is the MACHINE-READABLE form of what this description already
 # says twice: the companion's network_mode names the `gpu` definition of
-# openwebui (frontend/docker-compose.yml:375), so `--profile tailscale` alone is
+# openwebui (frontend/docker-compose.yml:396), so `--profile tailscale` alone is
 # not a deployment - compose refuses it outright with
 #   service "tailscale" depends on undefined service "openwebui"
 # Added by sl-driver-parity using the `requires` key sl-ob1-profiles introduced,
@@ -283,7 +283,7 @@ description = "the CUDA local build + the NVIDIA device reservation (frontend/do
 # profile is `default`, so nothing passes these flags today.
 requires    = ["gpu"]
 opt_in      = true
-description = "the tailscale netns companion and its state backup; usable ONLY with `gpu`, whose service its network_mode names (frontend/docker-compose.yml:375)"
+description = "the tailscale netns companion and its state backup; usable ONLY with `gpu`, whose service its network_mode names (frontend/docker-compose.yml:396)"
 
 # --------------------------------------------------------------------------
 [planes.search]
@@ -388,6 +388,7 @@ keys = ["MCP_ACCESS_KEY", "POSTGRES_PASSWORD", "OPS_GATEWAY_KEY", "OPENBRAIN_GAT
 "8817" = "openbrain-chunk-worker"
 "8818" = "openbrain-research"
 "8819" = "openbrain-grounding-backfiller"
+"8820" = "openbrain-workbench-app (the research workbench's own front end; stateless)"
 
 [planes.ob1.profiles.idea-refinery]
 # requires research: openbrain-idea-refinery's ONLY engine is openbrain-research
@@ -465,6 +466,19 @@ opt_in      = true
 [planes.ob1.profiles.wiki]
 description = "the wiki compiler, the wiki viewer (live renderer, frozen Quartz bundle), the workbench and the wiki backup (a SURFACE); the `open-brain` and `research` products enable it, and --headless drops it"
 opt_in      = true
+
+[planes.ob1.profiles.workbench-app]
+# rwr-app-container round 3 (reviewer finding 1): openbrain-workbench-app ALONE, in its own profile instead
+# of `wiki`. Its image is `build:`-only (openbrain-workbench-app:local) and compose BUILDS a build: service
+# whose image is missing, so while it rode `wiki` any whole-plane `up` (recovery, `stack.py up ob1`, a
+# reboot) built a `:local` image as a side effect, outside the gated deploy. Now NOTHING enables it until the
+# first deploy runs `stack.py enable workbench-app` (the product below). `requires` wiki: its depends_on
+# (openbrain-workbench) is in `wiki`, and compose refuses the project without it (same shape as notebook-app).
+# No other product names it (scripts/stack/test_stack.py holds that), so `enable open-brain` / `research`
+# never turns it on.
+description = "the research workbench's own front end: openbrain-workbench-app (:8820, stateless); OFF until its first deploy - `stack.py enable workbench-app` turns it on"
+opt_in      = true
+requires    = ["wiki"]
 
 [planes.ob1.profiles.notebook]
 description = "the Open Notebook DATA side: surrealdb + open-notebook-backup (the app itself is `notebook-app`); a SURFACE of the `research` product, and an engine PROFILE of `digest`"
@@ -677,6 +691,15 @@ description = "the Open Notebook APP (open_notebook UI + API) - retired by the o
 planes      = ["inference", "search", "ob1"]
 profiles    = { ob1 = ["notebook", "notebook-app"] }
 
+[products.workbench-app]
+# rwr-app-container round 3: the driver command for the ONE workbench-app switch (profile `workbench-app`,
+# which requires `wiki`; `stack.py enable workbench-app` adds both). Run by the first deploy, then
+# `ob1-deploy.ps1 -Service openbrain-workbench-app` (documentation/CONTAINER-REGISTRY.md, first deploy).
+# `disable workbench-app` takes the app back out and leaves `wiki` with whatever else asked for it.
+description = "the research workbench's own front end (openbrain-workbench-app); enabling it is the first-deploy step - nothing else turns it on"
+planes      = ["ob1"]
+profiles    = { ob1 = ["wiki", "workbench-app"] }
+
 [products.coding-agent]
 description = "little-coder, the coding agent; its surface is Open WebUI"
 planes      = ["coder"]
@@ -729,8 +752,9 @@ profiles    = { ob1 = ["research", "notebook"] }
 # ==========================================================================
 
 [lan_ingress.ports]
-openwebui             = { plane = "frontend",  port = 3000 }
-mattermost            = { plane = "agent-org", port = 8065 }
-llm-gateway-ui        = { plane = "inference", port = 8445 }
-openbrain-wiki-viewer = { plane = "ob1",       port = 8812 }
-openbrain-workbench   = { plane = "ob1",       port = 8814 }
+openwebui               = { plane = "frontend",  port = 3000 }
+mattermost              = { plane = "agent-org", port = 8065 }
+llm-gateway-ui          = { plane = "inference", port = 8445 }
+openbrain-wiki-viewer   = { plane = "ob1",       port = 8812 }
+openbrain-workbench     = { plane = "ob1",       port = 8814 }
+openbrain-workbench-app = { plane = "ob1",       port = 8820 }

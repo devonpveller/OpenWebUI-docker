@@ -173,7 +173,7 @@ services:
     # Pinned, and the same base the CUDA image is built FROM
     # (Dockerfile.openwebui-gpu line 1) — so `stock` and `gpu` are the same
     # Open WebUI release, differing only in the torch wheels.
-    image: ${OWUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.11.0}
+    image: ${OWUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.13.4}
     container_name: openwebui
     ports:
       - "127.0.0.1:3000:8080" # Bind to localhost only
@@ -196,7 +196,7 @@ services:
       # SSO entered in the admin UI is kept only when this is true (edge-b3-oauth);
       # off as shipped. Same line on the gpu definition below; see frontend/.env.example.
       - ENABLE_OAUTH_PERSISTENT_CONFIG=${OWUI_OAUTH_PERSISTENT_CONFIG:-false}
-      # OIDC login provider (edge-b3-oidc): OWUI 0.11 registers it at startup ONLY from
+      # OIDC login provider (edge-b3-oidc): OWUI 0.11 (and 0.13.4, lab-proved 2026-11-20) registers it at startup ONLY from
       # these env vars (admin-UI values are not used for that). Set in frontend/.env;
       # unset = OWUI's own defaults, no provider.
       - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
@@ -280,7 +280,7 @@ services:
       # this is true (edge-b3-oauth); off as shipped. OWUI_OAUTH_PERSISTENT_CONFIG in
       # frontend/.env; preconditions and recreate order are documented there.
       - ENABLE_OAUTH_PERSISTENT_CONFIG=${OWUI_OAUTH_PERSISTENT_CONFIG:-false}
-      # OIDC login provider (edge-b3-oidc): OWUI 0.11 registers it at startup ONLY from
+      # OIDC login provider (edge-b3-oidc): OWUI 0.11 (and 0.13.4, lab-proved 2026-11-20) registers it at startup ONLY from
       # these env vars (admin-UI values are not used for that). Set in frontend/.env;
       # unset = OWUI's own defaults, no provider.
       - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
@@ -313,6 +313,26 @@ services:
       # it governs fetching TOOL SERVER specs (the Open Brain mcpo servers), default 10s,
       # which is tight for a cold MCP server. Raised deliberately.
       - AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER_DATA=30
+      # 0.12.0 bounds every MCP tool CALL by AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER (unset
+      # = AIOHTTP_CLIENT_TIMEOUT, i.e. the 3600 above). Pinned to that same 3600 so the
+      # upgrade changes nothing; tighten only after the Open Brain tool-call durations
+      # are measured (owui-0.13.4-upgrade findings).
+      - AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER=3600
+      # 0.12.4 made this (default 10 s) bound the MCP initialize AND list-tools AND
+      # resource reads. 30 matches the allowance already given to the tool-server spec
+      # fetch above; measured 2026-11-20: openbrain-mcp / openbrain-ext reach "Listening"
+      # 1.0 s / 0.8 s after container start, so 10 s covers a cold process but not a
+      # cold first request (JWKS / DB), hence 30.
+      - MCP_INITIALIZE_TIMEOUT=30
+      # RAG defaults moved in 0.13.1 (RAG_TOP_K 3->10, CHUNK_SIZE 1000->1024). This
+      # host's webui.db already SAVES rag.top_k=40, rag.top_k_reranker=10,
+      # rag.chunk_size=512, rag.chunk_overlap=128 (a saved value beats the env while
+      # ENABLE_PERSISTENT_CONFIG is true - proved on a 0.13.4 lab copy), so these four
+      # equal the effective values and only matter if the saved rows are ever reset.
+      - RAG_TOP_K=40
+      - RAG_TOP_K_RERANKER=10
+      - CHUNK_SIZE=512
+      - CHUNK_OVERLAP=128
       - MODELS_CACHE_TTL=10 # Cache model list for 10 seconds to reduce repeated calls
       - ENABLE_BASE_MODELS_CACHE=true # Cache base models for faster loading
       # Reduce OpenWebUI overhead for model requests

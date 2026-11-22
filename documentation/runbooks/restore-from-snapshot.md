@@ -104,6 +104,11 @@ so a `pg_restore` into the existing cluster keeps it. Two cases need the operato
       Get-Content -Raw init-grants.sql | docker exec -i openbrain-db psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain
       Get-Content -Raw init-pantry.sql | docker exec -i openbrain-db psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain
       # init-inlet-owner.sql, then init-inlet-stamp.sql (the slot-470 paragraph above)
+      # the slots that grant BY NAME, in this order (the next paragraphs say why):
+      Get-Content -Raw init-request-boundary.sql | docker exec -i openbrain-db psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain
+      Get-Content -Raw init-boundary-digest.sql | docker exec -i openbrain-db psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain
+      Get-Content -Raw init-boundary-ideas.sql | docker exec -i openbrain-db psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain
+      Get-Content -Raw init-owner-private-view.sql | docker exec -i openbrain-db psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain
       Get-Content -Raw init-rest-door-auth.sql | docker exec -i openbrain-db psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain
 
   `init-pantry.sql` gives `ob_pantry` back its own grants; slot 450 gives back every stand-in grant it made in place
@@ -127,6 +132,22 @@ so a `pg_restore` into the existing cluster keeps it. Two cases need the operato
 
   The same holds for a LATER slot that drops and recreates a pre-450 function to narrow its grants: that slot must
   delete the function's `rest_door.regrants` rows (by signature), or 450's next run gives the old stand-ins back.
+- **The slots that grant by name** (rw-rest-door-auth int3). Slots 420 (boundary core), 460 (boundary digest) and 580
+  (boundary ideas) take their functions and the private hand-back tables away from service_role and PUBLIC and give
+  them to `ob_app_memory` alone; slot 480 gives its owner reads to `ob_workbench` alone. `--no-acl` recreates those
+  objects under the default privileges, so after a restore they are service_role's again (wider, not lost) until
+  their slot runs once more. Hence the four lines above: 420 before 460 (460 extends a function 420 defines), 580
+  after 420, 480 after 440 and 470, and 450 last as for 440 and 470 (450 recomputes the door's grants from its map,
+  so whatever an earlier line recreated is mapped again). The rw-rest-door-auth lab's case 9 runs this order and checks that no (role,
+  function) pair is lost OR gained against the pre-450 state.
+
+**Slot 480 (rw-owner-private-view: the workbench's own role).** `openbrain-workbench` logs in as `ob_workbench`, a member of
+`ob_app_memory`; it is the only role that may run the owner-scoped private reads and PD1's two owner reads. A `--no-acl`
+restore drops those grants, and every 440 re-run grants PD1's reads back to `ob_app_memory`. So in the re-apply above
+`init-owner-private-view.sql` runs LAST of the inlet slots (after 440 and 470, before 450; re-runnable, it names any drift
+in a NOTICE and fixes it); then check with `OB1/docker/workbench/check-owner-private-view-deploy.ps1` (read-only; exits non-zero on
+drift). A restore into a fresh cluster loses the role's password: set it again from `OB_WORKBENCH_DB_PASSWORD`
+(`\password ob_workbench`, it prompts), or the workbench cannot connect.
 
 ---
 
