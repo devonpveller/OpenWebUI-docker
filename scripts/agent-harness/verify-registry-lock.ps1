@@ -41,7 +41,13 @@ function Invoke-ScratchGit([string[]]$a) {
 }
 function Remove-ScratchWorktree([string]$Id) {
     $p = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    try { $null = & git -C $repo worktree remove --force (Join-Path $repo ".claude\worktrees\wt-$Id") 2>&1 } finally { $ErrorActionPreference = $p }
+    $wtDir = Join-Path $repo ".claude\worktrees\wt-$Id"
+    try { $null = & git -C $repo worktree remove --force $wtDir 2>&1; $rmExit = $LASTEXITCODE } finally { $ErrorActionPreference = $p }
+    # Expected branch: the scratch worktree may never have been created (the drill failed
+    # before it) or may already be gone. Only a directory that SURVIVES a failed remove is a leftover.
+    if ($rmExit -ne 0 -and (Test-Path $wtDir)) {
+        Write-Host ("  WARNING: git worktree remove --force {0} failed (exit {1}); the scratch worktree is still there" -f $wtDir, $rmExit) -ForegroundColor Yellow
+    }
 }
 $null = Invoke-ScratchGit @("init", "-q", "-b", "dev")
 $null = Invoke-ScratchGit @("config", "user.email", "t@example.invalid")

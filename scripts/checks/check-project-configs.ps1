@@ -52,6 +52,7 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue) -and
     (Get-Command python3 -ErrorAction SilentlyContinue)) { $script:PyName = 'python3' }
 
 $staged = @(& git diff --cached --name-only --diff-filter=ACM) | Where-Object { $_ }
+if ($LASTEXITCODE -ne 0) { Write-Host "  [configs] FAIL - git diff --cached --name-only --diff-filter=ACM failed (exit $LASTEXITCODE); an empty list would read as 'nothing staged'." -ForegroundColor Red; Pop-Location; exit 1 }
 # The SAME `--diff-filter=ACM` gate 4 below had to drop: it discards a rename
 # outright, so `git mv old new` plus an edit, staged alone, left $staged empty
 # and the whole check exited 0 on "nothing staged" (reproduced at f3eee64,
@@ -61,6 +62,7 @@ $staged = @(& git diff --cached --name-only --diff-filter=ACM) | Where-Object { 
 # open deliberately and written down in
 # ../documentation-plans-ai-stack/journal/notes/stack-layers-sl-gate4-carries-findings.md.
 $stagedAny = @(& git diff --cached --name-only) | Where-Object { $_ }
+if ($LASTEXITCODE -ne 0) { Write-Host "  [configs] FAIL - git diff --cached --name-only failed (exit $LASTEXITCODE); an empty list would read as 'nothing staged'." -ForegroundColor Red; Pop-Location; exit 1 }
 if (-not $stagedAny) { Write-Host "  [configs] nothing staged - skip"; Pop-Location; exit 0 }
 
 $failed = 0

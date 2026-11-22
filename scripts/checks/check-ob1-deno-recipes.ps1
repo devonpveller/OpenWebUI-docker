@@ -118,7 +118,10 @@ function Fail([string]$msg) {
 # refusal on its first live run (2026-09-03). Interactive runs never see it -
 # only hook runs do, which is why this gate's verdicts have to be proven with a
 # real `git commit`, not by invoking this file by hand.
-function Git-InOB1([string[]]$GitArgs) {
+function Git-InOB1([string[]]$GitArgs, [switch]$Probe) {
+    # Default: a failing git call is FATAL and names the command. -Probe is for the callers
+    # whose question has an expected "no" (a ref or object that may be absent): they read
+    # $LASTEXITCODE themselves and handle that case explicitly.
     $saved = @{}
     foreach ($k in 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE') {
         $saved[$k] = [Environment]::GetEnvironmentVariable($k)
@@ -129,21 +132,27 @@ function Git-InOB1([string[]]$GitArgs) {
         # moment a redirected native command writes to stderr, which would fire before
         # the friendly Fail below. Relax it for the native call only; function-scoped.
         $ErrorActionPreference = 'Continue'
-        & git -C (Join-Path $Root 'OB1') @GitArgs 2>$null
+        $out = @(& git -C (Join-Path $Root 'OB1') @GitArgs 2>$null); $script:Ob1Exit = $LASTEXITCODE
     }
     finally {
         foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
     }
+    if ($script:Ob1Exit -ne 0 -and -not $Probe) {
+        Fail ("git -C OB1 " + ($GitArgs -join ' ') + " failed (exit " + $script:Ob1Exit + ")")
+    }
+    return $out
 }
 
 if (-not $Root) {
     $Root = (& git rev-parse --show-toplevel 2>$null)
+    if ($LASTEXITCODE -ne 0) { Fail "git rev-parse --show-toplevel failed (exit $LASTEXITCODE) - not inside a git repository and no -Root given" }
     if (-not $Root) { Fail "not inside a git repository and no -Root given" }
 }
 $Root = (Resolve-Path $Root).Path
 
 # --- 1. Is an OB1 gitlink bump staged? -------------------------------------
 $staged = @(& git -C $Root diff --cached --name-only)
+if ($LASTEXITCODE -ne 0) { Fail "git -C $Root diff --cached --name-only failed (exit $LASTEXITCODE)" }
 if ($staged -notcontains 'OB1') {
     Write-Host "[check-ob1-deno-recipes] no OB1 gitlink staged - skipped."
     exit 0
@@ -151,6 +160,7 @@ if ($staged -notcontains 'OB1') {
 
 # --- 2. The tree on disk must BE the tree being pinned ---------------------
 $lsLine = (& git -C $Root ls-files -s OB1) | Select-Object -First 1
+if ($LASTEXITCODE -ne 0) { Fail "git -C $Root ls-files -s OB1 failed (exit $LASTEXITCODE)" }
 if (-not $lsLine -or $lsLine -notmatch '^160000\s+([0-9a-f]{40})\s') {
     Fail "could not read the staged OB1 gitlink from the index (got '$lsLine')"
 }
@@ -242,7 +252,7 @@ foreach ($rel in $RecipeRels) {
         # no state changing. Name them, and say plainly that the loop is a loop.
         # Diagnosis only - it never changes the verdict, and never runs on the
         # green path, which is byte-identical to what it was before.
-        $tracked = @(Git-InOB1 @('-c', 'core.quotepath=false', 'ls-files', '--', $rel))
+        $tracked = @(Git-InOB1 -Probe @('-c', 'core.quotepath=false', 'ls-files', '--', $rel))
         if ($LASTEXITCODE -ne 0) {
             Write-Host ("  NOTE: could not list OB1's tracked files, so this gate cannot say " +
                 "whether an UNTRACKED file is the culprit. If re-staging the gitlink does not " +
